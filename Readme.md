@@ -1,4 +1,6 @@
-# PBGZ
+[English](Readme.en.deepseek.md)
+
+# PBGZ 
 
 - 可以理解为： **P**hytium & **B**IG 的研究人员一起发起的一个极具竞争力的高速、高压缩比大型 **G**enomic数据或大型通用数据的压缩(**Z**ip)工具。
 - 也可以理解为：支持PB级别的 **G**enomic数据或大型通用数据的压缩(**Z**ip)工具。
