@@ -24,8 +24,6 @@ rm -rf ../3rdlib/$buildtype
 
 ./build.libdeflate.sh $buildtype
 
-./build.blake2.sh $buildtype
-
 ./build.htslib.sh $buildtype
 
 ./build.jsoncpp.sh $buildtype
