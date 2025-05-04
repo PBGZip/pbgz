@@ -8,7 +8,6 @@ include_directories(
     ${THIRDPARTY_DIR}/intel/isa-l/include
     ${THIRDPARTY_DIR}/libdeflate/include
     ${THIRDPARTY_DIR}/hts/include
-    ${THIRDPARTY_DIR}/blake2/include
     ${THIRDPARTY_DIR}/jsoncpp/include
     ${THIRDPARTY_DIR}/zstd/include
     ${THIRDPARTY_DIR}/bzip2/include

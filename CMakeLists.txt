@@ -26,7 +26,6 @@ set(REQUIRED_LIBS
     ${THIRDPARTY_DIR}/intel/isa-l/lib/libisal.a
     ${THIRDPARTY_DIR}/libdeflate/lib/libdeflate.a
     ${THIRDPARTY_DIR}/hts/lib/libhts.a
-    ${THIRDPARTY_DIR}/blake2/lib/libblake2b.a
     ${THIRDPARTY_DIR}/jsoncpp/lib/libjsoncpp.a
     ${THIRDPARTY_DIR}/zstd/lib/libzstd.a
     ${THIRDPARTY_DIR}/bzip2/lib/libbz2.a
@@ -64,7 +63,6 @@ include_directories(
     ${THIRDPARTY_DIR}/intel/isa-l/include
     ${THIRDPARTY_DIR}/libdeflate/include
     ${THIRDPARTY_DIR}/hts/include
-    ${THIRDPARTY_DIR}/blake2/include
     ${THIRDPARTY_DIR}/jsoncpp/include
     ${THIRDPARTY_DIR}/zstd/include
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -83,7 +81,6 @@ target_link_libraries(pbgz PRIVATE
     ${THIRDPARTY_DIR}/libdeflate/lib/libdeflate.a
     ${THIRDPARTY_DIR}/bzip2/lib/libbz2.a
     ${THIRDPARTY_DIR}/zlib/lib/libz.a
-    ${THIRDPARTY_DIR}/blake2/lib/libblake2b.a
     ${THIRDPARTY_DIR}/jsoncpp/lib/libjsoncpp.a
     ${THIRDPARTY_DIR}/zstd/lib/libzstd.a
 )

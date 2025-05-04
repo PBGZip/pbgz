@@ -3,7 +3,6 @@
 
 #include "manager.h"
 #include "io.h"
-#include <blake2.h>
 
 /* 读写pbgz格式文件 */
 
