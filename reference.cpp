@@ -11,7 +11,6 @@
 #include "md5sum.h"
 #include "coder/coder_json.h"
 #include "actg.h"
-#include "blake2.h"
 #include "city.h"
 #include <fstream>
 

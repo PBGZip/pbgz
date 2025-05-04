@@ -16,8 +16,6 @@ declare -a REQUIRED_LIBS=(
     "libdeflate/include/libdeflate.h"
     "hts/lib/libhts.a"
     "hts/include/htslib/hts.h"
-    "blake2/lib/libblake2b.a"
-    "blake2/include/blake2.h"
     "jsoncpp/lib/libjsoncpp.a"
     "jsoncpp/include/json/json.h"
     "zstd/lib/libzstd.a"
