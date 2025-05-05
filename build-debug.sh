@@ -90,7 +90,7 @@ fi
 
 # Create build directory
 BUILD_DIR="$ROOT_DIR/build-$ARCH-$COMPILER-debug"
-INSTALL_DIR="$ROOT_DIR/release-$ARCH-$COMPILER-debug"
+INSTALL_DIR="$ROOT_DIR/release-debug"
 
 echo "Creating build directory: $BUILD_DIR"
 mkdir -p "$BUILD_DIR"
