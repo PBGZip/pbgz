@@ -15,7 +15,7 @@ typedef std::vector<arg> ziparg;
 
 static void get_arg(ziparg &a)
 {
-    a.push_back({'d', "decompress", "<file.nz> specify file to decompress"});
+    a.push_back({'d', "decompress", "<file.pbgz> specify file to decompress"});
     a.push_back({'z', "gz", "decompress to gz format"});
     a.push_back({'o', "outfile", "<outfile> specify output filename for compress/decompress"});
     a.push_back({'O', "outdir", "<outdir> specify output directory for compress/decompress"});
@@ -42,8 +42,8 @@ static void usage(int err, const ziparg &arg)
     for (auto &a : arg)
         CMD_ARG(fp, a.arg_short, a.arg_long.c_str(), a.arg_describe.c_str());
 
-    fprintf(fp, "\nTo compress\n  pbgz human.fq.gz -o /path/human.fq.gz.nz -r /path/ucsc.hg19.fa\n");
-    fprintf(fp, "To decompress\n  pbgz -d human.fq.gz.nz\n\n");
+    fprintf(fp, "\nTo compress\n  pbgz human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
+    fprintf(fp, "To decompress\n  pbgz -d human.fq.gz.pbgz\n\n");
 
     manage::instance().exit(ERR_BAD_ARGS, "", err);
 }
