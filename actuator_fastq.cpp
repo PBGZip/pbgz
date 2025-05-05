@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <memory> // Add this for std::shared_ptr
 #include "actuator_fastq.h"
 #include "manager.h"
 #include "pbgz_file.h"
@@ -250,23 +251,23 @@ bool actuator_fastq::compress_id()
     if (UINT32_MAX == idpos_offset) { /* id检查无效，整块压缩 */
         src_len = 0;
         dst_len = outdata->current_len;
-        coder_io id_io(outdata->get_curr(), outdata->get_remain());
-        coder_bwt_cm id_cm(&id_io);
+        std::shared_ptr<coder_io> id_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+        std::shared_ptr<coder_bwt_cm> id_cm = std::make_shared<coder_bwt_cm>(id_io.get());
         for (n = 0, i = 0; i < line;) {
             src_len += indata->npos[i] - n + 1;
-            id_cm.encode_line(indata->buffer + n, indata->npos[i] - n + 1);
+            id_cm->encode_line(indata->buffer + n, indata->npos[i] - n + 1);
             i += 4;
             n = indata->npos[i - 1] + 1;
         }
-        id_cm.encode_flush();
-        outdata->current_len += id_io.data_len;
+        id_cm->encode_flush();
+        outdata->current_len += id_io->data_len;
         dst_len = outdata->current_len - dst_len;
         total_srclen += src_len; total_dstlen += dst_len;
 
         curr_stream.clear();
         curr_stream["srclen"] = src_len;
         curr_stream["dstlen"] = dst_len;
-        curr_stream["coder"] = id_io.meta;
+        curr_stream["coder"] = id_io->meta;
         meta_streams.append(curr_stream);
 
         meta_id["tot_srclen"] = total_srclen;
@@ -302,8 +303,8 @@ bool actuator_fastq::compress_id()
                 }
 
                 if (n >= curr_len) { /* 是数字类型 */
-                    coder_io id_io(outdata->get_curr(), outdata->get_remain());
-                    coder_bwt_cm id_cm(&id_io);
+                    std::shared_ptr<coder_io>  id_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+                    std::shared_ptr<coder_bwt_cm> id_cm = std::make_shared<coder_bwt_cm>(id_io.get());
 
                     curr_lineoffset = 0;
                     pcurr_idpos = idpos + i;
@@ -315,22 +316,22 @@ bool actuator_fastq::compress_id()
                             data = indata->buffer + curr_lineoffset + *(pcurr_idpos - 1) + 1;
                             curr_len = *pcurr_idpos - *(pcurr_idpos - 1);
                         }
-                        id_cm.encode_line(data, curr_len);
+                        id_cm->encode_line(data, curr_len);
 
                         src_len += curr_len;
                         pcurr_idpos += idsplit_symslen;
                         n += 4;
                         curr_lineoffset = indata->npos[n - 1] + 1; /* 1: 表示要偏移一个回车 */
                     }
-                    id_cm.encode_flush();
-                    outdata->current_len += id_io.data_len;
+                    id_cm->encode_flush();
+                    outdata->current_len += id_io->data_len;
                     dst_len = outdata->current_len - dst_len;
                     total_srclen += src_len; total_dstlen += dst_len;
 
                     curr_stream.clear();
                     curr_stream["srclen"] = src_len;
                     curr_stream["dstlen"] = dst_len;
-                    curr_stream["coder"] = id_io.meta;
+                    curr_stream["coder"] = id_io->meta;
                     meta_streams.append(curr_stream);
                     continue;
                 }
@@ -338,8 +339,8 @@ bool actuator_fastq::compress_id()
         }
 
         /* id coder 2 */
-        coder_io id_io(outdata->get_curr(), outdata->get_remain());
-        coder_affix_match id_am(&id_io);
+        std::shared_ptr<coder_io> id_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+        std::shared_ptr<coder_affix_match> id_am = std::make_shared<coder_affix_match>(id_io.get());
         
         curr_lineoffset = 0;
         pcurr_idpos = idpos + i;
@@ -352,22 +353,22 @@ bool actuator_fastq::compress_id()
                 curr_len = *pcurr_idpos - *(pcurr_idpos - 1);
             }
 
-            id_am.encode_line(data, curr_len);
+            id_am->encode_line(data, curr_len);
             src_len += curr_len;
             pcurr_idpos += idsplit_symslen;
             n += 4;
             curr_lineoffset = indata->npos[n - 1] + 1; /* 1: 表示要偏移一个回车 */
         }
 
-        id_am.encode_flush();
-        outdata->current_len += id_io.data_len;
+        id_am->encode_flush();
+        outdata->current_len += id_io->data_len;
         dst_len = outdata->current_len - dst_len;
         total_srclen += src_len; total_dstlen += dst_len;
 
         curr_stream.clear();
         curr_stream["srclen"] = src_len;
         curr_stream["dstlen"] = dst_len;
-        curr_stream["coder"] = id_io.meta;
+        curr_stream["coder"] = id_io->meta;
         meta_streams.append(curr_stream);       
     }
 
@@ -378,7 +379,6 @@ bool actuator_fastq::compress_id()
 
     return (outdata->current_len <= outdata->buffer_size);
 }
-
 /* 解压id行初始化 */
 bool actuator_fastq::initialize_decode_id(std::vector<coder *> &id_decoders)
 {
@@ -393,15 +393,20 @@ bool actuator_fastq::initialize_decode_id(std::vector<coder *> &id_decoders)
     id_streams = meta["id"]["streams"];
     check(id_streams.isArray(), false, "prase id streams failed");
 
-    for (n = 0; n < id_streams.size(); n++) {
+    for (n = 0; n < id_streams.size(); n++)
+    {
         coder_name = id_streams[n]["coder"]["magic"].asString();
-       if (coder_name == "coder_affix_match") {
+        if (coder_name == "coder_affix_match")
+        {
             id_decoders.push_back(new coder_affix_match(new coder_io(indata->get_curr(), indata->get_remain())));
             id_decoders.back()->set_level(id_streams[n]["coder"]["level"].asInt());
-       } else if (coder_name == "coder_bwt_cm") {
+        }
+        else if (coder_name == "coder_bwt_cm")
+        {
             id_decoders.push_back(new coder_bwt_cm(new coder_io(indata->get_curr(), indata->get_remain())));
             id_decoders.back()->set_level(id_streams[n]["coder"]["level"].asInt());
-        } else
+        }
+        else
             check_exit(false, ERR_INTERNEL, "undefined coder: %s", coder_name.c_str());
 
         indata->current_len += id_streams[n]["dstlen"].asUInt();
@@ -423,20 +428,22 @@ bool actuator_fastq::initialize_decode_base(coder *&base_decoder)
     {
         meta_streams = base_meta["streams"];
         len_max_base = base_meta["lenmax"].asUInt();
-        n = len_max_base; /* sub stream 1, strip n  */
+        n = len_max_base;  /* sub stream 1, strip n  */
         n += len_max_base; /* for somebuffer_refe_stretch */
         for (id = 1; id < meta_streams.size(); id++)
             n += meta_streams[id]["srclen"].asUInt();
         safe_alloc(n, uint8_t, somebuffer);
         ps = somebuffer;
-        somebuffer_base_stripn = ps; ps += len_max_base;
-        somebuffer_refe_stretch = ps; ps += len_max_base;
+        somebuffer_base_stripn = ps;
+        ps += len_max_base;
+        somebuffer_refe_stretch = ps;
+        ps += len_max_base;
 
         /* check sub streams 1 */
         id = 0;
         check_exit(meta_streams[id]["sname"].asString() == "m",
                    ERR_INTERNEL, "check sub stream failed: %s", meta_streams[id]["sname"].asString().c_str());
-        
+
         if (meta_streams[id]["coder"]["magic"].asString() == "coder_bwt_cm")
             base_decoder = new coder_bwt_cm(new coder_io(indata->get_curr(), indata->get_remain()));
         else
@@ -453,7 +460,7 @@ bool actuator_fastq::initialize_decode_base(coder *&base_decoder)
             p = indata->get_curr() + offset;
             src_len = meta_streams[id]["srclen"].asUInt();
             dst_len = meta_streams[id]["dstlen"].asInt();
-            somebuffer_base_mpos = (uint64_t *)ps;  
+            somebuffer_base_mpos = (uint64_t *)ps;
             ps += src_len;
             coder_io pos_io(p, dst_len);
             coder_bwt_cm pos_cm(&pos_io);
@@ -464,7 +471,7 @@ bool actuator_fastq::initialize_decode_base(coder *&base_decoder)
             p = indata->get_curr() + offset;
             src_len = meta_streams[id]["srclen"].asUInt();
             dst_len = meta_streams[id]["dstlen"].asInt();
-            somebuffer_base_mpos = (uint64_t *)ps;  
+            somebuffer_base_mpos = (uint64_t *)ps;
             ps += src_len;
             coder_io pos_io(p, dst_len);
             pos_io.meta = meta_streams[id];
@@ -486,7 +493,7 @@ bool actuator_fastq::initialize_decode_base(coder *&base_decoder)
             p = indata->get_curr() + offset;
             src_len = meta_streams[id]["srclen"].asUInt();
             dst_len = meta_streams[id]["dstlen"].asInt();
-            somebuffer_base_mpair = ps;  
+            somebuffer_base_mpair = ps;
             ps += src_len;
             coder_io pair_io(p, dst_len);
             coder_bwt_cm pair_cm(&pair_io);
@@ -497,7 +504,7 @@ bool actuator_fastq::initialize_decode_base(coder *&base_decoder)
             p = indata->get_curr() + offset;
             src_len = meta_streams[id]["srclen"].asUInt();
             dst_len = meta_streams[id]["dstlen"].asInt();
-            somebuffer_base_mpair = ps;  
+            somebuffer_base_mpair = ps;
             ps += src_len;
             coder_io pair_io(p, dst_len);
             pair_io.meta = meta_streams[id];
@@ -532,7 +539,7 @@ bool actuator_fastq::initialize_decode_base(coder *&base_decoder)
             offset += meta_streams[id]["dstlen"].asInt();
         }
 
-         /* check sub stream 5 */
+        /* check sub stream 5 */
         somebuffer_base_len2 = nullptr;
         if (base_meta["lenmin"].asUInt() != base_meta["lenmax"].asUInt())
         {
@@ -589,22 +596,26 @@ bool actuator_fastq::initialize_decode_comment(coder *&com_decoder)
         ctype = CT_JUST_PLUS;
     else if (meta_comment["type"].asString() == "same")
         ctype = CT_SAME_AS_ID;
-    else if (meta_comment["type"].asString() == "other") {
+    else if (meta_comment["type"].asString() == "other")
+    {
         ctype = CT_OTHER;
         meta_streams = meta_comment["streams"];
         check_exit(meta_streams.size() == 1, ERR_INTERNEL,
-                "check comment decoder count failed: %u", meta_streams.size());
+                   "check comment decoder count failed: %u", meta_streams.size());
         check_exit(meta_streams["sname"].asString() == "comment",
-                ERR_INTERNEL, "check sub stream failed: %s", meta_streams["sname"].asString().c_str());
+                   ERR_INTERNEL, "check sub stream failed: %s", meta_streams["sname"].asString().c_str());
 
-        if (meta_streams["coder"]["magic"].asString() == "coder_bwt_cm") {
+        if (meta_streams["coder"]["magic"].asString() == "coder_bwt_cm")
+        {
             com_decoder = new coder_bwt_cm(new coder_io(indata->get_curr(), indata->get_remain()));
             indata->current_len += meta_streams["dstlen"].asInt();
-        } else
+        }
+        else
             check_exit(false, ERR_INTERNEL, "check sub stream failed: coder name unmatch");
-    } else
+    }
+    else
         check_exit(false, ERR_INTERNEL,
-                    "check comment type failed: %s", meta_comment["type"].asString().c_str());
+                   "check comment type failed: %s", meta_comment["type"].asString().c_str());
     return true;
 }
 
@@ -617,13 +628,14 @@ bool actuator_fastq::initialize_decode_quality(coder_qual *&qual_decoder)
     meta_streams = meta_qual["streams"];
 
     check_exit(meta_streams.size() == 2, ERR_INTERNEL,
-            "check quality decoder count failed: %u", meta_streams.size());
+               "check quality decoder count failed: %u", meta_streams.size());
     len_src = meta_streams[1]["srclen"].asUInt();
     flen = len_src / sizeof(uint16_t);
     uint16_t qual_freq_arr[flen];
 
     /* 先解析 qual_freq_table */
-    if (meta_streams[1]["coder"]["magic"].asString() == "coder_bwt_cm") {
+    if (meta_streams[1]["coder"]["magic"].asString() == "coder_bwt_cm")
+    {
         coder_io qual_io(indata->get_curr() + meta_streams[0]["dstlen"].asInt(),
                          indata->get_remain() - meta_streams[0]["dstlen"].asInt());
         coder_bwt_cm *qual_freq_cm = new coder_bwt_cm(&qual_io);
@@ -635,14 +647,18 @@ bool actuator_fastq::initialize_decode_quality(coder_qual *&qual_decoder)
             qual_freq_table.push_back(std::make_pair(qual_freq_arr[n], qual_freq_arr[n + 1]));
         delete qual_freq_cm;
 
-        if (meta_streams[0]["coder"]["magic"].asString() == "coder_qual") {
+        if (meta_streams[0]["coder"]["magic"].asString() == "coder_qual")
+        {
             qual_decoder = new coder_qual(new coder_io(
-                indata->get_curr(), indata->get_remain() - meta_streams[1]["dstlen"].asInt()), true, qual_freq_table);
-        } else
+                                              indata->get_curr(), indata->get_remain() - meta_streams[1]["dstlen"].asInt()),
+                                          true, qual_freq_table);
+        }
+        else
             check_exit(false, ERR_INTERNEL, "check sub stream failed: coder name unmatch");
 
         indata->current_len += meta_qual["tot_dstlen"].asUInt();
-    } else
+    }
+    else
         check_exit(false, ERR_INTERNEL, "check sub stream failed: coder name unmatch");
     return true;
 }
@@ -661,7 +677,7 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
     const uint8_t bg_is_unalign4 = !!(bg_len & 0x3);
     const uint32_t bg_align4_len = (bg_len >> 2) << 2;
     const uint32_t len_bgs = (bg_len >> 2) + bg_is_unalign4;
-    
+
     uint32_t base_squash_align4 = (base_len >> 2) + !!(base_len & 0x3);
     uint32_t match_pair, match_pair_origin;
     uint32_t match_pos, unmatchs = base_len;
@@ -695,37 +711,41 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
         len_squash[0] = (base_len - n) >> 2;
         total = len_squash[0] << 2;
         mt[n].ps_l_unalign_len[0] = n;
-        for (m = 0; m < n; m++)mt[n].ps_l_unalign[0][m] = ((*(pseq[0] + m)) >> 1) & 0x3; /* 左边没有4对齐的碱基squash值 */
+        for (m = 0; m < n; m++)
+            mt[n].ps_l_unalign[0][m] = ((*(pseq[0] + m)) >> 1) & 0x3; /* 左边没有4对齐的碱基squash值 */
         mt[n].ps_r_unalign_len[0] = base_len - n - total;
-        for (m = 0; m < mt[n].ps_r_unalign_len[0]; m++)mt[n].ps_r_unalign[0][m] = ((*(pseq[0] + base_len - mt[n].ps_r_unalign_len[0] + m)) >> 1) & 0x3;
-        actg_squash(pseq[0] + n, total, somebuffer_base_squash[n]); 
+        for (m = 0; m < mt[n].ps_r_unalign_len[0]; m++)
+            mt[n].ps_r_unalign[0][m] = ((*(pseq[0] + base_len - mt[n].ps_r_unalign_len[0] + m)) >> 1) & 0x3;
+        actg_squash(pseq[0] + n, total, somebuffer_base_squash[n]);
 
         len_squash[1] = (base_len - n + 1) >> 2; /*  在最右边补一个字符使之与32对齐，如果match到mt[0]的pair，且mt[0] offset为0时需要处理最后一个字符 */
         total = len_squash[1] << 2;
         mt[n].ps_l_unalign_len[1] = base_len + 1 - n - total;
-        for (m = 0; m < mt[n].ps_l_unalign_len[1]; m++)mt[n].ps_l_unalign[1][m] = ((*(pseq[1] + m)) >> 1) & 0x3;
+        for (m = 0; m < mt[n].ps_l_unalign_len[1]; m++)
+            mt[n].ps_l_unalign[1][m] = ((*(pseq[1] + m)) >> 1) & 0x3;
         mt[n].ps_r_unalign_len[1] = (n == 0) ? 0 : (n - 1); /* 右边补一个到key对齐，所以需要减1 */
-        for (m = 0; m < mt[n].ps_r_unalign_len[1] ; m++)mt[n].ps_r_unalign[1][m] = ((*(pseq[1] + base_len - mt[n].ps_r_unalign_len[1]  + m) >> 1) & 0x3);
+        for (m = 0; m < mt[n].ps_r_unalign_len[1]; m++)
+            mt[n].ps_r_unalign[1][m] = ((*(pseq[1] + base_len - mt[n].ps_r_unalign_len[1] + m) >> 1) & 0x3);
         actg_squash(pseq[1] + mt[n].ps_l_unalign_len[1], total, somebuffer_basepair_squash[n]);
 
-         mt[n].set(somebuffer_base_squash[n], len_squash[0], /* 建立base squash与对应pair base squash的对应关系 */
+        mt[n].set(somebuffer_base_squash[n], len_squash[0], /* 建立base squash与对应pair base squash的对应关系 */
                   somebuffer_basepair_squash[n] + len_squash[1] - len_bgs, len_squash[1], 0);
 
         /* do mapping */
         align4_curr = n & 0x3;
         match_pair_origin = (*(pseq[0] + n + bg_mid) < *(pseq[1] + base_len - bg_len - n + bg_mid));
-        
+
         psquash = mt[align4_curr].get_squash(match_pair_origin);
-        xsquash = *((uint64_t *)(psquash)); 
+        xsquash = *((uint64_t *)(psquash));
         xsquash &= xsquash_tab[match_pair_origin];
-        hash32 = (uint32_t) CityHash64((const char *)(&xsquash), len_bgs);
+        hash32 = (uint32_t)CityHash64((const char *)(&xsquash), len_bgs);
         pos_vals = (uint32_t *)(refgene->query_pos(hash32, pos_cnts));
 
         for (o = 0; o < pos_cnts; o++)
         {
             match_pos = *pos_vals++;
             match_pair = ((match_pos & 0x80000000) >> 31) ^ match_pair_origin;
-            match_pos = (match_pos & 0x7FFFFFFF)  << 3; /* to squash reference pos */
+            match_pos = (match_pos & 0x7FFFFFFF) << 3; /* to squash reference pos */
 
             /* check left and right boundary simply */
             if (match_pos + base_squash_align4 >= refe_squashlen || match_pos < base_squash_align4)
@@ -751,12 +771,12 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
                 continue;
 
             /*  因为这种情况在最右边补一个字符使之与32对齐：如果match到mt[0]的pair，且mt[0] offset为0时需要处理最后一个字符 */
-            unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? 
-                ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
+            unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
 
             /* left unalign */
             l = mt[align4_curr].ps_l_unalign_len[match_pair];
-            for (ch = *(psquash_refe - 1), m = 0; m < mt[align4_curr].ps_l_unalign_len[match_pair]; m++) {
+            for (ch = *(psquash_refe - 1), m = 0; m < mt[align4_curr].ps_l_unalign_len[match_pair]; m++)
+            {
                 unmatchs += ((ch >> (m << 1)) & 0x3) != (mt[align4_curr].ps_l_unalign[match_pair][l - 1]);
                 l--;
             }
@@ -764,7 +784,8 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
             l = mt[align4_curr].ps_len[match_pair];
             for (ch = *(psquash_refe + l), m = 0; m < mt[align4_curr].ps_r_unalign_len[match_pair]; m++)
                 unmatchs += ((ch >> (6 - (m << 1)) & 0x3) != (mt[align4_curr].ps_r_unalign[match_pair][m]));
-            if (unmatchs < best_unmatchs) {
+            if (unmatchs < best_unmatchs)
+            {
                 best_pos = (match_pos << 2) - (loffset << 2) - mt[align4_curr].ps_l_unalign_len[match_pair];
                 best_pos_inrefe = match_pos - loffset;
                 best_is_pair = match_pair;
@@ -780,24 +801,25 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
         mt[align4_curr].inc_offset();
     }
 
-    if (best_unmatchs > MAPPED_THRESHOLD_GEN2) { /* 继续mapping */
+    if (best_unmatchs > MAPPED_THRESHOLD_GEN2)
+    { /* 继续mapping */
         for (n = 4; n <= e; n++)
         {
             /* do mapping */
             align4_curr = n & 0x3;
             match_pair_origin = (*(pseq[0] + n + bg_mid) < *(pseq[1] + base_len - bg_len - n + bg_mid));
-            
+
             psquash = mt[align4_curr].get_squash(match_pair_origin);
-            xsquash = *((uint64_t *)(psquash)); 
+            xsquash = *((uint64_t *)(psquash));
             xsquash &= xsquash_tab[match_pair_origin];
-            hash32 = (uint32_t) CityHash64((const char *)(&xsquash), len_bgs);
+            hash32 = (uint32_t)CityHash64((const char *)(&xsquash), len_bgs);
             pos_vals = (uint32_t *)(refgene->query_pos(hash32, pos_cnts));
 
             for (o = 0; o < pos_cnts; o++)
             {
                 match_pos = *pos_vals++;
                 match_pair = ((match_pos & 0x80000000) >> 31) ^ match_pair_origin;
-                match_pos = (match_pos & 0x7FFFFFFF)  << 3; /* to squash reference pos */
+                match_pos = (match_pos & 0x7FFFFFFF) << 3; /* to squash reference pos */
 
                 /* check left and right boundary simply */
                 if (match_pos + base_squash_align4 >= refe_squashlen || match_pos < base_squash_align4)
@@ -816,19 +838,19 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
 
                 /* align 4 */
                 unmatchs = actg_squash_diffcnt(psquash, psquash_refe, mt[align4_curr].ps_len[match_pair]);
-    #ifdef ANALYZ_STREAMS
+#ifdef ANALYZ_STREAMS
                 mapping_cnt++;
-    #endif
+#endif
                 if (unmatchs >= best_unmatchs)
                     continue;
 
                 /*  因为这种情况在最右边补一个字符使之与32对齐：如果match到mt[0]的pair，且mt[0] offset为0时需要处理最后一个字符 */
-                unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? 
-                    ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
+                unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
 
                 /* left unalign */
                 l = mt[align4_curr].ps_l_unalign_len[match_pair];
-                for (ch = *(psquash_refe - 1), m = 0; m < mt[align4_curr].ps_l_unalign_len[match_pair]; m++) {
+                for (ch = *(psquash_refe - 1), m = 0; m < mt[align4_curr].ps_l_unalign_len[match_pair]; m++)
+                {
                     unmatchs += ((ch >> (m << 1)) & 0x3) != (mt[align4_curr].ps_l_unalign[match_pair][l - 1]);
                     l--;
                 }
@@ -836,7 +858,8 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
                 l = mt[align4_curr].ps_len[match_pair];
                 for (ch = *(psquash_refe + l), m = 0; m < mt[align4_curr].ps_r_unalign_len[match_pair]; m++)
                     unmatchs += ((ch >> (6 - (m << 1)) & 0x3) != (mt[align4_curr].ps_r_unalign[match_pair][m]));
-                if (unmatchs < best_unmatchs) {
+                if (unmatchs < best_unmatchs)
+                {
                     best_pos = (match_pos << 2) - (loffset << 2) - mt[align4_curr].ps_l_unalign_len[match_pair];
                     best_pos_inrefe = match_pos - loffset;
                     best_is_pair = match_pair;
@@ -862,7 +885,8 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
 
         /* left unalign */
         n = o = l = mt[best_align4].ps_l_unalign_len[best_is_pair];
-        for (ch = *(psquash_refe - 1), m = 0; m < mt[best_align4].ps_l_unalign_len[best_is_pair]; m++) {
+        for (ch = *(psquash_refe - 1), m = 0; m < mt[best_align4].ps_l_unalign_len[best_is_pair]; m++)
+        {
             /* xor  method*/
             out[--o] = (((ch >> (m << 1)) & 0x3) ^ (mt[best_align4].ps_l_unalign[best_is_pair][l - 1]));
             l--;
@@ -876,13 +900,15 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
         out_len -= (best_is_pair && best_align4 == 0);
         /* right unalign */
         l = mt[best_align4].ps_len[best_is_pair];
-        for (ch = *(psquash_refe + l), m = 0; m < mt[best_align4].ps_r_unalign_len[best_is_pair]; m++) {
+        for (ch = *(psquash_refe + l), m = 0; m < mt[best_align4].ps_r_unalign_len[best_is_pair]; m++)
+        {
             // out[out_len++] = ((ch >> (6 - (m << 1)) & 0x3) == (mt[best_align4].ps_r_unalign[best_is_pair][m])) ? 0 : mt[best_align4].ps_r_unalign[best_is_pair][m];
             /* xor method */
             out[out_len++] = ((ch >> (6 - (m << 1)) & 0x3) ^ (mt[best_align4].ps_r_unalign[best_is_pair][m]));
         }
-
-    } else { /* not match valid pos */
+    }
+    else
+    { /* not match valid pos */
         actg_encode(base, out, base_len);
         out_len = base_len;
 
@@ -898,7 +924,7 @@ inline void actuator_fastq::mapping_gen2(const uint8_t *base, uint32_t base_len,
 inline void actuator_fastq::mapping_gen3(const uint8_t *base, uint32_t base_len, uint8_t *&out, uint32_t &out_len, uint64_t &mpos, uint8_t &mdir)
 {
     check_exit(false, ERR_INTERNEL, "undefined");
-}
+} 
 
 /* 压缩base行 */
 bool actuator_fastq::compress_base()
@@ -923,12 +949,8 @@ bool actuator_fastq::compress_base()
     if (refgene) { /* 使用reference压缩 */
 
         src_len = dst_len = 0;
-        coder_io match_io(outdata->get_curr(), outdata->get_remain());
-        coder_bwt_cm match_cm(&match_io);
-        // coder_ppmd match_cm(&match_io);
-
-        // match_io.m = coder_io::MENC;
-        // coder_base<2, 9, 6> match_cm(&match_io);
+        std::shared_ptr<coder_io> match_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+        std::shared_ptr<coder_bwt_cm> match_cm = std::make_shared<coder_bwt_cm>(match_io.get());
 
         for (i = 1; i < line; i+= 4)
         {
@@ -951,8 +973,7 @@ bool actuator_fastq::compress_base()
             (this->*actuator_fastq::mapping)(somebuffer_base_stripn, pbuff - somebuffer_base_stripn,
                                                 somebuffer_base_mapped, out_len, somebuffer_base_mpos[offset], somebuffer_base_mpair[offset]);
             src_len += pbuff - somebuffer_base_stripn;
-            match_cm.encode_line(somebuffer_base_mapped, out_len);
-            // match_cm.encode(somebuffer_base_mapped, out_len);
+            match_cm->encode_line(somebuffer_base_mapped, out_len);
 
 #ifdef ANALYZ_STREAMS
             for (int32_t _ = 0; _ < out_len; _++)
@@ -968,141 +989,122 @@ bool actuator_fastq::compress_base()
             currpos += e - s;
         }
         /* 第一条子流：reads与reference的match流 */
-        match_cm.encode_flush();
+        match_cm->encode_flush();
         meta_subs.clear();
         meta_subs["srclen"] =  (Json::Value::UInt)src_len;
-        meta_subs["dstlen"] = (Json::Value::Int)(match_io.data_len);
-        meta_subs["coder"] = match_io.meta;
+        meta_subs["dstlen"] = (Json::Value::Int)(match_io->data_len);
+        meta_subs["coder"] = match_io->meta;
         meta_subs["sname"] = "m";
         meta_streams.append(meta_subs);
-        outdata->current_len += match_io.data_len;
+        outdata->current_len += match_io->data_len;
         total_srclen += src_len;
-        total_dstlen += match_io.data_len;
+        total_dstlen += match_io->data_len;
 #ifdef ANALYZ_STREAMS
         fprintf(stderr, "\n\tsub streams: ---[match xor]--- src size %llu, dst size %llu, cost ms %llu\n\n",
-               src_len, match_io.data_len, cost_ms.elapsed());
+               src_len, match_io->data_len, cost_ms.elapsed());
         cost_ms.reset();
 #endif
 
         /* 第二条子流：reads与reference的match的位置流 */
-        coder_io pos_io(outdata->get_curr(), outdata->get_remain());
+        std::shared_ptr<coder_io> pos_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
         src_len = (line4 << 3);
         if (src_len > FC_MIN_LEN && src_len < FC_MAX_LEN)
         {
-            coder_fc pos_cm(&pos_io);
-            pos_cm.encode_line((uint8_t *)somebuffer_base_mpos, src_len);
-            pos_cm.encode_flush();
+            std::shared_ptr<coder_fc> pos_cm = std::make_shared<coder_fc>(pos_io.get());
+            pos_cm->encode_line((uint8_t *)somebuffer_base_mpos, src_len);
+            pos_cm->encode_flush();
         } else {
-            coder_bwt_cm pos_cm(&pos_io);
-            pos_cm.encode_line((uint8_t *)somebuffer_base_mpos, src_len);
-            pos_cm.encode_flush();
+            std::shared_ptr<coder_bwt_cm> pos_cm = std::make_shared<coder_bwt_cm>(pos_io.get());
+            pos_cm->encode_line((uint8_t *)somebuffer_base_mpos, src_len);
+            pos_cm->encode_flush();
         }
         meta_subs.clear();
         meta_subs["srclen"] =  (Json::Value::UInt)src_len;
-        meta_subs["dstlen"] =  (Json::Value::Int)pos_io.data_len;
-        meta_subs["coder"] = pos_io.meta;
+        meta_subs["dstlen"] =  (Json::Value::Int)pos_io->data_len;
+        meta_subs["coder"] = pos_io->meta;
         meta_subs["sname"] = "mpos";
         meta_streams.append(meta_subs);
-        outdata->current_len += pos_io.data_len;
+        outdata->current_len += pos_io->data_len;
         total_srclen += src_len;
-        total_dstlen += pos_io.data_len;
+        total_dstlen += pos_io->data_len;
 #ifdef ANALYZ_STREAMS
         printf("\n\tsub streams: ---[match pos]--- src size %llu, dst size %llu, cost ms %llu\n\n",
-               src_len, pos_io.data_len, cost_ms.elapsed());
+               src_len, pos_io->data_len, cost_ms.elapsed());
         cost_ms.reset();
 #endif
 
         /* 第三条子流：reads与reference的match的pair标识流 */
-        coder_io pair_io(outdata->get_curr(), outdata->get_remain());
+        auto pair_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
         src_len = line4;
         if (src_len > FC_MIN_LEN && src_len < FC_MAX_LEN)
-        // if (false)
         {
-            coder_fc sub_coder(&pair_io);
-            sub_coder.encode_line((uint8_t *)somebuffer_base_mpair, src_len);
-            sub_coder.encode_flush();
+            std::shared_ptr<coder_fc> sub_coder = std::make_shared<coder_fc>(pair_io.get());
+            sub_coder->encode_line((uint8_t *)somebuffer_base_mpair, src_len);
+            sub_coder->encode_flush();
         } else {
-            coder_bwt_cm sub_coder(&pair_io);
-            sub_coder.encode_line((uint8_t *)somebuffer_base_mpair, src_len);
-            sub_coder.encode_flush();
+            std::shared_ptr<coder_bwt_cm> sub_coder = std::make_shared<coder_bwt_cm>(pair_io.get());
+            sub_coder->encode_line((uint8_t *)somebuffer_base_mpair, src_len);
+            sub_coder->encode_flush();
         }
         meta_subs.clear();
         meta_subs["srclen"] = (Json::Value::UInt)src_len;
-        meta_subs["dstlen"] = (Json::Value::Int)pair_io.data_len;
-        meta_subs["coder"] = pair_io.meta;
+        meta_subs["dstlen"] = (Json::Value::Int)pair_io->data_len;
+        meta_subs["coder"] = pair_io->meta;
         meta_subs["sname"] = "mpair";
         meta_streams.append(meta_subs);
-        outdata->current_len += pair_io.data_len;
+        outdata->current_len += pair_io->data_len;
         total_srclen += src_len;
-        total_dstlen += pair_io.data_len;
-#ifdef ANALYZ_STREAMS
-        printf("\n\tsub streams: ---[match diretory]--- src size %llu, dst size %llu, cost ms %llu\n\n",
-               src_len, pair_io.data_len, cost_ms.elapsed());
-        cost_ms.reset();
-#endif
+        total_dstlen += pair_io->data_len;
 
         /* 第四条子流：reads中所有N的位置 */
         if (base_n_cnt > 0) {
-            coder_io npos_io(outdata->get_curr(), outdata->get_remain());
-            coder_bwt_cm npos_cm(&npos_io);
+            std::shared_ptr<coder_io> npos_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
             src_len = (base_n_cnt << 2);
-            // if (src_len > FC_MIN_LEN && src_len < FC_MAX_LEN)
             if (false)
             {
-                coder_fc sub_coder(&npos_io);
-                sub_coder.encode_line((uint8_t *)somebuffer_base_npos, src_len);
-                sub_coder.encode_flush();
+                std::shared_ptr<coder_fc> sub_coder = std::make_shared<coder_fc>(npos_io.get());
+                sub_coder->encode_line((uint8_t *)somebuffer_base_npos, src_len);
+                sub_coder->encode_flush();
             } else {
-                coder_bwt_cm sub_coder(&npos_io);
-                sub_coder.encode_line((uint8_t *)somebuffer_base_npos, src_len);
-                sub_coder.encode_flush();
+                std::shared_ptr<coder_bwt_cm> sub_coder = std::make_shared<coder_bwt_cm>(npos_io.get());
+                sub_coder->encode_line((uint8_t *)somebuffer_base_npos, src_len);
+                sub_coder->encode_flush();
             }
             meta_subs.clear();
             meta_subs["srclen"] = (Json::Value::UInt)src_len;
-            meta_subs["dstlen"] = (Json::Value::Int)npos_io.data_len;
-            meta_subs["coder"] = npos_io.meta;
+            meta_subs["dstlen"] = (Json::Value::Int)npos_io->data_len;
+            meta_subs["coder"] = npos_io->meta;
             meta_subs["sname"] = "npos";
             meta_streams.append(meta_subs);
-            outdata->current_len += npos_io.data_len;
+            outdata->current_len += npos_io->data_len;
             total_srclen += src_len;
-            total_dstlen += npos_io.data_len;
-#ifdef ANALYZ_STREAMS
-            printf("\n\tsub streams: ---[N pos]--- src size %llu, dst size %llu, cost ms %llu\n\n",
-                   src_len, npos_io.data_len, cost_ms.elapsed());
-            cost_ms.reset();
-#endif
+            total_dstlen += npos_io->data_len;
         }
         meta_base["ncount"] = (Json::Value::UInt)base_n_cnt;
 
         /* 第五条流：每行base的长度 */
         if (enc_baselen) {
-            coder_io len_io(outdata->get_curr(), outdata->get_remain());
+            std::shared_ptr<coder_io> len_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
             src_len = (line4 << 1);
-            // if (src_len > FC_MIN_LEN && src_len < FC_MAX_LEN)
             if (false)
             {
-                coder_fc sub_coder(&len_io);
-                sub_coder.encode_line((uint8_t *)somebuffer_base_len2, src_len);
-                sub_coder.encode_flush();
+                std::shared_ptr<coder_fc> sub_coder = std::make_shared<coder_fc>(len_io.get());
+                sub_coder->encode_line((uint8_t *)somebuffer_base_len2, src_len);
+                sub_coder->encode_flush();
             } else {
-                coder_bwt_cm sub_coder(&len_io);
-                sub_coder.encode_line((uint8_t *)somebuffer_base_len2, src_len);
-                sub_coder.encode_flush();
+                std::shared_ptr<coder_bwt_cm> sub_coder = std::make_shared<coder_bwt_cm>(len_io.get());
+                sub_coder->encode_line((uint8_t *)somebuffer_base_len2, src_len);
+                sub_coder->encode_flush();
             }
             meta_subs.clear();
             meta_subs["srclen"] = (Json::Value::UInt)src_len;
-            meta_subs["dstlen"] = (Json::Value::Int)len_io.data_len;
-            meta_subs["coder"] = len_io.meta;
+            meta_subs["dstlen"] = (Json::Value::Int)len_io->data_len;
+            meta_subs["coder"] = len_io->meta;
             meta_subs["sname"] = "baselen";
             meta_streams.append(meta_subs);
-            outdata->current_len += len_io.data_len;
+            outdata->current_len += len_io->data_len;
             total_srclen += src_len;
-            total_dstlen += len_io.data_len;
-#ifdef ANALYZ_STREAMS
-            printf("\n\tsub streams: ---[base len each line]--- src size %llu, dst size %llu, cost ms %llu\n\n",
-                   src_len, len_io.data_len, cost_ms.elapsed());
-            cost_ms.reset();
-#endif
+            total_dstlen += len_io->data_len;
         }
         meta_base["lenmin"] = (Json::Value::UInt)baselen_min;
         meta_base["lenmax"] = (Json::Value::UInt)baselen_max;
@@ -1112,9 +1114,6 @@ bool actuator_fastq::compress_base()
         meta_base["streams"] = meta_streams;
         meta["base"] = meta_base;
 
-#ifdef ANALYZ_STREAMS
-        printf("\n\ttotal src len %llu, total encode len %llu\n", total_srclen, total_dstlen);
-#endif
     } else { /* 不使用reference压缩 */
 
         int add_enter = !!enc_baselen;
@@ -1129,21 +1128,21 @@ bool actuator_fastq::compress_base()
 
         if (base_src_len <= FC_MIN_LEN || base_src_len >= FC_MAX_LEN) // 用bcm压缩
         {
-            check_exit(false, ERR_INTERNEL, // 当一个块中base行不全相同时bwt有点问题，即不知道长度时解压有问题，需要再看下
+            check_exit(false, ERR_INTERNEL,
                 "base total len is invalid: %d, should be (%d, %d)", base_src_len, FC_MIN_LEN, FC_MAX_LEN); 
-            coder_io base_io(outdata->get_curr(), outdata->get_remain());
-            coder_bwt_cm base_cm(&base_io);
+            std::shared_ptr<coder_io> base_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+            std::shared_ptr<coder_bwt_cm> base_cm = std::make_shared<coder_bwt_cm>(base_io.get());
             for (i = 1; i < line; i+= 4)
             {
                 e = indata->npos[i];
                 s = indata->npos[i - 1] + 1;
                 l = e - s + add_enter;
                 src_len += l;
-                base_cm.encode_line(p + s, l);
+                base_cm->encode_line(p + s, l);
             }
-            base_cm.encode_flush();
-            dst_len = base_io.data_len;
-            meta_subs = base_io.meta;
+            base_cm->encode_flush();
+            dst_len = base_io->data_len;
+            meta_subs = base_io->meta;
         }
         else // fc效果基本都比bcm效果好， fc整块压缩
         {
@@ -1163,15 +1162,15 @@ bool actuator_fastq::compress_base()
                 src_len += l;
             }
 
-            coder_io base_io(outdata->get_curr(), outdata->get_remain() - base_src_len);
-            coder_fc base_cm(&base_io);
-            base_cm.encode_line(pbase_tmp, base_src_len);
-            base_cm.encode_flush();
-            dst_len = base_io.data_len;
-            meta_subs = base_io.meta;
+            std::shared_ptr<coder_io> base_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain() - base_src_len);
+            std::shared_ptr<coder_fc> base_cm = std::make_shared<coder_fc>(base_io.get());
+            base_cm->encode_line(pbase_tmp, base_src_len);
+            base_cm->encode_flush();
+            dst_len = base_io->data_len;
+            meta_subs = base_io->meta;
 
-            check_exit(base_io.data_len <= (outdata->get_remain() - base_src_len),
-                   ERR_INTERNEL, "lack of buffer: %d should <= %d", base_io.data_len, outdata->get_remain() - base_src_len);
+            check_exit(base_io->data_len <= (outdata->get_remain() - base_src_len),
+                   ERR_INTERNEL, "lack of buffer: %d should <= %d", base_io->data_len, outdata->get_remain() - base_src_len);
         }
 
         total_srclen += base_src_len;
@@ -1196,8 +1195,8 @@ bool actuator_fastq::compress_comment()
     Json::Value meta_comment, meta_subs, meta_streams;
     uint32_t i, line, s, e, src_len = 0, l;
     uint8_t *p = indata->buffer;
-    coder_io c_io(outdata->get_curr(), outdata->get_remain());
-    coder_bwt_cm c_cm(&c_io);
+    std::shared_ptr<coder_io> c_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+    std::shared_ptr<coder_bwt_cm> c_cm = std::make_shared<coder_bwt_cm>(c_io.get());
 
     switch (ctype)
     {
@@ -1215,18 +1214,18 @@ bool actuator_fastq::compress_comment()
             e = indata->npos[i];
             s = indata->npos[i - 1] + 1;
             l = e - s;
-            c_cm.encode_line(p + s, l + 1); /* encode '\n'*/
+            c_cm->encode_line(p + s, l + 1); /* encode '\n'*/
 
             src_len += l;
         }
-        c_cm.encode_flush();
+        c_cm->encode_flush();
         meta_subs.clear();
         meta_subs["srclen"] = (Json::Value::UInt)src_len;
-        meta_subs["dstlen"] = (Json::Value::Int)c_io.data_len;
-        meta_subs["coder"] = c_io.meta;
+        meta_subs["dstlen"] = (Json::Value::Int)c_io->data_len;
+        meta_subs["coder"] = c_io->meta;
         meta_subs["sname"] = "comment";
         meta_streams.append(meta_subs);
-        outdata->current_len += c_io.data_len;
+        outdata->current_len += c_io->data_len;
         meta_comment["streams"] = meta_streams;
         break;
     default:
@@ -1244,8 +1243,8 @@ bool actuator_fastq::compress_quality()
     uint32_t total_srclen, total_dstlen;
     uint16_t qual_freq_arr[flen];
     uint8_t *p = indata->buffer;
-    coder_io qual_io(outdata->get_curr(), outdata->get_remain());
-    coder_qual qual_cm(&qual_io, true, qual_freq_table);
+    std::shared_ptr<coder_io> qual_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+    std::shared_ptr<coder_qual> qual_cm = std::make_shared<coder_qual>(qual_io.get(), true, qual_freq_table);
 
     total_srclen = total_dstlen = 0;
     line = indata->npos.size();
@@ -1254,42 +1253,42 @@ bool actuator_fastq::compress_quality()
         e = indata->npos[i];
         s = indata->npos[i - 1] + 1;
         l = e - s;
-        qual_cm.encode_qual_gen2(p + indata->npos[i - 3] + 1, p + s, l);
+        qual_cm->encode_qual_gen2(p + indata->npos[i - 3] + 1, p + s, l);
         src_len += l;
     }
-    qual_cm.encode_flush();
+    qual_cm->encode_flush();
 
     /* 第一条流 */
     meta_subs.clear();
     meta_subs["srclen"] = (Json::Value::UInt)src_len;
-    meta_subs["dstlen"] = (Json::Value::Int)qual_io.data_len;
-    meta_subs["coder"] = qual_io.meta;
+    meta_subs["dstlen"] = (Json::Value::Int)qual_io->data_len;
+    meta_subs["coder"] = qual_io->meta;
     meta_subs["sname"] = "qual";
     meta_streams.append(meta_subs);
-    outdata->current_len += qual_io.data_len;
+    outdata->current_len += qual_io->data_len;
     total_srclen += src_len;
-    total_dstlen += qual_io.data_len;
+    total_dstlen += qual_io->data_len;
 
     /* 第二条流, 质量数符号频率表 */
-    coder_io qual_freq_io(outdata->get_curr(), outdata->get_remain());
-    coder_bwt_cm qual_freq_cm(&qual_freq_io);
+    std::shared_ptr<coder_io> qual_freq_io = std::make_shared<coder_io>(outdata->get_curr(), outdata->get_remain());
+    std::shared_ptr<coder_bwt_cm> qual_freq_cm = std::make_shared<coder_bwt_cm>(qual_freq_io.get());
     for (i = 0; i < qual_freq_table.size(); i++) {
         l = (i << 1);
         qual_freq_arr[l] = qual_freq_table[i].first;
         qual_freq_arr[l + 1] = qual_freq_table[i].second;
     }
     src_len = flen * sizeof(uint16_t);
-    qual_freq_cm.encode_line((uint8_t *)qual_freq_arr, src_len);
-    qual_freq_cm.encode_flush();
+    qual_freq_cm->encode_line((uint8_t *)qual_freq_arr, src_len);
+    qual_freq_cm->encode_flush();
     meta_subs.clear();
     meta_subs["srclen"] = (Json::Value::UInt)src_len;
-    meta_subs["dstlen"] = (Json::Value::Int)qual_freq_io.data_len;
-    meta_subs["coder"] = qual_freq_io.meta;
+    meta_subs["dstlen"] = (Json::Value::Int)qual_freq_io->data_len;
+    meta_subs["coder"] = qual_freq_io->meta;
     meta_subs["sname"] = "qual_freq";
     meta_streams.append(meta_subs);
-    outdata->current_len += qual_freq_io.data_len;
+    outdata->current_len += qual_freq_io->data_len;
     total_srclen += src_len;
-    total_dstlen += qual_freq_io.data_len;
+    total_dstlen += qual_freq_io->data_len;
 
     meta_qual["tot_srclen"] = (Json::Value::UInt)total_srclen;
     meta_qual["tot_dstlen"] = (Json::Value::UInt)total_dstlen;
@@ -1297,6 +1296,8 @@ bool actuator_fastq::compress_quality()
     meta["quality"] = meta_qual;
     return true;
 }
+
+
 
 /* 压缩初始化 */
 void actuator_fastq::compress_initialize()

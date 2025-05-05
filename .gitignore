@@ -20,6 +20,9 @@
 *.out
 *.app
 
+# other
+*.DS_Store
+
 # ------[add by myself]------
 # Directory
 .vscode/
