@@ -25,7 +25,6 @@
 
 # ------[add by myself]------
 # Directory
-.vscode/
 3rdlib/
 build-x86_64-gcc-release/
 build-x86_64-gcc-debug/

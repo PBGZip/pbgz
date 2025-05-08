@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Mac OSX Debug PBGZ Program",
+            "program": "${workspaceFolder}/release-debug/bin/pbgz",           
+            "args": [
+                "${workspaceFolder}/data/SRR1518158_1.fastq.gz",
+                "-o","${workspaceFolder}/data/SRR1518158_1.fastq.pbgz",
+                "-r","${workspaceFolder}/data/Homo_sapiens.GRCh38.dna_sm.toplevel.fa",
+                "-t", "1",
+                "-f"
+            ],
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false
+        }
+    ]
+}
