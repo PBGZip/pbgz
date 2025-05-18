@@ -59,7 +59,7 @@ public:
         uint8_t *lout;
         safe_alloc(in_len, uint8_t, lout);
         int lzSize;
-        int result = fc_preprocess(in, in + in_len, lout + 1, lout + in_len - 1, ppHashSize, ppMinLen); // TODO -> name
+        int result = fc_preprocess(in, in + in_len, lout + 1, lout + in_len - 1, ppHashSize, ppMinLen);
         if (result >= 0)
         {
             result = (lout[0] = 1, result + 1);
