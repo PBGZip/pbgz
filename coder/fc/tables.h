@@ -1,9 +1,41 @@
+/*-----------------------------------------------------------*/
+/* Block Sorting, Lossless Data Compression Library.         */
+/* Static tables of constant values                          */
+/*-----------------------------------------------------------*/
+
+/*--
+
+This file is a part of bsc and/or libbsc, a program and a library for
+lossless, block-sorting data compression.
+
+   Copyright (c) 2009-2021 Ilya Grebnov <ilya.grebnov@gmail.com>
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+Please see the file LICENSE for full copyright information and file AUTHORS
+for full list of contributors.
+
+See also the bsc and libbsc web site:
+  http://libbsc.com/ for more information.
+
+--*/
+
 #ifndef _FC_CODER_TABLES_H
 #define _FC_CODER_TABLES_H
 
 #include "fc_header.h"
 
-static const short fse_tab1[4097] =
+static const short fsm_tab1[4097] =
 {
     -2047,-2047,-1952,-1848,-1774,-1717,-1670,-1631,-1597,-1566,-1539,-1515,-1492,-1472,-1453,-1435,
     -1419,-1403,-1388,-1374,-1361,-1349,-1337,-1325,-1314,-1304,-1294,-1284,-1275,-1266,-1257,-1248,
@@ -264,7 +296,7 @@ static const short fse_tab1[4097] =
      2047
 };
 
-static const short fse_tab2[4097] =
+static const short fsm_tab2[4097] =
 {
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
@@ -525,7 +557,7 @@ static const short fse_tab2[4097] =
      4095
 };
 
-static const unsigned char fse_tab_state[32768] =
+static const unsigned char fsm_tab_state[32768] =
 {
  224,   0,   0,   0,   0,   0,   0,   0, 205,   0,   0,   0,   0,   0,   0,   0, 173,   0,   0,   0,   0,   0,   0,   0, 255,   0,   0,   0,   0,   0,   0,   0,
    0, 159,   6, 176,  18,  11,  35,  46, 124, 159,   6,  75, 207, 180, 229,  24,   0, 234,   6, 176, 124, 231,  53, 209,   0, 110,  62, 176, 243,  53,  41,  38,
@@ -1553,7 +1585,7 @@ static const unsigned char fse_tab_state[32768] =
   28,   0, 110, 176,   5, 218, 168, 190, 187,   0, 110, 176,   5, 218, 168, 190, 190,   0, 110, 176,   5, 218, 120, 190, 190,   0, 110, 176,   5, 218, 120, 190,
 };
 
-static const unsigned char fse_tab_lstate[8192] =
+static const unsigned char fsm_tab_lstate[8192] =
 {
       80, 168, 115,  59,  51,  58,  99, 250,  80,  80, 225,  59,  63,  99, 250, 250, 233,  80, 225,  23,  51,  63, 207,  99, 233,  80, 225,  23,  23, 249, 207,   1,
       20,  80, 225,  23,  23,  98, 104,  58,  20,  80, 225,  23,  23, 160, 108, 167,  20,  80,  65,  23,  23, 160, 207, 148,  80,  80,  65, 112, 160, 160, 207,   4,
@@ -1815,22 +1847,22 @@ static const unsigned char fse_tab_lstate[8192] =
 
 static INLINE int fc_stretch(const int p)
 {
-    return fse_tab1[p];
+    return fsm_tab1[p];
 }
 
 static INLINE int fc_squash(const int s)
 {
-    return fse_tab2[2048 + s];
+    return fsm_tab2[2048 + s];
 }
 
 static INLINE int model_tid_state(const int contextRank4, const int contextRun, const int tidSizeHistory)
 {
-    return fse_tab_state[(contextRun << 11) | (contextRank4 << 3) | (tidSizeHistory)];
+    return fsm_tab_state[(contextRun << 11) | (contextRank4 << 3) | (tidSizeHistory)];
 }
 
 static INLINE int lstate(const int contextRank0, const int contextRun, const int tid, const int runSizeHistory)
 {
-    return fse_tab_lstate[(contextRank0 << 10) | (contextRun << 6) | ((tid < 7 ? tid : 7) << 3) | (runSizeHistory < 7 ? runSizeHistory : 7)];
+    return fsm_tab_lstate[(contextRank0 << 10) | (contextRun << 6) | ((tid < 7 ? tid : 7) << 3) | (runSizeHistory < 7 ? runSizeHistory : 7)];
 }
 
 #endif
