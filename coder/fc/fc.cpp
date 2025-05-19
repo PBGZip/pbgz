@@ -1,3 +1,35 @@
+/*-----------------------------------------------------------*/
+/* Block Sorting, Lossless Data Compression Library.         */
+/* Quantized Local Frequency Coding functions                */
+/*-----------------------------------------------------------*/
+
+/*--
+
+This file is a part of bsc and/or libbsc, a program and a library for
+lossless, block-sorting data compression.
+
+   Copyright (c) 2009-2021 Ilya Grebnov <ilya.grebnov@gmail.com>
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+Please see the file LICENSE for full copyright information and file AUTHORS
+for full list of contributors.
+
+See also the bsc and libbsc web site:
+  http://libbsc.com/ for more information.
+
+--*/
+
 #include "fc.h"
 #include "fc_model.h"
 #include "predictor.h"
@@ -7,7 +39,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-// #define MY_DEBUG
+// #define FC_DEBUG
 
 #if FC_CPU_TYPES >= FC_CPU_TYPES_SSE41
 static const __m128i ALIGNED(64) tid_reorder[16] =
@@ -354,11 +386,10 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         tidHistory[i] = runHistory[i] = 0;
     }
 
-    // MTFTable为input去重后的表
-    // buffer为transform后的内容，tidArray是buffer + j后的内容，buffer - buffer + j -1 都为0
+    // 全局频率排序优化了 MTF 输出的符号分布
     unsigned char * tidArray = fctransform(input, buffer, inputSize, MTFTable);
 
-#ifdef MY_DEBUG
+#ifdef FC_DEBUG
     fprintf(stderr, "\ninput after bwt: \n");
     for (int i = 0; i < 20 && i < inputSize; i++)fprintf(stderr, "%u|", input[i]);
     fprintf(stderr, "\n");
@@ -372,16 +403,15 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
     unsigned char usedChar[CHAR_SIZE];
     for (int i = 0; i < CHAR_SIZE; ++i) usedChar[i] = 0;
 
-#ifdef MY_DEBUG
+#ifdef FC_DEBUG
     fprintf(stderr, "\nMTFTable: \n");
 #endif
 
-    // 编码MTFTable，这里会通过算法稍微减少一些bits编码，不是完整的MTFTable，但是解压还原时能通过同样的方法可以还原
     int prevChar = -1;
     for (int tid = 0; tid < CHAR_SIZE; ++tid)
     {
         int currentChar = MTFTable[tid];
-#ifdef MY_DEBUG
+#ifdef FC_DEBUG
         fprintf(stderr, "%u|", currentChar); if (((tid + 1) & 0xF) == 0)fprintf(stderr, "\n");
 #endif
 
@@ -415,7 +445,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
 
         prevChar = currentChar; usedChar[currentChar] = 1;
     }
-#ifdef MY_DEBUG
+#ifdef FC_DEBUG
     fprintf(stderr, " @ maxRank %d\n", maxRank);
 #endif
 
@@ -483,9 +513,11 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         }
 
         // 建模思路：首先描述当前过程涉及到的变量有，tid, 当前字符(MTFTable), runSize(字符重复了多少次)
-        int                 tid            =   *tidArray++;
-        int                 history         =   tidHistory[currentChar]; // 这个history值为当前字符对应的tid的有效位数-1， tidHistory应该是会小于8的，即只占3bits
-        int                 state           =   model_tid_state(contextRank4, contextRun, history); // 这个表应该是用FSE（Finite State Entropy）有界的状态编码生成的
+        int tid = *tidArray++;
+        int history = tidHistory[currentChar]; // 这个history值为当前字符对应的tid的有效位数-1， tidHistory应该是会小于8的，即只占3bits
+        int state = model_tid_state(contextRank4, contextRun, history);
+        // 状态转移表， contextRanke :3 bits,contextRun : 4 bits，rank : clipped to [0,7], 3 bits，runsizeHistory : clipped to [0,7], 3 bits
+        // 总共:3+4+3+3=13 bits8192 entries
         // contextRank4 是8个bits的tid截取最低2位的历史记录（即最大保存最近4次记录），当tid大于3时取3,否则取整个tid
         // contextRun 是4个bits的runSize是否小于3的历史记录（即最大保存最近4次记录）
 
@@ -734,6 +766,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         contextRank4 = ((contextRank4 << 2) | (tid < 3    ? tid : 3)) & 0xff;
         contextRun   = ((contextRun   << 1) | (runSize < 3 ? 1    : 0)) & 0xf;
     }
+
     return coder.FinishEncoder();
 }
 
