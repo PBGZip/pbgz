@@ -46,6 +46,19 @@ typedef enum {
     FASTQ = 1,  // FASTQ format file
 } FileFormat;
 
+const uint32_t PBGZ_FILE_MAGIC_LENGTH = 4; // Length of PBGZ file magic value
+const uint32_t PBGZ_FILE_VERSION_LENGTH= 4; // Length of PBGZ file meta magic value
+
+const uint32_t PBGZ_FILE_META_MAGIC_LENGTH = 4; // Length of PBGZ file meta magic value
+const uint32_t PBGZ_FILE_META_SIZE_LENGTH = 4; // Length of PBGZ file meta information length
+const uint32_t PBGZ_FILE_META_CHECKSUM_LENGTH = 8; // Length of PBGZ data block magic value
+
+const uint32_t PBGZ_DATA_BLOCK_MAGIC_LENGTH = 4; // Length of PBGZ data block magic value
+const uint32_t PBGZ_DATA_BLOCK_META_SIZE_LENGTH = 4; // Length of PBGZ data block meta information length
+const uint32_t PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH = 4;  // Length of PBGZ data block data length
+const uint32_t PBGZ_DATA_BLOCK_CHECKSUM_LENGTH = 8; // Length of PBGZ data block checksum
+const uint32_t PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH = 8; // Length of PBGZ data block original data checksum
+
 class Serializable {
 public:
     /**
@@ -151,39 +164,39 @@ public:
     }
 
     uint32_t getMetaLength() const {
-        return metaLength;
+        return dataMetaLength;
     }
 
     void setMetaLength(uint32_t length) {
-        metaLength = length;
+        dataMetaLength = length;
     }
 
     Json::Value getMetaData() const {
-        return metaData;
+        return dataMetaInfo;
     }
 
     Json::Value getMetaData(const std::string &key) const {
-        return metaData[key];
+        return dataMetaInfo[key];
     }
 
     void setMetaData(const Json::Value& value) {
-        metaData = value;
+        dataMetaInfo = value;
     }
 
     void setMetaData(const std::string& key, const Json::Value& value) {
-        metaData[key] = value;
+        dataMetaInfo[key] = value;
     }
 
     uint32_t getDataLength() const {
-        return dataLength;
+        return blockDataLength;
     }
 
     void setDataLength(uint32_t length) {
-        dataLength = length;
+        blockDataLength = length;
     }
 
     const uint8_t* getDataPtr() const {
-        return pData;
+        return pBlockData;
     }
 
     int32_t setBlockData(uint8_t* data, uint32_t length);
@@ -198,27 +211,27 @@ public:
      */
     int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
 
-    PbgzDataBlock():blockType(INVALID), metaLength(0), dataLength(0), pData(nullptr){
-        metaData.clear();
-        memset(dataBlockChecksum, 0 ,sizeof(dataBlockChecksum));
-        memset(originDataChecksum, 0, sizeof(originDataChecksum));
+    PbgzDataBlock():blockType(INVALID), dataMetaLength(0), blockDataLength(0), pBlockData(nullptr){
+        dataMetaInfo.clear();
+        memset(dataBlockChecksum, 0 , PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
+        memset(originDataChecksum, 0, PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH);
     }
 
 protected:
     virtual ~PbgzDataBlock() {
-        metaData.clear();
-        if (!pData) {
-            free(pData);
-            pData = nullptr;
+        dataMetaInfo.clear();
+        if (!pBlockData) {
+            free(pBlockData);
+            pBlockData = nullptr;
         }
     }
 
 private:
     PbgzBlockType blockType;   // block type
-    uint32_t metaLength;           // block meta infomation length
-    Json::Value metaData;      // block meta infomation
-    uint32_t dataLength;           // block Data length
-    uint8_t *pData;                 // block data 
+    uint32_t dataMetaLength;           // block meta infomation length
+    Json::Value dataMetaInfo;      // block meta infomation
+    uint32_t blockDataLength;           // block Data length
+    uint8_t *pBlockData;                 // block data 
     uint8_t dataBlockChecksum[8];   // block data checksum
     uint8_t originDataChecksum[8];   // origin data checksum
 };
