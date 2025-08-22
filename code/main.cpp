@@ -4,6 +4,8 @@
 
 int main() {
     // Print version string
-    LOG_STDOUT(LOG_INFO, "PBGZ File Version: %d", 100);
+    PbgzFileHeader header;
+    std::string versionStr = header.getVersionStr();
+    LOG_STDOUT(LOG_INFO, "PBGZ File Version: %s", versionStr.c_str());
     return 0;
 }
