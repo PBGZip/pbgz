@@ -36,9 +36,9 @@ class PbgzFileReader {
 public:
     int32_t open();
 
-    const std::map<int32_t, PbgzFileHeader>& getFileHeader() const;
+    const PbgzFileHeader& getFileHeader();
 
-    const std::map<int32_t, PbgzFileMeta>& getFileMeta() const;
+    const PbgzFileMeta& getFileMeta();
 
     int32_t readDataBlock(PbgzDataBlock& dataBlock);
 
@@ -67,18 +67,32 @@ private:
 /// Note: 
 class PbgzFileWriter {
 public:
-    uint32_t write();
+    int32_t open();
+
+    int32_t close();
+
+    int32_t writeFileMeta();
+
+    int32_t writeBlockData(PbgzDataBlock& dataBlock);
+
+    int32_t setFileMeta(const PbgzFileMeta& metaInfo) {
+        fileMeta = metaInfo;
+        return 0;
+    }
 
     PbgzFileWriter(const std::string& fileName) : fileName(fileName), pFile(nullptr) {}
 
 private:
     static uint8_t* getFileWriteBuffer();
 
+    int32_t initFileHead();
+
 
 private:
     std::string fileName;
+    PbgzFileHeader fileHeader; // 文件头
+    PbgzFileMeta fileMeta; // 文件元信息
     FILE *pFile; // 文件指针
-    
 };
 
 #endif

@@ -56,8 +56,13 @@ const uint32_t PBGZ_FILE_META_CHECKSUM_LENGTH = 8; // Length of PBGZ data block 
 const uint32_t PBGZ_DATA_BLOCK_MAGIC_LENGTH = 4; // Length of PBGZ data block magic value
 const uint32_t PBGZ_DATA_BLOCK_META_SIZE_LENGTH = 4; // Length of PBGZ data block meta information length
 const uint32_t PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH = 4;  // Length of PBGZ data block data length
+const uint32_t PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH = 8; // Length of PBGZ data block meta information checksum
 const uint32_t PBGZ_DATA_BLOCK_CHECKSUM_LENGTH = 8; // Length of PBGZ data block checksum
 const uint32_t PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH = 8; // Length of PBGZ data block original data checksum
+
+const uint8_t PBGZ_VERSION_MAJOR = 2; // Major version of PBGZ file format
+const uint8_t PBGZ_VERSION_MINOR = 0; // Minor version of PBGZ file format
+const uint8_t PBGZ_VERSION_PATCH = 0; // Patch version
 
 class Serializable {
 public:
@@ -97,8 +102,17 @@ public:
      */
     std::string getVersionStr();
 
-    PbgzFileHeader() :blockType(INVALID) {
-        memset(version, 0, sizeof(version));
+    /**
+     * @brief Get the block type of the file header.
+     */
+    PbgzBlockType getBlockType() const {
+        return blockType;
+    }
+
+    PbgzFileHeader() : blockType(FILE_HEADER) {
+        version[0] = PBGZ_VERSION_MAJOR;
+        version[1] = PBGZ_VERSION_MINOR;
+        version[2] = PBGZ_VERSION_PATCH;
     }
 
 private:
@@ -119,6 +133,14 @@ public:
      */
     int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
 
+    /**
+     * @brief Check if the meta data checksum is valid.
+     * @return True if checksum is valid, false otherwise.
+     */
+    uint64_t getMetaChecksum() const{
+        return metaChecksum;
+    }
+
     Json::Value getMetaData() const {
         return metaData;
     }
@@ -135,11 +157,15 @@ public:
         metaData[key] = value;
     }
 
-    PbgzFileMeta():blockType(INVALID), metaLength(0) {
-        metaData.clear();
-        memset(metaChecksum, 0, sizeof(metaChecksum));
+    PbgzBlockType getBlockType() const {
+        return blockType;   
     }
 
+    PbgzFileMeta():blockType(FILE_META), metaLength(0) {
+        metaData.clear();
+        metaChecksum = 0;
+    }
+    
     virtual ~PbgzFileMeta() {
         metaData.clear();
     }
@@ -148,7 +174,7 @@ private:
     PbgzBlockType blockType;   // Block type
     uint32_t metaLength; // Length of meta data
     Json::Value metaData; // Meta information in JSON format
-    uint8_t metaChecksum[8]; // Checksum for meta data
+    uint64_t metaChecksum; // Checksum for meta data
 };
 
 
@@ -211,13 +237,22 @@ public:
      */
     int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
 
-    PbgzDataBlock():blockType(INVALID), dataMetaLength(0), blockDataLength(0), pBlockData(nullptr){
+    PbgzDataBlock():blockType(FILE_DATA), dataMetaLength(0), blockDataLength(0), pBlockData(nullptr){
         dataMetaInfo.clear();
-        memset(dataBlockChecksum, 0 , PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
-        memset(originDataChecksum, 0, PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH);
+        metaChecksum = 0;
+        dataBlockChecksum = 0; 
+        // 是否需要将这个校验和放到数据里面去？
+        originDataChecksum = 0;
     }
 
-protected:
+    uint64_t getOriginDataChecksum() const {
+        return originDataChecksum;
+    }
+
+    void setOriginDataChecksum(uint64_t checksum) {
+        originDataChecksum = checksum;
+    }
+
     virtual ~PbgzDataBlock() {
         dataMetaInfo.clear();
         if (!pBlockData) {
@@ -227,13 +262,14 @@ protected:
     }
 
 private:
-    PbgzBlockType blockType;   // block type
-    uint32_t dataMetaLength;           // block meta infomation length
+    PbgzBlockType blockType;       // block type
+    uint32_t dataMetaLength;       // block meta infomation length
     Json::Value dataMetaInfo;      // block meta infomation
-    uint32_t blockDataLength;           // block Data length
-    uint8_t *pBlockData;                 // block data 
-    uint8_t dataBlockChecksum[8];   // block data checksum
-    uint8_t originDataChecksum[8];   // origin data checksum
+    uint64_t metaChecksum;         // Checksum for meta data
+    uint32_t blockDataLength;      // block Data length
+    uint8_t *pBlockData;           // block data 
+    uint64_t dataBlockChecksum;    // block data checksum
+    uint64_t originDataChecksum;   // origin data checksum
 };
 
 #endif

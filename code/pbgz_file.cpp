@@ -22,6 +22,7 @@
  */
 
 #include <iostream>
+
 #include "pbgz_file.h"
 #include "log/logger.h"
 
@@ -31,7 +32,7 @@ std::string PbgzFileHeader::getVersionStr() {
     // Assuming version is in the format [major, minor, patch]
     // where each element is a single character representing a digit.
     // Adjust the conversion if the version format is different.
-    if (version[0] == '\0' || version[1] == '\0' || version[2] == '\0') {
+    if (version[0] == '\0') {
         return "Unknown Version";
     }
     // Ensure that version elements are valid characters    
@@ -50,7 +51,7 @@ int32_t PbgzFileHeader::serialize(uint8_t* buffer, uint32_t bufferLength, uint32
     }
 
     // Serialize block type, 4 byte without '\0'
-    memcpy(buffer, &PBGZ_FILE_MAGIC, PBGZ_FILE_MAGIC_LENGTH);
+    memcpy(buffer, PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH);
     // Serialize version
     memcpy(buffer + PBGZ_FILE_MAGIC_LENGTH, version, sizeof(version));
 
@@ -82,8 +83,8 @@ int32_t PbgzFileMeta::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t
         return -1;
     }   
 
-    Json::FastWriter writer;
-    std::string jsonString = writer.write(metaData);
+    Json::StreamWriterBuilder writer;
+    std::string jsonString =  Json::writeString(writer, metaData);
     metaLength = jsonString.size();
     if (bufferLength < PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH + metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH) {
         return -1; // Buffer too small
@@ -105,7 +106,7 @@ int32_t PbgzFileMeta::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t
     dataOffset += metaLength;
 
     // Serialize checksum
-    memcpy(buffer + dataOffset, metaChecksum, PBGZ_FILE_META_CHECKSUM_LENGTH);
+    memcpy(buffer + dataOffset, &metaChecksum, PBGZ_FILE_META_CHECKSUM_LENGTH);
 
     dataLength = dataOffset + PBGZ_FILE_META_CHECKSUM_LENGTH;
     return 0; 
@@ -144,11 +145,10 @@ int32_t PbgzFileMeta::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     dataOffset += metaLength;
 
     // Unserialize checksum
-    memcpy(metaChecksum, buffer + dataOffset, PBGZ_FILE_META_CHECKSUM_LENGTH);
+    metaChecksum = *(uint64_t*)(buffer + dataOffset);
 
     return 0; 
 }
-
 
 int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) {
     if (blockType != FILE_DATA) {
@@ -156,8 +156,8 @@ int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_
         return -1;
     }
 
-    Json::FastWriter writer;
-    std::string jsonString = writer.write(dataMetaInfo);
+    Json::StreamWriterBuilder writer;
+    std::string jsonString = Json::writeString(writer, dataMetaInfo);
     dataMetaLength = jsonString.size();
     if (bufferLength < PBGZ_DATA_BLOCK_MAGIC_LENGTH +  PBGZ_DATA_BLOCK_META_SIZE_LENGTH + dataMetaLength + 
         PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH + blockDataLength + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH + PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH) {
@@ -178,26 +178,29 @@ int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_
     memcpy(buffer + dataOffset, jsonString.c_str(), dataMetaLength);
     dataOffset += dataMetaLength;
 
+    // Serialize meta checksum
+    memcpy(buffer + dataOffset, &metaChecksum, PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
+    dataOffset += PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH;
+
     // Serialize data length
-    memcpy(buffer + dataOffset, &dataLength, sizeof(dataLength));
-    dataOffset += sizeof(dataLength);
+    memcpy(buffer + dataOffset, &blockDataLength, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
+    dataOffset += PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH;
 
     // Serialize block data
-    if (pBlockData && dataLength > 0) {
-        memcpy(buffer + dataOffset, pBlockData, dataLength);
-        dataOffset += dataLength;
+    if (pBlockData && blockDataLength > 0) {
+        memcpy(buffer + dataOffset, pBlockData, blockDataLength);
+        dataOffset += blockDataLength;
     }
 
     // Serialize checksums
-    memcpy(buffer + dataOffset, dataBlockChecksum, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
+    memcpy(buffer + dataOffset, &dataBlockChecksum, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
     dataOffset += PBGZ_DATA_BLOCK_CHECKSUM_LENGTH;
     
-    memcpy(buffer + dataOffset, originDataChecksum, PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH );
+    memcpy(buffer + dataOffset, &originDataChecksum, PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH );
     dataLength = dataOffset + PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH;
     
     return 0; 
 }
-
 
 int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     if (bufferLength < PBGZ_DATA_BLOCK_MAGIC_LENGTH + PBGZ_DATA_BLOCK_META_SIZE_LENGTH + PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH
@@ -233,6 +236,13 @@ int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     }
     dataOffset += dataMetaLength;
 
+    // Unserialize meta checksum
+    if (bufferLength < dataOffset + PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH) {
+        return -1; // Buffer too small for meta checksum
+    }
+    metaChecksum = *(uint64_t*)(buffer + dataOffset);
+    dataOffset += PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH; 
+
     // Unserialize data length
     memcpy(&blockDataLength, buffer + dataOffset, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
     dataOffset += PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH;
@@ -253,11 +263,10 @@ int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     }
 
     // Unserialize checksums
-    memcpy(dataBlockChecksum, buffer + dataOffset, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
+    dataBlockChecksum = *(uint64_t*)(buffer + dataOffset);
     dataOffset += PBGZ_DATA_BLOCK_CHECKSUM_LENGTH;
     
-    memcpy(originDataChecksum, buffer + dataOffset, PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH);
-
+    originDataChecksum = *(uint64_t*)(buffer + dataOffset);
     return 0; 
 }
 
@@ -273,6 +282,7 @@ int32_t PbgzDataBlock::setBlockData(uint8_t* data, uint32_t length) {
         return -1;
     }
 
+    blockDataLength = length;
     memcpy(pBlockData, data, length);
     return 0;
 }
