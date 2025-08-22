@@ -12,7 +12,7 @@
 - 多种数据支持：针对基因数据专门优化，但同时支持任意二进制文件的压缩；
 - 完全自由开放：基于 MIT License 开源，允许任何人.任何组织使用.修改和分发。
 
-![alt text](image/gdcc2021.png)
+![alt text](images/gdcc2021.png)
 
 
 | 指标/特性              | 平台    | GZip (.gz)    | Enancio (.ora)                               | Ours                             |
