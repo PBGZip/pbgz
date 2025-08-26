@@ -1,5 +1,5 @@
 /*
- * pbgz_file_handler.cpp - CPP file for pbgz_v2 project
+ * pbgz_file_handler.cpp - CPP file for pbgz project
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -71,9 +71,9 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     if (isCheckMagic) {
         memcpy(pReadBuffer, PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH);
     } else {
-        readLen = fread(pReadBuffer, PBGZ_FILE_MAGIC_LENGTH, 1, pFile);
+        readLen = fread(pReadBuffer, 1, PBGZ_FILE_MAGIC_LENGTH, pFile);
         if (readLen !=  PBGZ_FILE_MAGIC_LENGTH) {
-            LOG_STDOUT(LOG_ERROR, "Failed to read file header from: %s", fileName.c_str());
+            LOG_STDOUT(LOG_ERROR, "Failed to read file header from: %s, readLen=%d", fileName.c_str(), readLen);
             return -1; // File read error
         }
 
@@ -92,23 +92,30 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return -1; // File read error
     }   
 
-    LOG_STDOUT(LOG_INFO, "PBGZ file opened successfully: %s", fileName.c_str());
-
     PbgzFileHeader header;
     header.unserialize(reinterpret_cast<uint8_t*>(pReadBuffer), PBGZ_FILE_MAGIC_LENGTH + PBGZ_FILE_VERSION_LENGTH);
-    fileHeaderMap[currentFileIndex++] = header;
+    fileHeaderMap[++currentFileIndex] = header; 
+
+    LOG_STDOUT(LOG_INFO, "PBGZ file opened successfully: %s", fileName.c_str());
+    LOG_STDOUT(LOG_INFO, "PBGZ file magic: %d", header.getBlockType());
+    LOG_STDOUT(LOG_INFO, "PBGZ file version: %s", header.getVersionStr().c_str());
 
     // Read file meta information
     // read file meta magic
-    readLen = fread(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH, 1, pFile);
+    readLen = fread(pReadBuffer, 1, PBGZ_FILE_META_MAGIC_LENGTH, pFile);
+    if (readLen == 0) {
+        LOG_STDOUT(LOG_INFO, "No file meta information found in: %s", fileName.c_str());
+        return 0; // No file meta information, not an error
+    }
+
     if (readLen != PBGZ_FILE_META_MAGIC_LENGTH) {
         LOG_STDOUT(LOG_ERROR, "%s is not a valid pbgz file.", fileName.c_str());
         return -1;
     }
 
     if (0 != memcmp(pReadBuffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH)) {
-        LOG_STDOUT(LOG_ERROR, "%s is not a valid pbgz file, file meta magic no is %X", fileName.c_str(), 
-            (uint32_t)(*(uint32_t*)pReadBuffer));
+        LOG_STDOUT(LOG_ERROR, "%s is not a valid pbgz file, file meta magic no is %X, expect %X", fileName.c_str(), 
+            (*(uint32_t*)pReadBuffer), PBGZ_FILE_META_MAGIC);
         return -1;
     }
 
@@ -121,7 +128,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     const uint32_t metaLength = (uint32_t)(*(uint32_t*)(pReadBuffer + PBGZ_FILE_META_MAGIC_LENGTH));
 
     // read the rest of the meta data and checksum
-    readLen = fread(pReadBuffer + PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH, 1, metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH, pFile);
+    readLen = fread(pReadBuffer + PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH, 1,metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH, pFile);
     if (readLen != metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH) {
         LOG_STDOUT(LOG_ERROR, "Failed to read file meta data from: %s", fileName.c_str());
         return -1; // File read error   
@@ -200,7 +207,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
     }
 
     // Read the data block magic value, 4byte
-    size_t readLen = fread(pReadBuffer, PBGZ_DATA_BLOCK_MAGIC_LENGTH, 1, pFile);
+    size_t readLen = fread(pReadBuffer, 1, PBGZ_DATA_BLOCK_MAGIC_LENGTH, pFile);
     if (readLen != PBGZ_DATA_BLOCK_MAGIC_LENGTH) {
         LOG_STDOUT(LOG_ERROR, "Failed to read PBGZ data block header.");
         return -1; // File read error

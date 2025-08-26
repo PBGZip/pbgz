@@ -1,5 +1,5 @@
 /*
- * pbgz_file.h - Header file for pbgz_v2 project
+ * pbgz_file.h - Header file for pbgz project
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -36,8 +36,8 @@ typedef enum {
 }PbgzBlockType;
 
 const std::string PBGZ_FILE_MAGIC = "PBGZ"; // Magic value for PBGZ file format
-const uint32_t PBGZ_FILE_META_MAGIC = 0x0000EB; // Magic value for PBGZ file meta information
-const uint32_t PBGZ_DATA_BLOCK_MAGIC = 0x0000DB; // Magic value for PBGZ file meta information
+const uint32_t PBGZ_FILE_META_MAGIC = 0x000000EB; // Magic value for PBGZ file meta information
+const uint32_t PBGZ_DATA_BLOCK_MAGIC = 0x000000DB; // Magic value for PBGZ file meta information
 
 
 /// @brief File type in PBGZ file format
@@ -47,7 +47,7 @@ typedef enum {
 } FileFormat;
 
 const uint32_t PBGZ_FILE_MAGIC_LENGTH = 4; // Length of PBGZ file magic value
-const uint32_t PBGZ_FILE_VERSION_LENGTH= 4; // Length of PBGZ file meta magic value
+const uint32_t PBGZ_FILE_VERSION_LENGTH= 3; // Length of file version number
 
 const uint32_t PBGZ_FILE_META_MAGIC_LENGTH = 4; // Length of PBGZ file meta magic value
 const uint32_t PBGZ_FILE_META_SIZE_LENGTH = 4; // Length of PBGZ file meta information length
@@ -145,7 +145,7 @@ public:
         return metaData;
     }
 
-    Json::Value getMetaData(std::string& key) {
+    Json::Value getMetaData(const std::string& key) {
         return metaData[key];
     }
 

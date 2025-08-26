@@ -11,11 +11,11 @@ set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rd_party)
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/testcase/*.cpp)
 
 # 查找所有主项目源文件
-file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/code/*.cpp
-                       ${CMAKE_SOURCE_DIR}/code/log/*.cpp
+file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp
+                       ${CMAKE_SOURCE_DIR}/src/log/*.cpp
 )
 
-list(REMOVE_ITEM PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/code/main.cpp)
+list(REMOVE_ITEM PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
 set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/farmhash/src/farmhash.cc)
 
@@ -26,8 +26,8 @@ set(TEST_MAIN ${CMAKE_CURRENT_SOURCE_DIR}/pbgz_test_main.cpp)
 add_executable(pbgz_test ${TEST_MAIN} ${TEST_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPEN_SOURCES})
 
 # 包含主项目头文件
-include_directories(${CMAKE_SOURCE_DIR}/code)
-include_directories(${CMAKE_SOURCE_DIR}/code/log)
+include_directories(${CMAKE_SOURCE_DIR}/src)
+include_directories(${CMAKE_SOURCE_DIR}/src/log)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/jsoncpp/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/googletest/googletest/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/farmhash/src)
