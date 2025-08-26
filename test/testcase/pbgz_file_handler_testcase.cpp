@@ -41,3 +41,41 @@ TEST(PbgzFileWriteTest, WriteBlockData) {
     writer.writeBlockData(blockData);
     writer.close();
 }
+
+TEST(PbgzFileReadTest, ReadFileMeta) {
+    PbgzFileReader reader("pbgz_write_file_meta_test.pbgz");
+    EXPECT_EQ(reader.open(), 0) << "Failed to open file for reading";
+    PbgzFileHeader fileHeader = reader.getFileHeader();
+    EXPECT_EQ(fileHeader.getBlockType(), FILE_HEADER) << "Invalid file magic";
+    PbgzFileMeta fileMeta = reader.getFileMeta();
+    EXPECT_EQ(fileMeta.getBlockType(), FILE_META) << "Failed to read file metadata";
+    Json::Value value = fileMeta.getMetaData("testKey");
+    ASSERT_FALSE(value.isNull()) << "Metadata 'testKey' not found";
+    ASSERT_EQ(value["test"].asString(), "value") << "Metadata 'testKey' has incorrect value";
+    reader.close();
+}
+
+TEST(PbgzFileReadTest, ReadBlockData) {
+    PbgzFileReader reader("pbgz_write_data_block_test.pbgz");
+    EXPECT_EQ(reader.open(), 0) << "Failed to open file for reading";
+    PbgzFileHeader fileHeader = reader.getFileHeader();
+    EXPECT_EQ(fileHeader.getBlockType(), FILE_HEADER) << "Invalid file magic";
+    PbgzFileMeta fileMeta = reader.getFileMeta();
+    EXPECT_EQ(fileMeta.getBlockType(), FILE_META) << "Failed to read file metadata";
+    Json::Value value = fileMeta.getMetaData("fileTestKey");
+    ASSERT_FALSE(value.isNull()) << "Metadata 'fileTestKey' not found";
+    ASSERT_EQ(value["test"].asString(), "value") << "Metadata 'fileTestKey' has incorrect value";
+
+    PbgzDataBlock dataBlock;
+    EXPECT_EQ(reader.readDataBlock(dataBlock), 0) << "Failed to read data block";
+    EXPECT_EQ(dataBlock.getBlockType(), FILE_DATA) << "Invalid block type";
+    value = dataBlock.getMetaData("metaTestKey");
+    ASSERT_FALSE(value.isNull()) << "Metadata 'metaTestKey' not found";
+    EXPECT_EQ(value["test"].asString(), "value") << "Metadata 'metaTestKey' has incorrect value";
+    const uint8_t* dataPtr = dataBlock.getDataPtr();
+    ASSERT_NE(dataPtr, nullptr) << "Data pointer is null";
+    std::string dataStr((const char*)dataPtr, dataBlock.getDataLength());
+    EXPECT_EQ(dataStr, "This is test data.") << "Data content is incorrect";
+    reader.close();
+}
+
