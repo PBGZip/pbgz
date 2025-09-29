@@ -1,0 +1,98 @@
+
+#include <unistd.h>
+#include <cstring>
+
+#include "pbgz_manager.h"
+#include "pbgz_errno.h"
+#include "utils/path_util.h"
+#include "block_wrapper.h"
+
+
+PbgzManager& PbgzManager::getInstance() {
+    static PbgzManager instance;
+    return instance;
+}
+
+void PbgzManager::exitProc(int errorCode, const char* errorMessage){
+    if (errorCode < pbgz::PBGZ_ERR_NO) {
+        for (auto &currFile : outfiles) {
+            const std::string& fileName = currFile.first;
+            if (!currFile.second && PathUtil::fileExists(fileName)) {
+                unlink(fileName.c_str());
+            }
+        }
+    } 
+
+    if (errorMessage != nullptr && strlen(errorMessage) > 0) {
+        fprintf(stdout, "pbgz exit : %s \n", errorMessage);
+    }
+
+    _Exit(errorCode);
+}
+
+void pbgzExitProc(int errorCode, const char* errorMessage) {
+    return PbgzManager::getInstance().exitProc(errorCode, errorMessage);
+}
+
+void coderLog(int logLevel, const char* logMessage) {
+    LogLevel pbgzLogLevel = LogLevel::OFF;
+    switch (logLevel)
+    {
+    case coder_ns::DEBUGGING:
+        pbgzLogLevel = LogLevel::DEBUGGING;
+        break;
+    case coder_ns::INFO:
+        pbgzLogLevel = LogLevel::INFO;
+        break;
+    case coder_ns::WARNING:
+        pbgzLogLevel = LogLevel::WARNING;
+        break;
+    case coder_ns::ERROR:
+        pbgzLogLevel = LogLevel::ERROR;
+        break;
+    case coder_ns::FATAL:
+        pbgzLogLevel = LogLevel::FATAL;
+        break;    
+    default:
+        break;
+    }
+
+    return Logger::getInstance().log(pbgzLogLevel, logMessage);
+}
+
+std::string PbgzManager::getVersion() {
+    char buffer[12];
+    snprintf(buffer, sizeof(buffer), "%d.%d.%d", PBGZ_VERSION_MAJOR, PBGZ_VERSION_MINOR, PBGZ_VERSION_PATCH);
+    return std::string(buffer);
+}
+
+void PbgzManager::updateReadDataLen(RoughIOBlock* blockPtr) {
+    totalReadLen += blockPtr->getDataLen();
+    updateDataInfo();
+}
+    
+void PbgzManager::updateWriteDataLen(RoughIOBlock* blockPtr) {
+    totalWriteLen += blockPtr->getDataLen() + blockPtr->getMetaLen();
+    updateDataInfo();
+}   
+
+void PbgzManager::updateDataInfo() {
+    fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\r", "from/to", totalReadLen, totalWriteLen);;
+}
+
+void PbgzManager::printFileType(BlockType blockType) {
+    fprintf(stderr, "File type: %s\n", BlockUtil::getBlockTypeName(blockType).c_str());
+}
+
+void PbgzManager::printHeadInfo(PbgzParameter& para) {
+    fprintf(stderr, "\033[37mpbgz version => %s\033[0m\n\n", getVersion().c_str());
+    fprintf(stderr, "Parallel set: %d\n", para.threadNum);
+}
+
+void PbgzManager::printTailInfo(Timer costTime, PbgzParameter& para) {
+    fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\033[0m\n", "from/to", totalReadLen, totalWriteLen);
+    fprintf(stderr, "\nCompress finish, cost %lum%lus.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
+    if (!para.isDecompress) {
+        fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%\n", totalReadLen, totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen);
+    }
+}

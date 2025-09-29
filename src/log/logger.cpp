@@ -28,6 +28,7 @@
 #include <time.h>
 
 #include "logger.h"
+#include "config_manager.h"
 
 
 Logger& Logger::getInstance() {
@@ -37,19 +38,19 @@ Logger& Logger::getInstance() {
 
 std::string Logger::getLogLevelString(LogLevel logLevel) {
     switch (logLevel) {
-        case LOG_TRACE: return "TRACE";
-        case LOG_DEBUG: return "DEBUG";
-        case LOG_INFO: return "INFO";
-        case LOG_WARNING: return "WARNING";
-        case LOG_ERROR: return "ERROR";
-        case LOG_FATAL: return "FATAL";
-        case LOG_OFF: return "OFF";
+        case LogLevel::TRACE: return "TRACE";
+        case LogLevel::DEBUGGING: return "DEBUG";
+        case LogLevel::INFO: return "INFO";
+        case LogLevel::WARNING: return "WARNING";
+        case LogLevel::ERROR: return "ERROR";
+        case LogLevel::FATAL: return "FATAL";
+        case LogLevel::OFF: return "OFF";
         default: return "UNKNOWN";
     }
 }
 
 int32_t Logger::buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel logLevel, int line, const char* function, const char* fileName, 
-                const char* logContent){
+                const char* logContent) {
     time_t now = time(nullptr);
     struct tm *ltm = localtime(&now);
     char timeBuffer[32];
@@ -58,43 +59,69 @@ int32_t Logger::buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel log
     std::string logLevelStr = getLogLevelString(logLevel);
 
     /// 不做长度判断，如果空间不够，则会截断
-    snprintf(logBuffer, bufferLen, "[%s][%s][%s] [%s][%s:%d]\n",
+    snprintf(logBuffer, bufferLen, "[%s][%s][%s]%s[%s:%d]\n",
          getLogLevelString(logLevel).c_str(), function, timeBuffer, logContent, fileName, line);
 
     return 0;
 }
 
-void Logger::logStdout(LogLevel logLevel, int line, const char* function, const char* fileName, 
+void Logger::log(LogLevel logLevel, int line, const char* function, const char* fileName, 
                 const char* logFormat, ...) {
-    char logContent[512];
-    va_list args;
-    va_start(args, logFormat);
-    vsnprintf(logContent, sizeof(logContent), logFormat, args);
-    va_end(args);
-
-    char logBuffer[1024];
-    buildLogString(logBuffer, sizeof(logBuffer), logLevel, line, function, fileName, logContent);
-    // 输出到标准输出
-    std::cerr << logBuffer;
-}
-
-void Logger::logFile(LogLevel logLevel, int line, const char* function, const char* fileName, 
-                const char* logFormat, ...)
-{
-    char logContent[512];
-    va_list args;
-    va_start(args, logFormat);
-    vsnprintf(logContent, sizeof(logContent), logFormat, args);
-    va_end(args);
-
-    char logBuffer[1024];
-    buildLogString(logBuffer, sizeof(logBuffer), logLevel, line, function, fileName, logContent);
-
-    FILE* pLogFile = fopen(logFileName.c_str(), "a");
-    if (pLogFile != nullptr) {
-        fwrite(logBuffer, 1, strlen(logBuffer), pLogFile);
-        fflush(pLogFile);
-        fclose(pLogFile);
+    LogLevel configLevel = ConfigManager::getInstance().getLogLevel();
+    if (configLevel == LogLevel::OFF) {
+        return;
     }
+    if (configLevel > logLevel) {
+        return;
+    }
+
+    char logContent[512];
+    va_list args;
+    va_start(args, logFormat);
+    vsnprintf(logContent, sizeof(logContent), logFormat, args);
+    va_end(args);
+
+    char logBuffer[1024];
+    buildLogString(logBuffer, sizeof(logBuffer), logLevel, line, function, fileName, logContent);
+    
+    return log(configLevel, logBuffer);
 }
+
+void Logger::log(LogLevel logLevel, const char* logMessage) {
+    LogLevel configLevel = ConfigManager::getInstance().getLogLevel();
+    if (configLevel == LogLevel::OFF) {
+        return;
+    } 
+
+    if (configLevel > logLevel) {
+        return;
+    }
+
+    // 先简单实现，后续可优化为异步写文件方式，防止IO阻塞主进程
+    LogAppender appender = ConfigManager::getInstance().getLogAppender();
+    switch (appender) {
+        case LogAppender::CONSOLE:{
+            if (logLevel > LogLevel::ERROR) {
+                std::cerr << logMessage;
+            } else {
+                std::cout << logMessage;
+            }
+            break;
+        }
+        case LogAppender::FILE:{
+            FILE* pLogFile = fopen(logFileName.c_str(), "a");
+            if (pLogFile != nullptr) {
+                fwrite(logMessage, 1, strlen(logMessage), pLogFile);
+                fflush(pLogFile);
+                fclose(pLogFile);
+                pLogFile = nullptr;
+            }
+            break;
+        }
+        case LogAppender::NETWORK:  // 暂不支持输出到网络
+        default:
+            break;
+    }   
+}
+
 

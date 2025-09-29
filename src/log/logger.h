@@ -27,26 +27,31 @@
 #include <stdint.h>
 #include <string>
 
-typedef enum {
-    LOG_TRACE = 0,     // 跟踪日志
-    LOG_DEBUG = 1,     // 调试日志
-    LOG_INFO = 2,      // 重要的信息
-    LOG_WARNING = 3,   // 告警日志
-    LOG_ERROR = 4,     // 错误日志
-    LOG_FATAL = 5,     // 致命错误
-    LOG_OFF = 6        // 关闭所有日志
- }LogLevel;
+enum class LogLevel{
+    TRACE = 0,     // 跟踪日志
+    DEBUGGING = 1, // 调试日志
+    INFO = 2,      // 重要的信息
+    WARNING = 3,   // 告警日志
+    ERROR = 4,     // 错误日志
+    FATAL = 5,     // 致命错误
+    OFF = 6        // 关闭所有日志
+ };
+
+ enum class LogAppender{
+    CONSOLE = 0,  // 输出到控制台
+    FILE = 1,     // 输出到文件
+    NETWORK = 2,  // 输出到网络
+ };
 
 
 class Logger {
 public:
-    void logStdout(LogLevel logLevel, int line, const char* function, const char* fileName, 
-                const char* logFormat, ...);
-
-    void logFile(LogLevel logLevel, int line, const char* function, const char* fileName, 
+    void log(LogLevel logLevel, int line, const char* function, const char* fileName, 
                 const char* logFormat, ...);
 
     static Logger& getInstance();
+
+    void log(LogLevel logLevel, const char* logMessage);
 
 private:
     std::string getLogLevelString(LogLevel logLevel);
@@ -61,11 +66,25 @@ private:
 };
 
 
-#define LOG_STDOUT(logLevel, logFormat, ... )  \
-    Logger::getInstance().logStdout(logLevel, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
 
-#define LOG_FILE(logLevel, logFormat, ... )  \
-    Logger::getInstance().logFile(logLevel, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
+
+#define LOG_TRACE(logFormat, ... )  \
+    Logger::getInstance().log(LogLevel::TRACE, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
+
+#define LOG_DEBUG(logFormat, ... )  \
+    Logger::getInstance().log(LogLevel::DEBUGGING, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
+
+#define LOG_INFO(logFormat, ... )  \
+    Logger::getInstance().log(LogLevel::INFO, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
+
+#define LOG_WARNING(logFormat, ... )  \
+    Logger::getInstance().log(LogLevel::WARNING, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
+
+#define LOG_ERROR(logFormat, ... )  \
+    Logger::getInstance().log(LogLevel::ERROR, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
+
+#define LOG_FATAL(logFormat, ... )  \
+    Logger::getInstance().log(LogLevel::FATAL, __LINE__, __FUNCTION__, __FILE__, logFormat, ##__VA_ARGS__) 
 
 
 #endif

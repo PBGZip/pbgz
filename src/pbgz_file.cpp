@@ -43,7 +43,7 @@ std::string PbgzFileHeader::getVersionStr() {
 
 int32_t PbgzFileHeader::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) {
     if (blockType != FILE_HEADER) {
-        LOG_STDOUT(LOG_ERROR, "Invalid block type for serialization: %d", blockType);
+        LOG_ERROR("Invalid block type for serialization: %d", blockType);
         return -1;
     }
     if (bufferLength < PBGZ_FILE_MAGIC_LENGTH + sizeof(version)) {
@@ -66,7 +66,7 @@ int32_t PbgzFileHeader::unserialize(uint8_t* buffer, uint32_t bufferLength) {
 
     // Unserialize block type
     if (strncmp(reinterpret_cast<const char*>(buffer), PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH) != 0) {
-        LOG_STDOUT(LOG_ERROR, "Invalid magic value for PBGZ file header.");
+        LOG_ERROR("Invalid magic value for PBGZ file header.");
         return -1; // Invalid magic
     }
     blockType = FILE_HEADER;
@@ -79,7 +79,7 @@ int32_t PbgzFileHeader::unserialize(uint8_t* buffer, uint32_t bufferLength) {
 
 int32_t PbgzFileMeta::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) {
     if (blockType != FILE_META) {
-        LOG_STDOUT(LOG_ERROR, "Invalid block type for serialization: %d", blockType);
+        LOG_ERROR("Invalid block type for serialization: %d", blockType);
         return -1;
     }   
 
@@ -120,7 +120,7 @@ int32_t PbgzFileMeta::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     uint dataOffset = 0;
     // Unserialize block type
     if (memcmp(buffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH) != 0) {
-        LOG_STDOUT(LOG_ERROR, "Invalid magic value for PBGZ file meta.");
+        LOG_ERROR("Invalid magic value for PBGZ file meta.");
         return -1; // Invalid magic
     }
     blockType = FILE_META;
@@ -139,7 +139,7 @@ int32_t PbgzFileMeta::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     std::istringstream jsonStream(jsonString);
     std::string errs;
     if (!Json::parseFromStream(readerBuilder, jsonStream, &metaData, &errs)) {
-        LOG_STDOUT(LOG_ERROR, "Failed to parse JSON: %s", errs);
+        LOG_ERROR("Failed to parse JSON: %s", errs.c_str());
         return -1; // JSON parse error
     }
     dataOffset += metaLength;
@@ -152,7 +152,7 @@ int32_t PbgzFileMeta::unserialize(uint8_t* buffer, uint32_t bufferLength) {
 
 int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) {
     if (blockType != FILE_DATA) {
-        LOG_STDOUT(LOG_ERROR, "Invalid block type for serialization: %d", blockType);
+        LOG_ERROR("Invalid block type for serialization: %d", blockType);
         return -1;
     }
 
@@ -160,8 +160,8 @@ int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_
     std::string jsonString = Json::writeString(writer, dataMetaInfo);
     dataMetaLength = jsonString.size();
     if (bufferLength < PBGZ_DATA_BLOCK_MAGIC_LENGTH +  PBGZ_DATA_BLOCK_META_SIZE_LENGTH + dataMetaLength + 
-        PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH + blockDataLength + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH + PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH) {
-        LOG_STDOUT(LOG_ERROR, "Buffer too small for serialization");
+        PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH + blockDataLength + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH) {
+        LOG_ERROR("Buffer too small for serialization");
         return -1; // Buffer too small
     }
 
@@ -194,24 +194,21 @@ int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_
 
     // Serialize checksums
     memcpy(buffer + dataOffset, &dataBlockChecksum, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
-    dataOffset += PBGZ_DATA_BLOCK_CHECKSUM_LENGTH;
-    
-    memcpy(buffer + dataOffset, &originDataChecksum, PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH );
-    dataLength = dataOffset + PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH;
+    dataLength = dataOffset + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH;
     
     return 0; 
 }
 
 int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     if (bufferLength < PBGZ_DATA_BLOCK_MAGIC_LENGTH + PBGZ_DATA_BLOCK_META_SIZE_LENGTH + PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH
-         + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH + PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH) {
+         + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH) {
         return -1; // Buffer too small
     }
 
     uint32_t dataOffset = 0;
     // Unserialize block type
     if (memcmp(buffer, &PBGZ_DATA_BLOCK_MAGIC, PBGZ_DATA_BLOCK_MAGIC_LENGTH) != 0) {
-        LOG_STDOUT(LOG_ERROR, "Invalid magic value for PBGZ data block.");
+        LOG_ERROR("Invalid magic value for PBGZ data block.");
         return -1; // Invalid magic
     }
 
@@ -231,7 +228,7 @@ int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     std::istringstream jsonStream(jsonString);
     std::string errs;
     if (!Json::parseFromStream(readerBuilder, jsonStream, &dataMetaInfo, &errs)) {
-        LOG_STDOUT(LOG_FATAL, "Failed to parse JSON: %s", errs.c_str());
+        LOG_FATAL("Failed to parse JSON: %s", errs.c_str());
         return -1; // JSON parse error
     }
     dataOffset += dataMetaLength;
@@ -255,7 +252,7 @@ int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     if (blockDataLength > 0) {
         pBlockData = static_cast<uint8_t*>(malloc(blockDataLength));
         if (!pBlockData) {
-            LOG_STDOUT(LOG_FATAL, "Failed to allocate memory for block data.");
+            LOG_FATAL("Failed to allocate memory for block data.");
             return -1; // Memory allocation failed
         }
         memcpy(pBlockData, buffer + dataOffset, blockDataLength);
@@ -264,26 +261,25 @@ int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
 
     // Unserialize checksums
     dataBlockChecksum = *(uint64_t*)(buffer + dataOffset);
-    dataOffset += PBGZ_DATA_BLOCK_CHECKSUM_LENGTH;
     
-    originDataChecksum = *(uint64_t*)(buffer + dataOffset);
     return 0; 
 }
 
 int32_t PbgzDataBlock::setBlockData(uint8_t* data, uint32_t length) {
-    if (pBlockData) {
-        free(pBlockData);
-        pBlockData = nullptr;
-    }
-    
-    pBlockData = static_cast<uint8_t*>(malloc(length));
-    if (!pBlockData) {
-        std::cerr << "Failed to allocate memory for block data." << std::endl;
+    if (data == nullptr) {
         return -1;
     }
-
+    
+    pBlockData = data;
     blockDataLength = length;
-    memcpy(pBlockData, data, length);
+    return 0;
+}
+
+void PbgzDataBlock::calcChecksum() {
+
+}
+
+int32_t PbgzDataBlock::verifyCheckSum() {
     return 0;
 }
 
