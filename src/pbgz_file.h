@@ -21,11 +21,12 @@
  * SOFTWARE.
  */
 
-#ifndef PBGZ_FILE_H
-#define PBGZ_FILE_H
+#pragma once
 
 #include <string>
 #include <json/json.h>
+
+#include "pbgz_types.h"
 
 /// @brief Magic value for block in PBGZ file format, used to identify block type
 typedef enum {
@@ -42,8 +43,8 @@ const uint32_t PBGZ_DATA_BLOCK_MAGIC = 0x000000DB; // Magic value for PBGZ file 
 
 /// @brief File type in PBGZ file format
 typedef enum {
-    BINARY = 0, // Binary file
-    FASTQ = 1,  // FASTQ format file
+    BINARY_FILE = 0, // Binary file
+    FASTQ_FILE = 1,  // FASTQ format file
 } FileFormat;
 
 const uint32_t PBGZ_FILE_MAGIC_LENGTH = 4; // Length of PBGZ file magic value
@@ -58,11 +59,7 @@ const uint32_t PBGZ_DATA_BLOCK_META_SIZE_LENGTH = 4; // Length of PBGZ data bloc
 const uint32_t PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH = 4;  // Length of PBGZ data block data length
 const uint32_t PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH = 8; // Length of PBGZ data block meta information checksum
 const uint32_t PBGZ_DATA_BLOCK_CHECKSUM_LENGTH = 8; // Length of PBGZ data block checksum
-const uint32_t PBGZ_DATA_BLOCK_ORIGIN_CHECKSUM_LENGTH = 8; // Length of PBGZ data block original data checksum
 
-const uint8_t PBGZ_VERSION_MAJOR = 2; // Major version of PBGZ file format
-const uint8_t PBGZ_VERSION_MINOR = 0; // Minor version of PBGZ file format
-const uint8_t PBGZ_VERSION_PATCH = 0; // Patch version
 
 class Serializable {
 public:
@@ -149,11 +146,7 @@ public:
         return metaData[key];
     }
 
-    void setMetaData(std::string &key, Json::Value &value) {
-        metaData[key] = value;
-    }
-
-    void setMetaData(std::string &key, std::string&value) {
+    void setMetaData(const std::string &key, const Json::Value& value) {
         metaData[key] = value;
     }
 
@@ -241,25 +234,18 @@ public:
         dataMetaInfo.clear();
         metaChecksum = 0;
         dataBlockChecksum = 0; 
-        // 是否需要将这个校验和放到数据里面去？
-        originDataChecksum = 0;
-    }
-
-    uint64_t getOriginDataChecksum() const {
-        return originDataChecksum;
-    }
-
-    void setOriginDataChecksum(uint64_t checksum) {
-        originDataChecksum = checksum;
     }
 
     virtual ~PbgzDataBlock() {
         dataMetaInfo.clear();
-        if (!pBlockData) {
-            free(pBlockData);
-            pBlockData = nullptr;
-        }
+        // 外部地址，不能在此释放， 反序列化场景，使用后手工释放
+        pBlockData = nullptr;
+        
     }
+
+    void calcChecksum();
+
+    int32_t verifyCheckSum();
 
 private:
     PbgzBlockType blockType;       // block type
@@ -269,7 +255,4 @@ private:
     uint32_t blockDataLength;      // block Data length
     uint8_t *pBlockData;           // block data 
     uint64_t dataBlockChecksum;    // block data checksum
-    uint64_t originDataChecksum;   // origin data checksum
 };
-
-#endif

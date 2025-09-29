@@ -21,15 +21,14 @@
  * SOFTWARE.
  */
 
-#ifndef PBGZ_FILE_HANDLER_H
-#define PBGZ_FILE_HANDLER_H 
+#pragma once
 
 #include <stdint.h>
 #include <string>
 
 #include "pbgz_file.h"
+#include "io_wrapper.h"
 
-uint8_t* getFileReadBuffer();
 
 /// @brief pbgz格式文件的读取器
 class PbgzFileReader {
@@ -42,13 +41,13 @@ public:
 
     int32_t readDataBlock(PbgzDataBlock& dataBlock);
 
-    PbgzFileReader(const std::string& fileName) : fileName(fileName) {
+    PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
         currentFileIndex = -1;  // 初始化文件索引为-1，表示未读取任何文件
     }
 
     void close();
 
-    virtual ~PbgzFileReader();
+    virtual ~PbgzFileReader() { }
 
 private:
     int32_t initFileHeadAndMeta(bool isCheckMagic = false);
@@ -56,15 +55,14 @@ private:
     static uint8_t* getFileReadBuffer();
 
 private:
-    std::string fileName;
     std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // 文件头, 一个文件可能多个压缩包拼接而成
     std::map<int32_t, PbgzFileMeta> fileMetaMap;      // 文件元信息
     int32_t currentFileIndex; // 当前文件序号，表示当前读到哪个文件了
-    FILE *pFile;
+    IOReader* ioReader;
 };
 
 /// @brief  pbgz格式文件的写入器
-/// Note: 
+/// @note: 
 class PbgzFileWriter {
 public:
     int32_t open();
@@ -80,7 +78,9 @@ public:
         return 0;
     }
 
-    PbgzFileWriter(const std::string& fileName) : fileName(fileName), pFile(nullptr) {}
+    PbgzFileWriter(IOWriter* pWriter ) : ioWriter(pWriter) {}
+
+    virtual ~PbgzFileWriter() { }
 
 private:
     static uint8_t* getFileWriteBuffer();
@@ -89,10 +89,7 @@ private:
 
 
 private:
-    std::string fileName;
     PbgzFileHeader fileHeader; // 文件头
     PbgzFileMeta fileMeta; // 文件元信息
-    FILE *pFile; // 文件指针
+    IOWriter* ioWriter;
 };
-
-#endif

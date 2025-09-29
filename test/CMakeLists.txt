@@ -1,6 +1,12 @@
 # GoogleTest
 project(pbgz_test)
 
+# Add cmake directory to module path
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# Include build options
+include(BuildOptions)
+
 # 设置测试源码目录
 set(TEST_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/testcase)
 
@@ -13,11 +19,13 @@ file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/testcase/*.cpp)
 # 查找所有主项目源文件
 file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp
                        ${CMAKE_SOURCE_DIR}/src/log/*.cpp
+                       ${CMAKE_SOURCE_DIR}/src/utils/*.cpp
 )
 
 list(REMOVE_ITEM PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
-set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/farmhash/src/farmhash.cc)
+set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/farmhash/src/farmhash.cc
+                      ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
 
 # 添加主测试文件
 set(TEST_MAIN ${CMAKE_CURRENT_SOURCE_DIR}/pbgz_test_main.cpp)
@@ -29,18 +37,19 @@ add_executable(pbgz_test ${TEST_MAIN} ${TEST_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPE
 include_directories(${CMAKE_SOURCE_DIR}/src)
 include_directories(${CMAKE_SOURCE_DIR}/src/log)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/jsoncpp/include)
-include_directories(${CMAKE_SOURCE_DIR}/3rd_party/googletest/googletest/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/zstd/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/googletest/googletest/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/farmhash/src)
-
-
-set(REQUIRED_LIBS
-    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
-)
+include_directories(${CMAKE_SOURCE_DIR}/3rd_party/md5sum)
 
 # Link to libraries - Add PRIVATE keyword to match style with CoreServices linkage
 target_link_libraries(pbgz_test PRIVATE
+    pbgz_coder
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
+    ${THIRDPARTY_DIR}/release/zstd/lib/libzstd.a
 )
+
+add_subdirectory(googletest)
 
 # 可选：添加gtest支持
 target_link_libraries(pbgz_test PRIVATE gtest_main)
@@ -48,5 +57,6 @@ target_link_libraries(pbgz_test PRIVATE gtest_main)
 # 启用测试
 enable_testing()
 add_test(NAME pbgz_test COMMAND pbgz_test)
+
 
 

@@ -154,8 +154,6 @@ TEST(PbgzDataBlock, PbgzDataBlockSerialize) {
 
     uint64_t dataBlockChecksum = *(uint64_t*)(buffer + PBGZ_DATA_BLOCK_MAGIC_LENGTH + PBGZ_DATA_BLOCK_META_SIZE_LENGTH + metaLength + PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH + PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH + dataLength);
     EXPECT_EQ(dataBlockChecksum, 0); // Assuming checksum is not set in this test
-    uint64_t originDataChecksum = *(uint64_t*)(buffer + PBGZ_DATA_BLOCK_MAGIC_LENGTH + PBGZ_DATA_BLOCK_META_SIZE_LENGTH + metaLength + PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH + PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH + dataLength + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
-    EXPECT_EQ(originDataChecksum, 0); // Assuming origin checksum is not set in this test
 }
 
 TEST(PbgzDataBlock, PbgzDataBlockUnserialize) {
@@ -178,5 +176,4 @@ TEST(PbgzDataBlock, PbgzDataBlockUnserialize) {
     EXPECT_EQ(newDataBlock.getDataLength(), dataLength);
     EXPECT_NE(newDataBlock.getDataPtr(), nullptr);
     EXPECT_EQ(memcmp(newDataBlock.getDataPtr(), testData, dataLength), 0);
-    EXPECT_EQ(newDataBlock.getOriginDataChecksum(), 0); // Assuming origin checksum is not set in this test
 }

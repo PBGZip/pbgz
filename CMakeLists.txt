@@ -8,4 +8,3 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_subdirectory(src)
 add_subdirectory(test)
-add_subdirectory(3rd_party/googletest)
