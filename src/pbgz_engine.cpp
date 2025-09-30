@@ -180,6 +180,7 @@ int32_t PbgzEngine::start() {
 }
 
 int32_t PbgzEngine::startReadTask() {
+    pthread_setname_np(pthread_self(), "readtask");
     BlockReader* blockReader = nullptr;
     if (parameter.isDecompress) {   // 解压模式，从pbgz文件读取内容
         blockReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
@@ -193,6 +194,8 @@ int32_t PbgzEngine::startReadTask() {
     }
     if (0 != blockReader->init()) {
         LOG_ERROR("BlockReader init failed");
+        delete blockReader;
+        blockReader = nullptr;
         return -1;
     }
 
@@ -234,7 +237,8 @@ int32_t PbgzEngine::startReadTask() {
 }
 
 int32_t PbgzEngine::startCoderTask() {
-    auto coderTask = [this]() {
+    auto coderTask = [this](int32_t id) {
+        pthread_setname_np(pthread_self(), std::string("codertask_").append(std::to_string(id)).c_str());
         while (true) {
             RoughIOBlock* inBlockPtr = inputDataPool.get();
             if (inBlockPtr == nullptr) {  // 读到空指针，表示拿到了结束标志
@@ -296,14 +300,15 @@ int32_t PbgzEngine::startCoderTask() {
     };
 
     for (int8_t i = 0; i < parameter.threadNum; ++i) {
-        coderThreads.emplace_back(std::thread(coderTask));
+        coderThreads.emplace_back(std::thread(coderTask, i));
     }
 
     return 0;
 }   
 
 int32_t PbgzEngine::startWriteTask() {
-    auto writerTask = [this]() {
+    auto writerTask = [this]() -> int32_t {
+        pthread_setname_np(pthread_self(), "writetask");
         BlockWriter* blockWriter = nullptr;
         if (parameter.isDecompress) {  // 解压模式，文件写入为非pbgz格式
             blockWriter = MemoryUtil::safeNewClass<BlockWriter>(ioWriter);
@@ -325,6 +330,7 @@ int32_t PbgzEngine::startWriteTask() {
                     RoughIOBlock* outblockPtr = outputSortedCache.front();
                     blockWriter->writeBlock(outblockPtr);
                     PbgzManager::getInstance().updateWriteDataLen(outblockPtr);
+                    freeOutputPool.push(outblockPtr);
                     outputSortedCache.pop_front();
                 }
                 break;
@@ -349,9 +355,11 @@ int32_t PbgzEngine::startWriteTask() {
                 } 
             }
         }
-
-        delete blockWriter;
-        blockWriter = nullptr;
+        if (blockWriter != nullptr) {
+            delete blockWriter;
+            blockWriter = nullptr;
+        }
+        return 0;
     };
 
     writeThread = std::thread(writerTask);
