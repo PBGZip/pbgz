@@ -26,6 +26,7 @@
 # ------[add by myself]------
 # Directory
 3rdlib/
+build/
 build-x86_64-gcc-release/
 build-x86_64-gcc-debug/
 build-arm64-gcc-release/
@@ -34,6 +35,19 @@ release-x86_64-gcc-release/
 release-x86_64-gcc-debug/
 release-arm64-gcc-release/
 release-arm64-gcc-debug/
+
+# VTune profiling results
+vtune-profiles-result/
+
+# Release profiling directories
+build-x86_64-gcc-release-profile/
+release-release-profile/
+
+# 3rdparty release directories
+3rd_party/release/
+
+# Test data directories
+test-data/
 
 
 

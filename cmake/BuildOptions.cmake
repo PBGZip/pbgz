@@ -94,6 +94,10 @@ set(CMAKE_C_FLAGS_DEBUG "${OPTIMIZATION_DEBUG} -g -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "${OPTIMIZATION_RELEASE} -DNDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "${OPTIMIZATION_RELEASE} -DNDEBUG")
 
+# Release-Profile build type: optimized with debug symbols
+set(CMAKE_CXX_FLAGS_RELEASEPROFILE "${OPTIMIZATION_RELEASE} -g -DNDEBUG")
+set(CMAKE_C_FLAGS_RELEASEPROFILE "${OPTIMIZATION_RELEASE} -g -DNDEBUG")
+
 # Apply common flags, architecture flags, and compiler flags
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${PBGZ_COMMON_FLAGS} ${PBGZ_ARCH_FLAGS} ${COMPILER_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${PBGZ_COMMON_FLAGS} ${PBGZ_ARCH_FLAGS} ${COMPILER_FLAGS}")
@@ -135,5 +139,6 @@ message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "C++ flags: ${CMAKE_CXX_FLAGS}")
 message(STATUS "C++ Debug flags: ${CMAKE_CXX_FLAGS_DEBUG}")
 message(STATUS "C++ Release flags: ${CMAKE_CXX_FLAGS_RELEASE}")
+message(STATUS "C++ Release-Profile flags: ${CMAKE_CXX_FLAGS_RELEASEPROFILE}")
 message(STATUS "Linker flags: ${CMAKE_EXE_LINKER_FLAGS}")
 message(STATUS "=========================================")
