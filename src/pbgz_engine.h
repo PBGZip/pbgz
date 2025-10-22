@@ -32,7 +32,8 @@
 #include "blocking_queue.h"
 #include "pbgz_types.h"
 #include "io_wrapper.h"
-
+#include "reference.h"
+#include "block_wrapper.h"
 
 class PbgzEngine {
 public:
@@ -40,6 +41,7 @@ public:
         parameter = para;
         ioReader = nullptr;
         ioWriter = nullptr;
+        pRefGene = nullptr;
     }
 
     int32_t init();
@@ -55,6 +57,14 @@ private:
 
     int32_t startWriteTask();
 
+    bool initRefGeneForDecomress(PbgzBlockReader* blockReader);
+
+    void unpackReference(PbgzBlockReader* blockReader);
+
+    int64_t packReference(std::vector<RoughIOBlock*>& blockVec, int64_t &maxBlockLen, int64_t &totalEncLen);
+
+    bool initReferenceForCompress();
+
 private:
     BlockingQueue<RoughIOBlock*> freeInputPool;   // 空闲的队列，文件读取任务从这里获取block块去读取数据
     BlockingQueue<RoughIOBlock*> inputDataPool;   // 数据读取任务获取完数据写入到此队列，压缩/解压任务从此队列获取数据进行数据
@@ -67,5 +77,7 @@ private:
 
     std::vector<std::thread> coderThreads;
     std::thread writeThread;
-};
+    Reference* pRefGene;
 
+    PbgzFileMeta fileMeta;
+};

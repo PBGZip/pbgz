@@ -58,5 +58,18 @@ namespace PathUtil {
     /// @param fileName 
     /// @return bool  true/false
     bool removeFile(const std::string& fileName);
+
+    /// @brief 获取home目录
+    /// @return home的绝对路径
+    std::string getHomePath();
+
+    /// @brief 获取文件最后修改时间
+    /// @return 
+    int64_t getFileMtime(const std::string& fileName);
+
+    /// @brief 获取文件大小
+    /// @param fileName 
+    /// @return 文件大小
+    int64_t getFileSize(const std::string& fileName);
 }
 

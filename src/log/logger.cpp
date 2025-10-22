@@ -36,6 +36,10 @@ Logger& Logger::getInstance() {
     return logInstance;
 }
 
+Logger::Logger() {
+    logFileName = ConfigManager::getInstance().getLogFileName();
+}
+
 std::string Logger::getLogLevelString(LogLevel logLevel) {
     switch (logLevel) {
         case LogLevel::TRACE: return "TRACE";
@@ -49,7 +53,7 @@ std::string Logger::getLogLevelString(LogLevel logLevel) {
     }
 }
 
-int32_t Logger::buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel logLevel, int line, const char* function, const char* fileName, 
+int32_t Logger::buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel logLevel, uint32_t line, const char* function, const char* fileName, 
                 const char* logContent) {
     time_t now = time(nullptr);
     struct tm *ltm = localtime(&now);
@@ -65,7 +69,7 @@ int32_t Logger::buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel log
     return 0;
 }
 
-void Logger::log(LogLevel logLevel, int line, const char* function, const char* fileName, 
+void Logger::log(LogLevel logLevel, uint32_t line, const char* function, const char* fileName, 
                 const char* logFormat, ...) {
     LogLevel configLevel = ConfigManager::getInstance().getLogLevel();
     if (configLevel == LogLevel::OFF) {
@@ -118,7 +122,6 @@ void Logger::log(LogLevel logLevel, const char* logMessage) {
             }
             break;
         }
-        case LogAppender::NETWORK:  // 暂不支持输出到网络
         default:
             break;
     }   

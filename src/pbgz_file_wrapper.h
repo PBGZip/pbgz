@@ -43,6 +43,12 @@ public:
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
         currentFileIndex = -1;  // 初始化文件索引为-1，表示未读取任何文件
+        // Implement the read logic for PBGZ file format
+        // This is a placeholder implementation
+        if (0 != initFileHeadAndMeta()) {
+            throw std::runtime_error("Create PbgzFileReader, load head and meta failed");
+        }
+
     }
 
     void close();
@@ -80,16 +86,26 @@ public:
 
     PbgzFileWriter(IOWriter* pWriter ) : ioWriter(pWriter) {}
 
-    virtual ~PbgzFileWriter() { }
+    virtual ~PbgzFileWriter() { 
+        ioWriter = nullptr;
+    }
+
+    PbgzFileHeader& getFileHeader() {
+        return fileHeader;
+    }
+
+    PbgzFileMeta& getFileMeta() {
+        return fileMeta;
+    }
 
 private:
     static uint8_t* getFileWriteBuffer();
 
     int32_t initFileHead();
 
-
 private:
     PbgzFileHeader fileHeader; // 文件头
     PbgzFileMeta fileMeta; // 文件元信息
     IOWriter* ioWriter;
 };
+

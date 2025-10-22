@@ -15,9 +15,11 @@ typedef struct PbgzParameter{
     bool isOverwriteOutFile;         // 是否强制覆盖输出文件
     std::string referenceGenic;      // 参考基因
     bool isUnpackRef;  
-    int8_t threadNum; 
-    int8_t compressLevel;
+    uint32_t threadNum; 
+    uint8_t compressLevel;
     bool isRemoveOriginFile;    //是否删除源文件
+    uint8_t logLevel;
+    std::string logFile;
 
     PbgzParameter() {
         showHelp = false;
@@ -29,6 +31,7 @@ typedef struct PbgzParameter{
         threadNum = sysconf(_SC_NPROCESSORS_ONLN);
         compressLevel = 2;
         isRemoveOriginFile = false;
+        logLevel = 6;
     }
 } PbgzParameter;
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <initializer_list>
 #include <any>
+#include <log/logger.h>
 
 namespace MemoryUtil {
     template<typename T>
@@ -84,12 +85,22 @@ namespace MemoryUtil {
         do {
             T* ptr = nullptr;
             if (size > 0) {
-                ptr = std::shared_ptr<T>(new T[size], [](T* p) { delete[] p;});
+                ptr = new T[size];
                 if (nullptr == ptr) {
                     LOG_ERROR("Memory not enough");
                 }
             }
             return ptr;
+        } while(0);
+    }
+
+    template <typename T>
+    void safeDelete(T*& ptr) {
+        do {
+            if (ptr) {
+                delete [] ptr;
+                ptr = nullptr;
+            }
         } while(0);
     }
 
@@ -101,6 +112,16 @@ namespace MemoryUtil {
                 LOG_ERROR("Memory not enough");
             }
             return ptr;
+        } while(0);
+    }
+
+    template <typename T>
+    void safeDeleteClass(T*& ptr) {
+        do {
+            if (ptr) {
+                delete ptr;
+                ptr = nullptr;
+            }
         } while(0);
     }
 }

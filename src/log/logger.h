@@ -40,13 +40,12 @@ enum class LogLevel{
  enum class LogAppender{
     CONSOLE = 0,  // 输出到控制台
     FILE = 1,     // 输出到文件
-    NETWORK = 2,  // 输出到网络
  };
 
 
 class Logger {
 public:
-    void log(LogLevel logLevel, int line, const char* function, const char* fileName, 
+    void log(LogLevel logLevel, uint32_t line, const char* function, const char* fileName, 
                 const char* logFormat, ...);
 
     static Logger& getInstance();
@@ -56,10 +55,10 @@ public:
 private:
     std::string getLogLevelString(LogLevel logLevel);
 
-    int32_t buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel logLevel, int line, const char* function, const char* fileName, 
+    int32_t buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel logLevel, uint32_t line, const char* function, const char* fileName, 
                 const char* logContent);
     
-    Logger():logFileName("pbgz.log"){}
+    Logger();
 
 private:
     std::string logFileName;

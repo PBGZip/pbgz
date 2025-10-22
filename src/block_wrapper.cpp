@@ -3,6 +3,7 @@
 #include "pbgz_types.h"
 #include <cstring>
 #include "utils/md5util.h"
+#include "pbgz_manager.h"
 
 BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
     /// 通过分析block内容获取文件类型
@@ -205,15 +206,14 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         return -1;
     }
 
-    // 
     if (0 != pbgzDataBlock.verifyCheckSum()) {
         LOG_ERROR("Verify pbgz block checksum failed");
         return -1;
     }
     
-    blockPtr->setBlockId(blockId++);
     blockPtr->setDataLen(pbgzDataBlock.getMetaData("datalen").asInt64());
     blockPtr->setMetaLen(pbgzDataBlock.getMetaData("metalen").asInt64());
+    blockPtr->setBlockId(pbgzDataBlock.getMetaData("blockid").asInt64());
     std::string blockType = pbgzDataBlock.getMetaData("blocktype").asString();
     if (blockType == "fastq_gen2") {
         blockPtr->setBlockType(FASTQ_GEN2);
@@ -221,22 +221,19 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         blockPtr->setBlockType(FASTQ_GEN3);
     } else if (blockType == "binary") {
         blockPtr->setBlockType(BINARY);
-    } 
-    // 前面放的是data, 后面放的是meta
+    }  else if (blockType == "refe_gene") {
+        blockPtr->setBlockType(REFERENCE);
+    }
+    // blocK整块信息拷贝
     memcpy(blockPtr->getBuffer(), pbgzDataBlock.getDataPtr(), pbgzDataBlock.getDataLength());
     
     return pbgzDataBlock.getDataLength();
 }   
 
 int32_t PbgzBlockReader::init() {
-    if (pbgzFileReader != nullptr) {
-        return 0;
-    }
     if (ioReader == nullptr) {
         return -1;
     }
-
-    pbgzFileReader = new PbgzFileReader(ioReader);
     if (pbgzFileReader == nullptr) {
         LOG_ERROR("Creat PbgzFileReader failed");
         return -1;
@@ -253,26 +250,18 @@ int32_t BlockWriter::writeBlock(RoughIOBlock* blockPtr) {
 }
 
 int32_t PbgzBlockWriter::init() {
-    if (pbgzFileWriter != nullptr) {
-        return 0;
-    }
-
     if (ioWriter == nullptr) {
         return -1;
     }
-
-    pbgzFileWriter = new PbgzFileWriter(ioWriter);
+    
     if (pbgzFileWriter == nullptr) {
         return -1;
     }
 
     pbgzFileWriter->open();
-
-    PbgzFileMeta pgzeFileMeta;
-    pgzeFileMeta.setMetaData("writer", "pbgz_writer_v2.0.0");
-    pgzeFileMeta.setMetaData("hashmethod", "md5");
-    pgzeFileMeta.setMetaData("blocksize", BLOCK_SIZE);
-    pbgzFileWriter->setFileMeta(pgzeFileMeta);
+    pbgzFileWriter->getFileMeta().setMetaData("writer", "pbgz_writer_v" + PbgzManager::getInstance().getVersion());
+    pbgzFileWriter->getFileMeta().setMetaData("hashmethod", "md5");
+    pbgzFileWriter->getFileMeta().setMetaData("blocksize", BLOCK_SIZE);
     pbgzFileWriter->writeFileMeta();
 
     return 0;
@@ -291,13 +280,17 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
     dataBlock.setBlockData(blockPtr->getBuffer(), blockPtr->getTotalDataLen());
     dataBlock.setMetaData("datalen", blockPtr->getDataLen());
     dataBlock.setMetaData("metalen", blockPtr->getMetaLen());
+    dataBlock.setMetaData("blockid", blockPtr->getBlockId());
     if (blockPtr->getBlockType() == FASTQ_GEN2) {
         dataBlock.setMetaData("blocktype", "fastq_gen2");
     } else if (blockPtr->getBlockType() == FASTQ_GEN3) {
         dataBlock.setMetaData("blocktype", "fastq_gen3");
     } else if (blockPtr->getBlockType() == BINARY) {
         dataBlock.setMetaData("blocktype", "binary");
+    } else if (blockPtr->getBlockType() == REFERENCE) {
+        dataBlock.setMetaData("blocktype", "refe_gene");
     } 
+
     /// 计算Meta和数据的校验和
     dataBlock.calcChecksum();
     pbgzFileWriter->writeBlockData(dataBlock);

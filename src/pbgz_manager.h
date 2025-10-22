@@ -29,6 +29,8 @@ public:
 
     std::string getVersion();
 
+    std::vector<char> getVersionAsArray();
+
     void updateReadDataLen(RoughIOBlock* blockPtr);
     
     void updateWriteDataLen(RoughIOBlock* blockPtr);
@@ -51,3 +53,5 @@ private:
 void pbgzExitProc(int errorCode, const char* errorMessage);
 
 void coderLog(int logLevel, const char* logMessage);
+
+int32_t powerof2Proximal(int32_t i);

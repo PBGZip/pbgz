@@ -17,6 +17,27 @@ enum class CommentType {
     UNKNOWN        // 未知的类型
 };
 
+typedef struct {
+    void set(uint8_t *_squashBuffer, uint32_t _squashBufferLen, uint8_t *_squashBuffCmplt, uint32_t __squashBuffCmpltLen, uint32_t _offset) {
+        squashBuffer[0] = _squashBuffer;
+        squashBufferLen[0] = _squashBufferLen;
+        squashBuffer[1] = _squashBuffCmplt;
+        squashBufferLen[1] = __squashBuffCmpltLen;
+        offset = _offset;
+    }
+    inline void incOffset() { ++offset; }
+    uint8_t *getSquash(bool pair) const {return ((pair) ? (squashBuffer[1] - offset) : (squashBuffer[0] + offset));}
+
+    /*  squash buffer , 0表示正向，1表示互补链 */
+    uint8_t *squashBuffer[2];      /* 指向squash buffer */
+    uint32_t squashBufferLen[2];  /* 对应squash buffer的数据长度 */
+    uint32_t leftUnalignLen[2]; /* 左边没有对齐的碱基长度 */
+    uint8_t leftUnalign[2][3]; /* 左边没有对齐的碱基，这里存的是squash之后的数据 */
+    uint32_t rightUnalignLen[2]; /* 右边没有对齐的碱基长度 */
+    uint8_t rightUnalign[2][3]; /* 右边没有对齐的碱基，这里存的是squash之后的数据 */
+    uint32_t offset;  /* 当前偏移 */
+} Mapping;
+
 
 class FastqActuator : public Actuator {
 public:
@@ -30,6 +51,21 @@ public:
         baseDecoder = nullptr;
         commentDecoder = nullptr;
         qualityDecoder = nullptr;
+
+        isGen2 = false;
+        mappingBuffer = nullptr;
+        basePairBuffer = nullptr;
+        std::fill_n(basePairSquashBuffer, 4, nullptr);
+        std::fill_n(baseSquashBuffer, 4, nullptr);
+        baseMappedBuffer = nullptr;
+        baseMappedLength = 0;
+        baseMappedPosBuffer = nullptr;
+        baseMappedPairBuffer = nullptr;
+        baseStripNBuffer = nullptr;
+        baseNPosBuffer = nullptr;
+        baseLengthGen2Buffer = nullptr;
+        baseLengthGen3Buffer = nullptr;
+        refeStretchBuffer = nullptr;
     }
 
     virtual ~FastqActuator() {
@@ -61,8 +97,9 @@ public:
 
     int32_t preAnalysis();
 
-private:
     int32_t initEncoder();
+
+private:
 
     int32_t preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLe );
 
@@ -93,6 +130,12 @@ private:
 
     int32_t initDecoder();
 
+    void (FastqActuator::*mapping)(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&);
+
+    void mappingFastqGen2(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
+
+    void mappingFastQGen3(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
+
 private:
     std::vector<uint8_t> idSplitSymbols;
     uint32_t idPosLength;
@@ -111,6 +154,21 @@ private:
     coder* baseDecoder;
     coder* commentDecoder;
     coder_qual* qualityDecoder;
+
+    bool isGen2;
+
+    /// 带参考基因场景使用的变量
+    uint8_t* mappingBuffer;
+    uint8_t* basePairBuffer;
+    uint8_t* basePairSquashBuffer[4];
+    uint8_t* baseSquashBuffer[4];
+    uint8_t* baseMappedBuffer;
+    uint32_t baseMappedLength;
+    uint64_t* baseMappedPosBuffer;
+    uint8_t* baseMappedPairBuffer;
+    uint8_t* baseStripNBuffer;
+    uint32_t* baseNPosBuffer;
+    uint16_t* baseLengthGen2Buffer;
+    uint32_t* baseLengthGen3Buffer;
+    uint8_t* refeStretchBuffer;
 };
-
-

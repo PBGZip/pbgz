@@ -20,6 +20,7 @@ typedef enum
     FASTQ_GEN2_GZIP = (FASTQ_GEN2 | GZIP), // FASTQ gen2 block with GZIP compression (5)
     FASTQ_GEN3_GZIP = (FASTQ_GEN3 | GZIP), // FASTQ gen3 block with GZIP compression (9)
     BAM = (1 << 4),                 // BAM format block (16)
+    REFERENCE = (1 << 5),           // 
     PBGZFILE = UINT32_MAX           // Special value for PBGZ file type (4294967295)
 } BlockType;
 

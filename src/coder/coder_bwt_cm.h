@@ -41,7 +41,7 @@ private:
             c = count;
         }
 
-        inline const uint16_t get() const
+        inline uint16_t get() const
         {
             return c;
         }
@@ -67,7 +67,6 @@ private:
 
         void encode_flush()
         {
-            int32_t i;
             if (flushed)
                 return;
             for (int32_t i = 0; i < 4; ++i)
@@ -179,7 +178,7 @@ public:
         if (io->m != coder_io::MENC)
         { /* 未初始化时先初始化 */
             int32_t len_buf, len_bwt, len_arr;
-            int32_t len2enc, level;
+            // int32_t len2enc;
             const int32_t tab[10] =
                 {
                     0,
@@ -195,7 +194,7 @@ public:
                 };
 
             io->m = coder_io::MENC;
-            level = (io->meta["level"].isInt()) ? (io->meta["level"].asInt()) : 4;
+            int32_t level = (io->meta["level"].isInt()) ? (io->meta["level"].asInt()) : 4;
             io->meta["level"] = (Json::Value::Int)level;
             
             check_exit(level <= 9 && level >= 0,  coder_ns::CODER_ERR_BAD_ARGS, "coder level should in [0, 9], current is %d", level);
