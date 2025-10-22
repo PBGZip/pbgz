@@ -7,6 +7,7 @@
 #include "log/logger.h"
 
 
+
 int FileOperator::openIO() {
     if (fileName.empty()) {
         LOG_ERROR("IO Open failed, No file name gived");
@@ -40,7 +41,6 @@ int32_t FileOperator::mmapFile(size_t mapFileSize) {
     if (mappedAddress == MAP_FAILED) {
         LOG_ERROR("file mmaped failed.file name = %s, errno = %d", fileName.c_str(), errno);
         close(fd);
-
         return -1;
     }
 
@@ -127,16 +127,92 @@ void* FileReader::getAt(size_t pos) {
     return fo.mappedAddress + pos;
 }
 
+int32_t FileWriter::openIO() {
+    if (0 != fo.openIO()) {
+        LOG_ERROR("File writer open failed.");
+        return -1;
+    }
+    mapSize = getMappedSize(fo.fileSize);
+    ftruncate(fo.fd, mapSize);
+    if (0 != fo.mmapFile(mapSize)) {
+        LOG_ERROR("File writer mmap failed.");
+        return -1;
+    }
+    return 0;
+}
+
+void FileWriter::closeIO() {
+        // 退出前将数据强制刷新
+        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        ftruncate(fo.fd, fo.fileSize);
+        return fo.closeIO();
+    }
+
+size_t FileWriter::getMappedSize(size_t fileSize) {
+    const size_t mapSizeUint = 16 * 1024 * 1024;
+    return ((fileSize / mapSizeUint) + 1) * mapSizeUint;
+}
+
 size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
+    if (pBuffer == nullptr || writeLen == 0) {
+        LOG_ERROR("Input invalid.");
+        return 0;
+    }
+
+    if (fo.mappedAddress == nullptr) {
+        LOG_ERROR("mappedAddress is nullptr.");
+        return 0;
+    }
+
     size_t newSize = fo.fileSize + writeLen;
-    ftruncate(fo.fd, newSize);
-    fo.mmapFile(newSize);
+    if (newSize > mapSize) {
+        // 如果文件大小超过了映射大小，需重新映射
+        // 现将内容罗盘
+        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        // 解除映射
+        munmap(fo.mappedAddress, mapSize);
+        // 计算新的映射大小
+        mapSize = getMappedSize(newSize);
+        // 扩展文件
+        ftruncate(fo.fd, mapSize);
+        // 重新映射文件
+        if (0 != fo.mmapFile(mapSize)) {
+            LOG_ERROR("File not mapped");
+            return 0;
+        }
+    }
+   
     (void)memcpy(fo.mappedAddress + fo.fileSize, pBuffer, writeLen);
     fo.fileSize = newSize;
-    msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
-    munmap(fo.mappedAddress, fo.fileSize);
-    fo.mappedAddress = nullptr;
     return newSize;
+}
+
+int32_t FileWriter::writeIOAt(int32_t seekOffset, const void* pBuffer, size_t writeLen) {
+    if (pBuffer == nullptr || writeLen == 0) {
+        LOG_ERROR("Input invalid.");
+        return 0;
+    }
+
+    size_t newFileSize = fo.fileSize;
+    if (seekOffset + writeLen > mapSize) {
+         // 如果文件大小超过了映射大小，需重新映射
+        // 现将内容罗盘
+        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        // 解除映射
+        munmap(fo.mappedAddress, mapSize);
+        // 新的文件大小
+        newFileSize = seekOffset + writeLen;
+        mapSize = getMappedSize(newFileSize);
+        ftruncate(fo.fd, mapSize);
+        if (0 != fo.mmapFile(mapSize)) {
+            LOG_ERROR("File not mapped");
+            return 0;
+        }
+    }
+
+    (void)memcpy(fo.mappedAddress + seekOffset, pBuffer, writeLen);
+    fo.fileSize = newFileSize;
+    return newFileSize;
 }
 
 size_t PipeReader::readIO(void* pBuffer, size_t readSize) {

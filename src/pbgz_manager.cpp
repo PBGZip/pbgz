@@ -14,7 +14,7 @@ PbgzManager& PbgzManager::getInstance() {
 }
 
 void PbgzManager::exitProc(int errorCode, const char* errorMessage){
-    if (errorCode < pbgz::PBGZ_ERR_NO) {
+    if (errorCode < pbgz::PBGZ_ERR_OK) {
         for (auto &currFile : outfiles) {
             const std::string& fileName = currFile.first;
             if (!currFile.second && PathUtil::fileExists(fileName)) {
@@ -66,6 +66,10 @@ std::string PbgzManager::getVersion() {
     return std::string(buffer);
 }
 
+std::vector<char> PbgzManager::getVersionAsArray() {
+    return std::vector<char>{PBGZ_VERSION_MAJOR, PBGZ_VERSION_MINOR, PBGZ_VERSION_PATCH};
+}
+
 void PbgzManager::updateReadDataLen(RoughIOBlock* blockPtr) {
     totalReadLen += blockPtr->getDataLen();
     updateDataInfo();
@@ -95,4 +99,15 @@ void PbgzManager::printTailInfo(Timer costTime, PbgzParameter& para) {
     if (!para.isDecompress) {
         fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%\n", totalReadLen, totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen);
     }
+}
+
+/* 将n转换为最接近2的幂次方的整数 */
+int32_t powerof2Proximal(int32_t i)
+{
+    i |= (i >> 1);
+    i |= (i >> 2);
+    i |= (i >> 4);
+    i |= (i >> 8);
+    i |= (i >> 16);
+    return i - (i >> 1);
 }

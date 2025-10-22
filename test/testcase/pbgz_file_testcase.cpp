@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 #include "pbgz_file.h"
+#include "coder.h"
+#include "utils/memory_util.h"
+#include <coder_json.h>
 
 // Test cases for PbgzFileHeader
 TEST(PbgzFileHeader, PbgzFileHeaderInit) {
@@ -48,6 +51,11 @@ TEST(PbgzFileMeta, PbgzFileMetaSetKey) {
 }
 
 TEST(PbgzFileMeta, PbgzFileMetaSerialize) {
+    // 注册coder需要的注册函数
+    coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
+    coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
+    coder_ns::register_free_func(MemoryUtil::safeFree<void>);
+
     PbgzFileMeta meta;
     std::string key = "testKey";
     std::string value = "testValue";
@@ -60,19 +68,22 @@ TEST(PbgzFileMeta, PbgzFileMetaSerialize) {
 
     uint32_t metaLength;
     memcpy(&metaLength, buffer + PBGZ_FILE_META_MAGIC_LENGTH, PBGZ_FILE_META_SIZE_LENGTH);
-    EXPECT_GT(metaLength, 0);   
-    std::string jsonString(reinterpret_cast<char*>(buffer + PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH), metaLength);
-    Json::CharReaderBuilder readerBuilder;
-    Json::Value jsonData;   
-    std::istringstream jsonStream(jsonString);
-    std::string errs;
-    EXPECT_TRUE(Json::parseFromStream(readerBuilder, jsonStream, &jsonData, &errs));
+    EXPECT_GT(metaLength, 0);  
+    
+    coder_json fileMetaCoder;
+    Json::Value jsonData;  
+    fileMetaCoder.decoder(buffer + PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH, metaLength, jsonData);
     EXPECT_EQ(jsonData[key].asString(), value); 
     uint64_t checksum = *(uint64_t*)(buffer + PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH + metaLength);
     EXPECT_EQ(checksum, 0);    
 }
 
 TEST(PbgzFileMeta, PbgzFileMetaUnserialize) {
+    // 注册coder需要的注册函数
+    coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
+    coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
+    coder_ns::register_free_func(MemoryUtil::safeFree<void>);
+
     PbgzFileMeta meta;
     std::string key = "testKey";    
     std::string value = "testValue";
@@ -116,6 +127,11 @@ TEST(PbgzDataBlock, PbgzDataBlockSetData) {
 }
 
 TEST(PbgzDataBlock, PbgzDataBlockSerialize) {
+    // 注册coder需要的注册函数
+    coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
+    coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
+    coder_ns::register_free_func(MemoryUtil::safeFree<void>);
+
     PbgzDataBlock dataBlock;
     std::string key = "testKey";        
     Json::Value value;
@@ -134,12 +150,10 @@ TEST(PbgzDataBlock, PbgzDataBlockSerialize) {
     uint32_t metaLength;
     memcpy(&metaLength, buffer + PBGZ_DATA_BLOCK_MAGIC_LENGTH, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
     EXPECT_GT(metaLength, 0);
-    std::string jsonString(reinterpret_cast<char*>(buffer + PBGZ_DATA_BLOCK_MAGIC_LENGTH + PBGZ_DATA_BLOCK_META_SIZE_LENGTH), metaLength);
-    Json::CharReaderBuilder readerBuilder;
+
+    coder_json coder;
     Json::Value jsonData;
-    std::istringstream jsonStream(jsonString);
-    std::string errs;
-    EXPECT_TRUE(Json::parseFromStream(readerBuilder, jsonStream, &jsonData, &errs));
+    coder.decoder(buffer + PBGZ_DATA_BLOCK_MAGIC_LENGTH + PBGZ_DATA_BLOCK_META_SIZE_LENGTH, metaLength, jsonData);
     EXPECT_EQ(jsonData[key]["test"].asString(), value["test"].asString());
     uint64_t metaChecksum = (*(uint64_t*)(buffer + PBGZ_DATA_BLOCK_MAGIC_LENGTH + PBGZ_DATA_BLOCK_META_SIZE_LENGTH + metaLength));
     EXPECT_EQ(metaChecksum, 0); // Assuming checksum is not set in this test
@@ -157,6 +171,11 @@ TEST(PbgzDataBlock, PbgzDataBlockSerialize) {
 }
 
 TEST(PbgzDataBlock, PbgzDataBlockUnserialize) {
+    // 注册coder需要的注册函数
+    coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
+    coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
+    coder_ns::register_free_func(MemoryUtil::safeFree<void>);
+    
     PbgzDataBlock dataBlock;
     std::string key = "testKey";
     Json::Value value;

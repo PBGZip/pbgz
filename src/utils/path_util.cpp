@@ -2,8 +2,13 @@
 #include <cstring>
 #include <filesystem>
 #include <system_error>
+#include <pwd.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include "path_util.h"
+
 
 namespace PathUtil {
     bool suffixCheck(const std::string& fileName,const std::string& suffix) {
@@ -43,10 +48,15 @@ namespace PathUtil {
     }
 
     std::string getFilePath(const std::string& fullFileName) {
-        return std::filesystem::path(fullFileName).parent_path().string() + std::filesystem::path::preferred_separator;
+        std::string&& absFileName = std::filesystem::absolute(fullFileName).lexically_normal();
+        return std::filesystem::path(absFileName).parent_path().string() + std::filesystem::path::preferred_separator;
     }
 
     std::string getAbsPath(const std::string& fileName) {
+        std::filesystem::path fileNamePath(fileName);
+        if (fileNamePath.is_absolute()) {
+            return fileNamePath.lexically_normal();
+        }
         return std::filesystem::absolute(fileName).lexically_normal();
     }
 
@@ -80,4 +90,44 @@ namespace PathUtil {
         return std::filesystem::remove(fileName, ec) && !ec;
     }
 
+    std::string getHomePath() {
+#if defined(_WIN32)
+        char path[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, 0, path))) {
+            return std::string(path);
+        }
+#else 
+        const char* home = getenv("HOME");
+        if (home != nullptr) {
+            return std::string(home);
+        }
+
+        struct passwd *pwd = getpwuid(getuid());
+        if (pwd != nullptr) {
+            return std::string(pwd->pw_dir);
+        }
+
+        return "";
+#endif
+    }
+
+    int64_t getFileMtime(const std::string& fileName) {
+        struct stat st;
+        if (0 != stat(fileName.c_str(), &st)) {
+            return INT64_MAX;
+        }
+#if defined(__APPLE__) || defined(__MACH__) 
+        return st.st_mtimespec.tv_sec;
+#else
+        return st.st_mtim.tv_sec;
+#endif
+    }
+
+    int64_t getFileSize(const std::string& fileName) {
+        struct stat st;
+        if (0 != stat(fileName.c_str(), &st)) {
+            return -1;
+        }
+        return st.st_size;
+    }
 }

@@ -8,6 +8,7 @@
 #include "pbgz_types.h"
 #include "pbgz_manager.h"
 #include "utils/path_util.h"
+#include "config_manager.h"
 
 
 typedef struct
@@ -33,7 +34,9 @@ static PbgzArg pbgzArgs =
     {'l', "level", required_argument, "<1-3> specify compress level, default is 2, 1 is fast, 3 is best"},
     {'e', "remove", no_argument, "if compress succeed, will remove origin file, else this option is invalid. use for compress"},
     {'h', "help",  no_argument, "show help"},
-    {'v', "version", no_argument, "show version"}
+    {'v', "version", no_argument, "show version"},
+    {'g', "loglevel", required_argument, "<1-6> sepcify log level, default 6. debug(1), info(2), warning(3), error(4), fatal(5), off(6)"},
+    {'G', "logfile", required_argument, "sepcify log file"},
 };
 
 
@@ -68,7 +71,6 @@ int reconstrucParamters(PbgzParameter& para) {
     }
 
     para.inputFile = PathUtil::getAbsPath(para.inputFile);
-
     if (!para.outputDir.empty() && !para.outputFile.empty()) {  // 输出目录和文件同时指定
         fprintf(stderr, "Output directory and filename cannot be specified simultaneously.\n");
         return -1;
@@ -142,6 +144,7 @@ int reconstrucParamters(PbgzParameter& para) {
         PathUtil::removeFile(para.outputFile);
     }
 
+    ConfigManager::getInstance().init(para);
     return 0;
 }
 
@@ -251,9 +254,7 @@ int main(int argc, char** argv) {
     int opt = 0;
     PbgzParameter parameter;
     while((opt = getopt_long(argc, argv, argOption.c_str(), longopts, NULL)) != -1) {
-        switch (opt) 
-        {
-        printf("input file = %c \n", opt);
+        switch (opt) {
         case 'h': {
             parameter.showHelp = true;
             break;
@@ -300,6 +301,14 @@ int main(int argc, char** argv) {
         }
         case 'e': {
             parameter.isRemoveOriginFile = true;
+            break;
+        }
+        case 'g': {
+            parameter.logLevel = atoi(optarg);
+            break;
+        }
+         case 'G': {
+            parameter.logFile = optarg;
             break;
         }
         case '?':

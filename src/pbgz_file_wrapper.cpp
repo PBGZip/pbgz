@@ -40,12 +40,6 @@ uint8_t* PbgzFileReader::getFileReadBuffer(){
 }
 
 int32_t PbgzFileReader::open() {
-    // Implement the read logic for PBGZ file format
-    // This is a placeholder implementation
-    if (0 != initFileHeadAndMeta()) {
-        return -1; // Initialization error
-    }
-
     return 0;
 }
 

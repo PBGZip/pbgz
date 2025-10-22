@@ -19,7 +19,6 @@ set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rd_party)
 include_directories(
     ${THIRDPARTY_DIR}/release/jsoncpp/include
     ${THIRDPARTY_DIR}/release/zstd/include
-    ${THIRDPARTY_DIR}/farmhash/src
     ${THIRDPARTY_DIR}/md5sum
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -38,13 +37,9 @@ file(GLOB PBGZ_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
 )
 
 # 直接编译的开源代码
-set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/farmhash/src/farmhash.cc
-                      ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
+set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
 
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp )
-
-configure_file(pbgz_conf.json ${CMAKE_CURRENT_BINARY_DIR}/pbgz_conf.json COPYONLY)
-
 
 # Define main executable
 add_executable(pbgz ${MAIN_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPEN_SOURCES})
@@ -58,4 +53,4 @@ target_link_libraries(pbgz PRIVATE
 )
 
 install(TARGETS pbgz DESTINATION bin)
-install(FILES pbgz_conf.json DESTINATION bin)
+

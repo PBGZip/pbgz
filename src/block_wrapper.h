@@ -5,6 +5,7 @@
 #include "io_block.h"
 #include "io_wrapper.h"
 #include "pbgz_file_wrapper.h"
+#include "utils/memory_util.h"
 
 namespace BlockUtil {
     bool isFastqBlock(BlockType type);
@@ -42,19 +43,24 @@ protected:
 class PbgzBlockReader : public BlockReader {
 public:
     PbgzBlockReader(IOReader* reader): BlockReader(reader) {
-        pbgzFileReader = nullptr;
+        pbgzFileReader = MemoryUtil::safeNewClass<PbgzFileReader>(ioReader);;
     }
 
     ~PbgzBlockReader() {
-        if (pbgzFileReader != nullptr) {
-            delete pbgzFileReader;
-            pbgzFileReader = nullptr;
-        }
+       MemoryUtil::safeDeleteClass(pbgzFileReader);
     }
 
-    virtual int64_t readBlock(RoughIOBlock* blockPtr, BlockType fileType) override;
+    virtual int64_t readBlock(RoughIOBlock* blockPtr, BlockType fileType = TYPE_UNKNOW) override;
 
     virtual int32_t init() override;
+
+    const PbgzFileMeta& getFileMeta() {
+        return pbgzFileReader->getFileMeta();
+    }
+
+    const PbgzFileHeader& getFileHeader() {
+         return pbgzFileReader->getFileHeader();
+    }
 
 private:
     PbgzFileReader* pbgzFileReader;
@@ -81,17 +87,18 @@ protected:
 class PbgzBlockWriter : public BlockWriter {
 public:
     PbgzBlockWriter(IOWriter* pIoWriter) : BlockWriter(pIoWriter) {
-        pbgzFileWriter = nullptr;
+        pbgzFileWriter = MemoryUtil::safeNewClass<PbgzFileWriter>(ioWriter);;
     }
     virtual int32_t writeBlock(RoughIOBlock* blockPtr);
+
+    void setFileMeta(PbgzFileMeta& fileMeta) {
+        pbgzFileWriter->setFileMeta(fileMeta);
+    }
 
     virtual int32_t init();
 
     virtual ~PbgzBlockWriter() {
-        if (pbgzFileWriter != nullptr) {
-            delete pbgzFileWriter ;
-            pbgzFileWriter = nullptr;
-        }
+        MemoryUtil::safeDeleteClass(pbgzFileWriter);
     }
     
 private:

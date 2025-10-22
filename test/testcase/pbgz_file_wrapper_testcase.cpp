@@ -2,37 +2,52 @@
 #include "pbgz_file_wrapper.h"
 
 TEST(PbgzFileWriteTest, WriteNewFile) {
-    IOWriter* iowriter = new FileWriter("pbgz_write_test.pbgz");
+    std::string fileName = "pbgz_write_test.pbgz";
+    (void)remove(fileName.c_str());
+    IOWriter* iowriter = new FileWriter(fileName);
+    iowriter->openIO();
     PbgzFileWriter writer(iowriter);
     ASSERT_EQ(writer.open(), 0) << "Failed to open file for writing";
     writer.close();
+    iowriter->closeIO();
     delete iowriter;
 }
 
 
 TEST(PbgzFileWriteTest, WriteFileMeta) {
-    IOWriter* iowriter = new FileWriter("pbgz_write_file_meta_test.pbgz");
+    std::string fileName = "pbgz_write_file_meta_test.pbgz";
+    (void)remove(fileName.c_str());
+    IOWriter* iowriter = new FileWriter(fileName);
+    iowriter->openIO();
     PbgzFileWriter writer(iowriter);
     ASSERT_EQ(writer.open(), 0) << "Failed to open file for writing";
     PbgzFileMeta fileMeta;
     std::string key = "testKey";
     Json::Value value;
     value["test"] = "value";
+    value["test2"] = "value";
+    value["test3"] = "value";
     fileMeta.setMetaData(key, value);
     writer.setFileMeta(fileMeta);
     writer.writeFileMeta();
     writer.close();
+    iowriter->closeIO();
     delete iowriter;
 }
 
 TEST(PbgzFileWriteTest, WriteBlockData) {
-     IOWriter* iowriter = new FileWriter("pbgz_write_data_block_test.pbgz");
+    std::string fileName = "pbgz_write_data_block_test.pbgz";
+    (void)remove(fileName.c_str());
+    IOWriter* iowriter = new FileWriter(fileName);
+    iowriter->openIO();
     PbgzFileWriter writer(iowriter);
     ASSERT_EQ(writer.open(), 0) << "Failed to open file for writing";
     PbgzFileMeta fileMeta;
     std::string key = "fileTestKey";
     Json::Value value;
     value["test"] = "value";
+    value["test2"] = "value";
+    value["test3"] = "value";
     fileMeta.setMetaData(key, value);
     writer.setFileMeta(fileMeta);
     writer.writeFileMeta();
@@ -45,12 +60,15 @@ TEST(PbgzFileWriteTest, WriteBlockData) {
     EXPECT_EQ(blockData.setBlockData((uint8_t*)testData, dataLength), 0);
     writer.writeBlockData(blockData);
     writer.close();
+    iowriter->closeIO();
     delete iowriter;
     
 }
 
 TEST(PbgzFileReadTest, ReadFileMeta) {
-    IOReader* ioreader = new FileReader("pbgz_write_file_meta_test.pbgz");
+    std::string fileName = "pbgz_write_file_meta_test.pbgz";
+    IOReader* ioreader = new FileReader(fileName);
+    ioreader->openIO();
     PbgzFileReader reader(ioreader);
     EXPECT_EQ(reader.open(), 0) << "Failed to open file for reading";
     PbgzFileHeader fileHeader = reader.getFileHeader();
@@ -61,11 +79,14 @@ TEST(PbgzFileReadTest, ReadFileMeta) {
     ASSERT_FALSE(value.isNull()) << "Metadata 'testKey' not found";
     ASSERT_EQ(value["test"].asString(), "value") << "Metadata 'testKey' has incorrect value";
     reader.close();
+    ioreader->closeIO();
     delete ioreader;
 }
 
 TEST(PbgzFileReadTest, ReadBlockData) {
-    IOReader* ioreader = new FileReader("pbgz_write_data_block_test.pbgz");
+    std::string fileName = "pbgz_write_data_block_test.pbgz";
+    IOReader* ioreader = new FileReader(fileName);
+    ioreader->openIO();
     PbgzFileReader reader(ioreader);
     EXPECT_EQ(reader.open(), 0) << "Failed to open file for reading";
     PbgzFileHeader fileHeader = reader.getFileHeader();
@@ -87,5 +108,6 @@ TEST(PbgzFileReadTest, ReadBlockData) {
     std::string dataStr((const char*)dataPtr, dataBlock.getDataLength());
     EXPECT_EQ(dataStr, "This is test data.") << "Data content is incorrect";
     reader.close();
+    ioreader->closeIO();
     delete ioreader;
 }

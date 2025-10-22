@@ -1,0 +1,1153 @@
+#include <fstream>
+
+#include "spinlock/spinlock-pthread.h"
+#include "city.h"
+#include "cfgpath/cfgpath.h"
+#include <md5sum.h>
+
+#include "reference.h"
+#include "pbgz_errno.h"
+#include "log/logger.h"
+#include "io_wrapper.h"
+#include "pbgz_file.h"
+#include "utils/memory_util.h"
+#include "coder_json.h"
+#include "utils/path_util.h"
+#include "utils/file_lock.h"
+#include "pbgz_manager.h"
+#include "actg.h"
+
+Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
+    // 初始化所有指针为nullptr，避免野指针
+    refGeneSquash = nullptr;
+    refGeneSquashlen = 0;
+    hashBucketCnt = nullptr;
+    hashTableBuffer = nullptr;
+    refGeneSquashMatched = nullptr;
+    refGeneSquashMatchedlen = 0;
+    
+    // 设置参考基因组文件路径和线程数
+    refGeneFile = fastaName;
+    parallel = threadNum;
+    guardBar = nullptr;
+}
+
+int32_t Reference::referencCheck() {
+    if ((baseGroupStep & 0x3) != 0) {
+        LOG_ERROR("Invalid base group step %d.", baseGroupStep);
+        return pbgz::PBGZ_ERR_INTERNEL;
+    }
+
+    if (baseGroupLen != 31) {
+        LOG_ERROR("Invalid base group length %d.", baseGroupLen);
+        return pbgz::PBGZ_ERR_INTERNEL;
+    }
+
+    if (baseGroupLen > baseGroupStep) {
+        LOG_ERROR("Reference base group length %d must be less than base group step.", baseGroupLen, baseGroupStep);
+        return pbgz::PBGZ_ERR_INTERNEL;
+    }
+
+    return pbgz::PBGZ_ERR_OK;
+}
+
+Reference::~Reference() {
+    // 释放所有动态分配的内存，避免内存泄漏
+    MemoryUtil::safeFree(refGeneSquash);
+    MemoryUtil::safeFree(hashBucketCnt);
+    MemoryUtil::safeFree(hashTableBuffer);
+    MemoryUtil::safeFree(refGeneSquashMatched);
+    MemoryUtil::safeDeleteClass(guardBar);
+}
+
+bool Reference::initSquashByNiFile() {
+    std::string niFileName;
+    getNiFileFromReference(niFileName);
+    fprintf(stderr, "Reference index path: %s\n", niFileName.c_str());
+    if (!isNiFileValid(niFileName)) {
+        fprintf(stderr, "Begin to make ni file...\n");
+        if(!makeNiFile(niFileName)) {
+            LOG_ERROR("Make ni file failed.");
+            return false;
+        }
+        if (!isNiFileValid(niFileName)) {
+            LOG_ERROR("Check ni file failed after maked. niFileName = %s.", niFileName.c_str());
+            return false;
+        }
+    }
+
+    FileReader niReader(niFileName);
+    if (0 != niReader.openIO()) {
+        LOG_ERROR("Open ni file %s failed.", niFileName.c_str());
+        return false;
+    }
+
+    uint8_t buffer[4096];
+    // 读取魔数
+    int64_t readLen = niReader.readIO(buffer, PBGZ_FILE_MAGIC.length());
+    int64_t buffOffset = readLen;
+    if (readLen != PBGZ_FILE_MAGIC.length() || 0 != memcmp(PBGZ_FILE_MAGIC.c_str(), buffer, PBGZ_FILE_MAGIC.length())) {
+        LOG_ERROR("ni file format error in file magic header.");
+        return false;
+    }
+
+    // 读取版本号
+    readLen =  niReader.readIO(buffer, 3);
+    buffOffset += readLen;
+    if (readLen != 3) {
+        LOG_ERROR("ni file format error in file version.");
+        return false;
+    }
+
+    readLen = niReader.readIO(buffer, 2);
+    buffOffset += readLen;
+    if (readLen != 2 || 0 != memcmp(buffer, "ni", 2)) {
+        LOG_ERROR("ni file format error in magic.");
+        return false;
+    }
+
+    int64_t dataLen;
+    readLen = niReader.readIO(&dataLen, sizeof(dataLen));
+    buffOffset += readLen;
+    if (readLen != sizeof(int64_t)) {
+        LOG_ERROR("ni file format error in meta offset.");
+        return false;
+    }
+
+    refGeneSquashlen = dataLen;
+    refGeneSquash = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashlen);
+    if (refGeneSquash == nullptr) {
+        return false;
+    }
+    readLen = niReader.readIO(refGeneSquash, refGeneSquashlen);
+    buffOffset += readLen;
+    if (readLen != refGeneSquashlen) {
+        LOG_ERROR("ni file check failed in data.");
+        return false;
+    }
+
+    int64_t metaLen = niReader.getFileSize() - buffOffset;
+    uint8_t* metaBuf = buffer;
+    if (metaLen > 4096) {
+        metaBuf = MemoryUtil::safeAlloc<uint8_t>(metaLen);
+        if (metaBuf == nullptr) {
+            return false;
+        }
+    }
+    readLen = niReader.readIO(metaBuf, metaLen);
+    if (readLen != metaLen) {
+        LOG_ERROR("ni file check failed meta.");
+        return false;
+    }
+
+    coder_json cmCoder;
+    Json::Value niMeta;
+    cmCoder.decoder(metaBuf, metaLen, niMeta);
+    if (metaBuf != buffer) {
+       MemoryUtil::safeFree(metaBuf);
+    }
+    return true;
+}
+
+uint8_t* Reference::initSquashByStream(int64_t squashLength) {
+    refGeneSquashlen = squashLength;
+    refGeneSquash = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashlen);
+    return refGeneSquash;
+}
+
+bool Reference::isNiFileValid(const std::string& niFileName) {
+    char cfgdir[MAX_PATH];
+    get_user_config_folder(cfgdir, sizeof(cfgdir), PBGZ_FILE_MAGIC.c_str());
+    if (cfgdir[0] == 0) { 
+        LOG_INFO("user config path not exists.");
+        return false;
+    }
+
+    std::string conf = cfgdir;
+    conf += ".conf";
+    if (!PathUtil::fileExists(conf)) {
+        LOG_INFO("File %s not exists.", conf.c_str());
+        return false;
+    }
+
+    if (!PathUtil::fileExists(niFileName)) {
+        LOG_INFO("File %s not exists.", niFileName.c_str());
+        return false;
+    }
+
+    //读取conf文件
+    FileReader confReader(conf);
+    confReader.openIO();
+    int64_t confFileSize = confReader.getFileSize();
+    uint8_t* buffer = MemoryUtil::safeAlloc<uint8_t>(confFileSize);
+    if (buffer == nullptr) {
+        LOG_ERROR("Alloc memory failed.");
+        return false;
+    }
+
+    int64_t readSize = confReader.readIO(buffer, confFileSize);
+    if (readSize != confFileSize) {
+        LOG_ERROR("Read conf file failed.");
+        MemoryUtil::safeFree<uint8_t>(buffer);
+        return false;
+    }
+    confReader.closeIO();
+
+    coder_json metaCoder;
+    metaCoder.decoder(buffer, confFileSize, ref2niCache);
+    MemoryUtil::safeFree<uint8_t>(buffer);
+
+    std::string refFileName = PathUtil::getFileName(refGeneFile);
+    if (refFileName.empty()){
+        LOG_ERROR("Get refFileName from %s failed.", refGeneFile.c_str());
+        return false;
+    }
+
+    if (!ref2niCache[refFileName.c_str()].isArray()) {
+        LOG_ERROR("ref2niCache[%s] is not array.", refFileName.c_str());
+        return false;
+    }
+
+    FileReader niReader(niFileName);
+    niReader.openIO();
+    int64_t fileSize = niReader.getFileSize();
+    std::string niName = PathUtil::getFileName(niFileName);
+    if (niName.empty()) {
+        LOG_ERROR("Get file name from %s failed.", niFileName);
+        return false;
+    }
+    niReader.closeIO();
+
+    for (uint32_t n = 0; n < ref2niCache[refFileName.c_str()].size(); ++n) {
+        Json::Value niConf = ref2niCache[refFileName.c_str()][n]; 
+        if (!niConf["ni_name"].isNull() && niConf["ni_name"] == niName) {
+            if (PathUtil::getFileMtime(niFileName) != niConf["ni_mtime"].asInt64()) {
+                LOG_ERROR("Get file %s mtime failed.", niFileName);
+                return false;
+            }
+            if (fileSize != niConf["ni_fsize"].asInt64()) {
+                LOG_ERROR("file %s size not match, filesize = %d, expect = %d.", niFileName, fileSize, niConf["ni_fsize"].asInt64());
+                return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Reference::makeNiFile(const std::string& niFile) {
+    (void)remove(niFile.c_str());
+     /* 检查是否有程序已经在make ni */
+    std::thread* progress = nullptr;
+    for (;;){
+        bool skip = false;
+        bool done = false;
+        std::string lockFileName = niFile + ".lock";
+        FileLock fileLock(lockFileName);
+        if(!fileLock.lock()) {
+            skip = true; /* 检测到有程序在make该ni时，当前程序直接等待ni文件制作完成直接使用 */
+            if (!progress) {
+                progress = new std::thread([&done]() {
+                    const std::string prompt = "......";
+                    int32_t cnt = 0, mask = powerof2Proximal(prompt.length()) - 1;
+                    for (;;) {
+                        if (done) {
+                            break;
+                        }
+                        ++cnt;
+                        cnt &= mask;
+                        fprintf(stderr, "\33[2K\ranother program is making ni file, waiting %s", std::string(prompt.c_str(), cnt).c_str());
+                        usleep(500000);
+                    }
+                });
+            }
+            usleep(10000);
+            continue;
+        }
+        done = true;
+        if (progress) {
+            progress->join();
+        }
+        if (skip) {
+            fprintf(stderr, "\n");
+            return true;
+        }
+        break;
+    }
+
+    std::string refGene = refGeneFile;
+    std::string refGeneMd5;
+    int64_t refGeneLen;
+
+    std::thread calc_md5 = std::thread([&refGene, &refGeneMd5, &refGeneLen]() {                                 
+        uint32_t bufferLen = 4096, len;
+        refGeneLen = 0;
+        MD5_CONTEXT md5;
+        uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
+        md5_init(&md5);
+        FileReader niReader(refGene);
+        niReader.openIO();
+        for (;;) {
+            len = niReader.readIO(buffer, bufferLen);
+            refGeneLen += len;
+            md5_write(&md5, buffer, len);
+            if (len != bufferLen) {
+                break;
+            }
+        }
+        md5_final(&md5);
+        refGeneMd5 = md5.hexstr();
+        niReader.closeIO();
+    });
+
+    int bufferLen = (5 << 20);
+    uint8_t* buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
+    FileWriter niWriter(niFile);
+    niWriter.openIO();
+    MD5_CONTEXT md5;
+    md5_init(&md5);
+
+    niWriter.writeIO(PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC.length());
+    niWriter.writeIO(PbgzManager::getInstance().getVersionAsArray().data(), 3);
+    niWriter.writeIO((uint8_t *)"ni", 2);
+    int64_t offset = PBGZ_FILE_MAGIC.length() + 3 + 2;
+    niWriter.writeIO((uint8_t *)(&offset), sizeof(offset));
+
+    /* 串行处理就行，基本就是读文件的时间, base_squash时间可以忽略 */
+    std::ifstream file(refGeneFile.c_str());
+    std::string line;
+    int squashBufferlen = 1024 >> 2;
+    uint8_t* squashBuffer = MemoryUtil::safeAlloc<uint8_t>(1024);
+
+    uint8_t cacheActg[4];
+    uint32_t cacheLen = 0;
+    int64_t docnt = 0, wlen = 0;
+    int64_t left;
+    uint8_t ch;
+    uint32_t l4Align;
+
+    for (;;) {
+        if (!std::getline(file, line)) {
+            LOG_INFO("Read file %s end.", refGeneFile.c_str());
+            break;
+        }
+        if (line[0] == '>') {
+            continue;
+        }
+        if (cacheLen + line.length() < 4) {
+            memcpy(cacheActg + cacheLen, line.c_str(), line.length());
+            cacheLen += line.length();
+        } else {
+            /* 先处理cache */
+            docnt = 4 - cacheLen;
+            memcpy(cacheActg + cacheLen, line.c_str(), docnt);
+            actgSquash((uint8_t *)cacheActg, 4, &ch);
+            niWriter.writeIO(&ch, 1);
+            wlen += 1;
+            md5_write(&md5, &ch, 1);
+            cacheLen = 0;
+
+            left = line.length() - docnt;
+            if (left < 4) {
+                /* 剩余的不够cache */
+                memcpy(cacheActg + cacheLen, line.c_str() + docnt, left);
+                cacheLen += left;
+            } else {
+                /* 剩余的够cache */
+                l4Align = left >> 2 << 2;
+                squashBuffer = MemoryUtil::safeRealloc<uint8_t>(squashBufferlen, squashBuffer, (size_t)(l4Align >> 2));
+                uint32_t lenSquash = actgSquash((const uint8_t *)(line.c_str() + docnt), l4Align, squashBuffer);
+                niWriter.writeIO(squashBuffer, lenSquash);
+                wlen += lenSquash;
+                md5_write(&md5, squashBuffer, lenSquash);
+
+                /* 处理未处理的未以4对齐的字节 */
+                docnt += l4Align;
+                left = line.length() - docnt;
+                if (left > 0) {
+                    memcpy(cacheActg + cacheLen, line.c_str() + docnt, left);
+                    cacheLen += left;
+                }
+            }
+        }
+    }
+
+    niWriter.writeIOAt(offset, (uint8_t *)(&wlen), sizeof(wlen));
+
+    md5_final(&md5);
+    calc_md5.join();
+
+    std::string refename = PathUtil::getFileName(refGeneFile);
+    Json::Value meta;
+    meta["refe_name"] = refename;
+    meta["refe_len"] = Json::Value::UInt64(refGeneLen);
+    meta["refe_orgfile_md5"] = refGeneMd5; /* reference文件的原始md5，即直接读未解开 */
+    meta["ni_data_md5"] = md5.hexstr();  /* ni文件的数据内容的md5 */
+    fastaLength = refGeneLen;
+    fastaChecksum = refGeneMd5;
+
+    coder_json cmeta;
+    std::string metaStr;
+    cmeta.encoder(meta, metaStr);
+    niWriter.writeIO((uint8_t *)(metaStr.c_str()), metaStr.length());
+    niWriter.closeIO();
+
+    { /* 将当前ni信息写conf */
+        Json::Value niconf, nicurr;
+        std::string conf, ni_name, out;
+        uint64_t file_size;
+        char cfgdir[MAX_PATH];
+
+        get_user_config_folder(cfgdir, sizeof(cfgdir), PBGZ_FILE_MAGIC.c_str());
+        if (cfgdir[0] == 0) {
+            return false;
+        }
+        conf = cfgdir;
+        conf += ".conf";
+
+        FileReader niReader(niFile);
+        niReader.openIO();
+        std::string niFileName = PathUtil::getFileName(niFile);
+        nicurr["ni_name"] = niFileName;
+        nicurr["ni_mtime"] = (Json::Value::Int64)(PathUtil::getFileMtime(niFile));
+        nicurr["ni_fsize"] = (Json::Value::Int64)(niReader.getFileSize());
+        niReader.closeIO();
+
+        if (PathUtil::fileExists(conf)) {
+            FileReader confReader(conf);
+            confReader.openIO();
+            file_size = confReader.getFileSize();
+            buffer = MemoryUtil::safeRealloc<uint8_t>(bufferLen, buffer, file_size);
+            if (confReader.readIO(buffer, file_size) != file_size) {
+                LOG_ERROR("conf file read failed: %s", conf.c_str());
+                return false;
+            }
+            confReader.closeIO();
+            cmeta.decoder(buffer, file_size, ref2niCache);
+
+            if (!ref2niCache[refename.c_str()].isArray())  { 
+                /* 没有conf信息则新增 */ 
+                ref2niCache[refename.c_str()].append(nicurr);
+            } else {
+                int64_t n = 0;
+                for (; n < ref2niCache[refename.c_str()].size(); n++) {
+                    niconf = ref2niCache[refename.c_str()][(int32_t)n];
+                    if (!niconf["ni_name"].isNull() && niconf["ni_name"] == niFileName) { 
+                        /* 存在则更新 */
+                        ref2niCache[refename.c_str()][(int32_t)n]["ni_mtime"] = nicurr["ni_mtime"];
+                        ref2niCache[refename.c_str()][(int32_t)n]["ni_fsize"] = nicurr["ni_fsize"];
+                        break;
+                    }
+                }
+                if (n >= ref2niCache[refename.c_str()].size()) {
+                    ref2niCache[refename.c_str()].append(nicurr);
+                }
+            }
+        } else {
+            ref2niCache[refename.c_str()].append(nicurr);
+        }
+
+        (void)remove(conf.c_str());
+        FileWriter confWriter(conf);
+        confWriter.openIO();
+        cmeta.encoder(ref2niCache, out);
+        if(confWriter.writeIO((uint8_t *)(out.c_str()), out.length()) != out.length()) {
+            LOG_ERROR("conf file write failed: %s.", conf.c_str());
+            return false;
+        }    
+        confWriter.closeIO();    
+    }
+
+    MemoryUtil::safeFree(buffer);
+    MemoryUtil::safeFree(squashBuffer);
+    return true;
+}
+
+void Reference::getNiFileFromReference(std::string& niFile) {
+    MD5_CONTEXT md5;
+    md5_init(&md5);
+    std::string niFileName = PathUtil::getFileName(refGeneFile);
+    char cfgdir[MAX_PATH];
+    get_user_data_folder(cfgdir, sizeof(cfgdir), PBGZ_FILE_MAGIC.c_str());
+    if (cfgdir[0] == 0) {
+        return;
+    }
+    niFilePath = cfgdir;
+
+    FILE *fp = fopen(refGeneFile.c_str(), "rb");
+    if (fp == nullptr) {
+        LOG_ERROR("reference file read failed: %s", refGeneFile.c_str());
+        return;
+    }
+    
+    if (fseeko64(fp, 0, SEEK_END) != 0) { 
+        LOG_ERROR("fseek failed: %s", refGeneFile.c_str());
+        fclose(fp);
+        return;
+    }
+    
+    int64_t fileSize = ftello64(fp);
+    rewind(fp);
+
+    int64_t readEach = 1024;
+    int64_t offsetEach = fileSize >> 2;
+    
+    if (offsetEach < readEach) {
+        uint8_t buffer[fileSize + sizeof(fileSize)];
+        if (fread(buffer, fileSize, 1, fp) != 1) {
+            LOG_ERROR("reference file read failed: %s", refGeneFile.c_str());
+            fclose(fp);
+            return;
+        } 
+        *((int64_t *)(buffer + fileSize)) = fileSize;
+        md5_write(&md5, buffer, fileSize + sizeof(fileSize));
+    } else {
+        uint8_t buffer[(readEach << 2) + sizeof(fileSize)];
+        int64_t offset = 0, len = 0;
+        for (int64_t n = 0; n < 4; n++) {
+            if (fseeko64(fp, offset, SEEK_SET) != 0) {
+                LOG_ERROR("reference file fseek failed: %s", refGeneFile.c_str());
+                fclose(fp);
+                return;
+            }
+            if (fread(buffer + len, readEach, 1, fp) != 1)  {
+                LOG_ERROR("reference file read failed: %s", refGeneFile.c_str());
+                fclose(fp);
+                return;
+            }
+            offset += offsetEach;
+            len += readEach;
+        }
+        *((int64_t *)(buffer + len)) = fileSize;
+        md5_write(&md5, buffer, (readEach << 2) + sizeof(fileSize));
+    }
+    fclose(fp);
+
+    md5_final(&md5);
+    niFileName += ".";
+    niFileName += std::string(md5.hexstr().c_str(), 8); /* 取md5的前8位 */
+    niFileName += ".ni";
+    niFilePath += niFileName;
+    niFile = niFilePath;
+}
+
+bool Reference::makeIndex() {
+    Timer cost_ms(true);
+    int64_t supportMax = ((int64_t)2 << 30) * baseGroupStep;
+    BaseGroupHash *bgHash;
+    HashTable hashTable;
+    std::string tips;
+    /* 记录每个bucket下一个hash值写的位置，该位置为相对hash_buff起始位置的偏移，这样是为了并发写 */
+    uint32_t *hashBucketCurpos;
+
+    hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
+    if (!initSquashByNiFile()) {
+        LOG_ERROR("initialize reference failed");
+        return false;
+    }
+    if ((refGeneSquashlen << 2) >= supportMax) {
+        LOG_ERROR("Reference max support %lu(M), current size %ld(M)\n",
+                   supportMax / 1024 / 1024, (refGeneSquashlen << 2) / 1024 / 1024);
+    } else {
+        fprintf(stderr, "Reference max support %lu(M), current size %ld(M)\n",
+                supportMax / 1024 / 1024, (refGeneSquashlen << 2) / 1024 / 1024);
+    }
+
+    cost_ms.reset();
+    makeIndexFetchBaseGroup(bgHash);
+    makeIndexCalcHashTableSize(hashTable);
+    makeIndexInitHashTable(hashTable, hashBucketCurpos);
+    makeIndexBuildHashTable(bgHash, hashBucketCurpos);
+    makeIndexSortHashTable();
+    tips = "elapsed ms: ";
+    tips += std::to_string((int64_t)(cost_ms.elapsed()));
+    if (guardBar != nullptr) {
+        guardBar->done(tips);
+    }
+   
+    free(bgHash);
+    free(hashBucketCurpos);
+
+    refGeneSquashMatchedlen = refGeneSquashlen; /* 一个字节表示一个squash字节是否有matched */
+    refGeneSquashMatched = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashMatchedlen);
+    return true;
+}
+
+void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
+    uint8_t *p; 
+    uint32_t *hb_cnt;
+    BaseGroupHash *bhash;
+    std::vector<std::thread> tpools;
+    int64_t each, current, remain, total, offset_start;
+    int64_t n, pcnt = this->parallel;
+    int64_t *pnn = nullptr;
+    spinlock *slocks;
+
+    const uint32_t bg_step = baseGroupStep;
+    const uint32_t bg_len = baseGroupLen;
+    const uint32_t *actg_stretch_tab = actgStretch;
+    const int32_t hbuckets = hashBuckets;
+    const int32_t hmask = hashMask;
+
+    total = (refGeneSquashlen << 2) / baseGroupStep;
+    each = total / pcnt;
+    remain = (total - (each * pcnt));
+    p = this->refGeneSquash;
+    bgHash = MemoryUtil::safeAlloc<BaseGroupHash>(total);
+    hashBucketCnt = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
+    slocks = MemoryUtil::safeAlloc<spinlock>(hashBuckets);
+    hb_cnt = hashBucketCnt;
+    bhash = bgHash;
+    BaseGroupHash *bhash_start = bgHash;
+
+    for (n = 0; n < pcnt; n++) {
+        current = (n + 1 == pcnt) ? (each + remain) : each; /* 当前处理的key数 */
+        if ((n + 1) == pcnt) {
+            gbTotal = 0;
+            gbCurrent = current;
+            guardBar = MemoryUtil::safeNewClass<GuardBar>(gbCurrent, gbTotal, "Building index from reference");
+            guardBar->start();
+            pnn = &gbTotal;
+        }
+
+        offset_start = bhash - bhash_start;
+
+        tpools.push_back(std::thread([p, current, offset_start, hbuckets, hmask, &bhash_start,
+                                      &bg_step, &bg_len, &actg_stretch_tab, &hb_cnt, &slocks, pnn]() {
+            uint32_t len_hash = 0, len_bucket = 0;
+            int64_t n = 0, m = 0;
+            uint8_t current_cnt;
+            uint8_t *s = p;
+            uint32_t kpos = bg_len >> 1;
+            int64_t align4 = bg_len >> 2 << 2;
+            uint32_t hash32, curr_bucket;
+            int64_t offset = offset_start, pos;
+            int64_t *pnnn = (pnn) ? pnn : (&n);
+            uint64_t xsquash;
+
+            const uint32_t len_bgs = (bg_len >> 2) + ((bg_len & 0x3) ? 1 : 0);
+            const char actg4[4] = {'A', 'C', 'T', 'G'};
+            char actg_bg[bg_len + 1];
+            char actg_bg_pair[bg_len + 1]; /* 互补碱基*/
+            char actg_bgs[len_bgs];    /* squash base group */
+            char actg_bgs_pair[len_bgs];
+            
+            for (*pnnn = 0; *pnnn < current; *pnnn = (*pnnn) + 1) {
+                /* step 1 : get base group */
+                for (m = 0; m < align4; m += 4)
+                    *((uint32_t *)(actg_bg + m)) = actg_stretch_tab[*s++];
+                switch (bg_len - align4) {
+                case 0:
+                    break;
+                case 1:
+                    m = align4;
+                    *(actg_bg + m) = actg4[(((*s) >> 6) & 0x3)];
+                    s++;
+                    break;
+                case 2:
+                    m = align4;
+                    *(actg_bg + m++) = actg4[(((*s) >> 6) & 0x3)];
+                    *(actg_bg + m) = actg4[(((*s) >> 4) & 0x3)];
+                    s++;
+                    break;
+                case 3:
+                    m = align4;
+                    *(actg_bg + m++) = actg4[(((*s) >> 6) & 0x3)];
+                    *(actg_bg + m++) = actg4[(((*s) >> 4) & 0x3)];
+                    *(actg_bg + m) = actg4[(((*s) >> 2) & 0x3)];
+                    s++;
+                    break;
+                default:
+                    break;
+                }
+
+                /* step 2: get base group pair */
+                actgPair((uint8_t *)actg_bg_pair, (uint8_t *)actg_bg, bg_len);
+
+                /* step 3:  save current base group with direction*/
+                if (actg_bg[kpos] < actg_bg_pair[kpos]) {
+                    actgSquash((uint8_t *)actg_bg_pair, bg_len, (uint8_t *)actg_bgs_pair);
+                    xsquash = *((uint64_t *)(actg_bgs_pair));
+                    xsquash &= 0xFCFFFFFFFFFFFFFF;
+                    hash32 = (uint32_t) CityHash64((const char *)(&xsquash), len_bgs);
+                    pos = offset | 0x80000000;
+                } else {
+                    actgSquash((uint8_t *)actg_bg, bg_len, (uint8_t *)actg_bgs);
+                    xsquash = *((uint64_t *)(actg_bgs));
+                    xsquash &= 0xFCFFFFFFFFFFFFFF;
+                    hash32 = (uint32_t)CityHash64((const char *)(&xsquash), len_bgs);
+                    pos = offset;
+                }
+                curr_bucket = hash32 & hmask;
+                (bhash_start + offset)->hashBucket = curr_bucket;
+                (bhash_start + offset)->baseGroupPos = pos;
+                offset++;
+                {
+                    spinlock &sl = slocks[curr_bucket];
+                    spin_lock(&sl);
+                    hb_cnt[curr_bucket]++;
+                    spin_unlock(&sl);
+                }
+            }
+        }));
+
+        p += (current * (baseGroupStep >> 2)); /* 这里限定了basegroup_step必须为4的整数，有需要可以修改 */
+        bhash += current;
+    }
+
+    for (n = 0; n < pcnt; n++) {
+        if (tpools[n].joinable()) {
+            tpools[n].join();
+        }
+    }
+    free(slocks);
+}
+
+void Reference::makeIndexCalcHashTableSize(HashTable& hashTable) {
+    uint32_t *p;
+    int64_t each, current, remain, total;
+    uint32_t pcnt = this->parallel;
+    std::vector<std::thread> tpools;
+
+    /* 第一段存hash buffer的内容和总长度，第二段存hash butcket的长度 */
+    hashTable.resize(pcnt);
+
+    total = hashBuckets;
+    each = hashBuckets / pcnt;
+    remain = (total - (each * pcnt));
+    p = hashBucketCnt;
+
+    for (uint32_t n = 0; n < pcnt; n++) {
+        current = (n + 1 == pcnt) ? (each + remain) : each;
+
+        std::pair<std::pair<uint32_t *, uint32_t>, uint32_t> &hash_buffer = hashTable[n];
+        tpools.push_back(std::thread([p, current, &hash_buffer]() {
+            int64_t len_hash = 0, len_bucket = 0;
+            int64_t n = 0, m = 0;
+            uint32_t current_cnt;
+
+            for (n = 0; n < current; n++) {
+                current_cnt = *(p + n);
+                len_bucket++;
+                /* 如果当前bucket中有多个hash值，那么hash buffer第一个存指针，该指针指向当前bucket的hash值对应的buffer */
+                len_hash += (current_cnt <= 1) ? 1 : (current_cnt + 1);
+            }
+            hash_buffer.first.second = len_hash;
+            hash_buffer.second = len_bucket;
+        }));
+
+        p += current;
+    }
+
+    for (uint32_t n = 0; n < pcnt; n++) {
+        if (tpools[n].joinable()) {
+            tpools[n].join();
+        }
+    }
+}
+
+void Reference::makeIndexInitHashTable(const HashTable& hashTable, uint32_t* &hashBucketCurPos) {
+    uint32_t hashBufflen = 0;
+    uint32_t hashBucketlen = 0;
+    uint32_t *phbucket;
+    uint32_t *pbucketNext;
+    uint32_t *phbuff, *phbuffConflict, *phbuffStart;
+    int64_t each, current, remain, total;
+    uint32_t n, pcnt = this->parallel;
+    std::vector<std::thread> tpools;
+
+    for (n = 0; n < hashTable.size(); n++) {
+        hashBufflen += hashTable[n].first.second;
+        hashBucketlen += hashTable[n].second;
+    }
+
+    hashTableBuffer = MemoryUtil::safeAlloc<uint32_t>(hashBufflen);
+    
+    total = hashBuckets;
+    each = hashBuckets / pcnt;
+    remain = (total - (each * pcnt));
+    phbucket = hashBucketCnt;
+    phbuff = hashTableBuffer;
+    phbuffStart = hashTableBuffer;
+    phbuffConflict = hashTableBuffer + hashBucketlen;
+    pbucketNext = hashBucketCurPos;
+
+    for (n = 0; n < pcnt; n++) {
+        current = (n + 1 == pcnt) ? (each + remain) : each;
+        tpools.push_back(std::thread([phbucket, phbuff, phbuffConflict, phbuffStart, pbucketNext, &current]() {
+            uint32_t n = 0;
+            uint32_t current_cnt;
+            uint32_t *p = phbuff;
+            uint32_t *pc = phbuffConflict;
+            uint32_t *pn = pbucketNext;
+
+            for (n = 0; n < current; n++) {
+                current_cnt = *(phbucket + n);
+                switch (current_cnt)
+                {
+                case 0:
+                    pn++;
+                    p++;
+                    break;
+                case 1:
+                    *pn++ = p - phbuffStart; /* 没有hash冲突时，下一个位置直接写bucket */
+                    p++;
+                    break;
+                default:
+                    *pn++ = pc - phbuffStart;
+                    *p = pc - phbuffStart; /*  hash冲突时bucket第一个元素存hash冲突buffer相对hash buffer起始位置的偏移 */
+                    pc += current_cnt;      /*  当前bucket有current_cnt个hash值，故做current_cnt个偏移 */
+                    p++;
+                    break;
+                }
+            }
+        }));
+
+        pbucketNext += current;
+        phbucket += current;
+        phbuff += hashTable[n].second;
+        phbuffConflict += hashTable[n].first.second - hashTable[n].second;
+    }
+
+    for (n = 0; n < pcnt; n++) {
+        if (tpools[n].joinable()) {
+            tpools[n].join();
+        }
+    }
+}
+
+void Reference::makeIndexBuildHashTable(const BaseGroupHash* bgHash, uint32_t* &hashBucketCurPos) {
+    uint32_t *phbuffStart, id;
+    std::vector<std::thread> tpools;
+    uint32_t *hb_cnt = hashBucketCnt;
+    int64_t each, current, remain, total;
+    int64_t n, pcnt = this->parallel;
+    uint32_t *hb_curpos = hashBucketCurPos;
+
+    total = (refGeneSquashlen << 2) / baseGroupStep;
+    each = total / pcnt;
+    remain = (total - (each * pcnt));
+    const BaseGroupHash *h = (BaseGroupHash*)bgHash;
+    phbuffStart = hashTableBuffer;
+
+    for (n = 0; n < pcnt; n++) {
+        id = n;
+        tpools.push_back(std::thread([h, total, &phbuffStart, &hb_curpos, &hb_cnt, id, pcnt]() {
+            Timer cost_ms(true);
+            uint32_t n = 0, bucket, pos;
+
+            for (n = 0; n < total; n++)
+            {
+                bucket = (h + n)->hashBucket;
+                if ((bucket % pcnt) == id) {
+                    switch (hb_cnt[bucket])
+                    {
+                    case 0:
+                        break;
+                    case 1:
+                        pos = hb_curpos[bucket];
+                        *(phbuffStart + pos) = (h + n)->baseGroupPos;
+                        break;
+                    default:
+                        pos = hb_curpos[bucket];
+                        *(phbuffStart + pos) = (h + n)->baseGroupPos;
+                        hb_curpos[bucket]++; /* 该bucket指向下一个位置 */
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
+    for (n = 0; n < pcnt; n++) {
+        if (tpools[n].joinable()) {
+            tpools[n].join();
+        }
+    }
+}
+
+void Reference::makeIndexSortHashTable() {
+    uint32_t *phb_cnt, *phb_cnt_start;
+    uint32_t *phb_buff, *phb_buff_start, offset = 0;
+    int64_t each, current, remain, total;
+    int64_t n, pcnt = this->parallel;
+    std::vector<std::thread> tpools;
+
+    total = hashBuckets;
+    each = total / pcnt;
+    remain = (total - (each * pcnt));
+    phb_buff_start = phb_buff = hashTableBuffer;
+    phb_cnt_start = phb_cnt = hashBucketCnt;
+
+    for (n = 0; n < pcnt; n++) {
+        current = (n + 1 == pcnt) ? (each + remain) : each;
+        tpools.push_back(std::thread([phb_buff, current, phb_buff_start, &phb_cnt_start, offset]() {
+            uint32_t current_cnt;
+            uint32_t n, m, *p;
+            uint32_t *pstart = phb_buff_start;
+
+            for (n = 0; n < current; n++) {
+                current_cnt = *(phb_cnt_start + offset + n);
+                if (current_cnt > 1) {
+                    if (current_cnt < 255) {
+                        p = pstart + phb_buff[n];
+                        std::sort(p, p + current_cnt, [](const uint32_t &p1, const uint32_t &p2) -> bool {
+                             return p1 < p2; 
+                        }); // 修复可能core问题，相等返回true会越界，当元素个数>16(_S_threshold)时选择快速排序，<=16个则选择插入排序(对象少时快排性能不理想)
+                    }
+                    *(phb_cnt_start + offset + n) = std::min((uint32_t)16, current_cnt);
+                }
+            }
+        }));
+        offset += current;
+        phb_buff += current;
+    }
+
+    for (n = 0; n < pcnt; n++) {
+        if (tpools[n].joinable()) {
+            tpools[n].join();
+        }
+    }
+}
+
+void Reference::dumpHashTable() {
+    FILE *fp = fopen("hash_table", "wb");
+    if (fp == nullptr) {
+        LOG_ERROR("Failed to open hash_table file for writing");
+        return;
+    }
+    
+    for (int32_t n = 0; n < hashBuckets; n++) {
+        if (hashBucketCnt[n] <= 0) {
+            continue;
+        }
+        fprintf(fp, "bucket %u : ", n);
+        uint32_t *p = (hashBucketCnt[n] > 1) ? (hashTableBuffer + hashTableBuffer[n]) : (hashTableBuffer + n);
+            
+        for (uint32_t m = 0; m < hashBucketCnt[n]; m++) {
+            fprintf(fp, "%u,", *(p + m));
+        }
+        fprintf(fp, "\n");
+    }
+    fflush(fp);
+    fclose(fp);
+}
+
+
+uint32_t Reference::getBaseGroupLength() const {
+    return this->baseGroupLen;
+}
+
+uint32_t Reference::getBaseGroupStep() const {
+    return this->baseGroupStep;
+}
+
+const uint32_t* Reference::queryPosition(const uint32_t &hash, uint32_t &length) {
+    uint32_t hbucket = hash & hashMask;
+    length = hashBucketCnt[hbucket];
+    return (length == 1) ? (hashTableBuffer + hbucket) : (hashTableBuffer + hashTableBuffer[hbucket]);
+}
+
+void Reference::updateMatchedGene(uint64_t actgPos, uint32_t matchLength) {
+    uint64_t sposStart = actgPos >> 2;
+    uint64_t sposEnd = (actgPos + matchLength - 1) >> 2;
+    memset(refGeneSquashMatched + sposStart, 1, sposEnd - sposStart + 1);
+}
+
+/* 得到reference squash buffer */
+const uint8_t* Reference::getSquash() const {
+    return this->refGeneSquash;
+}
+
+/* 得到reference squash buffer的长度 */
+int64_t Reference::getSquashLength() const {
+    return this->refGeneSquashlen;
+}
+
+/* 获取fasta文件名 */
+const std::string& Reference::getFastaFileName() const {
+    return this->refGeneFile;
+}
+
+/* 获取fasta文件内容长度 */
+int64_t Reference::getFastaLength() const {
+    return this->fastaLength;
+}
+
+/* 获取fasta文件内容md5 */
+const std::string& Reference::getFastaChecksum() const {
+    return this->fastaChecksum;
+}
+
+/* 获取ni文件路径 */
+const std::string& Reference::getNiFilePath() const {
+    return this->niFilePath;
+}
+
+/* 将没有matched上的reference清零 */
+void Reference::sanitizeRefSquash(int64_t startSquashPos, int64_t len) {
+    uint64_t e = startSquashPos + len;
+    for (uint64_t n = startSquashPos; n < e; n++) {
+        *(refGeneSquash + n) = (*(refGeneSquashMatched + n)) ? (*(refGeneSquash + n)) : 0;
+    }
+}
+
+/* 获取指定位置对应长度的actg碱基 */
+void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) {
+    uint64_t squashPos = actgPos >> 2;
+    uint8_t *p = refGeneSquash + squashPos;
+    uint8_t ch = *p;
+
+    uint32_t offset  = 0;
+    const char actg4[4] = {'A', 'C', 'T', 'G'};
+    /* 左边不对齐 */
+    switch (actgPos & 0x3) 
+    {
+    case 0:
+        break;
+    case 1:
+        *(out + offset++) = actg4[(ch >> 4) & 0x3];
+        *(out + offset++) = actg4[(ch >> 2) & 0x3];
+        *(out + offset++) = actg4[(ch) & 0x3];
+        p++;
+        break;
+    case 2:
+        *(out + offset++) = actg4[(ch >> 2) & 0x3];
+        *(out + offset++) = actg4[(ch) & 0x3];
+        p++;
+        break;
+    case 3:
+        *(out + offset++) = actg4[(ch) & 0x3];
+        p++;
+        break;
+    default:
+        break;
+    }
+    if (offset == outLen)
+        return;
+
+    /* 对齐部分 */
+    uint32_t lenNeed = (outLen - offset) >> 2;
+    for (uint32_t n = 0; n < lenNeed; n++) {
+        *((uint32_t *)(out + offset)) = actgStretch[*p];
+        offset += 4;
+        p++;
+    }
+    if (offset == outLen) {
+        return;
+    }
+
+    /* 右边未对齐部分 */
+    lenNeed = outLen - offset;
+    ch = *p;
+    switch (lenNeed & 0x3) 
+    {
+    case 0:
+        break;
+    case 1:
+        *(out + offset++) = actg4[(ch >> 6) & 0x3];
+        break;
+    case 2:
+        *(out + offset++) = actg4[(ch >> 6) & 0x3];
+        *(out + offset++) = actg4[(ch >> 4) & 0x3];
+        break;
+    case 3:
+        *(out + offset++) = actg4[(ch >> 6) & 0x3];
+        *(out + offset++) = actg4[(ch >> 4) & 0x3];
+        *(out + offset++) = actg4[(ch >> 2) & 0x3];
+        break;
+    default:
+        break;
+    }
+}
+
+/*  根据每个字节末尾的2个bits，转换成actg */
+void Reference::getActgFrom2Bits(const uint8_t *src2Bits, uint32_t src2BitsLen, uint8_t *dstActg) {
+    uint8_t *s = (uint8_t *)src2Bits, *p;
+    uint32_t align4 = src2BitsLen >> 2 << 2, offset = 0;
+    const uint8_t actg4[4] = {'A', 'C', 'T', 'G'};
+
+    uint32_t n = 0;
+    for ( ;n < align4; n += 4) {
+        p = s + n;
+        *((uint32_t *)(dstActg + offset)) = actgStretch[((*p) << 6) | ((*(p + 1)) << 4) | ((*(p + 2)) << 2) | (*(p + 3))];
+        offset += 4;
+    }
+
+    if (n == src2BitsLen) {
+        return;
+    }
+
+    for (; n < src2BitsLen; n++) {
+        *(dstActg + offset++) = actg4[*(src2Bits + n)];
+    }
+}
+
+/* 获取指定位置对应长度的squash碱基，即2个bits 放到一个字符的末尾*/
+void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t actgPos) {
+    uint32_t offset = 0;
+    uint64_t squashPos = actgPos >> 2;
+    
+    uint8_t *p = refGeneSquash + squashPos;
+    uint8_t ch = *p;
+
+    /* 左边不对齐 */
+    switch (actgPos & 0x3) 
+    {
+    case 0:
+        break;
+    case 1:
+        *(out + offset++) = (ch >> 4) & 0x3;
+        *(out + offset++) = (ch >> 2) & 0x3;
+        *(out + offset++) = (ch) & 0x3;
+        p++;
+        break;
+    case 2:
+        *(out + offset++) = (ch >> 2) & 0x3;
+        *(out + offset++) = (ch) & 0x3;
+        p++;
+        break;
+    case 3:
+        *(out + offset++) = (ch) & 0x3;
+        p++;
+        break;
+    default:
+        break;
+    }
+    if (offset == outLen)
+        return;
+
+    /* 对齐部分 */
+    uint32_t lenNeed = (outLen - offset) >> 2;
+    for (uint32_t n = 0; n < lenNeed; n++) {
+        *((uint32_t *)(out + offset)) = actgStretch2bits[*p];
+        offset += 4;
+        p++;
+    }
+    if (offset == outLen) {
+        return;
+    }
+
+    /* 右边未对齐部分 */
+    lenNeed = outLen - offset;
+    ch = *p;
+    switch (lenNeed & 0x3) 
+    {
+    case 0:
+        break;
+    case 1:
+        *(out + offset++) = (ch >> 6) & 0x3;
+        break;
+    case 2:
+        *(out + offset++) = (ch >> 6) & 0x3;
+        *(out + offset++) = (ch >> 4) & 0x3;
+        break;
+    case 3:
+        *(out + offset++) = (ch >> 6) & 0x3;
+        *(out + offset++) = (ch >> 4) & 0x3;
+        *(out + offset++) = (ch >> 2) & 0x3;
+        break;
+    default:
+        break;
+    }
+}

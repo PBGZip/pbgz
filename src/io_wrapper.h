@@ -85,8 +85,12 @@ public:
 
     void* getAt(size_t pos);
 
-    int32_t seekIO(int32_t seekOffset, IOWhence whence) {
-        return fo.seekIO( seekOffset, whence );
+    int32_t seekIO(int32_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
+        return fo.seekIO(seekOffset, whence);
+    }
+
+    size_t getFileSize() {
+        return fo.fileSize;
     }
 
 private:
@@ -96,31 +100,37 @@ private:
 
 class FileWriter : public IOWriter {
 public:
-     int32_t openIO() {return fo.openIO();}
+    int32_t openIO();
 
-     void closeIO() { return fo.closeIO();}
+    void closeIO();
 
     size_t writeIO(const void* pBuffer, size_t writeLen);
 
     FileWriter(const std::string& inFileName): fo(inFileName)  {
         fo.openMode = O_RDWR | O_CREAT;
         fo.mapMode = PROT_READ|PROT_WRITE;
+        mapSize = 0;
     }
 
-    int32_t seekIO(int32_t seekOffset, IOWhence whence) {
-        return fo.seekIO( seekOffset, whence );
+    int32_t seekIO(int32_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
+        return fo.seekIO( seekOffset, whence);
     }
 
-    ~FileWriter() {
-        // 退出前将数据强制刷新
+    int32_t writeIOAt(int32_t seekOffset, const void* pBuffer, size_t writeLen);
+
+    void flushIO() {
         msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
     }
 
-private:
+    ~FileWriter() {
+    }
+
+    size_t getMappedSize(size_t fileSize);
+
+protected:
     FileOperator fo;
+    size_t mapSize;
 };
-
-
 
 class PipeReader : public IOReader {
 public:

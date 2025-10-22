@@ -25,6 +25,7 @@
 
 #include "pbgz_file.h"
 #include "log/logger.h"
+#include "coder_json.h"
 
 
 std::string PbgzFileHeader::getVersionStr() {
@@ -83,9 +84,10 @@ int32_t PbgzFileMeta::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t
         return -1;
     }   
 
-    Json::StreamWriterBuilder writer;
-    std::string jsonString =  Json::writeString(writer, metaData);
-    metaLength = jsonString.size();
+    coder_json fileMetaCoder;
+    std::string fileMetaEncodeStr;
+    fileMetaCoder.encoder(metaData, fileMetaEncodeStr);
+    uint32_t metaLength = fileMetaEncodeStr.length();
     if (bufferLength < PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH + metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH) {
         return -1; // Buffer too small
     }
@@ -100,9 +102,7 @@ int32_t PbgzFileMeta::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t
     dataOffset += PBGZ_FILE_META_SIZE_LENGTH;
 
     // Serialize meta data
-    // 暂时没有加密，待实现
-    /// TODO: Implement meta data encryption if needed
-    memcpy(buffer + dataOffset, jsonString.c_str(), metaLength);
+    memcpy(buffer + dataOffset, fileMetaEncodeStr.c_str(), metaLength);
     dataOffset += metaLength;
 
     // Serialize checksum
@@ -130,18 +130,12 @@ int32_t PbgzFileMeta::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     if (bufferLength < dataOffset + PBGZ_FILE_META_SIZE_LENGTH) {
         return -   1 ; // Buffer too small for metaLength   
     }
+    uint32_t metaLength = 0;
     memcpy(&metaLength, buffer + dataOffset, sizeof(metaLength));
     dataOffset += PBGZ_FILE_META_SIZE_LENGTH;   
 
-    // Unserialize meta data
-    std::string jsonString(reinterpret_cast<char*>(buffer + dataOffset), metaLength);
-    Json::CharReaderBuilder readerBuilder;
-    std::istringstream jsonStream(jsonString);
-    std::string errs;
-    if (!Json::parseFromStream(readerBuilder, jsonStream, &metaData, &errs)) {
-        LOG_ERROR("Failed to parse JSON: %s", errs.c_str());
-        return -1; // JSON parse error
-    }
+    coder_json fileMetaCoder;
+    fileMetaCoder.decoder(buffer + dataOffset, metaLength, metaData);
     dataOffset += metaLength;
 
     // Unserialize checksum
@@ -155,10 +149,12 @@ int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_
         LOG_ERROR("Invalid block type for serialization: %d", blockType);
         return -1;
     }
+    
+    coder_json blockMetaCoder;
+    std::string blockMetaOut;
+    blockMetaCoder.encoder(dataMetaInfo, blockMetaOut);
+    dataMetaLength = blockMetaOut.length();
 
-    Json::StreamWriterBuilder writer;
-    std::string jsonString = Json::writeString(writer, dataMetaInfo);
-    dataMetaLength = jsonString.size();
     if (bufferLength < PBGZ_DATA_BLOCK_MAGIC_LENGTH +  PBGZ_DATA_BLOCK_META_SIZE_LENGTH + dataMetaLength + 
         PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH + blockDataLength + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH) {
         LOG_ERROR("Buffer too small for serialization");
@@ -175,7 +171,7 @@ int32_t PbgzDataBlock::serialize(uint8_t* buffer, uint32_t bufferLength, uint32_
     dataOffset += PBGZ_DATA_BLOCK_META_SIZE_LENGTH;
 
     // Serialize meta data
-    memcpy(buffer + dataOffset, jsonString.c_str(), dataMetaLength);
+    memcpy(buffer + dataOffset, blockMetaOut.c_str(), dataMetaLength);
     dataOffset += dataMetaLength;
 
     // Serialize meta checksum
@@ -223,14 +219,9 @@ int32_t PbgzDataBlock::unserialize(uint8_t* buffer, uint32_t bufferLength) {
     if (bufferLength < dataOffset + dataMetaLength) {
         return -1; // Buffer too small for meta data
     }
-    std::string jsonString(reinterpret_cast<char*>(buffer + dataOffset), dataMetaLength);
-    Json::CharReaderBuilder readerBuilder;
-    std::istringstream jsonStream(jsonString);
-    std::string errs;
-    if (!Json::parseFromStream(readerBuilder, jsonStream, &dataMetaInfo, &errs)) {
-        LOG_FATAL("Failed to parse JSON: %s", errs.c_str());
-        return -1; // JSON parse error
-    }
+    coder_json blockMetaCoder;
+
+    blockMetaCoder.decoder(buffer + dataOffset, dataMetaLength, dataMetaInfo);
     dataOffset += dataMetaLength;
 
     // Unserialize meta checksum

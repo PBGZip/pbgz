@@ -142,7 +142,7 @@ public:
         return metaData;
     }
 
-    Json::Value getMetaData(const std::string& key) {
+    Json::Value getMetaData(const std::string& key) const {
         return metaData[key];
     }
 
@@ -154,7 +154,7 @@ public:
         return blockType;   
     }
 
-    PbgzFileMeta():blockType(FILE_META), metaLength(0) {
+    PbgzFileMeta():blockType(FILE_META) {
         metaData.clear();
         metaChecksum = 0;
     }
@@ -165,7 +165,6 @@ public:
 
 private:
     PbgzBlockType blockType;   // Block type
-    uint32_t metaLength; // Length of meta data
     Json::Value metaData; // Meta information in JSON format
     uint64_t metaChecksum; // Checksum for meta data
 };

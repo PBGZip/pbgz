@@ -87,7 +87,6 @@ public:
     /* 编码完成后需要调用它将缓存中的数据压缩 */
     void encode_flush()
     {
-        int32_t i;
         if (io->m != coder_io::MENC || flushed)
             return;
         Ppmd8_EncodeSymbol(&ppmd, -1); /* EndMark */

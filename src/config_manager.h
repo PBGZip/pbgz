@@ -1,6 +1,7 @@
 #pragma once
 
 #include "log/logger.h"
+#include "pbgz_types.h"
 
 class ConfigManager{
 
@@ -9,7 +10,11 @@ public:
 
     LogAppender getLogAppender();
 
+    void init(PbgzParameter& para);
+
     static ConfigManager& getInstance();
+
+    std::string& getLogFileName();
 
 private:
     ConfigManager();
@@ -20,11 +25,6 @@ private:
     LogLevel logLevel;
     LogAppender logAppender;
     std::string logFile;
-    uint32_t maxLogFileSize;
-    std::string logIpAddress;
-    uint16_t logPort;
-    std::string logUrl;
-    int runMode;   // 运行模式，Debug/Release
 };
 
 

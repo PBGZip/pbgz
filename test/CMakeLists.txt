@@ -4,6 +4,8 @@ project(pbgz_test)
 # Add cmake directory to module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+set(CMAKE_BUILD_TYPE "Debug")
+
 # Include build options
 include(BuildOptions)
 
@@ -24,8 +26,7 @@ file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp
 
 list(REMOVE_ITEM PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
-set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/farmhash/src/farmhash.cc
-                      ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
+set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
 
 # 添加主测试文件
 set(TEST_MAIN ${CMAKE_CURRENT_SOURCE_DIR}/pbgz_test_main.cpp)
@@ -39,7 +40,6 @@ include_directories(${CMAKE_SOURCE_DIR}/src/log)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/jsoncpp/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/zstd/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/googletest/googletest/include)
-include_directories(${CMAKE_SOURCE_DIR}/3rd_party/farmhash/src)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/md5sum)
 
 # Link to libraries - Add PRIVATE keyword to match style with CoreServices linkage

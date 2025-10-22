@@ -28,6 +28,15 @@ public:
     }
 
     /*
+     * 将元素加入队列, 不带阻塞
+     **/
+    void pushForce(const T &item) {
+        std::unique_lock<std::mutex> lock(mutex);
+        dataQueue.push(std::move(item));
+        conditonVar.notify_one();
+    }
+
+    /*
      * 从队列中弹出一个元素,如果队列为空就阻塞
      **/
     T get() {
@@ -35,6 +44,7 @@ public:
         conditonVar.wait(lock, [this]{return !this->dataQueue.empty();});
         T value = std::move(dataQueue.front());
         dataQueue.pop();
+        conditonVar.notify_one();
         return value;
     }
 
@@ -44,6 +54,13 @@ public:
     bool empty() {
         std::lock_guard<std::mutex> lock(mutex);
         return dataQueue.empty();
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex);
+        while(!dataQueue.empty()) {
+            dataQueue.pop();
+        }
     }
 
     /*

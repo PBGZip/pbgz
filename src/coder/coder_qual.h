@@ -21,7 +21,6 @@ class coder_qual
 public:
     coder_qual(coder_io *io, bool is_gen2, const std::vector<std::pair<uint16_t, uint16_t>> &qual_freq_table)
     {
-        uint32_t n;
         flushed = false;
         this->is_gen2 = is_gen2;
 
@@ -98,8 +97,7 @@ public:
     }
 
     void encode_qual_gen2(uint8_t *seq, uint8_t *qual, uint32_t len) {
-        int32_t delta = 5;
-        int32_t i, next_s = 1 + s_ctx_len/2;
+        uint32_t i, next_s = 1 + s_ctx_len/2;
         uint32_t s_prev_ctx = 0, q_prev_ctx = 0, ctx = 0;
         uint64_t tot_qual = 0; /* 当前行的质量数和 */
         uint32_t sse_ctx_cur = 0;
@@ -140,10 +138,10 @@ public:
     }
 
     void encode_qual_gen3(uint8_t *seq, uint8_t *qual, uint32_t len) {
-        int32_t delta = 5;
-        int32_t i, next_s = 1 + s_ctx_len/2;
+        // int32_t delta = 5;
+        uint32_t i, next_s = 1 + s_ctx_len / 2;
         uint32_t s_prev_ctx = 0, q_prev_ctx = 0, ctx = 0;
-        uint64_t tot_qual = 0; // 当前行的质量数和
+        // uint64_t tot_qual = 0; // 当前行的质量数和
         uint32_t sse_ctx_cur = 0;
 
         // Get first context
@@ -176,11 +174,11 @@ public:
     }
 
     void decode_qual_gen2(uint8_t *seq, uint8_t *qual, uint32_t len) {
-        uint32_t last = 0;
-        int32_t i;
-        int32_t delta = 5;
-        int32_t q1 = 0, q2 = 0;
-        int32_t next_s = 1 + s_ctx_len/2;
+        // uint32_t last = 0;
+        uint32_t i;
+        // int32_t delta = 5;
+        //int32_t q1 = 0, q2 = 0;
+        uint32_t next_s = 1 + s_ctx_len/2;
         uint32_t s_prev_ctx = 0, q_prev_ctx = 0, ctx = 0;
         uint64_t tot_qual = 0;
 
@@ -219,20 +217,20 @@ public:
 
             qual[i] = q + '!';
 
-            q2 = q1;
-            q1 = q;
+            // q2 = q1;
+            // q1 = q;
 
         }
     }
 
     void decode_qual_gen3(uint8_t *seq, uint8_t *qual, uint32_t len) {
-        uint32_t last = 0;
-        int32_t i;
-        int32_t delta = 5;
-        int32_t q1 = 0, q2 = 0;
-        int32_t next_s = 1 + s_ctx_len/2;
+        // uint32_t last = 0;
+        uint32_t i;
+        //  int32_t delta = 5;
+        // int32_t q1 = 0, q2 = 0;
+        uint32_t next_s = 1 + s_ctx_len / 2;
         uint32_t s_prev_ctx = 0, q_prev_ctx = 0, ctx = 0;
-        uint64_t tot_qual = 0;
+        // uint64_t tot_qual = 0;
         uint32_t sse_ctx_cur = 0;
 
         for (i = 0; i < next_s; i++) {
@@ -261,8 +259,8 @@ public:
 
             qual[i] = q + '!';
 
-            q2 = q1;
-            q1 = q;
+            // q2 = q1;
+            // q1 = q;
 
         }
     }

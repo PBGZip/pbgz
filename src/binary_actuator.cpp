@@ -35,12 +35,12 @@ int32_t BinaryActuator::compress() {
 
     // 压缩meta信息
     coder_json metaCoder;
-    uint32_t metaLength = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
+    int64_t metaLength = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
     if (metaLength < 0) {
         LOG_ERROR("Failed to compress meta information");
         return -1;
     }
-    outBlockPtr->setMetaLen(metaLength);
+    outBlockPtr->setMetaLen((uint32_t)metaLength);
     return 0;
 }
 
