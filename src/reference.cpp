@@ -86,7 +86,7 @@ bool Reference::initSquashByNiFile() {
     // ¶ÁÈ¡Ä§Êý
     int64_t readLen = niReader.readIO(buffer, PBGZ_FILE_MAGIC.length());
     int64_t buffOffset = readLen;
-    if (readLen != PBGZ_FILE_MAGIC.length() || 0 != memcmp(PBGZ_FILE_MAGIC.c_str(), buffer, PBGZ_FILE_MAGIC.length())) {
+    if (readLen != (int64_t)PBGZ_FILE_MAGIC.length() || 0 != memcmp(PBGZ_FILE_MAGIC.c_str(), buffer, PBGZ_FILE_MAGIC.length())) {
         LOG_ERROR("ni file format error in file magic header.");
         return false;
     }
@@ -614,9 +614,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
 
         tpools.push_back(std::thread([p, current, offset_start, hbuckets, hmask, &bhash_start,
                                       &bg_step, &bg_len, &actg_stretch_tab, &hb_cnt, &slocks, pnn]() {
-            uint32_t len_hash = 0, len_bucket = 0;
             int64_t n = 0, m = 0;
-            uint8_t current_cnt;
             uint8_t *s = p;
             uint32_t kpos = bg_len >> 1;
             int64_t align4 = bg_len >> 2 << 2;
@@ -723,7 +721,7 @@ void Reference::makeIndexCalcHashTableSize(HashTable& hashTable) {
         std::pair<std::pair<uint32_t *, uint32_t>, uint32_t> &hash_buffer = hashTable[n];
         tpools.push_back(std::thread([p, current, &hash_buffer]() {
             int64_t len_hash = 0, len_bucket = 0;
-            int64_t n = 0, m = 0;
+            int64_t n = 0;
             uint32_t current_cnt;
 
             for (n = 0; n < current; n++) {
@@ -820,13 +818,10 @@ void Reference::makeIndexBuildHashTable(const BaseGroupHash* bgHash, uint32_t* &
     uint32_t *phbuffStart, id;
     std::vector<std::thread> tpools;
     uint32_t *hb_cnt = hashBucketCnt;
-    int64_t each, current, remain, total;
     int64_t n, pcnt = this->parallel;
     uint32_t *hb_curpos = hashBucketCurPos;
 
-    total = (refGeneSquashlen << 2) / baseGroupStep;
-    each = total / pcnt;
-    remain = (total - (each * pcnt));
+    int64_t total = (refGeneSquashlen << 2) / baseGroupStep;
     const BaseGroupHash *h = (BaseGroupHash*)bgHash;
     phbuffStart = hashTableBuffer;
 
@@ -883,7 +878,7 @@ void Reference::makeIndexSortHashTable() {
         current = (n + 1 == pcnt) ? (each + remain) : each;
         tpools.push_back(std::thread([phb_buff, current, phb_buff_start, &phb_cnt_start, offset]() {
             uint32_t current_cnt;
-            uint32_t n, m, *p;
+            uint32_t n, *p;
             uint32_t *pstart = phb_buff_start;
 
             for (n = 0; n < current; n++) {

@@ -23,13 +23,15 @@
 
 #include "pbgz_file_wrapper.h"
 #include "log/logger.h"
+#include "coder_json.h"
 
-// 256MB read buffer size
-const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 256 * 1024 * 1024; 
+// buffer作为临时存储，用于解析meta等信息，不用太大
+const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 16 * 1024 * 1024;
 
 uint8_t* PbgzFileReader::getFileReadBuffer(){
     thread_local static uint8_t* pReadBuffer = nullptr;
     if (!pReadBuffer) {
+        
         pReadBuffer = new uint8_t[PBGZ_FILE_READ_BUFFER_LENGTH];
         if (!pReadBuffer) {
             LOG_ERROR("Failed to allocate memory for read buffer.");
@@ -55,78 +57,76 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return -1; 
     }
 
+    PbgzFileHeader header;
     // Read the magic value, 4 byte
     size_t readLen = 0;
     // If isCheckMagic is true, we will not read the magic value again
-    if (isCheckMagic) {
-        memcpy(pReadBuffer, PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH);
-    } else {
+    if (!isCheckMagic) {
         readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_MAGIC_LENGTH);
         if (readLen !=  PBGZ_FILE_MAGIC_LENGTH) {
             LOG_ERROR("Failed to read file header from io, readLen=%d", readLen);
             return -1; // File read error
         }
-
         if (memcmp(pReadBuffer, PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH) != 0) {
             // 安照16进制打印，自行解析
             LOG_ERROR("IO is not a valid pbgz format, magic no is %X", (uint32_t)(*(uint32_t*)pReadBuffer));
             return -1; // Invalid magic
         }
     }
+    header.setBlockType(FILE_HEADER);
 
     // Read the version number, 3 byte
-    readLen = ioReader->readIO(pReadBuffer + PBGZ_FILE_MAGIC_LENGTH, PBGZ_FILE_VERSION_LENGTH);
+    readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_VERSION_LENGTH);
     if (readLen != PBGZ_FILE_VERSION_LENGTH) {
         LOG_ERROR("Failed to read file version from IO");
         return -1; // File read error
     }   
-
-    PbgzFileHeader header;
-    header.unserialize(reinterpret_cast<uint8_t*>(pReadBuffer), PBGZ_FILE_MAGIC_LENGTH + PBGZ_FILE_VERSION_LENGTH);
+    // Unserialize version
+    header.setVersion(pReadBuffer + PBGZ_FILE_MAGIC_LENGTH, PBGZ_FILE_VERSION_LENGTH);
     fileHeaderMap[++currentFileIndex] = header; 
 
     // Read file meta information
+    PbgzFileMeta fileMeta;
     // read file meta magic
     readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH);
     if (readLen == 0) {
         LOG_INFO("No file meta information found in IO");
         return 0; // No file meta information, not an error
     }
-
     if (readLen != PBGZ_FILE_META_MAGIC_LENGTH) {
         LOG_ERROR("IO is not a valid pbgz file.");
         return -1;
     }
-
     if (0 != memcmp(pReadBuffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH)) {
         LOG_ERROR("IO is not a valid pbgz format, file meta magic no is %X, expect %X", 
             (*(uint32_t*)pReadBuffer), PBGZ_FILE_META_MAGIC);
         return -1;
     }
+    fileMeta.setBlockType(FILE_META);
 
     // read file meta length
-    readLen = ioReader->readIO(pReadBuffer + PBGZ_FILE_META_MAGIC_LENGTH, PBGZ_FILE_META_SIZE_LENGTH);
+    readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_SIZE_LENGTH);
     if (readLen != PBGZ_FILE_META_SIZE_LENGTH) {
         LOG_ERROR("Failed to read file meta length from IO.");
         return -1; // File read error       
     }
-    const uint32_t metaLength = (uint32_t)(*(uint32_t*)(pReadBuffer + PBGZ_FILE_META_MAGIC_LENGTH));
+    const uint32_t metaLength = (uint32_t)(*(uint32_t*)(pReadBuffer));
 
-    // read the rest of the meta data and checksum
-    readLen = ioReader->readIO(pReadBuffer + PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH, metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH);
-    if (readLen != metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH) {
+    // read the the meta data 
+    readLen = ioReader->readIO(pReadBuffer, metaLength);
+    if (readLen != metaLength) {
         LOG_ERROR("Failed to read file meta data from IO.");
         return -1; // File read error   
     }
+    coder_json fileMetaCoder;
+    fileMetaCoder.decoder(pReadBuffer, metaLength, fileMeta.getMetaData());
 
-    PbgzFileMeta fileMeta;
-    // file meta 的总长度：maigic头（4）+ metaLength（4）+ metaData + checksum（8）
-    uint32_t fileMetaDataLength = PBGZ_FILE_META_MAGIC_LENGTH + PBGZ_FILE_META_SIZE_LENGTH + metaLength + PBGZ_FILE_META_CHECKSUM_LENGTH;
-    int ret = fileMeta.unserialize(pReadBuffer, fileMetaDataLength);
-    if (ret != 0) {
-        LOG_ERROR("Failed to unserialize file meta data from IO.");
-        return -1; // Unserialization error
+    readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_CHECKSUM_LENGTH);
+    if (readLen != PBGZ_FILE_META_CHECKSUM_LENGTH) {
+        LOG_ERROR("Failed to read file meta data from IO.");
+        return -1; // File read error   
     }
+    fileMeta.setMetaChecksum(*(uint64_t*)pReadBuffer);
 
     // 保持和header相同的序列号
     fileMetaMap[currentFileIndex] = fileMeta;
@@ -210,74 +210,64 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
         }
         return -1; // Invalid magic
     }
+    dataBlock.setBlockType(FILE_DATA);
 
-    uint32_t offset = PBGZ_DATA_BLOCK_MAGIC_LENGTH;
     // Read the meta length, 4byte
-    readLen = ioReader->readIO(pReadBuffer + offset, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
+    readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_META_SIZE_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block meta size.");
         return -1; // File read error           
     }
-
-    uint32_t metaLength = (uint32_t)(*(uint32_t*)(pReadBuffer + PBGZ_DATA_BLOCK_MAGIC_LENGTH));
+    uint32_t metaLength = (uint32_t)(*(uint32_t*)pReadBuffer);
     if (metaLength == 0) {
         LOG_ERROR("Meta length is zero, invalid data block.");
         return -1; // Invalid meta length       
     }
-    offset += PBGZ_DATA_BLOCK_META_SIZE_LENGTH;
-
     // Read the meta data
-    readLen = ioReader->readIO(pReadBuffer + offset, metaLength);
+    readLen = ioReader->readIO(pReadBuffer, metaLength);
     if (readLen != metaLength) {
         LOG_ERROR("Failed to read PBGZ data block meta data."); 
         return -1; // File read error   
     }
-    offset += metaLength;
-
+    coder_json blockMetaCoder;
+    blockMetaCoder.decoder(pReadBuffer, metaLength, dataBlock.getMetaData());
+   
     // Read the meta checksum, 8byte
-    readLen = ioReader->readIO(pReadBuffer + offset , PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
+    readLen = ioReader->readIO(pReadBuffer , PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block meta checksum.");
         return -1; // File read error
     }
-    offset += PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH;
+    dataBlock.setMetaCheckSum(*(uint64_t*)pReadBuffer);
 
     // Read the data length, 4byte
-    readLen = ioReader->readIO(pReadBuffer + offset, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
+    readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block data length.");
         return -1; // File read error
     }   
-    
-    uint32_t dataLength = (uint32_t)(*(uint32_t*)(pReadBuffer + offset));
+    uint32_t dataLength = (uint32_t)(*(uint32_t*)(pReadBuffer));
     if (dataLength == 0) {
         LOG_ERROR("Data length is zero, invalid data block.");  
         return -1; // Invalid data length
     }
+    dataBlock.setDataLength(dataLength);
 
     // Read the block data
-    offset += PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH;
-    readLen = ioReader->readIO(pReadBuffer + offset, dataLength);
+    // PbgzDataBlock的数据存放不是自己申请的内存, 地址是外部传入的，减少拷贝
+    readLen = ioReader->readIO(dataBlock.getDataPtr(), dataLength);
     if (readLen != dataLength) {
         LOG_ERROR("Failed to read PBGZ data block data.");
         return -1; // File read error
     }
 
     // Read the data block checksum, 8byte
-    offset += dataLength;
-    readLen = ioReader->readIO(pReadBuffer + offset, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
+    readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block checksum.");
         return -1; // File read error
     }
-
-    // Unserialize the data block
-    int ret = dataBlock.unserialize(pReadBuffer, offset + PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
-    if (ret != 0) {
-        LOG_ERROR("Failed to unserialize PBGZ data block.");
-        return -1; // Unserialization error 
-    }
-        
+    dataBlock.setDataCheckSum(*(uint64_t*)pReadBuffer);
     return 0;
 }   
 
@@ -311,26 +301,16 @@ int32_t PbgzFileWriter::close(){
 }
 
 int32_t PbgzFileWriter::initFileHead() {
-     if (!ioWriter) {
+    if (!ioWriter) {
         LOG_ERROR("IO is not open.");
         return -1; // File not open
     }
 
-    uint8_t* pWriteBuffer = getFileWriteBuffer();
-    if (!pWriteBuffer) {
-        LOG_ERROR("Failed to get write buffer.");
-        return -1; // Memory allocation error   
-    }
+    // Serialize block type, 4 byte without '\0'
+    ioWriter->writeIO(PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH);
+    // Serialize version
+    ioWriter->writeIO(fileHeader.getVerion(), PBGZ_FILE_VERSION_LENGTH);
 
-    uint32_t dataLength = 0;
-    // Serialize the file header to the write buffer
-    fileHeader.serialize(pWriteBuffer, PBGZ_FILE_READ_BUFFER_LENGTH, dataLength);
-    if (dataLength == 0) {
-        LOG_ERROR("Failed to serialize file header.");
-        return -1; // Serialization error
-    }
-
-    ioWriter->writeIO(pWriteBuffer, dataLength);
     return 0;
 }
 
@@ -340,26 +320,24 @@ int32_t PbgzFileWriter::writeFileMeta() {
         return -1; // File not open
     }
 
-    uint8_t* pWriteBuffer = getFileWriteBuffer();
-    if (!pWriteBuffer) {
-        LOG_ERROR("Failed to get write buffer.");
-        return -1; // Memory allocation error
-    }
+    coder_json fileMetaCoder;
+    std::string fileMetaEncodeStr;
+    fileMetaCoder.encoder(fileMeta.getMetaData(), fileMetaEncodeStr);
+    uint32_t metaLength = fileMetaEncodeStr.length();
 
-    uint32_t dataLength = 0;
-    // Serialize the file meta to the write buffer
-    int32_t ret = fileMeta.serialize(pWriteBuffer, PBGZ_FILE_READ_BUFFER_LENGTH, dataLength);
-    if (ret != 0) {
-        LOG_ERROR("Failed to serialize file meta.");
-        return -1; // Serialization error
-    }
+    // write block type
+    ioWriter->writeIO(&PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH);
 
-    if (dataLength == 0) {
-        LOG_ERROR("No data to serialize file meta.");
-        return 0; // No data to write
-    }
+    // write meta data length
+    ioWriter->writeIO( &metaLength, PBGZ_FILE_META_SIZE_LENGTH);
 
-    ioWriter->writeIO(pWriteBuffer, dataLength);
+    // write meta data
+    ioWriter->writeIO(fileMetaEncodeStr.c_str(), metaLength);
+
+    // write checksum
+    uint64_t checksum = fileMeta.getMetaChecksum();
+    ioWriter->writeIO(&checksum, PBGZ_FILE_META_CHECKSUM_LENGTH);
+
     return 0;
 }
 
@@ -374,20 +352,37 @@ int32_t PbgzFileWriter::writeBlockData(PbgzDataBlock& dataBlock) {
         LOG_ERROR("Failed to get write buffer.");
         return -1; // Memory allocation error
     }
+    
+    // Write block type
+    ioWriter->writeIO(&PBGZ_DATA_BLOCK_MAGIC, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
 
-    uint32_t dataLength = 0;
-    int32_t ret = dataBlock.serialize(pWriteBuffer, PBGZ_FILE_READ_BUFFER_LENGTH, dataLength);
-    if (ret != 0) {
-        LOG_ERROR("Failed to serialize block data.");
-        return -1; // Serialization error
+    // Write meta length
+    coder_json blockMetaCoder;
+    std::string blockMetaOut;
+    blockMetaCoder.encoder(dataBlock.getMetaData(), blockMetaOut);
+    uint32_t dataMetaLength = blockMetaOut.length();
+    ioWriter->writeIO(&dataMetaLength, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
+    
+    // Write meta data
+    ioWriter->writeIO(blockMetaOut.c_str(), dataMetaLength);
+
+    // Write meta checksum
+    uint64_t checksum = dataBlock.getMetaCheckSum();
+    ioWriter->writeIO(&checksum, PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
+
+    // Serialize data length
+    uint32_t blockDataLength = dataBlock.getDataLength();
+    ioWriter->writeIO(&blockDataLength, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
+
+    // Write block data
+    void* pBlockData = dataBlock.getDataPtr();
+    if (pBlockData && blockDataLength > 0) {
+        ioWriter->writeIO(pBlockData, blockDataLength);
     }
 
-    if (dataLength == 0) {
-        LOG_ERROR("No data to serialize block data.");
-        return 0; // No data to write
-    }
-
-    ioWriter->writeIO(pWriteBuffer, dataLength);
+    // Write checksums
+    uint64_t dataChecksum = dataBlock.getDataCheckSum();
+    ioWriter->writeIO(&dataChecksum, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
     
     return 0;
 }

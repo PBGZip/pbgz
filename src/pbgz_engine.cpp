@@ -32,6 +32,7 @@
 #include "utils/path_util.h"
 #include "coder_ppmd.h"
 #include "coder_json.h"
+#include "config_manager.h"
 
 int PbgzEngine::init() {
     // 注册coder需要的注册函数
@@ -47,9 +48,10 @@ int PbgzEngine::init() {
     freeOutputPool.setCapility(parameter.threadNum << 1);
     outputDataPool.setCapility(parameter.threadNum << 1);
 
+    uint32_t blockBufferSize = ConfigManager::getInstance().getBlockSizeByCompressLevel(parameter.compressLevel);
     // 首先往空闲队列压入空的block
     for (uint32_t i = 0; i < freeInputPool.getCapility(); ++i) {
-        RoughIOBlock* inPtr = new RoughIOBlock();
+        RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
         if (inPtr == nullptr) {
             LOG_ERROR("PbgzEngine init failed.");
             return -1;
@@ -58,7 +60,7 @@ int PbgzEngine::init() {
     }
 
     for (uint32_t j = 0; j < freeOutputPool.getCapility(); ++j) {
-        RoughIOBlock* outPtr = new RoughIOBlock();
+        RoughIOBlock* outPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
         if (outPtr == nullptr) {
             LOG_ERROR("PbgzEngine init failed.");
             return -1;
@@ -194,7 +196,7 @@ int32_t PbgzEngine::startReadTask() {
             LOG_INFO("Init reference for decompress failed");
         }
         fileMeta = pbgzReader->getFileMeta();
-    } else {  // 压缩模式，从非pbgz文件读取内
+    } else {  // 压缩模式，从非pbgz文件读取内容
         blockReader = MemoryUtil::safeNewClass<BlockReader>(ioReader);
     }
 
@@ -214,7 +216,7 @@ int32_t PbgzEngine::startReadTask() {
     do {
         RoughIOBlock* blockPtr = freeInputPool.get();
         if (blockPtr == nullptr) {
-            LOG_ERROR("Get free block failed。");
+            LOG_ERROR("Get free block failed.");
             return -1;
         }
         blockPtr->reset();

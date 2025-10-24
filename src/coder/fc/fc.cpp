@@ -455,11 +455,6 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
     int current;
     for (; tidArray < tidArrayEnd; ) // 循环处理每个tid，即transform的内容
     {
-        // if (((tidArrayEnd - tidArray) & 0xFF) == 0)
-        // {
-        //     current = ((tidArrayEnd - tidArray) * 100) / inputSize;
-        //     fprintf(stderr, "%-s -[%d%%]-\r", "progress", current);
-        // }
         if (coder.is_end())
         {
             return FC_FAILED_ZIP;

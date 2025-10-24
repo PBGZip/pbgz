@@ -29,7 +29,7 @@ typedef struct PbgzParameter{
         isOverwriteOutFile = false;
         isUnpackRef = false;
         threadNum = sysconf(_SC_NPROCESSORS_ONLN);
-        compressLevel = 2;
+        compressLevel = 5;
         isRemoveOriginFile = false;
         logLevel = 6;
     }
