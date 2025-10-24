@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <future>
+#include "unistd.h"
 
 #include "wait.h"
 

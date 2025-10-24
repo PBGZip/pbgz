@@ -6,12 +6,6 @@
 
 class PbgzFileWriteTest : public ::testing::Test {
 public:
-    // Constructor - explicitly noexcept to match base class
-    PbgzFileWriteTest() noexcept = default;
-    
-    // Destructor - explicitly noexcept to match base class
-    ~PbgzFileWriteTest() noexcept override = default;
-
     void SetUp() override { 
         coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
         coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
@@ -25,12 +19,6 @@ public:
 
 class PbgzFileReadTest : public ::testing::Test {
 public:
-    // Constructor - explicitly noexcept to match base class
-    PbgzFileReadTest() noexcept = default;
-    
-    // Destructor - explicitly noexcept to match base class
-    ~PbgzFileReadTest() noexcept override = default;
-
     void SetUp() override { 
         coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
         coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);

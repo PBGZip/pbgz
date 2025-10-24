@@ -15,16 +15,9 @@ namespace BlockWrapperTestData {
 
 class BlockWrapperTest : public ::testing::Test {
 public:
-    // Constructor - explicitly noexcept to match base class
-    BlockWrapperTest() noexcept = default;
-    
-    // Destructor - explicitly noexcept to match base class
-    ~BlockWrapperTest() noexcept override = default;
-
     void SetUp() override { }
 
     void TearDown() override { }
-
 
 };
 
