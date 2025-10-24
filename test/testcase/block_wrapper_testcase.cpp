@@ -6,7 +6,9 @@
 #undef private
 
 namespace BlockWrapperTestData {
+    // 需要先构造一个100行的文件
     const std::string samllFastQFile = "small.fastq";
+    // 需要先构造一个10000行的文件
     const std::string bigFastQFile = "test.fastq";
     const uint32_t MAX_BLOCK_SIZE = 8 << 20;
 

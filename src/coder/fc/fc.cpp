@@ -1089,7 +1089,7 @@ int fc_encode(const unsigned char * input, unsigned char * output, int inputSize
             return result;
         };
         free(model);
-    };
+    }
     return FC_LACK_OF_MEMORY;
 }
 
@@ -1103,6 +1103,7 @@ int fc_decode(const unsigned char * input, unsigned char * output)
         free(model);
 
         return result;
-    };
+    }
     return FC_LACK_OF_MEMORY;
 }
+
