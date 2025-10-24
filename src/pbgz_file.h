@@ -48,7 +48,7 @@ typedef enum {
 } FileFormat;
 
 const uint32_t PBGZ_FILE_MAGIC_LENGTH = 4; // Length of PBGZ file magic value
-const uint32_t PBGZ_FILE_VERSION_LENGTH= 3; // Length of file version number
+const uint32_t PBGZ_FILE_VERSION_LENGTH = 3; // Length of file version number
 
 const uint32_t PBGZ_FILE_META_MAGIC_LENGTH = 4; // Length of PBGZ file meta magic value
 const uint32_t PBGZ_FILE_META_SIZE_LENGTH = 4; // Length of PBGZ file meta information length
@@ -82,17 +82,17 @@ public:
 };
 
 /// @brief PBGZ file header
-class PbgzFileHeader : public Serializable {
+class PbgzFileHeader {
 public:
-    /**
-     * @brief Serialize the file header to a buffer.
-     */
-    int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override ;
+    // /**
+    //  * @brief Serialize the file header to a buffer.
+    //  */
+    // int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override ;
 
-    /**
-     * @brief Deserialize the file header from a buffer.
-     */
-    int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
+    // /**
+    //  * @brief Deserialize the file header from a buffer.
+    //  */
+    // int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
 
     /**
      * @brief Get the version string of the file header.
@@ -104,6 +104,21 @@ public:
      */
     PbgzBlockType getBlockType() const {
         return blockType;
+    }
+
+    void setBlockType(PbgzBlockType type) {
+        blockType = type;
+    }
+
+    uint8_t* getVerion() {
+        return version;
+    }
+
+    void setVersion(uint8_t* buffer, uint32_t size) {
+        if (size != PBGZ_FILE_VERSION_LENGTH) {
+            return;
+        }
+        memcpy(version, buffer, size);
     }
 
     PbgzFileHeader() : blockType(FILE_HEADER) {
@@ -118,17 +133,17 @@ private:
 };
 
 /// @brief PBGZ file meta information
-class PbgzFileMeta : public Serializable{
+class PbgzFileMeta {
 public:
-    /**
-     * @brief Serialize the file meta information to a buffer.
-     */
-    int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override ;
+    // /**
+    //  * @brief Serialize the file meta information to a buffer.
+    //  */
+    // int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override ;
 
-    /**
-     * @brief Unserialize the file meta information from a buffer.
-     */
-    int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
+    // /**
+    //  * @brief Unserialize the file meta information from a buffer.
+    //  */
+    // int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
 
     /**
      * @brief Check if the meta data checksum is valid.
@@ -138,7 +153,11 @@ public:
         return metaChecksum;
     }
 
-    Json::Value getMetaData() const {
+    void setMetaChecksum(uint64_t checksum) {
+        metaChecksum = checksum;
+    }
+
+    Json::Value& getMetaData() {
         return metaData;
     }
 
@@ -154,6 +173,10 @@ public:
         return blockType;   
     }
 
+    void setBlockType(PbgzBlockType type) {
+        blockType = type;
+    }
+ 
     PbgzFileMeta():blockType(FILE_META) {
         metaData.clear();
         metaChecksum = 0;
@@ -171,9 +194,9 @@ private:
 
 
 /// @brief  Pbgz file block data
-class PbgzDataBlock : public Serializable {
+class PbgzDataBlock {
 public:
-    PbgzBlockType getBlockType() const {
+    PbgzBlockType getBlockType() {
         return blockType;
     }
 
@@ -181,19 +204,11 @@ public:
         blockType = type;
     }
 
-    uint32_t getMetaLength() const {
-        return dataMetaLength;
-    }
-
-    void setMetaLength(uint32_t length) {
-        dataMetaLength = length;
-    }
-
-    Json::Value getMetaData() const {
+    Json::Value& getMetaData() {
         return dataMetaInfo;
     }
 
-    Json::Value getMetaData(const std::string &key) const {
+    Json::Value& getMetaData(const std::string &key) {
         return dataMetaInfo[key];
     }
 
@@ -205,7 +220,7 @@ public:
         dataMetaInfo[key] = value;
     }
 
-    uint32_t getDataLength() const {
+    uint32_t getDataLength() {
         return blockDataLength;
     }
 
@@ -213,23 +228,27 @@ public:
         blockDataLength = length;
     }
 
-    const uint8_t* getDataPtr() const {
+    uint8_t* getDataPtr() {
         return pBlockData;
+    }
+
+    void setDataPtr(uint8_t* dataPtr) {
+        pBlockData = dataPtr;
     }
 
     int32_t setBlockData(uint8_t* data, uint32_t length);
 
-    /**
-     * @brief Serialize the data block to a buffer.
-     */
-    int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override;
+    // /**
+    //  * @brief Serialize the data block to a buffer.
+    //  */
+    // int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override;
 
-    /**
-     * @brief Unserialize the data block from a buffer.
-     */
-    int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
+    // /**
+    //  * @brief Unserialize the data block from a buffer.
+    //  */
+    // int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
 
-    PbgzDataBlock():blockType(FILE_DATA), dataMetaLength(0), blockDataLength(0), pBlockData(nullptr){
+    PbgzDataBlock():blockType(FILE_DATA), blockDataLength(0), pBlockData(nullptr){
         dataMetaInfo.clear();
         metaChecksum = 0;
         dataBlockChecksum = 0; 
@@ -237,18 +256,33 @@ public:
 
     virtual ~PbgzDataBlock() {
         dataMetaInfo.clear();
-        // 外部地址，不能在此释放， 反序列化场景，使用后手工释放
+        // 外部地址，不能在此释放
         pBlockData = nullptr;
         
     }
 
     void calcChecksum();
 
+    void setMetaCheckSum(uint64_t checkSum) {
+        metaChecksum = checkSum;
+    }
+
+    void setDataCheckSum(uint64_t checkSum) {
+        dataBlockChecksum = checkSum;
+    }
+
+    uint64_t getMetaCheckSum() {
+        return metaChecksum;
+    }
+
+    uint64_t getDataCheckSum() {
+        return dataBlockChecksum;
+    }
+
     int32_t verifyCheckSum();
 
 private:
     PbgzBlockType blockType;       // block type
-    uint32_t dataMetaLength;       // block meta infomation length
     Json::Value dataMetaInfo;      // block meta infomation
     uint64_t metaChecksum;         // Checksum for meta data
     uint32_t blockDataLength;      // block Data length

@@ -44,11 +44,9 @@ public:
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
         currentFileIndex = -1;  // 初始化文件索引为-1，表示未读取任何文件
         // Implement the read logic for PBGZ file format
-        // This is a placeholder implementation
         if (0 != initFileHeadAndMeta()) {
             throw std::runtime_error("Create PbgzFileReader, load head and meta failed");
         }
-
     }
 
     void close();

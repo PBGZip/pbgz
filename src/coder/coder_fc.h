@@ -48,20 +48,8 @@ public:
     void encode_line(const uint8_t *in, const int32_t in_len, bool need2hold = false)
     {
         check_exit(io->m != coder_io::MENC, coder_ns::CODER_ERR_INNER, "only support block compress, not support line method"); // 暂未扩展成line方式
-        // if (io->m == coder_io::MENC) {
-        //     coder_logger(coder_ns::ERROR, "only support block compress, not support line method");
-        //     return coder_ns::CODER_ERR_INNER;
-        // }
-
         check_exit(in_len > FC_MIN_LEN && in_len < FC_MAX_LEN,  coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, in_len);
-        // if (!(in_len > FC_MIN_LEN && in_len < FC_MAX_LEN)) {
-        //     coder_logger(coder_ns::ERROR, "check failed (%d) : %d", __LINE__, in_len);
-        //     return coder_ns::CODER_ERR_INNER;
-        // }
-
         io->m = coder_io::MENC;
-
-        // fprintf(stderr, "preprocess...");
 
         // 先做pp prehandler
         uint8_t *lout;
@@ -92,7 +80,7 @@ public:
         bool need_alloc = (lzSize + 4096) > in_len;
         if (need_alloc)
         {
-            fc_buff = static_cast<uint8_t*>(safe_alloc(lzSize + 4096));
+            fc_buff = static_cast<uint8_t*>(safe_alloc((lzSize << 1) + 4096));
             check_exit(fc_buff, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Memory not enough");
         }
         else{
@@ -101,7 +89,7 @@ public:
 
         result = fcinit();
         check_exit(FC_OK == result, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d, in_len %d", __LINE__, result, in_len);
-        result = fc_encode(lout, fc_buff + 1, lzSize, lzSize - 1);
+        result = fc_encode(lout, fc_buff + 1, lzSize, (lzSize << 1) - 1);
         check_exit(result >= 0, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d, in_len %d", __LINE__, result, in_len);
         result = (fc_buff[0] = 1, result + 1);
 

@@ -7,6 +7,8 @@
 #include <string>
 #include <string.h>
 
+#include "utils/memory_util.h"
+
 const uint32_t BLOCK_SIZE = 268435456;
 
 typedef enum
@@ -28,16 +30,15 @@ typedef enum
 class RoughIOBlock /* 粗糙的块*/
 {
 public:
-    RoughIOBlock(uint32_t len = BLOCK_SIZE) : bufferSize(len) {
-        this->buffer = static_cast<uint8_t*>(calloc(len, sizeof(int8_t)));
+    RoughIOBlock(uint32_t len = BLOCK_SIZE) {
+        blockSize = len;
+        bufferSize = blockSize * 2; // 多部分空间, 用于解决压缩后变大的问题
+        buffer =  MemoryUtil::safeAlloc<uint8_t>(bufferSize); //static_cast<uint8_t*>(calloc(bufferSize, sizeof(int8_t)));
         reset();
     }
 
     ~RoughIOBlock() {
-        if (buffer) {
-            free(buffer);
-            buffer = nullptr;
-        }
+        MemoryUtil::safeFree(buffer);
     }
 
     void reset() {
@@ -116,11 +117,16 @@ public:
     uint32_t  getTotalDataLen() {
         return dataLen + metaLen;
     }
+
+    uint32_t getBlockSize() {
+        return blockSize;
+    }
     
 private:
     uint8_t *buffer;
     uint32_t bufferSize;             /* buffer的size */
     BlockType blockType;             /* 当前块对应块类型 */
+    uint32_t blockSize;              /* 块大小 */
     std::vector<uint32_t> npos;      /* buffer中换行符的位置，从0开始 */
     int64_t blockId;
     int64_t dataLen;

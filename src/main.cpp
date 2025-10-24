@@ -31,7 +31,7 @@ static PbgzArg pbgzArgs =
     {'r', "reference", required_argument, "<FASTA> specify reference gene file (it's not Mandatory). use for compress/decompress"},
     {'n', "refunpack", no_argument, "unpack reference to pbgz file, so reference gene is needed when decompress"},
     {'t', "threads", required_argument, "<number> specify number of threads, default is CPUS. use for compress/decompress"},
-    {'l', "level", required_argument, "<1-3> specify compress level, default is 2, 1 is fast, 3 is best"},
+    {'l', "level", required_argument, "<1-9> specify compress level, default is 5, 1 is fast, 9 is best"},
     {'e', "remove", no_argument, "if compress succeed, will remove origin file, else this option is invalid. use for compress"},
     {'h', "help",  no_argument, "show help"},
     {'v', "version", no_argument, "show version"},
@@ -220,6 +220,16 @@ int checkParameters(PbgzParameter& para) {
             fprintf(stderr, "no permission to access %s.\n", para.inputFile.c_str());
             return -1;
         }
+    }
+
+    if (para.compressLevel < 1 || para.compressLevel > 9) {
+        fprintf(stderr, "Compress level is invalid.\n");
+        return -1;
+    }
+
+    if (para.logLevel < 1 || para.logLevel > 6) {
+         fprintf(stderr, "Log level is invalid.\n");
+        return -1;
     }
 
     return 0;

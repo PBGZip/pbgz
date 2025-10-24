@@ -91,14 +91,14 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
     }
 
     uint8_t* buffer = blockPtr->getBuffer();
-    size_t bufferSize = blockPtr->getBufferSize();
+    size_t blockSize = blockPtr->getBlockSize();
     size_t totalLen = 0;
 
     blockPtr->setBlockId(blockId++);
 
     // 先将缓存中的数据拷贝到buffer中
     if (cacheLen > 0) {
-        size_t toCopy = (cacheLen < bufferSize) ? cacheLen : bufferSize;
+        size_t toCopy = (cacheLen < blockSize) ? cacheLen : blockSize;
         memcpy(buffer, cache, toCopy);
         totalLen += toCopy;
         cacheLen -= toCopy;
@@ -107,8 +107,8 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         }
     }
 
-    while (totalLen < bufferSize) {
-        size_t readLen = ioReader->readIO(buffer + totalLen, bufferSize - totalLen);
+    while (totalLen < blockSize) {
+        size_t readLen = ioReader->readIO(buffer + totalLen, blockSize - totalLen);
         if (readLen == 0) { 
             break; // EOF
         }
@@ -129,8 +129,7 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         } else {
             if (type == BINARY && (fileType == BAM || fileType == GZIP)) {
                 blockPtr->setBlockType(fileType);
-            }
-            else {
+            } else {
                 blockPtr->setBlockType(type);
             }
         }
@@ -201,6 +200,7 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
     }
 
     PbgzDataBlock pbgzDataBlock;
+    pbgzDataBlock.setDataPtr(blockPtr->getBuffer());
     if (0 != pbgzFileReader->readDataBlock(pbgzDataBlock)) {
         LOG_ERROR("Read Pbgz data block faild.");
         return -1;

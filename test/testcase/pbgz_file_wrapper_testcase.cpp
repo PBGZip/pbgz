@@ -1,7 +1,48 @@
 #include <gtest/gtest.h>
-#include "pbgz_file_wrapper.h"
+#include <coder.h>
 
-TEST(PbgzFileWriteTest, WriteNewFile) {
+#include "pbgz_file_wrapper.h"
+#include "utils/memory_util.h"
+
+class PbgzFileWriteTest : public ::testing::Test {
+public:
+    // Constructor - explicitly noexcept to match base class
+    PbgzFileWriteTest() noexcept = default;
+    
+    // Destructor - explicitly noexcept to match base class
+    ~PbgzFileWriteTest() noexcept override = default;
+
+    void SetUp() override { 
+        coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
+        coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
+        coder_ns::register_free_func(MemoryUtil::safeFree<void>);
+    }
+
+    void TearDown() override { 
+
+    }
+};
+
+class PbgzFileReadTest : public ::testing::Test {
+public:
+    // Constructor - explicitly noexcept to match base class
+    PbgzFileReadTest() noexcept = default;
+    
+    // Destructor - explicitly noexcept to match base class
+    ~PbgzFileReadTest() noexcept override = default;
+
+    void SetUp() override { 
+        coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
+        coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
+        coder_ns::register_free_func(MemoryUtil::safeFree<void>);
+    }
+
+    void TearDown() override { 
+
+    }
+};
+
+TEST_F(PbgzFileWriteTest, WriteNewFile) {
     std::string fileName = "pbgz_write_test.pbgz";
     (void)remove(fileName.c_str());
     IOWriter* iowriter = new FileWriter(fileName);
@@ -13,8 +54,7 @@ TEST(PbgzFileWriteTest, WriteNewFile) {
     delete iowriter;
 }
 
-
-TEST(PbgzFileWriteTest, WriteFileMeta) {
+TEST_F(PbgzFileWriteTest, WriteFileMeta) {
     std::string fileName = "pbgz_write_file_meta_test.pbgz";
     (void)remove(fileName.c_str());
     IOWriter* iowriter = new FileWriter(fileName);
@@ -35,7 +75,7 @@ TEST(PbgzFileWriteTest, WriteFileMeta) {
     delete iowriter;
 }
 
-TEST(PbgzFileWriteTest, WriteBlockData) {
+TEST_F(PbgzFileWriteTest, WriteBlockData) {
     std::string fileName = "pbgz_write_data_block_test.pbgz";
     (void)remove(fileName.c_str());
     IOWriter* iowriter = new FileWriter(fileName);
@@ -65,7 +105,7 @@ TEST(PbgzFileWriteTest, WriteBlockData) {
     
 }
 
-TEST(PbgzFileReadTest, ReadFileMeta) {
+TEST_F(PbgzFileReadTest, ReadFileMeta) {
     std::string fileName = "pbgz_write_file_meta_test.pbgz";
     IOReader* ioreader = new FileReader(fileName);
     ioreader->openIO();
@@ -83,7 +123,7 @@ TEST(PbgzFileReadTest, ReadFileMeta) {
     delete ioreader;
 }
 
-TEST(PbgzFileReadTest, ReadBlockData) {
+TEST_F(PbgzFileReadTest, ReadBlockData) {
     std::string fileName = "pbgz_write_data_block_test.pbgz";
     IOReader* ioreader = new FileReader(fileName);
     ioreader->openIO();
@@ -98,6 +138,8 @@ TEST(PbgzFileReadTest, ReadBlockData) {
     ASSERT_EQ(value["test"].asString(), "value") << "Metadata 'fileTestKey' has incorrect value";
 
     PbgzDataBlock dataBlock;
+    uint8_t readerBuff[2048];
+    dataBlock.setDataPtr(readerBuff);
     EXPECT_EQ(reader.readDataBlock(dataBlock), 0) << "Failed to read data block";
     EXPECT_EQ(dataBlock.getBlockType(), FILE_DATA) << "Invalid block type";
     value = dataBlock.getMetaData("metaTestKey");
