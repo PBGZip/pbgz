@@ -232,6 +232,13 @@ int checkParameters(PbgzParameter& para) {
         return -1;
     }
 
+    if (!para.referenceGenic.empty()) {
+        if (!PathUtil::fileExists(para.referenceGenic)) {
+            fprintf(stderr, "Reference genic(%s) is not exists.\n", para.referenceGenic.c_str());
+            return -1;
+        }
+    }
+
     return 0;
 }
 

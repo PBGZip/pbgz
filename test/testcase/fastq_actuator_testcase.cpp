@@ -23,7 +23,7 @@ namespace FastqTestData {
 
 class FastQActuatorTest : public ::testing::Test {
 public:
-    // 为测试准备数�?对象
+    // 为测试准备数据对象
 	void SetUp() override {
 		pInBlock = new RoughIOBlock(FastqTestData::MAX_BLOCK_SIZE);
         pOutBlock = new RoughIOBlock(FastqTestData::MAX_BLOCK_SIZE);
