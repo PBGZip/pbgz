@@ -47,6 +47,7 @@ target_link_libraries(pbgz_test PRIVATE
     pbgz_coder
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
     ${THIRDPARTY_DIR}/release/zstd/lib/libzstd.a
+    pthread
 )
 
 add_subdirectory(googletest)

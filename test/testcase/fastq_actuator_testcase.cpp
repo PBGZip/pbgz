@@ -23,13 +23,7 @@ namespace FastqTestData {
 
 class FastQActuatorTest : public ::testing::Test {
 public:
-    // Constructor - explicitly noexcept to match base class
-    FastQActuatorTest() noexcept = default;
-    
-    // Destructor - explicitly noexcept to match base class
-    ~FastQActuatorTest() noexcept override = default;
-    
-    // 为测试准备数据对象
+    // 为测试准备数�?对象
 	void SetUp() override {
 		pInBlock = new RoughIOBlock(FastqTestData::MAX_BLOCK_SIZE);
         pOutBlock = new RoughIOBlock(FastqTestData::MAX_BLOCK_SIZE);

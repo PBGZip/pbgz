@@ -29,6 +29,7 @@ See also the bsc and libbsc web site:
   http://libbsc.com/ for more information.
 
 --*/
+#include <cstdlib>
 
 #include "fc_header.h"
 #include "libsais.h"
