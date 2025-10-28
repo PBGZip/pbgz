@@ -589,12 +589,13 @@ int32_t FastqActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Json::V
     int32_t currLen = 0;
     srcDataLen = 0;   // 源内容的总长度
     for (uint32_t idx = 0; idx < inBlockPtr->getNpos().size(); idx += 4) {
+        uint32_t splitStep = (idx / 4) * idSplitSymbols.size();
         if (splitSymIdx == 0) {
             data = inBlockPtr->getBuffer() + currLineOffset;
-            currLen =  idPositions[splitSymIdx + idx] + 1;  //  currIdPos;  
+            currLen =  idPositions[splitSymIdx + splitStep] + 1;  //  currIdPos;  
         } else {
-            data = inBlockPtr->getBuffer() + currLineOffset + idPositions[splitSymIdx + idx - 1] + 1;
-            currLen = idPositions[splitSymIdx + idx] - idPositions[splitSymIdx + idx - 1];
+            data = inBlockPtr->getBuffer() + currLineOffset + idPositions[splitSymIdx + splitStep - 1] + 1;
+            currLen = idPositions[splitSymIdx + splitStep] - idPositions[splitSymIdx + splitStep - 1];
         }
 
         idCoder->encode_line(data, currLen);
