@@ -944,6 +944,9 @@ const uint32_t* Reference::queryPosition(const uint32_t &hash, uint32_t &length)
 }
 
 void Reference::updateMatchedGene(uint64_t actgPos, uint32_t matchLength) {
+    if (matchLength == 0) {
+        return;
+    }
     uint64_t sposStart = actgPos >> 2;
     uint64_t sposEnd = (actgPos + matchLength - 1) >> 2;
     memset(refGeneSquashMatched + sposStart, 1, sposEnd - sposStart + 1);

@@ -426,10 +426,20 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
             }
 
             loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
-
+            /* 安全检查：确保 loffset 不会导致无效指针 */
+            if (loffset > mt[align4_curr].squashBufferLen[match_pair]) {
+                continue; // 跳过无效偏移
+            }
             /* caculate unmatch count */
             psquash = mt[align4_curr].getSquash(match_pair) - loffset;
+            if (psquash < baseSquashBuffer[0] || psquash >= baseSquashBuffer[0] + base_squash_align4) {
+                continue;
+            }
+
             psquash_refe = prefe_squash + match_pos - loffset;
+            if (psquash_refe < prefe_squash || psquash_refe >= prefe_squash + refe_squashlen) {
+                continue;
+            }
 
             xsquash_match = ((*((uint64_t *)(mt[align4_curr].getSquash(match_pair)))) & xsquash_tab[match_pair]);
             xsquash_macth_refe = ((*((uint64_t *)(prefe_squash + match_pos))) & xsquash_tab[match_pair]);
@@ -495,9 +505,23 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
                 }
 
                 loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
+                
+                /* 安全检查：确保 loffset 不会导致无效指针 */
+                if (loffset > mt[align4_curr].squashBufferLen[match_pair]) {
+                    continue; // 跳过无效偏移
+                }
+                
                 /* caculate unmatch count */
                 psquash = mt[align4_curr].getSquash(match_pair) - loffset;
                 psquash_refe = prefe_squash + match_pos - loffset;
+
+                /* 安全检查：确保指针在有效范围内 */
+                if (psquash < baseSquashBuffer[0] || psquash >= baseSquashBuffer[0] + base_squash_align4) {
+                    continue;
+                }
+                if (psquash_refe < prefe_squash || psquash_refe >= prefe_squash + refe_squashlen) {
+                    continue;
+                }
 
                 xsquash_match = ((*((uint64_t *)(mt[align4_curr].getSquash(match_pair)))) & xsquash_tab[match_pair]);
                 xsquash_macth_refe = ((*((uint64_t *)(prefe_squash + match_pos))) & xsquash_tab[match_pair]);
@@ -751,7 +775,7 @@ int32_t FastqActuator::compressBaseWithRef() {
     std::shared_ptr<coder_io> matchIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder_bwt_cm> matchCm = std::make_shared<coder_bwt_cm>(matchIo.get());
     int64_t srcLen = 0;
-    for (uint32_t i = 1; i < line; i+= 4) {
+    for (uint32_t i = 1; i < line; i += 4) {
         uint32_t endPos = inBlockPtr->getNpos()[i];
         uint32_t startPos = inBlockPtr->getNpos()[i - 1] + 1;
         uint8_t* pBuff = baseStripNBuffer;
@@ -1395,10 +1419,12 @@ int32_t FastqActuator::decompress() {
 
                 /* 解压当前base行的mapping流 */
                 uint32_t stripNLength = actualBaseLen - ncntCurrLine;
-                uint32_t decoderLen = baseDecoder->decode_line(baseStripNBuffer, stripNLength, UINT8_MAX, false);
-                if (stripNLength != decoderLen) {
-                    LOG_ERROR("base decode failed in block %llu, expect len %u, actual %u", meta["block_id"].asInt64(), stripNLength, decoderLen);
-                    return -1;
+                if (stripNLength > 0) {
+                    uint32_t decoderLen = baseDecoder->decode_line(baseStripNBuffer, stripNLength, UINT8_MAX, false);
+                    if (stripNLength != decoderLen) {
+                        LOG_ERROR("base decode failed in block %llu, expect len %u, actual %u", meta["block_id"].asInt64(), stripNLength, decoderLen);
+                        return -1;
+                    }
                 }
                 uint8_t* pdata;
                 if (2 == baseMappedPairBuffer[baseLines]) {

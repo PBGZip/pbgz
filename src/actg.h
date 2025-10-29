@@ -93,14 +93,33 @@ static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t
 /* 求squash后的actg不同碱基的个数，如01001011与01101110的个数为3 */
 static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len)
 {
+    // 添加安全检查
+    if (s1 == nullptr || s2 == nullptr) {
+        return 0;
+    }
+    
+    if (len == 0) {
+        return 0;
+    }
+    
     uint8_t x8;
     uint64_t x64;
     uint32_t cnt = 0, n, next;
     uint32_t align8 = len >> 3 << 3;
     for (n = 0, next = 8; next < align8; n += 8) {
-        x64 = (*((uint64_t *)(s1 + n))) ^ (*((uint64_t *)(s2 + n)));
-        x64 = (x64 & 0x5555555555555555) | ((x64 >> 1) & 0x5555555555555555);
-        cnt += std::bitset<64>{x64}.count();
+        // 检查内存对齐和边界
+        if (((uintptr_t)(s1 + n) & 0x7) == 0 && ((uintptr_t)(s2 + n) & 0x7) == 0) {
+            x64 = (*((uint64_t *)(s1 + n))) ^ (*((uint64_t *)(s2 + n)));
+            x64 = (x64 & 0x5555555555555555) | ((x64 >> 1) & 0x5555555555555555);
+            cnt += std::bitset<64>{x64}.count();
+        } else {
+            // 如果没有对齐，使用字节方式处理
+            for (uint32_t i = 0; i < 8; i++) {
+                x8 = (*(s1 + n + i)) ^ (*(s2 + n + i));
+                x8 = (x8 & 0x55) | ((x8 >> 1) & 0x55);
+                cnt += std::bitset<8>{x8}.count();
+            }
+        }
         next += 8;
     }
 
