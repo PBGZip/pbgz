@@ -142,7 +142,7 @@ int32_t FileWriter::openIO() {
 }
 
 void FileWriter::closeIO() {
-        // 退出前将数据强制刷新
+        // Force flush data before exit
         msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
         ftruncate(fo.fd, fo.fileSize);
         return fo.closeIO();
@@ -166,16 +166,16 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
 
     size_t newSize = fo.fileSize + writeLen;
     if (newSize > mapSize) {
-        // 如果文件大小超过了映射大小，需重新映射
-        // 现将内容罗盘
+        // If file size exceeds mapping size, need to remap
+        // Flush content to disk first
         msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
-        // 解除映射
+        // Unmap
         munmap(fo.mappedAddress, mapSize);
-        // 计算新的映射大小
+        // Calculate new mapping size
         mapSize = getMappedSize(newSize);
-        // 扩展文件
+        // Extend file
         ftruncate(fo.fd, mapSize);
-        // 重新映射文件
+        // Remap file
         if (0 != fo.mmapFile(mapSize)) {
             LOG_ERROR("File not mapped");
             return 0;
@@ -195,12 +195,12 @@ int32_t FileWriter::writeIOAt(int32_t seekOffset, const void* pBuffer, size_t wr
 
     size_t newFileSize = fo.fileSize;
     if (seekOffset + writeLen > mapSize) {
-         // 如果文件大小超过了映射大小，需重新映射
-        // 现将内容罗盘
+         // If file size exceeds mapping size, need to remap
+        // Flush content to disk first
         msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
-        // 解除映射
+        // Unmap
         munmap(fo.mappedAddress, mapSize);
-        // 新的文件大小
+        // New file size
         newFileSize = seekOffset + writeLen;
         mapSize = getMappedSize(newFileSize);
         ftruncate(fo.fd, mapSize);
@@ -231,7 +231,3 @@ size_t PipeWriter::writeIO(const void* pBuffer, size_t writeLen) {
 
     return write(STDOUT_FILENO, pBuffer, writeLen);
 }
-
-
-
-

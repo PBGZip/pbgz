@@ -9,16 +9,16 @@ set(CMAKE_BUILD_TYPE "Debug")
 # Include build options
 include(BuildOptions)
 
-# 设置测试源码目录
+# Set test source directory
 set(TEST_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/testcase)
 
 # Define third-party library paths first (make these available globally)
 set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rd_party)
 
-# 查找所有测试源文件
+# Find all test source files
 file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/testcase/*.cpp)
 
-# 查找所有主项目源文件
+# Find all main project source files
 file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp
                        ${CMAKE_SOURCE_DIR}/src/log/*.cpp
                        ${CMAKE_SOURCE_DIR}/src/utils/*.cpp
@@ -28,13 +28,13 @@ list(REMOVE_ITEM PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
 set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
 
-# 添加主测试文件
+# Add main test file
 set(TEST_MAIN ${CMAKE_CURRENT_SOURCE_DIR}/pbgz_test_main.cpp)
 
-# 生成测试可执行文件
+# Generate test executable
 add_executable(pbgz_test ${TEST_MAIN} ${TEST_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPEN_SOURCES})
 
-# 包含主项目头文件
+# Include main project header files
 include_directories(${CMAKE_SOURCE_DIR}/src)
 include_directories(${CMAKE_SOURCE_DIR}/src/log)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/jsoncpp/include)
@@ -52,12 +52,9 @@ target_link_libraries(pbgz_test PRIVATE
 
 add_subdirectory(googletest)
 
-# 可选：添加gtest支持
+# Optional: Add gtest support
 target_link_libraries(pbgz_test PRIVATE gtest_main)
 
-# 启用测试
+# Enable testing
 enable_testing()
 add_test(NAME pbgz_test COMMAND pbgz_test)
-
-
-

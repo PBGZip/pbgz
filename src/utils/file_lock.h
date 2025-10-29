@@ -16,16 +16,16 @@ private:
 
 public:
     enum LockType {
-        SHARED_LOCK,    // 共享锁（读锁）
-        EXCLUSIVE_LOCK  // 独占锁（写锁）
+        SHARED_LOCK,    // Shared lock (read lock)
+        EXCLUSIVE_LOCK  // Exclusive lock (write lock)
     };
 
     FileLock(const std::string& file) : filename(file) {}
 
-    // 阻塞式获取锁（无限等待）
+    // Blocking lock acquisition (infinite wait)
     bool lock(LockType type = EXCLUSIVE_LOCK) {
         if (isLocked) {
-            return true; // 已经锁定
+            return true; // Already locked
         }
 
         fd = open(filename.c_str(), O_RDWR | O_CREAT, 0644);
@@ -35,7 +35,7 @@ public:
 
         int operation = (type == SHARED_LOCK) ? LOCK_SH : LOCK_EX;
         
-        // 阻塞式获取锁
+        // Blocking lock acquisition
         if (flock(fd, operation) == -1) {
             close(fd);
             fd = -1;
@@ -46,7 +46,7 @@ public:
         return true;
     }
 
-    // 带超时的阻塞锁
+    // Blocking lock with timeout
     bool lock_for(std::chrono::milliseconds timeout, LockType type = EXCLUSIVE_LOCK) {
         auto start = std::chrono::steady_clock::now();
         
@@ -57,11 +57,11 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         
-        // 最后一次尝试
+        // Final attempt
         return try_lock(type);
     }
 
-    // 非阻塞尝试获取锁
+    // Non-blocking try lock acquisition
     bool try_lock(LockType type = EXCLUSIVE_LOCK) {
         if (isLocked) {
             return true;
@@ -73,7 +73,7 @@ public:
         }
 
         int operation = (type == SHARED_LOCK) ? LOCK_SH : LOCK_EX;
-        operation |= LOCK_NB; // 非阻塞模式
+        operation |= LOCK_NB; // Non-blocking mode
         
         if (flock(fd, operation) == -1) {
             close(fd);
@@ -102,7 +102,7 @@ public:
         unlock();
     }
 
-    // 删除拷贝操作
+    // Delete copy operations
     FileLock(const FileLock&) = delete;
     FileLock& operator=(const FileLock&) = delete;
 };
@@ -117,22 +117,22 @@ private:
 
 public:
     enum LockType {
-        READ_LOCK,   // 共享读锁
-        WRITE_LOCK   // 独占写锁
+        READ_LOCK,   // Shared read lock
+        WRITE_LOCK   // Exclusive write lock
     };
 
     FcntlFileLock(const std::string& file) : filename(file) {
         lockStruct.l_whence = SEEK_SET;
         lockStruct.l_start = 0;
-        lockStruct.l_len = 0; // 0 表示锁定到文件末尾
+        lockStruct.l_len = 0; // 0 means lock to end of file
     }
 
-    // 阻塞锁定整个文件
+    // Block lock entire file
     bool lock(LockType type) {
-        return lock_region(0, 0, type); // 长度为0表示整个文件
+        return lock_region(0, 0, type); // Length 0 means entire file
     }
 
-    // 阻塞锁定文件区域
+    // Block lock file region
     bool lock_region(off_t start, off_t length, LockType type) {
         if (is_locked) {
             return true;
@@ -147,7 +147,7 @@ public:
         lockStruct.l_start = start;
         lockStruct.l_len = length;
 
-        // F_SETLKW - 阻塞等待锁
+        // F_SETLKW - Blocking wait for lock
         if (fcntl(fd, F_SETLKW, &lockStruct) == -1) {
             close(fd);
             fd = -1;
@@ -158,7 +158,7 @@ public:
         return true;
     }
 
-    // 带超时的区域锁定
+    // Region lock with timeout
     bool lock_region_for(off_t start, off_t length, LockType type, 
                         std::chrono::milliseconds timeout) {
         auto start_time = std::chrono::steady_clock::now();
@@ -173,7 +173,7 @@ public:
         return try_lock_region(start, length, type);
     }
 
-    // 非阻塞尝试区域锁定
+    // Non-blocking try region lock
     bool try_lock_region(off_t start, off_t length, LockType type) {
         if (is_locked) {
             return true;
@@ -188,7 +188,7 @@ public:
         lockStruct.l_start = start;
         lockStruct.l_len = length;
 
-        // F_SETLK - 非阻塞尝试
+        // F_SETLK - Non-blocking try
         if (fcntl(fd, F_SETLK, &lockStruct) == -1) {
             close(fd);
             fd = -1;

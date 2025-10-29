@@ -71,15 +71,15 @@ int reconstrucParamters(PbgzParameter& para) {
     }
 
     para.inputFile = PathUtil::getAbsPath(para.inputFile);
-    if (!para.outputDir.empty() && !para.outputFile.empty()) {  // 输出目录和文件同时指定
+    if (!para.outputDir.empty() && !para.outputFile.empty()) {  // Output directory and file specified simultaneously
         fprintf(stderr, "Output directory and filename cannot be specified simultaneously.\n");
         return -1;
-    } else if(!para.outputDir.empty()) {   // 只指定输出目录场景
+    } else if(!para.outputDir.empty()) {   // Only output directory specified
         if (para.inputFile == "/dev/stdin") {
             fprintf(stderr, "Specify an output filename, or do not specify both the filename and the directory.\n");
             return -1;
         } else {
-            // 输出文件名为输出文件名加后缀(.pbgz)
+            // Output filename is input filename with suffix (.pbgz)
             std::string inFileName = PathUtil::getFileName(para.inputFile);
             if (inFileName.empty()) {
                 fprintf(stderr, "%s not exits or no permission to access.\n", para.inputFile.c_str());
@@ -88,7 +88,7 @@ int reconstrucParamters(PbgzParameter& para) {
 
             std::string outPath = PathUtil::getFilePath(para.outputDir);
             if (outPath.empty()) {
-                // 目录不存在就尝试创建此目录
+                // Try to create directory if it doesn't exist
                 outPath = PathUtil::createDir(para.outputDir);
                 if (outPath.empty()) {
                     fprintf(stderr, "%s not exits or no permission to access.\n", para.outputDir.c_str());
@@ -97,11 +97,11 @@ int reconstrucParamters(PbgzParameter& para) {
             }
             para.outputFile = outPath + inFileName + ".pbgz";
         }
-    } else if (!para.outputFile.empty()) {     // 指定文件输出场景
-        // 指定了输出文件，转成绝对路径
+    } else if (!para.outputFile.empty()) {     // File output specified
+        // Convert output file to absolute path
         para.outputFile = PathUtil::getAbsPath(para.outputFile);
     } else {
-        // 输出目录和文件均未指定
+        // Neither output directory nor file specified
         if (para.inputFile == "/dev/stdin") {
             para.outputFile = "/dev/stdout";
         } else {
@@ -109,11 +109,11 @@ int reconstrucParamters(PbgzParameter& para) {
                 fprintf(stderr, "%s not exits or no permission to access.\n", para.inputFile.c_str());
                 return -1;
             }
-            // 压缩场景，在出入文件同目录下输出,输出文件名加后缀(.pbgz)
+            // Compression scenario, output in same directory as input file with suffix (.pbgz)
             if (!para.isDecompress) {
                 para.outputFile = PathUtil::getFilePath(para.inputFile) + PathUtil::getFileName(para.inputFile) + ".pbgz";
             } else {  
-                // 解压场景，去掉文件的pbgz后缀
+                // Decompression scenario, remove pbgz suffix from file
                 std::string name = PathUtil::getFileName(para.inputFile);
                 if (name.length() <= 5) {
                     fprintf(stderr, "input file %s invalid.", name.c_str());
@@ -129,7 +129,7 @@ int reconstrucParamters(PbgzParameter& para) {
         }
     }
 
-    // 输入了参考基因，转换成绝对路径
+    // Reference gene input, convert to absolute path
     if (!para.referenceGenic.empty()) {
         std::string abspath = PathUtil::getAbsPath(para.referenceGenic);
         if (abspath.empty()) {
@@ -139,7 +139,7 @@ int reconstrucParamters(PbgzParameter& para) {
         para.referenceGenic = abspath;
     }
 
-    // 如果文件已经存在，并且配置了强制覆盖，则删除输出文件
+    // If file exists and force overwrite is configured, delete output file
     if (PathUtil::fileExists(para.outputFile) && para.isOverwriteOutFile) {
         PathUtil::removeFile(para.outputFile);
     }
@@ -149,7 +149,7 @@ int reconstrucParamters(PbgzParameter& para) {
 }
 
 int checkParameters(PbgzParameter& para) {
-    if (para.isDecompress) {   // 解压场景，输入文件名为pbgz结尾
+    if (para.isDecompress) {   // Decompression scenario, input file ends with pbgz
         if ("/dev/stdin" != para.inputFile) {
             if (PathUtil::isDir(para.inputFile)) {
                 fprintf(stdout, "Decompress file cannot be directory.\n");
@@ -161,7 +161,7 @@ int checkParameters(PbgzParameter& para) {
                 return -1;
             }
         }
-    } else {   // 压缩场景，输出文件名以pbgz结尾
+    } else {   // Compression scenario, output file ends with pbgz
         if ("/dev/stdout" != para.outputFile){
             if (PathUtil::isDir(para.outputFile)) {
                 fprintf(stdout, "Output file cannot be directory.\n");
@@ -176,20 +176,20 @@ int checkParameters(PbgzParameter& para) {
     }
 
     if (para.outputFile != "/dev/stdout") {
-        // 输出文件已经存在时,提醒使用-f强制覆盖输出
+        // Output file exists, remind to use -f to force overwrite
         if (PathUtil::fileExists(para.outputFile) && !para.isOverwriteOutFile) {
             fprintf(stdout, "%s exits, use -f to force overwrite.\n", para.outputFile.c_str());
             return -1;
         }
 
-        // 指定文件并且覆盖时，检查是否有写的权限
+        // File specified and overwrite, check write permission
         if (PathUtil::fileExists(para.outputFile)) {
             if (!PathUtil::fileWriteable(para.outputFile)) {
                 fprintf(stdout,"no permisstion to write %s.\n", para.outputFile.c_str());
                 return -1;
             }
-        } else {  // 文件不存在, 则需要检查文件所在的目录是否有权限
-            // 到了这里输出文件已经转换成了绝对路径，必然是带文件名的
+        } else {  // File doesn't exist, need to check directory permission
+            // At this point, output file has been converted to absolute path, must include filename
             char separator = std::filesystem::path::preferred_separator;
             int pos = para.outputFile.find_last_of(separator);
             if (pos == -1) {
@@ -383,4 +383,3 @@ int main(int argc, char** argv) {
     
     return 0;
 }
-

@@ -4,7 +4,7 @@
 TEST(IOReaderTest, IOReaderRead) {
     std::string fileName = "io_writer.txt";
     (void)remove(fileName.c_str());
-    // 先构造一个文件
+    // First construct a file
     FILE* pFile = fopen(fileName.c_str(), "w+");
     std::string testTxt = "this is a test file";
     fwrite(testTxt.c_str(), testTxt.length(), 1, pFile);

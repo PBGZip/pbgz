@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "fastq_actuator.h"
+#include "reference.h"
 #include "log/logger.h"
 #include "utils/memory_util.h"
 #include "coder_io.h"
@@ -43,13 +44,13 @@ int32_t FastqActuator::compress() {
         return -1;
     }
 
-    //计算数据块的Md5
+    // Calculate MD5 of data block
     std::string md5;
     calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
     meta["md5"] = md5;
     meta["idlines"] = inBlockPtr->getNpos().size() >> 2;
 
-    // 压缩Meta信息
+    // Compress meta information
     coder_json metaCoder;
     int32_t metaLen = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
     if (metaLen <= 0) {
@@ -61,18 +62,18 @@ int32_t FastqActuator::compress() {
     return 0;
 }
 
-/// @brief 解析首行存在的分隔符以及分隔符所在的位置
-/// @param pBuffer    // ID行的buffer
-/// @param bufLen     // ID行的长度
-/// @param idSplitSymbols    // 分隔符列表
-/// @return 0 成功，-1失败
+/// @brief Parse separators and their positions in the first line
+/// @param pBuffer    // Buffer for ID line
+/// @param bufLen     // Length of ID line
+/// @param idSplitSymbols    // List of separators
+/// @return 0 for success, -1 for failure
 int32_t FastqActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
     if (pBuffer == nullptr || bufLen == 0) {
         return -1;
     }
 
     std::vector<uint32_t> idSplitPos;  
-    for (uint32_t i = 1 ; i < bufLen; ++i) {    // 首个字符为@，跳过
+    for (uint32_t i = 1 ; i < bufLen; ++i) {    // First character is @, skip it
         char ch = pBuffer[i];
         if (idSplitDefault.find(ch) != std::string::npos) {
             idSplitSymbols.push_back(ch);
@@ -80,17 +81,17 @@ int32_t FastqActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen)
         }
     }
 
-    // 初始化每个分隔符的最大和最小长度
+    // Initialize max and min length for each separator
     for (size_t i = 0; i < idSplitSymbols.size(); ++i) {
         idSplitMinLen.push_back(UINT32_MAX);
         idSplitMaxLen.push_back(0);
     }
 
-    // 将第一行的ID行分析信息拷贝到idPositions中
+    // Copy first line ID analysis information to idPositions
     uint32_t lastPos = 0;
     for (uint32_t idx = 0;  idx < idSplitPos.size(); ++idx) {
         uint32_t pos = idSplitPos[idx]; 
-        uint32_t curLen = pos - lastPos - (0 == idx ? 0 : 1);   // 首行不需要偏移
+        uint32_t curLen = pos - lastPos - (0 == idx ? 0 : 1);   // First line no needs offset
         if (curLen < idSplitMinLen[idx]) {
             idSplitMinLen[idx] = curLen;
         }
@@ -129,7 +130,7 @@ int32_t FastqActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) {
         }
 
         if (pos > bufferLen) {
-            idPosLength = UINT32_MAX; // 标记为不可用
+            idPosLength = UINT32_MAX; // Mark as unavailable
             break;
         }
     }
@@ -137,7 +138,7 @@ int32_t FastqActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) {
 }
 
 int32_t FastqActuator::preAnalysisBase(uint8_t* pBuffer, uint32_t bufLen) {
-    uint32_t baseLength = bufLen - 1;    // 去掉换行符号
+    uint32_t baseLength = bufLen - 1;    // Remove newline character
     if (baseLength > maxBaseLength) {
         maxBaseLength = baseLength;
     }
@@ -173,12 +174,12 @@ int32_t FastqActuator::preAnalysisBase(uint8_t* pBuffer, uint32_t bufLen) {
    
 int32_t FastqActuator::preAnalysisComment(uint8_t* pBuffer, uint32_t bufLen, uint32_t lineNo) {
     if (commentType != CommentType::OTHER) {
-        if (commentType == CommentType::UNKNOWN) {  // 首行
+        if (commentType == CommentType::UNKNOWN) {  // First line
             if (*pBuffer == '+' && bufLen == 2) {
                 commentType = CommentType::PLUS_ONLY;
             }
             else {
-                // 找到ID行的内容
+                // Find ID line content
                 uint8_t* idStart = nullptr;
                 uint32_t idLineNo = lineNo - 2;
                 if (idLineNo == 0) {
@@ -199,7 +200,7 @@ int32_t FastqActuator::preAnalysisComment(uint8_t* pBuffer, uint32_t bufLen, uin
                 commentType = CommentType::OTHER;
             }
         } else if (commentType == CommentType::SAME_AS_ID) {
-            // 找到ID行的内容
+            // Find ID line content
             uint8_t* idStart = nullptr;
             uint32_t idLineNo = lineNo - 2;
             if (idLineNo == 0) {
@@ -232,12 +233,12 @@ int32_t FastqActuator::preAnalysis() {
     }
     for (uint32_t lineNo = 0; lineNo < lineNum; ++lineNo) {
         uint64_t endPos = inBlockPtr->getNpos()[lineNo];
-        uint32_t lineLength  = endPos - startPos + 1;   // 长度需要带换行符
+        uint32_t lineLength  = endPos - startPos + 1;   // Length needs to include newline character
         switch (lineNo & 0x3)
         {
-        case 0: {  // ID行
+        case 0: {  // ID line
             if (idPosLength != UINT32_MAX) {
-                if (lineNo == 0) {  // 首行
+                if (lineNo == 0) {  // First line
                     if (preAnalysisIdFirstLine(inBlockPtr->getBuffer() + startPos, lineLength) != 0) {
                         return -1;
                     }
@@ -249,19 +250,19 @@ int32_t FastqActuator::preAnalysis() {
             }
             break;
         }
-        case 1: { //  碱基行
+        case 1: { //  Base line
             if (preAnalysisBase(inBlockPtr->getBuffer() + startPos, lineLength) != 0) {
                 return -1;
             }
             break;
         }
-        case 2: { // 注释行
+        case 2: { // Comment line
             if (preAnalysisComment(inBlockPtr->getBuffer() + startPos, lineLength, lineNo) != 0) { 
                 return -1;
             }
             break;
         }
-        case 3: { // 质量值行
+        case 3: { // Quality line
             for (uint32_t idx = startPos; idx < endPos; ++idx) {
                 qualityFrequnce[*(inBlockPtr->getBuffer() + idx)].second++;
             }
@@ -286,8 +287,8 @@ int32_t FastqActuator::preAnalysis() {
 
 int32_t FastqActuator::initEncoder() {
     const uint32_t line4 = (inBlockPtr->getNpos().size() >> 2);
-    const uint32_t lmax = inBlockPtr->getMaxLineLen() + 4; /* 4个预留给碱基key不以4对齐的情况 */
-    const uint32_t lsquash = (lmax >> 2) + !!(lmax & 0x3); /* squash 长度 */
+    const uint32_t lmax = inBlockPtr->getMaxLineLen() + 4; /* 4 reserved for base key not 4-aligned */
+    const uint32_t lsquash = (lmax >> 2) + !!(lmax & 0x3); /* squash length */
 
     isGen2 = (inBlockPtr->getBlockType() == FASTQ_GEN2) || (inBlockPtr->getBlockType() == FASTQ_GEN2_GZIP);
     baseMappedLength = (isGen2) ? lmax : (lmax << 1);
@@ -357,32 +358,32 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
     uint32_t match_pos, unmatchs = baseLength;
     uint8_t *prefe_squash = (uint8_t*)(pReference->getSquash());
     int64_t refe_squashlen = pReference->getSquashLength();
-    uint32_t best_pos_inrefe = UINT32_MAX, best_is_pair = 0; /* 记录当前最好匹配时对应的reference中的位置和正负链方向 */
+    uint32_t best_pos_inrefe = UINT32_MAX, best_is_pair = 0; /* Record the position and strand direction in reference for current best match */
     uint32_t best_unmatchs = UINT32_MAX, best_align4;
-    uint32_t best_pos = UINT32_MAX; /* 转换为reference原始碱基对应的位置 */
+    uint32_t best_pos = UINT32_MAX; /* Position converted to reference original base */
     uint64_t xsquash, xsquash_match, xsquash_macth_refe;
     const uint64_t xsquash_tab[2] = {0xFCFFFFFFFFFFFFFF, 0xFCFFFFFFFFFFFFFF};
 
-    /* case 1: base长度不大于reference索引对应的碱基长度 */
+    /* case 1: base length is not greater than reference index corresponding base length */
     if (baseLength <= baseGroupLen) {
         actgEncode(base, out, baseLength);
         outLength = baseLength;
         mappingPos = 0;
-        mappingDir = 2; /*  解压时先判断mdir，如果为2说明没有匹配上 */
+        mappingDir = 2; /* During decompression, check mdir first; if it's 2, it means no match */
         return;
     }
 
-    /* case 2: base长度大于reference索引对应的碱基长度 */
+    /* case 2: base length is greater than reference index corresponding base length */
     uint32_t e = baseLength - baseGroupLen;
     actgPair(basePairBuffer, base, baseLength);
 
-    /* 计算align4  squash buffer and pair squash buffer */
+    /* Calculate align4 squash buffer and pair squash buffer */
     for (n = 0; n < 4; n++) {
         squashLen[0] = (baseLength - n) >> 2;
         total = squashLen[0] << 2;
         mt[n].leftUnalignLen[0] = n;
         for (m = 0; m < n; m++) {
-            mt[n].leftUnalign[0][m] = ((*(pseq[0] + m)) >> 1) & 0x3; /* 左边没有4对齐的碱基squash值 */
+            mt[n].leftUnalign[0][m] = ((*(pseq[0] + m)) >> 1) & 0x3; /* squash value of bases not 4-aligned on the left */
         }
         mt[n].rightUnalignLen[0] = baseLength - n - total;
         for (m = 0; m < mt[n].rightUnalignLen[0]; m++) {
@@ -390,19 +391,19 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
         }
         actgSquash(pseq[0] + n, total, baseSquashBuffer[n]);
 
-        squashLen[1] = (baseLength - n + 1) >> 2; /*  在最右边补一个字符使之与32对齐，如果match到mt[0]的pair，且mt[0] offset为0时需要处理最后一个字符 */
+        squashLen[1] = (baseLength - n + 1) >> 2; /* Add a character to the right for 32-byte alignment; need to handle the last character when matching to mt[0]'s pair and mt[0] offset is 0 */
         total = squashLen[1] << 2;
         mt[n].leftUnalignLen[1] = baseLength + 1 - n - total;
         for (m = 0; m < mt[n].leftUnalignLen[1]; m++) {
             mt[n].leftUnalign[1][m] = ((*(pseq[1] + m)) >> 1) & 0x3;
         }
-        mt[n].rightUnalignLen[1] = (n == 0) ? 0 : (n - 1); /* 右边补一个到key对齐，所以需要减1 */
+        mt[n].rightUnalignLen[1] = (n == 0) ? 0 : (n - 1); /* Subtract 1 because one character is added to the right for key alignment */
         for (m = 0; m < mt[n].rightUnalignLen[1]; m++) {
             mt[n].rightUnalign[1][m] = ((*(pseq[1] + baseLength - mt[n].rightUnalignLen[1] + m) >> 1) & 0x3);
         }
         actgSquash(pseq[1] + mt[n].leftUnalignLen[1], total, basePairSquashBuffer[n]);
 
-        /* 建立base squash与对应pair base squash的对应关系 */
+        /* Establish the relationship between base squash and corresponding pair base squash */
         mt[n].set(baseSquashBuffer[n], squashLen[0], basePairSquashBuffer[n] + squashLen[1] - len_bgs, squashLen[1], 0);
 
         /* do mapping */
@@ -426,9 +427,9 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
             }
 
             loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
-            /* 安全检查：确保 loffset 不会导致无效指针 */
+            /* Safety check: ensure loffset does not cause invalid pointer */
             if (loffset > mt[align4_curr].squashBufferLen[match_pair]) {
-                continue; // 跳过无效偏移
+                continue; // Skip invalid offset
             }
             /* caculate unmatch count */
             psquash = mt[align4_curr].getSquash(match_pair) - loffset;
@@ -452,7 +453,7 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
             if (unmatchs >= best_unmatchs)
                 continue;
 
-            /*  因为这种情况在最右边补一个字符使之与32对齐：如果match到mt[0]的pair，且mt[0] offset为0时需要处理最后一个字符 */
+            /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mt[0]'s pair and mt[0] offset is 0 */
             unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
 
             /* left unalign */
@@ -482,7 +483,7 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
         mt[align4_curr].incOffset();
     }
 
-    if (best_unmatchs > MAPPED_THRESHOLD_GEN2) { /* 继续mapping */
+    if (best_unmatchs > MAPPED_THRESHOLD_GEN2) { /* continue mapping */
         for (n = 4; n <= e; n++) {
             /* do mapping */
             align4_curr = n & 0x3;
@@ -506,16 +507,16 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
 
                 loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
                 
-                /* 安全检查：确保 loffset 不会导致无效指针 */
+                /* Safety check: ensure loffset does not cause invalid pointer */
                 if (loffset > mt[align4_curr].squashBufferLen[match_pair]) {
-                    continue; // 跳过无效偏移
+                    continue; // Skip invalid offset
                 }
                 
                 /* caculate unmatch count */
                 psquash = mt[align4_curr].getSquash(match_pair) - loffset;
                 psquash_refe = prefe_squash + match_pos - loffset;
 
-                /* 安全检查：确保指针在有效范围内 */
+                /* Safety check: ensure pointer is within valid range */
                 if (psquash < baseSquashBuffer[0] || psquash >= baseSquashBuffer[0] + base_squash_align4) {
                     continue;
                 }
@@ -535,7 +536,7 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
                     continue;
                 }
 
-                /*  因为这种情况在最右边补一个字符使之与32对齐：如果match到mt[0]的pair，且mt[0] offset为0时需要处理最后一个字符 */
+                /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mt[0]'s pair and mt[0] offset is 0 */
                 unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
 
                 /* left unalign */
@@ -580,7 +581,7 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
             out[--o] = (((ch >> (m << 1)) & 0x3) ^ (mt[best_align4].leftUnalign[best_is_pair][l - 1]));
             l--;
         }
-        outLength += n; /* 注意字节顺序 */
+        outLength += n; /* Note byte order */
         outLength += actgStretchMappingXor(psquash, psquash_refe, mt[best_align4].squashBufferLen[best_is_pair], out + outLength);
 
         outLength -= (best_is_pair && best_align4 == 0);
@@ -593,7 +594,7 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
         actgEncode(base, out, baseLength);
         outLength = baseLength;
         best_pos = 0;
-        best_is_pair = 2; ///*  解压时先判断mdir，如果为2说明没有匹配上 */
+        best_is_pair = 2; ///*  During decompression, check mdir first; if it's 2, it means no match */
     }
 
     mappingPos = best_pos;
@@ -608,10 +609,10 @@ void FastqActuator::mappingFastQGen3(const uint8_t* base, uint32_t baseLength, u
 
 template <typename TCoder>
 int32_t FastqActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Json::Value& streamMeta, uint32_t& srcDataLen, int32_t splitSymIdx) {
-    int32_t currLineOffset = 0;    // 行偏移，即每行的开头
+    int32_t currLineOffset = 0;    // Line offset, start of each line
     uint8_t * data = nullptr;
     int32_t currLen = 0;
-    srcDataLen = 0;   // 源内容的总长度
+    srcDataLen = 0;   // Total length of source content
     for (uint32_t idx = 0; idx < inBlockPtr->getNpos().size(); idx += 4) {
         uint32_t splitStep = (idx / 4) * idSplitSymbols.size();
         if (splitSymIdx == 0) {
@@ -674,11 +675,11 @@ int32_t FastqActuator::compressIdInSplit() {
     uint32_t totalSrcLength = 0;
     uint32_t totalDstLength = 0;
     for (uint32_t i = 0; i < idSplitSymbols.size();++i) {
-        // 全是数字的变长
+        // Variable length with all digits
         if (idSplitMaxLen[i] != idSplitMinLen[i]) {
             uint32_t currIdPos = idPositions[i];
             uint32_t currLineOffset = 0;
-            // 根据首行判断是否全是数字 
+            // Check if all digits based on first line
             uint8_t * data = nullptr;
             uint32_t currLen = 0;
             if (i == 0) {
@@ -712,7 +713,7 @@ int32_t FastqActuator::compressIdInSplit() {
             }
         }
 
-        // 定长或者不是全是数字场景
+        // Fixed length or not all digits scenario
         std::shared_ptr<coder_io> idIoAM = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
         std::shared_ptr<coder_affix_match> idCoderAm = std::make_shared<coder_affix_match>(idIoAM.get());
         uint32_t srcLength = 0;
@@ -743,11 +744,11 @@ int32_t FastqActuator::compressId() {
         }
     }
 
-    // ID检查不合法，整块压缩
+    // ID check invalid, compress as whole block
     if (idPosLength == UINT32_MAX) {
         return compressIdInAll();
     }else {
-        // ID检查合法，分块压缩
+        // ID check valid, compress in split blocks
         return compressIdInSplit();
     }
 }
@@ -804,7 +805,7 @@ int32_t FastqActuator::compressBaseWithRef() {
         offset++;
         currPos += endPos - startPos;
     }
-    /* 第一条子流：reads与reference的match流 */
+    /* First sub-stream: match stream between reads and reference */
     matchCm->encode_flush();
     metaSubs.clear();
     metaSubs["srclen"] =  (Json::Value::UInt)srcLen;
@@ -816,7 +817,7 @@ int32_t FastqActuator::compressBaseWithRef() {
     totalDstLen += matchIo->data_len;
     totalSrcLen += srcLen;
 
-    /* 第二条子流：reads与reference的match的位置流 */
+    /* Second sub-stream: position stream of matches between reads and reference */
     std::shared_ptr<coder_io> posIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     uint32_t line4 = inBlockPtr->getNpos().size() >> 2;
     srcLen = (line4 << 3);
@@ -839,7 +840,7 @@ int32_t FastqActuator::compressBaseWithRef() {
     totalSrcLen += srcLen;
     totalDstLen += posIo->data_len;
 
-    /* 第三条子流：reads与reference的match的pair标识流 */
+    /* Third sub-stream: pair identifier stream of matches between reads and reference */
     auto pairIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     srcLen = line4;
     if (srcLen > FC_MIN_LEN && srcLen < FC_MAX_LEN) {
@@ -861,7 +862,7 @@ int32_t FastqActuator::compressBaseWithRef() {
     totalSrcLen += srcLen;
     totalDstLen += pairIo->data_len;
 
-    /* 第四条子流：reads中所有N的位置 */
+    /* Fourth sub-stream: positions of all N's in reads */
     if (baseNCount > 0) {
         std::shared_ptr<coder_io> nposIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
         srcLen = (baseNCount << 2);
@@ -886,7 +887,7 @@ int32_t FastqActuator::compressBaseWithRef() {
     }
     metaBase["ncount"] = (Json::Value::UInt)baseNCount;
 
-    /* 第五条流：每行base的长度 */
+    /* Fifth stream: length of each base line */
     if (encBaseLen) {
         std::shared_ptr<coder_io> lenIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
         srcLen = (line4 << 1);
@@ -1008,7 +1009,7 @@ int32_t FastqActuator::compressQuality() {
     uint32_t totalDstLength = 0;
     Json::Value streamMeta;
 
-    // 编码质量数据
+    // Encode quality data
     uint32_t streamSrcLen = 0;
     for (uint32_t idx = 3; idx < inBlockPtr->getNpos().size(); idx += 4) {
         uint32_t end = inBlockPtr->getNpos()[idx];
@@ -1031,7 +1032,7 @@ int32_t FastqActuator::compressQuality() {
     totalSrcLength += streamSrcLen;
     totalDstLength += qualityIo->data_len;
 
-    // 编码质量符号表
+    // Encode quality frequency table
     std::shared_ptr<coder_io> qualityFreqIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
     std::shared_ptr<uint16_t[]> qualiltyFreqArray = std::make_unique<uint16_t[]>(qualityFreqTable.size()<< 1);
@@ -1074,7 +1075,7 @@ int32_t FastqActuator::initDecoder() {
     }
 
     uint32_t readOffset = 0;
-    // 初始化id解码器
+    // Initialize ID decoder
     for (uint32_t idx = 0; idx < idStreamMeta.size(); ++idx) {
         std::string coderName = idStreamMeta[idx]["coder"]["magic"].asString();
         uint32_t dstLen = idStreamMeta[idx]["dstlen"].asUInt();
@@ -1091,7 +1092,7 @@ int32_t FastqActuator::initDecoder() {
         readOffset += dstLen;
     }
 
-    // 初始化Base解码器
+    // Initialize Base decoder
     Json::Value& baseMeta = meta["base"];
     minBaseLength = baseMeta["minlen"].asUInt();
     maxBaseLength = baseMeta["maxlen"].asUInt();
@@ -1105,7 +1106,7 @@ int32_t FastqActuator::initDecoder() {
             baseIo.meta = baseMeta;
             baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
             coder_fc baseDecoderFc = coder_fc(&baseIo);
-            // 解压结果放在最后
+            // Put decompression result at the end
             baseDecoderFc.decode_line(outBlockPtr->getBuffer() + outBlockPtr->getBufferSize() - srcBaseLen, srcBaseLen,  UINT8_MAX, false);
         } else if (baseCoderName == "coder_bwt_cm") {
             baseDecoder = new coder_bwt_cm(new coder_io(inBlockPtr->getBuffer() + readOffset, dstBaseLen));
@@ -1172,7 +1173,7 @@ int32_t FastqActuator::initDecoder() {
             ps += srcLen;
             coder_io posIo(temBuffer, dstLen);
             posIo.meta = metaStreams[id];
-            posIo.meta["dstlen"] = metaStreams[id]["dstlen"]; // 兼容字段，可以统一
+            posIo.meta["dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
             coder_fc posCm(&posIo);
             posCm.decode_line((uint8_t*)baseMappedPosBuffer, srcLen, UINT8_MAX, false);
         } else {
@@ -1206,7 +1207,7 @@ int32_t FastqActuator::initDecoder() {
             ps += srcLen;
             coder_io pairIo(temBuffer, dstLen);
             pairIo.meta = metaStreams[id];
-            pairIo.meta["tot_dstlen"] = metaStreams[id]["dstlen"]; // 兼容字段，可以统一
+            pairIo.meta["tot_dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
             coder_fc pairCm(&pairIo);
             pairCm.decode_line(baseMappedPairBuffer, srcLen, UINT8_MAX, false);
         } else{
@@ -1264,7 +1265,7 @@ int32_t FastqActuator::initDecoder() {
         }
     }
 
-    // 初始化Comment解码器
+    // Initialize Comment decoder
     Json::Value& commentMeta = meta["comment"];
     if (commentMeta["type"].asString() == "plusonly") {
         commentType = CommentType::PLUS_ONLY;
@@ -1282,7 +1283,7 @@ int32_t FastqActuator::initDecoder() {
         readOffset += commentDstLen;
     }
 
-    // 初始化Quality解码器
+    // Initialize Quality decoder
     Json::Value& qualityMeta = meta["quality"];
     Json::Value& streamsMeta = qualityMeta["streams"];
     if (streamsMeta.size() != 2) {
@@ -1328,7 +1329,7 @@ int32_t FastqActuator::decompress() {
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
     outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
-    // 解析meta
+    // Parse meta
     coder_json metaCoder;
     metaCoder.decoder(inBlockPtr->getMetaBuffer(), inBlockPtr->getMetaLen(), meta);
 
@@ -1398,7 +1399,7 @@ int32_t FastqActuator::decompress() {
                     return -1;
                 }
                 outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
-                actualBaseLen -= 1;  // 去掉换行符
+                actualBaseLen -= 1;  // Remove newline character
             }
         } else {
             /* decode base mapping stream with strip N */;
@@ -1406,8 +1407,8 @@ int32_t FastqActuator::decompress() {
             uint8_t* pout = outBlockPtr->getCurrent();
             
             const uint8_t actg4[4] = {'A', 'C', 'T', 'G'};
-            if (baseNCount && nposOffset < baseNCount) { /* 该block有N，且未处理完所有N */
-                /* 计算当前base行N的个数 */
+            if (baseNCount && nposOffset < baseNCount) { /* This block has N, and not all N's have been processed */
+                /* Calculate the number of N's in the current base line */
                 uint32_t n = totalBaseLen + actualBaseLen;
                 uint64_t o = nposOffset;
                 for (; o < baseNCount; o++) {
@@ -1417,7 +1418,7 @@ int32_t FastqActuator::decompress() {
                 }
                 uint32_t ncntCurrLine = o - nposOffset; 
 
-                /* 解压当前base行的mapping流 */
+                /* Decompress the mapping stream of the current base line */
                 uint32_t stripNLength = actualBaseLen - ncntCurrLine;
                 if (stripNLength > 0) {
                     uint32_t decoderLen = baseDecoder->decode_line(baseStripNBuffer, stripNLength, UINT8_MAX, false);
@@ -1433,10 +1434,10 @@ int32_t FastqActuator::decompress() {
                     }
                     pdata = baseStripNBuffer;
                 } else {
-                    /* 得到对应位置的reference */
+                    /* Get the reference at the corresponding position */
                     pReference->getStretch2Bits1Char(refeStretchBuffer, stripNLength, baseMappedPosBuffer[baseLines]);
 
-                    /* 还原mapping的base squash之后的流 */
+                    /* Restore the base squash stream after mapping */
                     actgXor(baseStripNBuffer, refeStretchBuffer, baseStripNBuffer, stripNLength);
 
                     pReference->getActgFrom2Bits(baseStripNBuffer, stripNLength, refeStretchBuffer);
@@ -1448,18 +1449,18 @@ int32_t FastqActuator::decompress() {
                     }
                 }
 
-                /* 将还原数据复制到输出buffer */
+                /* Copy the restored data to the output buffer */
                 for (o = 0, n = 0; n < actualBaseLen; n++) {
-                    if (nposOffset < baseNCount && (totalBaseLen + n) == baseNPosBuffer[nposOffset]) { /* 当前位置为N */
+                    if (nposOffset < baseNCount && (totalBaseLen + n) == baseNPosBuffer[nposOffset]) { /* Current position is N */
                         *pout++ = 'N' ;
                         nposOffset++;
                     } else {
-                        /* 当前位置不为N */
+                        /* Current position is not N */
                         *pout++ = (pdata[o++]);
                     } 
                 }
-            } else { /* 块中没有N */
-                /* 解压当前base行的mapping流 */
+            } else { /* No N in the block */
+                /* Decompress the mapping stream of the current base line */
                 uint32_t stripNLength = actualBaseLen;
                 uint32_t decoderLen = baseDecoder->decode_line(baseStripNBuffer, stripNLength, UINT8_MAX, false);
                 if (stripNLength != decoderLen) {
@@ -1471,9 +1472,9 @@ int32_t FastqActuator::decompress() {
                         pout[o] = actg4[baseStripNBuffer[o]];
                     }
                 } else {
-                    /* 得到对应位置的reference */
+                    /* Get the reference at the corresponding position */
                     pReference->getStretch2Bits1Char(refeStretchBuffer, stripNLength, baseMappedPosBuffer[baseLines]);
-                    /* 还原mapping的base squash之后的流 */
+                    /* Restore the base squash stream after mapping */
                     actgXor(baseStripNBuffer, refeStretchBuffer, baseStripNBuffer, stripNLength);
                     if (baseMappedPairBuffer[baseLines]) {
                         pReference->getActgFrom2Bits(baseStripNBuffer, stripNLength, refeStretchBuffer);
@@ -1490,7 +1491,7 @@ int32_t FastqActuator::decompress() {
         }
         ++baseLines;
 
-        // 解码comment
+        // Decode comment
         uint8_t* commentPtr = outBlockPtr->getCurrent();
         switch (commentType) {
             case CommentType::PLUS_ONLY: {
@@ -1513,14 +1514,14 @@ int32_t FastqActuator::decompress() {
                 break;
         }
 
-        // 解码质量值
+        // Decode quality values
         qualityDecoder->decode_qual_gen2(basePtr, outBlockPtr->getCurrent(), actualBaseLen);
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
         *outBlockPtr->getCurrent() = '\n';
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
     }
 
-    // 检查文件的MD5
+    // Check file MD5
     std::string md5;
     calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
     if (md5 != meta["md5"].asString()) {

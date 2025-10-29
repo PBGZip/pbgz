@@ -11,10 +11,10 @@
 
 
 enum class CommentType {
-    PLUS_ONLY,     // Comment行只有一个+号
-    SAME_AS_ID,    // Comment行和ID行相同
-    OTHER,         // Comment行非上述两种情况，即可能为其他任意字符串，包括空字符串
-    UNKNOWN        // 未知的类型
+    PLUS_ONLY,     // Comment line contains only a '+' sign
+    SAME_AS_ID,    // Comment line is the same as ID line
+    OTHER,         // Comment line is neither of the above, could be any other string including empty string
+    UNKNOWN        // Unknown type
 };
 
 typedef struct {
@@ -28,14 +28,14 @@ typedef struct {
     inline void incOffset() { ++offset; }
     uint8_t *getSquash(bool pair) const {return ((pair) ? (squashBuffer[1] - offset) : (squashBuffer[0] + offset));}
 
-    /*  squash buffer , 0表示正向，1表示互补链 */
-    uint8_t *squashBuffer[2];      /* 指向squash buffer */
-    uint32_t squashBufferLen[2];  /* 对应squash buffer的数据长度 */
-    uint32_t leftUnalignLen[2]; /* 左边没有对齐的碱基长度 */
-    uint8_t leftUnalign[2][3]; /* 左边没有对齐的碱基，这里存的是squash之后的数据 */
-    uint32_t rightUnalignLen[2]; /* 右边没有对齐的碱基长度 */
-    uint8_t rightUnalign[2][3]; /* 右边没有对齐的碱基，这里存的是squash之后的数据 */
-    uint32_t offset;  /* 当前偏移 */
+    /*  squash buffer, 0 for forward strand, 1 for complementary strand */
+    uint8_t *squashBuffer[2];      /* Pointer to squash buffer */
+    uint32_t squashBufferLen[2];  /* Data length corresponding to squash buffer */
+    uint32_t leftUnalignLen[2]; /* Length of unaligned bases on the left */
+    uint8_t leftUnalign[2][3]; /* Unaligned bases on the left, storing squashed data */
+    uint32_t rightUnalignLen[2]; /* Length of unaligned bases on the right */
+    uint8_t rightUnalign[2][3]; /* Unaligned bases on the right, storing squashed data */
+    uint32_t offset;  /* Current offset */
 } Mapping;
 
 
@@ -139,15 +139,15 @@ private:
 private:
     std::vector<uint8_t> idSplitSymbols;
     uint32_t idPosLength;
-    std::vector<uint16_t> idPositions; // 每条记录ID字段中各个分隔符的位置，从0开始
-    std::vector<uint32_t> idSplitMinLen; // 每个分隔符的最小长度
-    std::vector<uint32_t> idSplitMaxLen; // 每个分隔符的最大长度
+    std::vector<uint16_t> idPositions; // Position of each separator in ID field of each record, starting from 0
+    std::vector<uint32_t> idSplitMinLen; // Minimum length of each separator
+    std::vector<uint32_t> idSplitMaxLen; // Maximum length of each separator
     const std::string idSplitDefault = "/:= _.,-#\r\t\n";
     uint32_t minBaseLength;
     uint32_t maxBaseLength;
     uint64_t baseNCount;
     CommentType commentType;
-    std::vector<std::pair<uint16_t, uint16_t>> qualityFreqTable; // 质量值频率统计
+    std::vector<std::pair<uint16_t, uint16_t>> qualityFreqTable; // Quality value frequency statistics
     Reference* pReference;
 
     std::vector<coder*> idDecoders;
@@ -157,7 +157,7 @@ private:
 
     bool isGen2;
 
-    /// 带参考基因场景使用的变量
+    /// Variables used in reference genome scenario
     uint8_t* mappingBuffer;
     uint8_t* basePairBuffer;
     uint8_t* basePairSquashBuffer[4];

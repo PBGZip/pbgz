@@ -5,7 +5,7 @@
 #include "fc/fc.h"
 
 #define FC_MIN_LEN 32
-// #define FC_MIN_LEN 2048 // 先设定保守点的值，因为如果太小时编码后长度可能大于原始长度，这样导致fc压缩报错上面流程不好处理
+// #define FC_MIN_LEN 2048 // Set a conservative value first, because if too small, the encoded length may be greater than the original length, which causes fc compression errors and makes the above process difficult to handle
 #define FC_MAX_LEN 2146435072
 
 class coder_fc : public coder
@@ -24,7 +24,7 @@ public:
         {
             this->ppHashSize = 17;
             this->ppMinLen = 28;
-            // 29 -> 123616168, 比28好
+            // 29 -> 123616168, better than 28
             // 27 -> 75368634
             // 26 -> 75365398
             // 20 -> 75350908
@@ -47,11 +47,11 @@ public:
 
     void encode_line(const uint8_t *in, const int32_t in_len, bool need2hold = false)
     {
-        check_exit(io->m != coder_io::MENC, coder_ns::CODER_ERR_INNER, "only support block compress, not support line method"); // 暂未扩展成line方式
+        check_exit(io->m != coder_io::MENC, coder_ns::CODER_ERR_INNER, "only support block compress, not support line method"); // Not yet extended to line method
         check_exit(in_len > FC_MIN_LEN && in_len < FC_MAX_LEN,  coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, in_len);
         io->m = coder_io::MENC;
 
-        // 先做pp prehandler
+        // First do pp prehandler
         uint8_t *lout;
         lout = static_cast<uint8_t*>(safe_alloc(in_len));
         check_exit(lout, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Memory not enough");
@@ -69,13 +69,13 @@ public:
         }
         check_exit(lzSize > 0, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d, in_len %d", __LINE__, lzSize, in_len);
 
-        // 再做bwt
+        // Then do bwt
         index = fc_transform(lout, lzSize, &num_indexes, indexes);
         if (in_len < 64 * 1024)
             num_indexes = 0;
         check_exit(index >= FC_OK, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d, in_len %d", __LINE__, index, in_len);
 
-        // 再压缩
+        // Then compress
         uint8_t *fc_buff;
         bool need_alloc = (lzSize + 4096) > in_len;
         if (need_alloc)
@@ -119,10 +119,10 @@ public:
         flushed = true;
     }
 
-    /* 对外解压接口，返回实际解压出来的长度，当解压遇到split_ch时退出 */
+    /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
     int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
     {
-        check_exit(io->m != coder_io::MDEC, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "only support block decompress, not support line method"); // 暂未扩展成line方式
+        check_exit(io->m != coder_io::MDEC, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "only support block decompress, not support line method"); // Not yet extended to line method
         check_exit(split_ch == UINT8_MAX, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, split_ch);
 
         // fprintf(stderr, "decompress...");

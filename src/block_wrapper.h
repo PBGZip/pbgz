@@ -35,8 +35,8 @@ private:
 protected:
     int64_t blockId;
     IOReader* ioReader;
-    uint8_t cache[BLOCK_SIZE];  // 用于存储上次读取后剩余的数据
-    uint64_t cacheLen;        // cache中数据的长度
+    uint8_t cache[BLOCK_SIZE];  // Used to store remaining data from previous read
+    uint64_t cacheLen;        // Length of data in cache
 };
 
 

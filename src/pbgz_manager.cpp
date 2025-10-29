@@ -101,7 +101,7 @@ void PbgzManager::printTailInfo(Timer costTime, PbgzParameter& para) {
     }
 }
 
-/* 将n转换为最接近2的幂次方的整数 */
+/* Convert n to the nearest integer power of 2 */
 int32_t powerof2Proximal(int32_t i)
 {
     i |= (i >> 1);

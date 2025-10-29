@@ -30,7 +30,7 @@
 #include "io_wrapper.h"
 
 
-/// @brief pbgz格式文件的读取器
+/// @brief Reader for pbgz format files
 class PbgzFileReader {
 public:
     int32_t open();
@@ -42,7 +42,7 @@ public:
     int32_t readDataBlock(PbgzDataBlock& dataBlock);
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
-        currentFileIndex = -1;  // 初始化文件索引为-1，表示未读取任何文件
+        currentFileIndex = -1;  // Initialize file index to -1, indicating no file has been read yet
         // Implement the read logic for PBGZ file format
         if (0 != initFileHeadAndMeta()) {
             throw std::runtime_error("Create PbgzFileReader, load head and meta failed");
@@ -59,13 +59,13 @@ private:
     static uint8_t* getFileReadBuffer();
 
 private:
-    std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // 文件头, 一个文件可能多个压缩包拼接而成
-    std::map<int32_t, PbgzFileMeta> fileMetaMap;      // 文件元信息
-    int32_t currentFileIndex; // 当前文件序号，表示当前读到哪个文件了
+    std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers, a file may consist of multiple compressed packages concatenated together
+    std::map<int32_t, PbgzFileMeta> fileMetaMap;      // File metadata
+    int32_t currentFileIndex; // Current file sequence number, indicating which file is currently being read
     IOReader* ioReader;
 };
 
-/// @brief  pbgz格式文件的写入器
+/// @brief Writer for pbgz format files
 /// @note: 
 class PbgzFileWriter {
 public:
@@ -102,8 +102,7 @@ private:
     int32_t initFileHead();
 
 private:
-    PbgzFileHeader fileHeader; // 文件头
-    PbgzFileMeta fileMeta; // 文件元信息
+    PbgzFileHeader fileHeader; // File header
+    PbgzFileMeta fileMeta; // File metadata
     IOWriter* ioWriter;
 };
-

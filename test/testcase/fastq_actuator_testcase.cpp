@@ -23,13 +23,13 @@ namespace FastqTestData {
 
 class FastQActuatorTest : public ::testing::Test {
 public:
-    // 为测试准备数据对象
+    // Prepare data objects for testing
 	void SetUp() override {
 		pInBlock = new RoughIOBlock(FastqTestData::MAX_BLOCK_SIZE);
         pOutBlock = new RoughIOBlock(FastqTestData::MAX_BLOCK_SIZE);
 	}
 
-	// 清除资源
+	// Clean up resources
 	void TearDown() override {
 		if (pInBlock != nullptr) {
 			delete pInBlock;
@@ -176,4 +176,3 @@ TEST_F(FastQActuatorTest, testPreAnalysis) {
     EXPECT_EQ(actuator.qualityFreqTable[1].first, ':' - '!');
     EXPECT_EQ(actuator.qualityFreqTable[2].first, ',' - '!');
 }
-

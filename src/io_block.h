@@ -27,12 +27,12 @@ typedef enum
 } BlockType;
 
 
-class RoughIOBlock /* 粗糙的块*/
+class RoughIOBlock /* Rough block */
 {
 public:
     RoughIOBlock(uint32_t len = BLOCK_SIZE) {
         blockSize = len;
-        bufferSize = blockSize * 2; // 多部分空间, 用于解决压缩后变大的问题
+        bufferSize = blockSize * 2; // Extra space to handle cases where compressed data is larger than original
         buffer =  MemoryUtil::safeAlloc<uint8_t>(bufferSize); //static_cast<uint8_t*>(calloc(bufferSize, sizeof(int8_t)));
         reset();
     }
@@ -124,14 +124,12 @@ public:
     
 private:
     uint8_t *buffer;
-    uint32_t bufferSize;             /* buffer的size */
-    BlockType blockType;             /* 当前块对应块类型 */
-    uint32_t blockSize;              /* 块大小 */
-    std::vector<uint32_t> npos;      /* buffer中换行符的位置，从0开始 */
+    uint32_t bufferSize;             /* Size of buffer */
+    BlockType blockType;             /* Current block type */
+    uint32_t blockSize;              /* Block size */
+    std::vector<uint32_t> npos;      /* Positions of newline characters in buffer, starting from 0 */
     int64_t blockId;
     int64_t dataLen;
     uint32_t maxLineLen;
     uint32_t metaLen;
 };
-
-

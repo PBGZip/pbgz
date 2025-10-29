@@ -8,8 +8,9 @@ coder_json::~coder_json()
 {
 }
 
-/* 压缩json数据，返回压缩后的长度，如果为负数说明out空间不够，如返回-28,说明out_len长度还需再加28
- * 调该函数则假设out_len肯定是足够的，否则一旦out_len不足则会报错退出
+/* Compress JSON data, return compressed length. If negative, it means out space is insufficient, 
+ * e.g., return -28 means out_len needs to be increased by 28.
+ * This function assumes out_len is sufficient, otherwise it will report an error and exit if out_len is insufficient.
  */
 int64_t coder_json::encoder(const Json::Value &in, uint8_t *out, const int64_t out_len)
 {
@@ -43,7 +44,7 @@ int64_t coder_json::encoder(const Json::Value &in, uint8_t *out, const int64_t o
     return output.pos;
 }
 
-/* 压缩json数据，在内部申请空间，压缩后数据存在out中 */
+/* Compress JSON data, allocate space internally, compressed data is stored in out */
 void coder_json::encoder(const Json::Value &in, std::string &out)
 {
     out.clear();
@@ -95,7 +96,7 @@ void coder_json::encoder(const Json::Value &in, std::string &out)
     safe_free((void**)&buffOut);
 }
 
-/* 解压json格式数据 */
+/* Decompress JSON format data */
 void coder_json::decoder(const uint8_t *in, const int64_t in_len, Json::Value &out)
 {
     JSONCPP_STRING err;

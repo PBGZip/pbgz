@@ -55,14 +55,14 @@ class coder_base
 
         inline void encode_bit(int32_t bit, uint32_t p)
         {
-            const uint32_t mid = low + ((uint64_t(high - low) * p) >> P_LOG); /* 这里是把高概率符号放前面了，低概率放后面，P表示高概率符号的概率 */
+            const uint32_t mid = low + ((uint64_t(high - low) * p) >> P_LOG); /* This puts high probability symbols first, low probability symbols last, P represents the probability of high probability symbols */
 
             if (bit)
                 high = mid;
             else
                 low = mid + 1;
 
-            /* 归一化 */
+            /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
                 *(io->data + io->data_len++) = (low >> 24);
@@ -81,7 +81,7 @@ class coder_base
             else
                 low = mid + 1;
 
-            /* 归一化 */
+            /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
                 low <<= 8;

@@ -6,7 +6,7 @@
 #include "pbgz_manager.h"
 
 BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
-    /// 通过分析block内容获取文件类型
+    /// Get file type by analyzing block content
     uint8_t* buffer = const_cast<uint8_t*>(blockPtr->getBuffer());
     if (blockPtr->getBlockId() == 0 && blockPtr->getDataLen() >= 2 && buffer[0] == 0x1f && buffer[1] == 0x8b) {
         return GZIP;
@@ -17,29 +17,29 @@ BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
         return BAM;
     }
 
-    if (buffer[0] == '@') {   // FASTQ格式
-        // 判断是GEN2还是GEN3
-        int64_t lineNum = 0;   // 行数
-        int32_t baseLen = 0;   // 碱基长度
-        int32_t maxBaseLen = 0; // 最大碱基长度
-        int64_t lastEndlinePos = 0;  // 上一个换行符位置
-        int64_t endlinePos = 0;  // 当前换行符位置
+    if (buffer[0] == '@') {   // FASTQ format
+        // Determine if it's GEN2 or GEN3
+        int64_t lineNum = 0;   // Line count
+        int32_t baseLen = 0;   // Base length
+        int32_t maxBaseLen = 0; // Maximum base length
+        int64_t lastEndlinePos = 0;  // Previous newline position
+        int64_t endlinePos = 0;  // Current newline position
         const std::string validBase = "ACGTNactgn";
-        int64_t linePos = 0;   // 当前行内的位置
+        int64_t linePos = 0;   // Position within current line
         for (int64_t pos = 0; pos < blockPtr->getDataLen(); ++pos) {
             int lineMod = lineNum % 4;  
             if (buffer[pos] == '\n') {
                 lastEndlinePos = endlinePos;
                 endlinePos = pos;
-                // 碱基行的结束符
+                // End of base line
                 if (lineMod == 1) {
                     baseLen = endlinePos - lastEndlinePos - 1;
-                    // 更新最大碱基数
+                    // Update maximum base count
                     if (baseLen > maxBaseLen) {
                         maxBaseLen = baseLen;
                     }
                 } else if (lineMod == 3) {  
-                    // 质量值行和碱基行长度必须一致
+                    // Quality line and base line must have same length
                     if (endlinePos - lastEndlinePos - 1 != baseLen) {
                         return BINARY;
                     }
@@ -52,7 +52,7 @@ BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
             }
             
             if (lineMod == 0) {
-                if (linePos == 0 && buffer[pos] != '@') { // 行ID
+                if (linePos == 0 && buffer[pos] != '@') { // Line ID
                     return BINARY;
                 }
             } else if (lineMod == 1) {
@@ -96,7 +96,7 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 
     blockPtr->setBlockId(blockId++);
 
-    // 先将缓存中的数据拷贝到buffer中
+    // First copy data from cache to buffer
     if (cacheLen > 0) {
         size_t toCopy = (cacheLen < blockSize) ? cacheLen : blockSize;
         memcpy(buffer, cache, toCopy);
@@ -121,7 +121,7 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 
     blockPtr->setDataLen(static_cast<int64_t>(totalLen));
 
-    // 首块或者根据首块已经确定为FASTQ格式
+    // First block or already determined as FASTQ format based on first block
     if (fileType == TYPE_UNKNOW || BlockUtil::isFastqBlock(fileType)) {
         BlockType type = constructBlock(blockPtr);
         if (blockPtr->getBlockId() == 0) {
@@ -138,15 +138,15 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
     }
 
     if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) {
-        // 如果是FASTQ格式，确保块的完整性
+        // If FASTQ format, ensure block integrity
         int32_t lineNum = static_cast<int32_t>(blockPtr->getNpos().size());
         int64_t remainLen = totalLen - blockPtr->getNpos()[((lineNum >> 2) << 2) - 1] - 1;
         if (remainLen > 0) {
-            // 如果缓存中还有数据，先memmove
+            // If there's still data in cache, do memmove first
             if (cacheLen > 0) {
                 memmove(cache + remainLen, cache, cacheLen);
             }
-            // 将剩余的数据放到缓存中
+            // Put remaining data into cache
             memcpy(cache, buffer + totalLen - remainLen, remainLen);
             cacheLen = cacheLen + remainLen;
             totalLen -= remainLen;
@@ -154,7 +154,7 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 
         blockPtr->setDataLen(static_cast<int64_t>(totalLen));
         for (int t = 0; t < lineNum - ((lineNum >> 2) << 2); ++t)  {
-            blockPtr->getNpos().pop_back(); // 去掉最后一个换行符位置
+            blockPtr->getNpos().pop_back(); // Remove last newline position
         }
     }
     
@@ -224,7 +224,7 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
     }  else if (blockType == "refe_gene") {
         blockPtr->setBlockType(REFERENCE);
     }
-    // blocK整块信息拷贝
+    // Copy entire block information
     memcpy(blockPtr->getBuffer(), pbgzDataBlock.getDataPtr(), pbgzDataBlock.getDataLength());
     
     return pbgzDataBlock.getDataLength();
@@ -291,7 +291,7 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
         dataBlock.setMetaData("blocktype", "refe_gene");
     } 
 
-    /// 计算Meta和数据的校验和
+    /// Calculate checksum of Meta and data
     dataBlock.calcChecksum();
     pbgzFileWriter->writeBlockData(dataBlock);
     return 0;

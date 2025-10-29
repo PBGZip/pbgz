@@ -256,7 +256,7 @@ public:
 
     virtual ~PbgzDataBlock() {
         dataMetaInfo.clear();
-        // 外部地址，不能在此释放
+        // External address, cannot be freed here
         pBlockData = nullptr;
         
     }

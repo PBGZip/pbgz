@@ -60,7 +60,7 @@ void safe_free(void** ptr) ;
 
 void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...);
 
-// 以下函数会触发进程退出，不建议在coder库内部使用
+// The following functions will cause process exit, not recommended for use within coder library
 void coder_exit(int16_t exit_code, const char* exit_msg_format, ...);
 
 void check_exit(bool condition, int16_t exit_code, const char* exit_msg_format, ...);

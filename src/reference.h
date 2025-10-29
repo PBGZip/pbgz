@@ -20,194 +20,194 @@ public:
 
     virtual ~Reference();
 
-    /// @brief 创建索引表
-    /// @return  bool true成功 / false 失败
+    /// @brief Create index table
+    /// @return  bool true for success / false for failure
     bool makeIndex();
 
-    /// @brief 根据hash值查询参考基因组中的位置信息
-    /// @param hash 输入的hash值
-    /// @param length 输出参数，返回该hash bucket中位置信息的数量
-    /// @return 指向位置信息数组的指针，数组包含length个uint32_t值
+    /// @brief Query position information in reference genome based on hash value
+    /// @param hash Input hash value
+    /// @param length Output parameter, returns the number of position information in this hash bucket
+    /// @return Pointer to position information array, array contains length uint32_t values
     const uint32_t* queryPosition(const uint32_t &hash, uint32_t &length);
 
-    /// @brief 获取建索引时使用的碱基组长度
-    /// @return 碱基组长度，固定为31
+    /// @brief Get base group length used when building index
+    /// @return Base group length, fixed to 31
     uint32_t getBaseGroupLength() const;
 
-    /// @brief 获取建索引时使用的碱基组步长
-    /// @return 碱基组步长，固定为32
-    uint32_t getBaseGroupStep()  const;
+    /// @brief Get base group step used when building index
+    /// @return Base group step, fixed to 32
+    uint32_t getBaseGroupStep() const;
 
-    /// @brief 获取参考基因组压缩后的数据缓冲区
-    /// @return 指向压缩数据缓冲区的指针，每个字节包含4个碱基的2位编码
+    /// @brief Get compressed data buffer of reference genome
+    /// @return Pointer to compressed data buffer, each byte contains 2-bit encoding of 4 bases
     const uint8_t* getSquash() const;
 
-    /// @brief 获取参考基因组压缩数据的长度
-    /// @return 压缩数据的字节长度
+    /// @brief Get length of reference genome compressed data
+    /// @return Byte length of compressed data
     int64_t getSquashLength() const;
 
-    /// @brief 获取FASTA参考基因组文件名
-    /// @return FASTA文件名的字符串引用
+    /// @brief Get FASTA reference genome file name
+    /// @return String reference of FASTA file name
     const std::string& getFastaFileName() const;
 
-    /// @brief 获取FASTA参考基因组文件的内容长度
-    /// @return FASTA文件的字节长度
+    /// @brief Get content length of FASTA reference genome file
+    /// @return Byte length of FASTA file
     int64_t getFastaLength() const;
 
-    /// @brief 获取FASTA参考基因组文件的MD5校验和
-    /// @return MD5校验和字符串
+    /// @brief Get MD5 checksum of FASTA reference genome file
+    /// @return MD5 checksum string
     const std::string& getFastaChecksum() const;
 
-    /// @brief 获取NI索引文件的完整路径
-    /// @return NI文件路径的字符串引用
+    /// @brief Get complete path of NI index file
+    /// @return String reference of NI file path
     const std::string& getNiFilePath() const;
 
-    /// @brief 清理参考基因组中未匹配的区域
-    /// 将指定范围内未匹配的squash字节设置为0
-    /// @param startPos 起始的squash位置（字节索引）
-    /// @param length 需要清理的长度（字节数）
+    /// @brief Clean up unmatched regions in reference genome
+    /// Set unmatched squash bytes to 0 within specified range
+    /// @param startPos Starting squash position (byte index)
+    /// @param length Length to be cleaned (in bytes)
     void sanitizeRefSquash(int64_t startPos, int64_t length);
 
-    /// @brief 更新已匹配基因区域的信息
-    /// 标记指定位置范围的参考基因组区域为已匹配
-    /// @param actgPos 起始的ACTG碱基位置
-    /// @param matchLength 匹配的碱基长度
+    /// @brief Update matched gene region information
+    /// Mark specified position range of reference genome as matched
+    /// @param actgPos Starting ACTG base position
+    /// @param matchLength Matched base length
     void updateMatchedGene(uint64_t actgPos, uint32_t matchLength);
 
-    /// @brief 根据参考基因组文件生成NI索引文件路径
-    /// @param niFile 输出参数，返回生成的NI文件完整路径
+    /// @brief Generate NI index file path based on reference genome file
+    /// @param niFile Output parameter, returns generated NI file complete path
     void getNiFileFromReference(std::string& niFile);
 
-    /// @brief 从NI文件初始化参考基因组压缩数据
-    /// 读取NI文件并初始化refGeneSquash缓冲区
-    /// @return 成功返回true，失败返回false
+    /// @brief Initialize reference genome compressed data from NI file
+    /// Read NI file and initialize refGeneSquash buffer
+    /// @return true for success, false for failure
     bool initSquashByNiFile();
 
-    /// @brief 通过流式方式初始化参考基因组压缩数据
-    /// 分配指定大小的缓冲区用于存储压缩数据
-    /// @param squashLength 压缩数据的期望长度
-    /// @return 指向分配的压缩数据缓冲区的指针
+    /// @brief Initialize reference genome compressed data through streaming
+    /// Allocate buffer of specified size for storing compressed data
+    /// @param squashLength Expected length of compressed data
+    /// @return Pointer to allocated compressed data buffer
     uint8_t* initSquashByStream(int64_t squashLength);
 
-    /// @brief 获取指定位置范围的ACTG碱基序列
-    /// 从参考基因组中提取指定位置和长度的ACTG碱基序列
-    /// @param out 输出缓冲区，用于存储ACTG字符
-    /// @param outLength 输出缓冲区的长度
-    /// @param actgPos 起始的ACTG碱基位置
+    /// @brief Get ACTG base sequence of specified position range
+    /// Extract ACTG base sequence of specified position and length from reference genome
+    /// @param out Output buffer for storing ACTG characters
+    /// @param outLength Length of output buffer
+    /// @param actgPos Starting ACTG base position
     void getStretchActg(uint8_t* out, uint32_t outLength, uint64_t actgPos);
 
-    /// @brief 获取指定位置范围的2位编码序列
-    /// 从参考基因组中提取指定位置和长度的2位编码序列（每个字符存储2位）
-    /// @param out 输出缓冲区，用于存储2位编码
-    /// @param outLength 输出缓冲区的长度
-    /// @param actgPos 起始的ACTG碱基位置
+    /// @brief Get 2-bit encoding sequence of specified position range
+    /// Extract 2-bit encoding sequence of specified position and length from reference genome (each character stores 2 bits)
+    /// @param out Output buffer for storing 2-bit encoding
+    /// @param outLength Length of output buffer
+    /// @param actgPos Starting ACTG base position
     void getStretch2Bits1Char(uint8_t* out, uint32_t outLength, uint64_t actgPos);
 
-    /// @brief 将2位编码转换为ACTG字符序列
-    /// 将输入的2位编码数据转换为对应的ACTG字符
-    /// @param src2Bit 输入的2位编码数据
-    /// @param src2BitsLen 输入数据的长度
-    /// @param dstActg 输出缓冲区，用于存储ACTG字符
+    /// @brief Convert 2-bit encoding to ACTG character sequence
+    /// Convert input 2-bit encoding data to corresponding ACTG characters
+    /// @param src2Bit Input 2-bit encoding data
+    /// @param src2BitsLen Length of input data
+    /// @param dstActg Output buffer for storing ACTG characters
     void getActgFrom2Bits(const uint8_t* src2Bit, uint32_t src2BitsLen, uint8_t* dstActg);
 
 private:
-    /// @brief 检查参考基因组参数的有效性
-    /// 验证baseGroupStep和baseGroupLen等关键参数是否符合要求
-    /// @return 成功返回PBGZ_ERR_OK，失败返回错误码
+    /// @brief Check validity of reference genome parameters
+    /// Verify key parameters like baseGroupStep and baseGroupLen meet requirements
+    /// @return PBGZ_ERR_OK for success, error code for failure
     int32_t referencCheck();
 
-    /// @brief 从参考基因组中提取碱基组并计算hash值
-    /// 多线程处理，将参考基因组按baseGroupStep步长切分为baseGroupLen长度的碱基组，
-    /// 计算每个碱基组的hash值并存储到bgHash数组中
-    /// @param bgHash 输出参数，指向存储碱基组hash信息的数组
+    /// @brief Extract base groups from reference genome and calculate hash values
+    /// Multi-threaded processing, split reference genome into base groups of baseGroupLen length with baseGroupStep step,
+    /// calculate hash value for each base group and store in bgHash array
+    /// @param bgHash Output parameter, pointer to array storing base group hash information
     void makeIndexFetchBaseGroup(BaseGroupHash *&bgHash);
 
-    /// @brief 计算hash表的大小和每个bucket的元素数量
-    /// 统计每个hash bucket中的元素数量，为hash表分配内存空间
-    /// @param hashTable 输出参数，包含hash表大小信息的向量
+    /// @brief Calculate hash table size and element count for each bucket
+    /// Count elements in each hash bucket and allocate memory space for hash table
+    /// @param hashTable Output parameter, vector containing hash table size information
     void makeIndexCalcHashTableSize(HashTable &hashTable);
 
-    /// @brief 初始化hash表结构
-    /// 根据计算得到的hash表大小信息，初始化hash表的内存布局，
-    /// 设置每个bucket的起始位置和冲突处理机制
-    /// @param hashTable hash表大小信息
-    /// @param hashBucketCurPos 输出参数，每个bucket的当前位置指针数组
+    /// @brief Initialize hash table structure
+    /// Initialize hash table memory layout based on calculated hash table size information,
+    /// set starting position and conflict handling mechanism for each bucket
+    /// @param hashTable Hash table size information
+    /// @param hashBucketCurPos Output parameter, current position pointer array for each bucket
     void makeIndexInitHashTable(const HashTable& hashTable, uint32_t* &hashBucketCurPos);
 
-    /// @brief 构建hash表内容
-    /// 将碱基组的位置信息填充到hash表中，处理hash冲突
-    /// @param bgHash 碱基组hash信息数组
-    /// @param hashBucketCurPos 每个bucket的当前位置指针数组
+    /// @brief Build hash table content
+    /// Fill hash table with base group position information and handle hash conflicts
+    /// @param bgHash Base group hash information array
+    /// @param hashBucketCurPos Current position pointer array for each bucket
     void makeIndexBuildHashTable(const BaseGroupHash* bgHash, uint32_t* &hashBucketCurPos);
     
-    /// @brief 对hash表进行排序
-    /// 对每个bucket中的位置信息进行排序，优化查询性能
+    /// @brief Sort hash table
+    /// Sort position information in each bucket to optimize query performance
     void makeIndexSortHashTable();
 
-    /// @brief 检查NI索引文件是否有效
-    /// 验证NI文件的存在性、格式正确性以及与参考基因组文件的匹配性
-    /// @param niFile NI文件路径
-    /// @return 有效返回true，无效返回false
+    /// @brief Check if NI index file is valid
+    /// Verify existence, format correctness and matching with reference genome file of NI file
+    /// @param niFile NI file path
+    /// @return true for valid, false for invalid
     bool isNiFileValid(const std::string& niFile);
 
-    /// @brief 创建NI索引文件
-    /// 读取FASTA参考基因组文件，进行压缩编码，生成包含压缩数据和元数据的NI索引文件
-    /// @param niFile 要创建的NI文件路径
-    /// @return 成功返回true，失败返回false
+    /// @brief Create NI index file
+    /// Read FASTA reference genome file, perform compression encoding, generate NI index file containing compressed data and metadata
+    /// @param niFile NI file path to create
+    /// @return true for success, false for failure
     bool makeNiFile(const std::string& niFile);
 
-    /// @brief 调试函数：导出hash表内容到文件
-    /// 将hash表的内容写入"hash_table"文件，用于调试和分析
+    /// @brief Debug function: export hash table content to file
+    /// Write hash table content to "hash_table" file for debugging and analysis
     void dumpHashTable();
     
 private:
-    // 进度条
+    // Progress bar
     GuardBar* guardBar;
     int64_t gbCurrent;
     int64_t gbTotal;
     
-    // fasta文件校验和, 当前用md5
+    // FASTA file checksum, currently using MD5
     std::string fastaChecksum;
-    // ni文件的路径
+    // NI file path
     std::string niFilePath;
-    // fasqa文件内容长度
+    // FASTA file content length
     int64_t fastaLength;
-    // 建立索引表时取碱基作为key的长度，必须为奇数
+    // Length of bases used as key when building index table, must be odd
     const uint32_t baseGroupLen = 31;
-    // 建立索引表时碱基的步长
+    // Base step when building index table
     const uint32_t baseGroupStep = 32;
-    // 并发度
+    // Concurrency level
     uint32_t parallel;
 
-    // hash table信息
-    // 每个hash buckets元素个数
+    // Hash table information
+    // Element count for each hash bucket
     uint32_t* hashBucketCnt;
 
-    //  记录参考基因组碱基位置信息的hash table buffer
+    // Hash table buffer recording reference genome base position information
     uint32_t* hashTableBuffer;
 
-    // 参考基因组文件
+    // Reference genome file
     std::string refGeneFile;
 
-    // 参考基因actg编码后的buffer
+    // Buffer for reference gene ACTG encoding
     uint8_t* refGeneSquash;
 
-    // 参考基因actg编码后的buffer 对应的长度
+    // Corresponding length of reference gene ACTG encoding buffer
     int64_t refGeneSquashlen;
 
-    // 参考基因组actg编码后,匹配上了base的buffer
+    // Buffer for matched bases after reference genome ACTG encoding
     uint8_t* refGeneSquashMatched;
 
-    // 对应的长度
+    // Corresponding length
     uint64_t refGeneSquashMatchedlen;
 
-    // 缓存文件
+    // Cache file
     Json::Value ref2niCache;
 
-    // actg hash信息
+    // ACTG hash information
     const int32_t hashBuckets = (32 << 20); // 32M
 
-    // hash buckets对应的mask
+    // Mask corresponding to hash buckets
     const int32_t hashMask = hashBuckets - 1;
 
     // 1 byte squashed actg stretch to 4 actg

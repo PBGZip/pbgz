@@ -33,7 +33,7 @@ int32_t BinaryActuator::compress() {
     calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
     meta["md5"] = md5;
 
-    // 压缩meta信息
+    // Compress meta information
     coder_json metaCoder;
     int64_t metaLength = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
     if (metaLength < 0) {
@@ -50,7 +50,7 @@ int32_t BinaryActuator::decompress() {
         return -1;
     }
 
-    // 先解析出meta信息
+    // First parse out meta information
     coder_json metaCoder;
     metaCoder.decoder(inBlockPtr->getMetaBuffer(), inBlockPtr->getMetaLen(), meta);
     uint32_t decoderLen = 0;
@@ -77,7 +77,7 @@ int32_t BinaryActuator::decompress() {
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
     outBlockPtr->setBlockType(inBlockPtr->getBlockType());
     
-    // 检查源内容的校验和
+    // Check checksum of source content
     std::string md5;
     calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
     if (md5 != meta["md5"].asString()) {
@@ -86,4 +86,4 @@ int32_t BinaryActuator::decompress() {
     }
 
     return 0;
-} 
+}

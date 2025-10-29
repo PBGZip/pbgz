@@ -30,13 +30,13 @@ set(REQUIRED_LIBS
 
 add_subdirectory(coder)
 
-# 查找所有源文件
+# Find all source files
 file(GLOB PBGZ_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/log/*.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/utils/*.cpp
 )
 
-# 直接编译的开源代码
+# Directly compiled open source code
 set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
 
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp )

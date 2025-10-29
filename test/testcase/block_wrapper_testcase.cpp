@@ -6,9 +6,9 @@
 #undef private
 
 namespace BlockWrapperTestData {
-    // 需要先构造一个100行的文件
+    // Need to construct a 100-line file first
     const std::string samllFastQFile = "small.fastq";
-    // 需要先构造一个10000行的文件
+    // Need to construct a 10000-line file first
     const std::string bigFastQFile = "test.fastq";
     const uint32_t MAX_BLOCK_SIZE = 8 << 20;
 
@@ -92,6 +92,3 @@ TEST_F(BlockWrapperTest, TestBlockReaderTwoBlock) {
     delete pBlockReader;
     delete pInBlock;
 }
-
-
-

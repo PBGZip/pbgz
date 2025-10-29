@@ -28,18 +28,18 @@
 #include <string>
 
 enum class LogLevel{
-    TRACE = 0,     // 跟踪日志
-    DEBUGGING = 1, // 调试日志
-    INFO = 2,      // 重要的信息
-    WARNING = 3,   // 告警日志
-    ERROR = 4,     // 错误日志
-    FATAL = 5,     // 致命错误
-    OFF = 6        // 关闭所有日志
+    TRACE = 0,     // Trace log
+    DEBUGGING = 1, // Debug log
+    INFO = 2,      // Important information
+    WARNING = 3,   // Warning log
+    ERROR = 4,     // Error log
+    FATAL = 5,     // Fatal error
+    OFF = 6        // Turn off all logs
  };
 
  enum class LogAppender{
-    CONSOLE = 0,  // 输出到控制台
-    FILE = 1,     // 输出到文件
+    CONSOLE = 0,  // Output to console
+    FILE = 1,     // Output to file
  };
 
 

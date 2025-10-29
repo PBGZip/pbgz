@@ -22,7 +22,7 @@ struct coder_io
         m = MUNSET;
     }
 
-    /* 追加coder标识 */
+    /* Append coder identifier */
     void appen_magic(const std::string magic)
     {
         meta["magic"] = magic;
@@ -33,7 +33,7 @@ struct coder_io
         return meta["magic"].asString();
     }
 
-    /* 设置level */
+    /* Set level */
     void set_level(int32_t level)
     {
         meta["level"] = level;
@@ -44,27 +44,27 @@ struct coder_io
         return meta["level"].asInt();
     }
 
-    /* 写一个字符 */
+    /* Write one character */
     void putc(uint8_t c)
     {
         *(data + data_len++) = c;
     }
 
-    /* 读一个字符 */
+    /* Read one character */
     uint8_t getc()
     {
         return (data_len == data_capacity) ? '\0' : (*(data + data_len++));
     }
 
-    /* io模式 */
+    /* IO mode */
     mode m;
 
     uint8_t *data;
-    /* data的总长度 */
+    /* Total length of data */
     int32_t data_capacity;
-    /* 当前已经处理的长度 */
+    /* Currently processed length */
     int32_t data_len;
-    /* 编码器参数传入和编码器输出的原信息由meta交互 */
+    /* Encoder parameter input and output metadata interaction through meta */
     Json::Value meta;
 };
 

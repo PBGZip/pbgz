@@ -67,8 +67,8 @@ public:
     uint32_t get_context_gen2(uint8_t s, uint8_t q, uint32_t &s_prev_ctx, uint32_t &q_prev_ctx, uint32_t sse_ctx)
     {
 
-        /* 得到q量化后的值，　量化方法
-        * QUANT_Q == 1: (q + 1) / 2 , 这里使用的是这个量化参数
+        /* Get quantized value of q, quantization method
+        * QUANT_Q == 1: (q + 1) / 2 , this quantization parameter is used here
         * QUANT_Q == 2: (q + 2) / 4
         * QUANT_Q == 3: (q + 4) / 8
         * QUANT_Q == 4: (q + 8) / 16
@@ -83,8 +83,8 @@ public:
 
     uint32_t get_context_gen3(uint8_t s, uint8_t q, uint32_t &s_prev_ctx, uint32_t &q_prev_ctx, uint32_t sse_ctx)
     {
-        /* 得到q量化后的值，　量化方法
-        * QUANT_Q == 1: (q + 1) / 2 , 这里使用的是这个量化参数
+        /* Get quantized value of q, quantization method
+        * QUANT_Q == 1: (q + 1) / 2 , this quantization parameter is used here
         * QUANT_Q == 2: (q + 2) / 4
         * QUANT_Q == 3: (q + 4) / 8
         * QUANT_Q == 4: (q + 8) / 16
@@ -99,7 +99,7 @@ public:
     void encode_qual_gen2(uint8_t *seq, uint8_t *qual, uint32_t len) {
         uint32_t i, next_s = 1 + s_ctx_len/2;
         uint32_t s_prev_ctx = 0, q_prev_ctx = 0, ctx = 0;
-        uint64_t tot_qual = 0; /* 当前行的质量数和 */
+        uint64_t tot_qual = 0; /* Sum of quality scores in current row */
         uint32_t sse_ctx_cur = 0;
 
         if (io->m != coder_io::MENC) {
@@ -120,14 +120,14 @@ public:
             uint8_t q = (qual[i] - '!');
             model_qual->encodeSymbol(&rc, q, ctx);
 
-            // 1) sse ctx 1，初始化开始的context效果有提升，但是用于所有context
+            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
             // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
 
-            // 2) sse ctx 2, 取当前待压缩符号前面所有的质量行平均值，再做量化，效果明显
+            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
             tot_qual += qual[i];
             sse_ctx_cur = tot_qual / (i + 1);
 
-            // 3) 基于2， 将sse_ctr_cur << 4可以略微提升0.1% (34.906%->34.798%)
+            // 3) Based on 2, shifting sse_ctr_cur << 4 can slightly improve by 0.1% (34.906%->34.798%)
             // sse_ctx_cur = sse_ctx_cur & 0x3FFF; // quality : 33928344/97500000 . ratio : 34.798%
 
             if (next_s < len)
@@ -141,7 +141,7 @@ public:
         // int32_t delta = 5;
         uint32_t i, next_s = 1 + s_ctx_len / 2;
         uint32_t s_prev_ctx = 0, q_prev_ctx = 0, ctx = 0;
-        // uint64_t tot_qual = 0; // 当前行的质量数和
+        // uint64_t tot_qual = 0; // Sum of quality scores in current row
         uint32_t sse_ctx_cur = 0;
 
         // Get first context
@@ -156,14 +156,14 @@ public:
             uint8_t q = (qual[i] - '!');
             model_qual->encodeSymbol(&rc, q, ctx);
 
-            // 1) sse ctx 1，初始化开始的context效果有提升，但是用于所有context
+            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
             // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
 
-            // 2) sse ctx 2, 取当前待压缩符号前面所有的质量行平均值，再做量化，效果明显
+            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
             // tot_qual += qual[i];
             // sse_ctx_cur = tot_qual / (i + 1);
 
-            // 3) 基于2， 将sse_ctr_cur << 4可以略微提升0.1% (34.906%->34.798%)
+            // 3) Based on 2, shifting sse_ctr_cur << 4 can slightly improve by 0.1% (34.906%->34.798%)
             // sse_ctx_cur = sse_ctx_cur & 0x3FFF; // quality : 33928344/97500000 . ratio : 34.798%
 
             if (next_s < len)
@@ -201,10 +201,10 @@ public:
 
             uint32_t sse_ctx_cur = 0;
 
-            // 1) sse ctx 1，初始化开始的context效果有提升，但是用于所有context
+            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
             // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
 
-            // 2) sse ctx 2, 取当前待压缩符号前面所有的质量行平均值，再做量化，效果明显
+            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
             tot_qual += q + '!';
             sse_ctx_cur = tot_qual / (i + 1);
 
@@ -243,10 +243,10 @@ public:
         for (i = 0; i < len; i++, next_s++) {
             uint8_t q = (uint8_t) (model_qual->decodeSymbol(&rc, ctx));
 
-            // 1) sse ctx 1，初始化开始的context效果有提升，但是用于所有context
+            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
             // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
 
-            // 2) sse ctx 2, 取当前待压缩符号前面所有的质量行平均值，再做量化，效果明显
+            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
             // tot_qual += q + '!';
             // sse_ctx_cur = tot_qual / (i + 1);
 
@@ -265,7 +265,7 @@ public:
         }
     }
 
-    /* 编码完未处理的数据 */
+    /* Encode unprocessed data */
     void encode_flush()
     {
         if (flushed)
@@ -282,7 +282,7 @@ private:
     QUAL_MODEL_ENGINE *model_qual;
     bool is_gen2;
     int32_t q_ctx_len, s_ctx_len, ctx_cnt, Q_MASK, S_CTX;
-    int32_t SSE_CTX; /* 二代质量数压缩扩展context */
+    int32_t SSE_CTX; /* Second generation quality score compression extended context */
     coder_io *io;
     RangeCoder rc;
     bool flushed;

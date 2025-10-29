@@ -12,7 +12,7 @@
 class ReferenceTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // 创建测试用的临时FASTA文件
+        // Create temporary FASTA file for testing
         testFastaFile = "test_reference.fasta";
         std::ofstream fastaFile(testFastaFile);
         fastaFile << ">test_sequence\n";
@@ -20,13 +20,13 @@ protected:
         fastaFile << "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT\n";
         fastaFile.close();
         
-        // 创建测试目录
+        // Create test directory
         testDir = "test_reference_dir";
         std::filesystem::create_directory(testDir);
     }
 
     void TearDown() override {
-        // 清理测试文件
+        // Clean up test files
         std::filesystem::remove(testFastaFile);
         std::filesystem::remove_all(testDir);
     }
@@ -35,7 +35,7 @@ protected:
     std::string testDir;
 };
 
-// 测试构造函数
+// Test constructor
 TEST_F(ReferenceTest, Constructor) {
     Reference ref(testFastaFile, 4);
     

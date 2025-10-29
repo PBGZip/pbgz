@@ -18,7 +18,7 @@ public:
     BlockingQueue(uint32_t maxSize) : maxQueueSize(maxSize) { }
 
     /*
-     * 将元素加入队列,如果队列满就阻塞
+     * Push element to queue, block if queue is full
      **/
     void push(const T &item) {
         std::unique_lock<std::mutex> lock(mutex);
@@ -28,7 +28,7 @@ public:
     }
 
     /*
-     * 将元素加入队列, 不带阻塞
+     * Push element to queue without blocking
      **/
     void pushForce(const T &item) {
         std::unique_lock<std::mutex> lock(mutex);
@@ -37,7 +37,7 @@ public:
     }
 
     /*
-     * 从队列中弹出一个元素,如果队列为空就阻塞
+     * Pop element from queue, block if queue is empty
      **/
     T get() {
         std::unique_lock<std::mutex> lock(mutex);
@@ -49,7 +49,7 @@ public:
     }
 
     /**
-     * 返回队列是否为空
+     * Return whether queue is empty
      */
     bool empty() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -64,7 +64,7 @@ public:
     }
 
     /*
-     * 返回队列中元素数个
+     * Return number of elements in queue
      * */
     size_t size() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -84,4 +84,4 @@ private:
     mutable std::mutex mutex;
     mutable std::condition_variable conditonVar;
     std::queue<T> dataQueue;
-}; 
+};

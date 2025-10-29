@@ -66,10 +66,10 @@ private:
     bool initReferenceForCompress();
 
 private:
-    BlockingQueue<RoughIOBlock*> freeInputPool;   // 空闲的队列，文件读取任务从这里获取block块去读取数据
-    BlockingQueue<RoughIOBlock*> inputDataPool;   // 数据读取任务获取完数据写入到此队列，压缩/解压任务从此队列获取数据进行数据
-    BlockingQueue<RoughIOBlock*> freeOutputPool;  // 压缩/解压任务从此队列中获取block写入处理后的数据，输出任务处理后空闲块写入此队列
-    BlockingQueue<RoughIOBlock*> outputDataPool;  // 压缩/解压完成之后写入此队列，输出任务从此队列中获取数据
+    BlockingQueue<RoughIOBlock*> freeInputPool;   // Free queue, file reading tasks get blocks from here to read data
+    BlockingQueue<RoughIOBlock*> inputDataPool;   // Data reading tasks write completed data to this queue, compression/decompression tasks get data from this queue
+    BlockingQueue<RoughIOBlock*> freeOutputPool;  // Compression/decompression tasks get blocks from this queue to write processed data, output tasks write free blocks to this queue after processing
+    BlockingQueue<RoughIOBlock*> outputDataPool;  // After compression/decompression is completed, write to this queue, output tasks get data from this queue
     PbgzParameter parameter;
     IOReader* ioReader;
     IOWriter* ioWriter;
