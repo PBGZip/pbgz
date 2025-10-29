@@ -62,12 +62,12 @@ namespace PathUtil {
 
     std::string getAbsPath(const std::string& fileName, const std::string& baseDir) {
         std::filesystem::path fileNamePath(fileName);
-        // 如果路径是绝对的，直接使用
+        // If path is absolute, use it directly
         if (fileNamePath.is_absolute()) {
             return fileNamePath.lexically_normal();
         }
         
-        // 否则基于基准目录
+        // Otherwise, use base directory
         return std::filesystem::path((baseDir + std::filesystem::path::preferred_separator + fileName)).lexically_normal();
     }
 

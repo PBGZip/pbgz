@@ -62,7 +62,7 @@ int32_t Logger::buildLogString(char* logBuffer, uint32_t bufferLen, LogLevel log
 
     std::string logLevelStr = getLogLevelString(logLevel);
 
-    /// 不做长度判断，如果空间不够，则会截断
+    /// No length check, will truncate if space is insufficient
     snprintf(logBuffer, bufferLen, "[%s][%s][%s]%s[%s:%d]\n",
          getLogLevelString(logLevel).c_str(), function, timeBuffer, logContent, fileName, line);
 
@@ -101,7 +101,7 @@ void Logger::log(LogLevel logLevel, const char* logMessage) {
         return;
     }
 
-    // 先简单实现，后续可优化为异步写文件方式，防止IO阻塞主进程
+    // Simple implementation for now, can be optimized to async file writing later to prevent IO blocking main process
     LogAppender appender = ConfigManager::getInstance().getLogAppender();
     switch (appender) {
         case LogAppender::CONSOLE:{

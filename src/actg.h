@@ -5,11 +5,11 @@
 #include <bitset>
 #include "utils/memory_util.h"
 
-/* ACTG pair对应的表 */
+/* ACTG pair lookup table */
 static uint16_t *actgp = nullptr;
 static std::mutex actgpMutex;
 
-/*  ACTG -> 00011011*/
+/*  ACTG -> 00011011 */
 static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *dst) {
     uint8_t *squash = dst;
     int64_t len4align = (baseLen >> 2) << 2;
@@ -30,10 +30,10 @@ static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *
     return (squash - dst);
 }
 
-/* 求碱基的互补链 */
+/* Calculate complementary strand of bases */
 static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len)
 {
-    if (!actgp) /* 为空时创建加速查找表 */
+    if (!actgp) /* Create acceleration lookup table when empty */
     {
         std::unique_lock<std::mutex> guard(actgpMutex);
         if (!actgp)
@@ -80,7 +80,7 @@ static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len)
     }
 }
 
-/* 求两个字符串不同字符的个数 */
+/* Count the number of different characters between two strings */
 static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len)
 {
     uint32_t n = 0, zcnt = 0;
@@ -90,10 +90,10 @@ static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t
     return len - zcnt;
 }
 
-/* 求squash后的actg不同碱基的个数，如01001011与01101110的个数为3 */
+/* Count the number of different ACTG bases after squash, e.g., count between 01001011 and 01101110 is 3 */
 static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len)
 {
-    // 添加安全检查
+    // Add safety checks
     if (s1 == nullptr || s2 == nullptr) {
         return 0;
     }
@@ -107,13 +107,13 @@ static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, u
     uint32_t cnt = 0, n, next;
     uint32_t align8 = len >> 3 << 3;
     for (n = 0, next = 8; next < align8; n += 8) {
-        // 检查内存对齐和边界
+        // Check memory alignment and boundaries
         if (((uintptr_t)(s1 + n) & 0x7) == 0 && ((uintptr_t)(s2 + n) & 0x7) == 0) {
             x64 = (*((uint64_t *)(s1 + n))) ^ (*((uint64_t *)(s2 + n)));
             x64 = (x64 & 0x5555555555555555) | ((x64 >> 1) & 0x5555555555555555);
             cnt += std::bitset<64>{x64}.count();
         } else {
-            // 如果没有对齐，使用字节方式处理
+            // If not aligned, use byte-wise processing
             for (uint32_t i = 0; i < 8; i++) {
                 x8 = (*(s1 + n + i)) ^ (*(s2 + n + i));
                 x8 = (x8 & 0x55) | ((x8 >> 1) & 0x55);
@@ -135,7 +135,7 @@ static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, u
     return cnt;
 }
 
-/* 计算squash之后的base与reference的mapping关系，2bits放到一个字节的末尾，如果内容相同则存0，否则存base原始的2bits */
+/* Calculate mapping relationship between base and reference after squash, 2bits placed at end of byte, store 0 if content is same, otherwise store original 2bits of base */
 static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst)
 {
     uint32_t n, offset = 0, next;
@@ -192,7 +192,7 @@ static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8
     return offset;
 }
 
-/* 计算squash之后的base与reference的mapping关系，2bits放到一个字节的末尾 */
+/* Calculate mapping relationship between base and reference after squash, 2bits placed at end of byte */
 static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst)
 {
     uint32_t n, offset = 0, x32, next;
@@ -298,7 +298,7 @@ static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const ui
     return offset;
 }
 
-/* 将ACTG编码，编码后一个碱基还是占1个字节，但是只有最后两个bits有效 */
+/* Encode ACTG, each base still occupies 1 byte after encoding, but only the last 2 bits are valid */
 static inline void actgEncode(const uint8_t *src, uint8_t *dst, uint32_t len)
 {
     uint32_t n, align8 = len >> 3 << 3;
@@ -316,7 +316,7 @@ static inline void actgEncode(const uint8_t *src, uint8_t *dst, uint32_t len)
     }
 }
 
-/* 以字节为单位异或 */
+/* Perform XOR operation byte by byte */
 static inline void actgXor(const uint8_t *x1, const uint8_t *x2, uint8_t *out, uint32_t len)
 {
     uint32_t n, align8 = (len >> 3) << 3;

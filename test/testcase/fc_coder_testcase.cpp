@@ -39,7 +39,7 @@ TEST_F(FcCoderTest, FcDecodeRandom) {
     std::vector<unsigned char> buffer(count);
     urandom.read(reinterpret_cast<char*>(buffer.data()), count);
     if (!urandom) {
-        throw std::runtime_error("´Ó /dev/urandom ¶ÁÈ¡Ê§°Ü");
+        throw std::runtime_error("Read data from /dev/urandom failed.");
     }
     fcCoder.encode_line(buffer.data(), count);
     EXPECT_EQ(1263, fcIo->data_len);

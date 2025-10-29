@@ -35,21 +35,21 @@
 #include "config_manager.h"
 
 int PbgzEngine::init() {
-    // 注册coder需要的注册函数
+    // Register allocation functions required by coder
     coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
     coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
     coder_ns::register_exit_proc(pbgzExitProc);
     coder_ns::register_free_func(MemoryUtil::safeFree<void>);
     coder_ns::resister_logger_proc(coderLog);
 
-    // 创建队列
+    // Create queues
     freeInputPool.setCapility(parameter.threadNum);
     inputDataPool.setCapility(parameter.threadNum);
     freeOutputPool.setCapility(parameter.threadNum << 1);
     outputDataPool.setCapility(parameter.threadNum << 1);
 
     uint32_t blockBufferSize = ConfigManager::getInstance().getBlockSizeByCompressLevel(parameter.compressLevel);
-    // 首先往空闲队列压入空的block
+    // First push empty blocks to free queue
     for (uint32_t i = 0; i < freeInputPool.getCapility(); ++i) {
         RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
         if (inPtr == nullptr) {
@@ -94,7 +94,7 @@ int PbgzEngine::init() {
 }
 
 PbgzEngine::~PbgzEngine() {
-    // 释放资源
+    // Release resources
     if (ioReader) {
         ioReader->closeIO();
         delete ioReader;
@@ -179,7 +179,7 @@ int32_t PbgzEngine::start() {
         }
     }
 
-    // 写入结束标记
+    // Write end marker
     outputDataPool.push(nullptr);
     writeThread.join();
     PbgzManager::getInstance().printTailInfo(costTimer, parameter);
@@ -189,14 +189,14 @@ int32_t PbgzEngine::start() {
 int32_t PbgzEngine::startReadTask() {
     pthread_setname_np(pthread_self(), "readtask");
     BlockReader* blockReader = nullptr;
-    if (parameter.isDecompress) {   // 解压模式，从pbgz文件读取内容
+    if (parameter.isDecompress) {   // Decompression mode, read content from pbgz file
         blockReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
         PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
         if (!initRefGeneForDecomress(pbgzReader)) {
             LOG_INFO("Init reference for decompress failed");
         }
         fileMeta = pbgzReader->getFileMeta();
-    } else {  // 压缩模式，从非pbgz文件读取内容
+    } else {  // Compression mode, read content from non-pbgz file
         blockReader = MemoryUtil::safeNewClass<BlockReader>(ioReader);
     }
 
@@ -226,7 +226,7 @@ int32_t PbgzEngine::startReadTask() {
             if (ret < 0) {
                 LOG_ERROR("Read block failed.");
             }
-            // 读到文件结尾或者出错, 往数据队列插入一个空的block作为结束标志
+            // Reached end of file or error, insert empty block as end marker to data queue
             for (uint32_t i = 0; i < parameter.threadNum; ++i) {
                 inputDataPool.push(nullptr);
             }
@@ -252,7 +252,7 @@ int32_t PbgzEngine::startCoderTask() {
         pthread_setname_np(pthread_self(), std::string("codertask_").append(std::to_string(id)).c_str());
         while (true) {
             RoughIOBlock* inBlockPtr = inputDataPool.get();
-            if (inBlockPtr == nullptr) {  // 读到空指针，表示拿到了结束标志
+            if (inBlockPtr == nullptr) {  // Got null pointer, indicating end marker
                 break;
             }
 
@@ -271,7 +271,7 @@ int32_t PbgzEngine::startCoderTask() {
                 pActuator = MemoryUtil::safeNewClass<FastqActuator>(inBlockPtr, outBlockPtr, pRefGene);
                 FastqActuator* fastqActuator = dynamic_cast<FastqActuator*>(pActuator);
                 if (fastqActuator != nullptr) {
-                    if (!parameter.isDecompress && 0 != fastqActuator->preAnalysis()) { // 压缩场景才需要对块的内容进行分析
+                    if (!parameter.isDecompress && 0 != fastqActuator->preAnalysis()) { // Only need to analyze block content in compression scenario
                         pActuator = MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
                     }
                 }
@@ -319,9 +319,9 @@ int32_t PbgzEngine::startWriteTask() {
     auto writerTask = [this]() -> int32_t {
         pthread_setname_np(pthread_self(), "writetask");
         BlockWriter* blockWriter = nullptr;
-        if (parameter.isDecompress) {  // 解压模式，文件写入为非pbgz格式
+        if (parameter.isDecompress) {  // Decompression mode, file write in non-pbgz format
             blockWriter = MemoryUtil::safeNewClass<BlockWriter>(ioWriter);
-        } else {   // 压缩模式，写文件格式为pbgz格式
+        } else {   // Compression mode, file write in pbgz format
             blockWriter = MemoryUtil::safeNewClass<PbgzBlockWriter>(ioWriter);
             PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
             if (pbgzWriter == nullptr) {
@@ -340,7 +340,7 @@ int32_t PbgzEngine::startWriteTask() {
         int64_t blockId2Write = 0; 
         while (true) {
             RoughIOBlock* outBlockPtr = outputDataPool.get();
-            if (outBlockPtr == nullptr) {     // 拿到了结束标记
+            if (outBlockPtr == nullptr) {     // Got end marker
                 while (!outputSortedCache.empty()) {
                     RoughIOBlock* outblockPtr = outputSortedCache.front();
                     blockWriter->writeBlock(outblockPtr);
@@ -351,7 +351,7 @@ int32_t PbgzEngine::startWriteTask() {
                 break;
             } else {
                 if (outBlockPtr->getBlockType() == REFERENCE) {
-                    /// 写reference的的block是一次性的，写完就释放
+                    /// Writing reference blocks is one-time, release after writing
                     blockWriter->writeBlock(outBlockPtr);
                     PbgzManager::getInstance().updateWriteDataLen(outBlockPtr);
                     MemoryUtil::safeDeleteClass(outBlockPtr);
@@ -400,11 +400,11 @@ bool PbgzEngine::initRefGeneForDecomress(PbgzBlockReader* blockReader) {
     std::string niName = metaRefe["ni_name"].asString();
 
     if (metaRefe["blocks"].asInt64() > 0) {
-        /*  压缩包里有pack reference，直接unpack*/
+        /*  There is pack reference in compression package, directly unpack */
         unpackReference(blockReader);
     } else {
         std::string fastaNameInput = parameter.referenceGenic;
-        if (fastaNameInput.empty()) { /* 没有指定reference文件 */
+        if (fastaNameInput.empty()) { /* No reference file specified */
             fprintf(stderr, "need to specify the following FASTA file:\n\n");
             fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
             fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
@@ -456,14 +456,14 @@ bool PbgzEngine::initReferenceForCompress() {
             MemoryUtil::safeDeleteClass(pRefGene);
         }
     }
-    // 刷新文件meta
+    // Refresh file meta
     if (pRefGene) {
         Json::Value refeMeta;
         refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
         refeMeta["fasta_name"] = PathUtil::getAbsPath(pRefGene->getFastaFileName());
         refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
         refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
-        refeMeta["ni_name"] = PathUtil::getAbsPath(pRefGene->getNiFilePath()); /* 包含了md5信息，用于解压校验 */
+        refeMeta["ni_name"] = PathUtil::getAbsPath(pRefGene->getNiFilePath()); /* Contains md5 information, used for decompression verification */
         std::vector<RoughIOBlock*> blockVec;
         if (!parameter.isUnpackRef) {
             int64_t maxRefLen = 0;
@@ -473,7 +473,7 @@ bool PbgzEngine::initReferenceForCompress() {
             refeMeta["blocks"] = refBlockCount;
         }
         fileMeta.setMetaData("refe",refeMeta);
-        // 扔到写文件的线程去写
+        // Throw to write file thread to write
         if (!parameter.isUnpackRef) {
             for (auto item : blockVec) {
                 outputDataPool.pushForce(item);
@@ -514,7 +514,7 @@ void PbgzEngine::unpackReference(PbgzBlockReader* blockReader) {
                     if (currBlock == nullptr) {
                         return;
                     }
-                    /* 首先解析出当前block的meta信息，获取对应行的流信息和编码器等信息 */
+                    /* First parse out current block's meta information, get corresponding line's stream information and encoder information */
                     coder_json cmeta;
                     Json::Value refBlockMeta;
                     cmeta.decoder(currBlock->getMetaBuffer(), currBlock->getMetaLen(), refBlockMeta);
@@ -523,7 +523,7 @@ void PbgzEngine::unpackReference(PbgzBlockReader* blockReader) {
                         int32_t srcLen = refBlockMeta["srclen"].asInt();
                         int32_t dstLen = refBlockMeta["dstlen"].asInt();
 
-                        /* 指向reference当前块待解压的数据位置 */
+                        /* Point to the position of data to be decompressed in current block of reference */
                         if (currBlock->getDataLen() != dstLen) {
                             LOG_ERROR("reference unpack failed in block %ld: encoded length expect %ld, actual is %ld",
                                 refBlockMeta["block"].asInt(), dstLen, currBlock->getDataLen());
@@ -568,7 +568,7 @@ void PbgzEngine::unpackReference(PbgzBlockReader* blockReader) {
     return;
 }
 
-/*  保存参考基因组 */
+/*  Save reference genome */
 int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t &maxBlockLen, int64_t &totalEncLen) {
     int64_t block = 0, offset = 0;
     std::vector<std::thread> tpools;
@@ -586,7 +586,7 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
     int64_t current;
     std::mutex m;
 
-    // 启动线程
+    // Start threads
     for (uint32_t idx = 0; idx < pcnt; ++idx) {
         tpools.push_back(std::thread([&inputPool, &output, &m, &blockVec, &refe, &each, &maxBlockLen, &totalEncLen]() {
             while(true) {
@@ -611,7 +611,7 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
                 meta["coder"] = refeIo.meta;
                 coder_json cmeta;
                 std::string metaString;
-                cmeta.encoder(meta, metaString); /*  压缩block meta */
+                cmeta.encoder(meta, metaString); /*  Compress block meta */
             
                 m.lock();
                 int64_t currBlockLen = metaString.length() + refeIo.data_len;
@@ -620,7 +620,7 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
                     m.unlock();
                     break;
                 }
-                /* 写当前block的meta压缩后的流 */
+                /* Write compressed stream of current block's meta */
                 RoughIOBlock* outBlock = MemoryUtil::safeNewClass<RoughIOBlock>();
                 memcpy(outBlock->getCurrent(), refeIo.data, refeIo.data_len);
                 outBlock->setDataLen(refeIo.data_len);
@@ -643,7 +643,7 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
         remain -= current;
     }
 
-    // 写入结束标记
+    // Write end marker
     for (uint32_t i = 0; i < pcnt; ++i) {
         std::pair<std::pair<int64_t, uint8_t *>, std::pair<int64_t, int64_t>> refe2do;
         refe2do.second.second = 0;

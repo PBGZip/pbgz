@@ -52,7 +52,7 @@ private:
     bool isExit;
     std::string info;
     std::thread guard;
-    // 创建 promise-future 对
+    // Create promise-future pair
     std::promise<void> promise;
     std::future<void> future = promise.get_future();
 };

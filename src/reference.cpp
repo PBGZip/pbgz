@@ -18,7 +18,7 @@
 #include "actg.h"
 
 Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
-    // 初始化所有指针为nullptr，避免野指针
+    // Initialize all pointers to nullptr to avoid wild pointers
     refGeneSquash = nullptr;
     refGeneSquashlen = 0;
     hashBucketCnt = nullptr;
@@ -26,7 +26,7 @@ Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
     refGeneSquashMatched = nullptr;
     refGeneSquashMatchedlen = 0;
     
-    // 设置参考基因组文件路径和线程数
+    // Set reference genome file path and thread count
     refGeneFile = fastaName;
     parallel = threadNum;
     guardBar = nullptr;
@@ -52,7 +52,7 @@ int32_t Reference::referencCheck() {
 }
 
 Reference::~Reference() {
-    // 释放所有动态分配的内存，避免内存泄漏
+    // Free all dynamically allocated memory to avoid memory leaks
     MemoryUtil::safeFree(refGeneSquash);
     MemoryUtil::safeFree(hashBucketCnt);
     MemoryUtil::safeFree(hashTableBuffer);
@@ -83,7 +83,7 @@ bool Reference::initSquashByNiFile() {
     }
 
     uint8_t buffer[4096];
-    // 读取魔数
+    // Read magic number
     int64_t readLen = niReader.readIO(buffer, PBGZ_FILE_MAGIC.length());
     int64_t buffOffset = readLen;
     if (readLen != (int64_t)PBGZ_FILE_MAGIC.length() || 0 != memcmp(PBGZ_FILE_MAGIC.c_str(), buffer, PBGZ_FILE_MAGIC.length())) {
@@ -91,7 +91,7 @@ bool Reference::initSquashByNiFile() {
         return false;
     }
 
-    // 读取版本号
+    // Read version number
     readLen =  niReader.readIO(buffer, 3);
     buffOffset += readLen;
     if (readLen != 3) {
@@ -175,7 +175,7 @@ bool Reference::isNiFileValid(const std::string& niFileName) {
         return false;
     }
 
-    //读取conf文件
+    // Read conf file
     FileReader confReader(conf);
     confReader.openIO();
     int64_t confFileSize = confReader.getFileSize();
@@ -237,7 +237,7 @@ bool Reference::isNiFileValid(const std::string& niFileName) {
 
 bool Reference::makeNiFile(const std::string& niFile) {
     (void)remove(niFile.c_str());
-     /* 检查是否有程序已经在make ni */
+     /* Check if any program is already making ni */
     std::thread* progress = nullptr;
     for (;;){
         bool skip = false;
@@ -245,7 +245,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
         std::string lockFileName = niFile + ".lock";
         FileLock fileLock(lockFileName);
         if(!fileLock.lock()) {
-            skip = true; /* 检测到有程序在make该ni时，当前程序直接等待ni文件制作完成直接使用 */
+            skip = true; /* When detecting another program making this ni, current program waits for ni file creation to complete and uses it directly */
             if (!progress) {
                 progress = new std::thread([&done]() {
                     const std::string prompt = "......";
@@ -313,7 +313,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
     int64_t offset = PBGZ_FILE_MAGIC.length() + 3 + 2;
     niWriter.writeIO((uint8_t *)(&offset), sizeof(offset));
 
-    /* 串行处理就行，基本就是读文件的时间, base_squash时间可以忽略 */
+    /* Serial processing is sufficient, basically just file reading time, base_squash time can be ignored */
     std::ifstream file(refGeneFile.c_str());
     std::string line;
     int squashBufferlen = 1024 >> 2;
@@ -338,7 +338,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
             memcpy(cacheActg + cacheLen, line.c_str(), line.length());
             cacheLen += line.length();
         } else {
-            /* 先处理cache */
+            /* Process cache first */
             docnt = 4 - cacheLen;
             memcpy(cacheActg + cacheLen, line.c_str(), docnt);
             actgSquash((uint8_t *)cacheActg, 4, &ch);
@@ -349,11 +349,11 @@ bool Reference::makeNiFile(const std::string& niFile) {
 
             left = line.length() - docnt;
             if (left < 4) {
-                /* 剩余的不够cache */
+                /* Remaining is not enough for cache */
                 memcpy(cacheActg + cacheLen, line.c_str() + docnt, left);
                 cacheLen += left;
             } else {
-                /* 剩余的够cache */
+                /* Remaining is enough for cache */
                 l4Align = left >> 2 << 2;
                 squashBuffer = MemoryUtil::safeRealloc<uint8_t>(squashBufferlen, squashBuffer, (size_t)(l4Align >> 2));
                 uint32_t lenSquash = actgSquash((const uint8_t *)(line.c_str() + docnt), l4Align, squashBuffer);
@@ -361,7 +361,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
                 wlen += lenSquash;
                 md5_write(&md5, squashBuffer, lenSquash);
 
-                /* 处理未处理的未以4对齐的字节 */
+                /* Process unprocessed bytes not aligned to 4 */
                 docnt += l4Align;
                 left = line.length() - docnt;
                 if (left > 0) {
@@ -381,8 +381,8 @@ bool Reference::makeNiFile(const std::string& niFile) {
     Json::Value meta;
     meta["refe_name"] = refename;
     meta["refe_len"] = Json::Value::UInt64(refGeneLen);
-    meta["refe_orgfile_md5"] = refGeneMd5; /* reference文件的原始md5，即直接读未解开 */
-    meta["ni_data_md5"] = md5.hexstr();  /* ni文件的数据内容的md5 */
+    meta["refe_orgfile_md5"] = refGeneMd5; /* Original MD5 of reference file, i.e., directly read without decompression */
+    meta["ni_data_md5"] = md5.hexstr();  /* MD5 of ni file data content */
     fastaLength = refGeneLen;
     fastaChecksum = refGeneMd5;
 
@@ -392,7 +392,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
     niWriter.writeIO((uint8_t *)(metaStr.c_str()), metaStr.length());
     niWriter.closeIO();
 
-    { /* 将当前ni信息写conf */
+    { /* Write current ni information to conf */
         Json::Value niconf, nicurr;
         std::string conf, ni_name, out;
         uint64_t file_size;
@@ -426,14 +426,14 @@ bool Reference::makeNiFile(const std::string& niFile) {
             cmeta.decoder(buffer, file_size, ref2niCache);
 
             if (!ref2niCache[refename.c_str()].isArray())  { 
-                /* 没有conf信息则新增 */ 
+                /* Add new if no conf information exists */ 
                 ref2niCache[refename.c_str()].append(nicurr);
             } else {
                 int64_t n = 0;
                 for (; n < ref2niCache[refename.c_str()].size(); n++) {
                     niconf = ref2niCache[refename.c_str()][(int32_t)n];
                     if (!niconf["ni_name"].isNull() && niconf["ni_name"] == niFileName) { 
-                        /* 存在则更新 */
+                        /* Update if exists */
                         ref2niCache[refename.c_str()][(int32_t)n]["ni_mtime"] = nicurr["ni_mtime"];
                         ref2niCache[refename.c_str()][(int32_t)n]["ni_fsize"] = nicurr["ni_fsize"];
                         break;
@@ -525,7 +525,7 @@ void Reference::getNiFileFromReference(std::string& niFile) {
 
     md5_final(&md5);
     niFileName += ".";
-    niFileName += std::string(md5.hexstr().c_str(), 8); /* 取md5的前8位 */
+    niFileName += std::string(md5.hexstr().c_str(), 8); /* Take first 8 digits of MD5 */
     niFileName += ".ni";
     niFilePath += niFileName;
     niFile = niFilePath;
@@ -537,7 +537,7 @@ bool Reference::makeIndex() {
     BaseGroupHash *bgHash;
     HashTable hashTable;
     std::string tips;
-    /* 记录每个bucket下一个hash值写的位置，该位置为相对hash_buff起始位置的偏移，这样是为了并发写 */
+    /* Record the position where the next hash value of each bucket is written, this position is the offset relative to the start of hash_buff, this is for concurrent writing */
     uint32_t *hashBucketCurpos;
 
     hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
@@ -568,7 +568,7 @@ bool Reference::makeIndex() {
     free(bgHash);
     free(hashBucketCurpos);
 
-    refGeneSquashMatchedlen = refGeneSquashlen; /* 一个字节表示一个squash字节是否有matched */
+    refGeneSquashMatchedlen = refGeneSquashlen; /* One byte indicates whether a squash byte is matched */
     refGeneSquashMatched = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashMatchedlen);
     return true;
 }
@@ -601,7 +601,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
     BaseGroupHash *bhash_start = bgHash;
 
     for (n = 0; n < pcnt; n++) {
-        current = (n + 1 == pcnt) ? (each + remain) : each; /* 当前处理的key数 */
+        current = (n + 1 == pcnt) ? (each + remain) : each; /* Number of keys currently processed */
         if ((n + 1) == pcnt) {
             gbTotal = 0;
             gbCurrent = current;
@@ -626,7 +626,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
             const uint32_t len_bgs = (bg_len >> 2) + ((bg_len & 0x3) ? 1 : 0);
             const char actg4[4] = {'A', 'C', 'T', 'G'};
             char actg_bg[bg_len + 1];
-            char actg_bg_pair[bg_len + 1]; /* 互补碱基*/
+            char actg_bg_pair[bg_len + 1]; /* Complementary base */
             char actg_bgs[len_bgs];    /* squash base group */
             char actg_bgs_pair[len_bgs];
             
@@ -689,7 +689,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
             }
         }));
 
-        p += (current * (baseGroupStep >> 2)); /* 这里限定了basegroup_step必须为4的整数，有需要可以修改 */
+        p += (current * (baseGroupStep >> 2)); /* This limits basegroup_step to be a multiple of 4, can be modified if needed */
         bhash += current;
     }
 
@@ -707,7 +707,7 @@ void Reference::makeIndexCalcHashTableSize(HashTable& hashTable) {
     uint32_t pcnt = this->parallel;
     std::vector<std::thread> tpools;
 
-    /* 第一段存hash buffer的内容和总长度，第二段存hash butcket的长度 */
+    /* First segment stores hash buffer content and total length, second segment stores hash bucket length */
     hashTable.resize(pcnt);
 
     total = hashBuckets;
@@ -727,7 +727,7 @@ void Reference::makeIndexCalcHashTableSize(HashTable& hashTable) {
             for (n = 0; n < current; n++) {
                 current_cnt = *(p + n);
                 len_bucket++;
-                /* 如果当前bucket中有多个hash值，那么hash buffer第一个存指针，该指针指向当前bucket的hash值对应的buffer */
+                /* If current bucket has multiple hash values, the first element of hash buffer stores a pointer pointing to the buffer corresponding to the hash values of current bucket */
                 len_hash += (current_cnt <= 1) ? 1 : (current_cnt + 1);
             }
             hash_buffer.first.second = len_hash;
@@ -788,13 +788,13 @@ void Reference::makeIndexInitHashTable(const HashTable& hashTable, uint32_t* &ha
                     p++;
                     break;
                 case 1:
-                    *pn++ = p - phbuffStart; /* 没有hash冲突时，下一个位置直接写bucket */
+                    *pn++ = p - phbuffStart; /* When no hash conflict, next position writes bucket directly */
                     p++;
                     break;
                 default:
                     *pn++ = pc - phbuffStart;
-                    *p = pc - phbuffStart; /*  hash冲突时bucket第一个元素存hash冲突buffer相对hash buffer起始位置的偏移 */
-                    pc += current_cnt;      /*  当前bucket有current_cnt个hash值，故做current_cnt个偏移 */
+                    *p = pc - phbuffStart; /* When hash conflict, first element of bucket stores offset of hash conflict buffer relative to hash buffer start */
+                    pc += current_cnt;      /* Current bucket has current_cnt hash values, so make current_cnt offsets */
                     p++;
                     break;
                 }
@@ -846,7 +846,7 @@ void Reference::makeIndexBuildHashTable(const BaseGroupHash* bgHash, uint32_t* &
                     default:
                         pos = hb_curpos[bucket];
                         *(phbuffStart + pos) = (h + n)->baseGroupPos;
-                        hb_curpos[bucket]++; /* 该bucket指向下一个位置 */
+                        hb_curpos[bucket]++; /* This bucket points to next position */
                         break;
                     }
                 }
@@ -888,7 +888,7 @@ void Reference::makeIndexSortHashTable() {
                         p = pstart + phb_buff[n];
                         std::sort(p, p + current_cnt, [](const uint32_t &p1, const uint32_t &p2) -> bool {
                              return p1 < p2; 
-                        }); // 修复可能core问题，相等返回true会越界，当元素个数>16(_S_threshold)时选择快速排序，<=16个则选择插入排序(对象少时快排性能不理想)
+                        }); // Fix potential core dump issue, returning true for equality causes out-of-bounds, uses quick sort when element count >16 (_S_threshold), uses insertion sort when <=16 (quick sort performance is not ideal for few objects)
                     }
                     *(phb_cnt_start + offset + n) = std::min((uint32_t)16, current_cnt);
                 }
@@ -952,37 +952,37 @@ void Reference::updateMatchedGene(uint64_t actgPos, uint32_t matchLength) {
     memset(refGeneSquashMatched + sposStart, 1, sposEnd - sposStart + 1);
 }
 
-/* 得到reference squash buffer */
+/* Get reference squash buffer */
 const uint8_t* Reference::getSquash() const {
     return this->refGeneSquash;
 }
 
-/* 得到reference squash buffer的长度 */
+/* Get reference squash buffer length */
 int64_t Reference::getSquashLength() const {
     return this->refGeneSquashlen;
 }
 
-/* 获取fasta文件名 */
+/* Get fasta file name */
 const std::string& Reference::getFastaFileName() const {
     return this->refGeneFile;
 }
 
-/* 获取fasta文件内容长度 */
+/* Get fasta file content length */
 int64_t Reference::getFastaLength() const {
     return this->fastaLength;
 }
 
-/* 获取fasta文件内容md5 */
+/* Get fasta file content MD5 */
 const std::string& Reference::getFastaChecksum() const {
     return this->fastaChecksum;
 }
 
-/* 获取ni文件路径 */
+/* Get ni file path */
 const std::string& Reference::getNiFilePath() const {
     return this->niFilePath;
 }
 
-/* 将没有matched上的reference清零 */
+/* Clear unmatched reference to zero */
 void Reference::sanitizeRefSquash(int64_t startSquashPos, int64_t len) {
     uint64_t e = startSquashPos + len;
     for (uint64_t n = startSquashPos; n < e; n++) {
@@ -990,7 +990,7 @@ void Reference::sanitizeRefSquash(int64_t startSquashPos, int64_t len) {
     }
 }
 
-/* 获取指定位置对应长度的actg碱基 */
+/* Get ACTG bases of specified length at specified position */
 void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) {
     uint64_t squashPos = actgPos >> 2;
     uint8_t *p = refGeneSquash + squashPos;
@@ -998,7 +998,7 @@ void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) 
 
     uint32_t offset  = 0;
     const char actg4[4] = {'A', 'C', 'T', 'G'};
-    /* 左边不对齐 */
+    /* Left unaligned part */
     switch (actgPos & 0x3) 
     {
     case 0:
@@ -1024,7 +1024,7 @@ void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) 
     if (offset == outLen)
         return;
 
-    /* 对齐部分 */
+    /* Aligned part */
     uint32_t lenNeed = (outLen - offset) >> 2;
     for (uint32_t n = 0; n < lenNeed; n++) {
         *((uint32_t *)(out + offset)) = actgStretch[*p];
@@ -1035,7 +1035,7 @@ void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) 
         return;
     }
 
-    /* 右边未对齐部分 */
+    /* Right unaligned part */
     lenNeed = outLen - offset;
     ch = *p;
     switch (lenNeed & 0x3) 
@@ -1059,7 +1059,7 @@ void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) 
     }
 }
 
-/*  根据每个字节末尾的2个bits，转换成actg */
+/* Convert to ACTG based on the last 2 bits of each byte */
 void Reference::getActgFrom2Bits(const uint8_t *src2Bits, uint32_t src2BitsLen, uint8_t *dstActg) {
     uint8_t *s = (uint8_t *)src2Bits, *p;
     uint32_t align4 = src2BitsLen >> 2 << 2, offset = 0;
@@ -1081,7 +1081,7 @@ void Reference::getActgFrom2Bits(const uint8_t *src2Bits, uint32_t src2BitsLen, 
     }
 }
 
-/* 获取指定位置对应长度的squash碱基，即2个bits 放到一个字符的末尾*/
+/* Get squash bases of specified length at specified position, i.e., 2 bits placed at the end of one character */
 void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t actgPos) {
     uint32_t offset = 0;
     uint64_t squashPos = actgPos >> 2;
@@ -1089,7 +1089,7 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
     uint8_t *p = refGeneSquash + squashPos;
     uint8_t ch = *p;
 
-    /* 左边不对齐 */
+    /* Left unaligned part */
     switch (actgPos & 0x3) 
     {
     case 0:
@@ -1115,7 +1115,7 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
     if (offset == outLen)
         return;
 
-    /* 对齐部分 */
+    /* Aligned part */
     uint32_t lenNeed = (outLen - offset) >> 2;
     for (uint32_t n = 0; n < lenNeed; n++) {
         *((uint32_t *)(out + offset)) = actgStretch2bits[*p];
@@ -1126,7 +1126,7 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
         return;
     }
 
-    /* 右边未对齐部分 */
+    /* Right unaligned part */
     lenNeed = outLen - offset;
     ch = *p;
     switch (lenNeed & 0x3) 

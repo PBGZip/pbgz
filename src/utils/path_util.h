@@ -3,73 +3,73 @@
 #include <string>
 
 namespace PathUtil {
-    /// @brief 判断文件名是否以后缀结尾
-    /// @param fileName  文件名
-    /// @param suffix    后缀
+    /// @brief Check if filename ends with suffix
+    /// @param fileName  File name
+    /// @param suffix    Suffix
     /// @return bool     true/false
     bool suffixCheck(const std::string& fileName, const std::string& suffix);
 
-    /// @brief 判断文件是否存在
-    /// @param fileName  文件名
-    /// @return bool     true:存在 / false:不存在
+    /// @brief Check if file exists
+    /// @param fileName  File name
+    /// @return bool     true: exists / false: not exists
     bool fileExists(const std::string& fileName);
 
-    /// @brief 判断文件是否可读
+    /// @brief Check if file is readable
     /// @param fileName 
     /// @return  bool  true/false
     bool fileReadble(const std::string& fileName);
 
-    /// @brief 判断文件是否可写
+    /// @brief Check if file is writable
     /// @param fileName 
     /// @return  bool  true/false
     bool fileWriteable(const std::string& fileName);
 
-    /// @brief 根据文件名获取文件的名字，不带目录
+    /// @brief Get file name without directory from full path
     /// @param fullFileName 
-    /// @return 不带目录的文件名
+    /// @return File name without directory
     std::string getFileName(const std::string& fullFileName);
 
-    /// @brief 根据文件名获取文件的目录
+    /// @brief Get directory path from full file name
     /// @param fullFileName 
-    /// @return 文件所在的目录
+    /// @return Directory where file is located
     std::string getFilePath(const std::string& fullFileName);
 
-    /// @brief 获取文件的绝对路径
+    /// @brief Get absolute path of file
     /// @param fileName 
-    /// @return 文件的决定路径
+    /// @return Absolute path of file
     std::string getAbsPath(const std::string& fileName);
 
-    /// @brief 创建目录
+    /// @brief Create directory
     /// @param dir 
-    /// @return 创建的目录名称的绝对路径
+    /// @return Absolute path of created directory
     std::string createDir(const std::string& dir);
 
-    /// @brief 判断文件是否是目录
+    /// @brief Check if path is a directory
     /// @param filename 
     /// @return  bool  true/false
     bool isDir(const std::string& filename);
 
-    /// @brief 判断文件是否是普通文件
+    /// @brief Check if path is a regular file
     /// @param filename 
     /// @return bool  true/false
     bool isFile(const std::string& filename);
 
-    /// @brief 删除文件
+    /// @brief Remove file
     /// @param fileName 
     /// @return bool  true/false
     bool removeFile(const std::string& fileName);
 
-    /// @brief 获取home目录
-    /// @return home的绝对路径
+    /// @brief Get home directory
+    /// @return Absolute path of home directory
     std::string getHomePath();
 
-    /// @brief 获取文件最后修改时间
+    /// @brief Get file last modification time
     /// @return 
     int64_t getFileMtime(const std::string& fileName);
 
-    /// @brief 获取文件大小
+    /// @brief Get file size
     /// @param fileName 
-    /// @return 文件大小
+    /// @return File size
     int64_t getFileSize(const std::string& fileName);
 }
 

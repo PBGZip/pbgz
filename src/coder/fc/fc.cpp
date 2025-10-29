@@ -386,7 +386,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         tidHistory[i] = runHistory[i] = 0;
     }
 
-    // 全局频率排序优化了 MTF 输出的符号分布
+    // Global frequency sorting optimizes the symbol distribution of MTF output
     unsigned char * tidArray = fctransform(input, buffer, inputSize, MTFTable);
 
 #ifdef FC_DEBUG
@@ -439,7 +439,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
 
         if (currentChar == prevChar)
         {
-            maxRank = fc_bit_scan_reverse(tid - 1); // 得到最后一个tid对应的有效bits数，即0-最左边的1之间的距离，如101000，则为5
+            maxRank = fc_bit_scan_reverse(tid - 1); // Get the number of valid bits for the last tid, i.e., the distance between 0 and the leftmost 1, e.g., 5 for 101000
             break;
         }
 
@@ -453,14 +453,14 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
     const unsigned char * tidArrayEnd  = buffer + inputSize;
 
     int current;
-    for (; tidArray < tidArrayEnd; ) // 循环处理每个tid，即transform的内容
+    for (; tidArray < tidArrayEnd; ) // Loop to process each tid, the content of transform
     {
         if (coder.is_end())
         {
             return FC_FAILED_ZIP;
         }
         
-        // 计算当前字符循环了多少次，记为runSize，同时input偏移到下个不重复的字符
+        // Calculate how many times the current character loops, recorded as runSize, and input offsets to the next non-repeating character
         int currentChar = *input, runSize;
         {
             const unsigned char * inputStart = input++;
@@ -507,24 +507,24 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
             runSize = (int)(input - inputStart);
         }
 
-        // 建模思路：首先描述当前过程涉及到的变量有，tid, 当前字符(MTFTable), runSize(字符重复了多少次)
+        // Modeling approach: First describe the variables involved in the current process: tid, current character (MTFTable), runSize (how many times the character repeats)
         int tid = *tidArray++;
-        int history = tidHistory[currentChar]; // 这个history值为当前字符对应的tid的有效位数-1， tidHistory应该是会小于8的，即只占3bits
+        int history = tidHistory[currentChar]; // This history value is the number of valid bits for the tid corresponding to the current character minus 1, tidHistory should be less than 8, i.e., only 3 bits
         int state = model_tid_state(contextRank4, contextRun, history);
-        // 状态转移表， contextRanke :3 bits,contextRun : 4 bits，rank : clipped to [0,7], 3 bits，runsizeHistory : clipped to [0,7], 3 bits
-        // 总共:3+4+3+3=13 bits8192 entries
-        // contextRank4 是8个bits的tid截取最低2位的历史记录（即最大保存最近4次记录），当tid大于3时取3,否则取整个tid
-        // contextRun 是4个bits的runSize是否小于3的历史记录（即最大保存最近4次记录）
+        // State transition table, contextRanke :3 bits, contextRun : 4 bits, rank : clipped to [0,7], 3 bits, runsizeHistory : clipped to [0,7], 3 bits
+        // Total: 3+4+3+3=13 bits 8192 entries
+        // contextRank4 is the history record of the lowest 2 bits of tid (i.e., save the last 4 records at most), when tid > 3 take 3, otherwise take the entire tid
+        // contextRun is the history record of whether runSize is less than 3 (i.e., save the last 4 records at most)
 
         short *            RESTRICT statePredictor  = & model->tid_t.state_model[state]; // 
         short *            RESTRICT charPredictor   = & model->tid_t.char_model[currentChar];
         short *            RESTRICT staticPredictor = & model->tid_t.static_model;
         pMixer * RESTRICT mixer           = & model->tid_mixer[currentChar];
 
-        // @@@ --- 总结地说：编码条件标志位，用于解压还原；编码tid的位宽(对应模型bit_width)；编码tid的真实bits(对应模型bits_value)
+        // @@@ --- In summary: encode condition flag bits for decompression restoration; encode bit width of tid (corresponding to model bit_width); encode real bits of tid (corresponding to model bits_value)
         if (avgRank < 32)
         {
-            if (tid == 1) // @@@ --- step : tid为1不需要编码，只需要编码0即可，类似编码了一个条件，本次编码完全是为了解码能还原，tid为1的含义没有完全理解，但是思路是可以理解的
+            if (tid == 1) // @@@ --- step : tid of 1 does not need encoding, only need to encode 0, similar to encoding a condition, this encoding is completely for decompression restoration, the meaning of tid being 1 is not fully understood, but the approach is understandable
             {
                 tidHistory[currentChar] = 0;
 
@@ -538,7 +538,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
             }
             else 
             {
-                { // @@@ --- step : 当前tid需要编码，先编码1，也是表示一个条件，本次编码完全是为了解码能还原
+                { // @@@ --- step : current tid needs encoding, first encode 1, which also represents a condition, this encoding is completely for decompression restoration
                     int probability0 = *charPredictor, probability1 = *statePredictor, probability2 = *staticPredictor;
 
                     fc_count::UpdateBit1(*statePredictor,  FC_RANK_TS_TH1, FC_RANK_TS_AR1);
@@ -548,18 +548,18 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
                     coder.EncodeBit1(mixer->MixupAndUpdateBit1(probability0, probability1, probability2, FC_RANK_TM_LR0, FC_RANK_TM_LR1, FC_RANK_TM_LR2, FC_RANK_TM_TH1, FC_RANK_TM_AR1));
                 }
 
-                // __builtin_clz (x) ^ 31: __builtin_clz (x)表示x左边第一个1前面0的个数，譬如x为40时为26, 31 - 26 = 5
+                // __builtin_clz (x) ^ 31: __builtin_clz (x) represents the number of zeros before the first 1 on the left of x, e.g., when x is 40, it is 26, 31 - 26 = 5
                 int bitRankSize = fc_bit_scan_reverse(tid); tidHistory[currentChar] = bitRankSize;
                 // printf("tid %d, bitRankSize %d\n", tid, bitRankSize);
 
                 statePredictor  = & model->tid_t.bit_width.state_model[state][0];
                 charPredictor   = & model->tid_t.bit_width.char_model[currentChar][0];
                 staticPredictor = & model->tid_t.bit_width.static_model[0];
-                mixer           = & model->tid_mixerbit_width[history < 1 ? 1 : history][1];//history为当前字符上一次的有效bits数-1
+                mixer           = & model->tid_mixerbit_width[history < 1 ? 1 : history][1];//history is the number of valid bits for the current character's last time minus 1
 
-                // @@@ --- step : 编码tid值的有效位数，编码时没有编码最高位，因为最高位肯定是1
-                // 还是假如tid为40，那么bitRankSize为5，注意tid的bits是记录在Rank.bit_width中
-                // bit范围为[1, 4]，为什么不到5是因为最高位肯定是1
+                // @@@ --- step : encode the valid bits of tid value, the highest bit is not encoded during encoding because the highest bit is definitely 1
+                // For example, if tid is 40, then bitRankSize is 5, note that tid's bits are recorded in Rank.bit_width
+                // bit range is [1, 4], why not 5 is because the highest bit is definitely 1
                 for (int bit = 1; bit < bitRankSize; ++bit, ++statePredictor, ++charPredictor, ++staticPredictor)
                 {
                     int probability0 = *charPredictor, probability1 = *statePredictor, probability2 = *staticPredictor;
@@ -572,7 +572,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
 
                     mixer = & model->tid_mixerbit_width[history <= bit ? bit + 1 : history][bit + 1];
                 }
-                if (bitRankSize < maxRank) // 小于maxRank时编一个标志位
+                if (bitRankSize < maxRank) // Encode a flag bit when less than maxRank
                 {
                     int probability0 = *charPredictor, probability1 = *statePredictor, probability2 = *staticPredictor;
 
@@ -583,15 +583,15 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
                     coder.EncodeBit0(mixer->MixupAndUpdateBit0(probability0, probability1, probability2, FC_RANK_EM_LR0, FC_RANK_EM_LR1, FC_RANK_EM_LR2, FC_RANK_EM_TH0, FC_RANK_EM_AR0));
                 }
 
-                // @@@ --- step : 真正编码tid的值，编码时没有编码最高位，因为最高位肯定是1
-                // 编码尾数，假如bank为40, 即0010 1000，那么bitRankSize==31-26=5， bit范围为[4, 0]
+                // @@@ --- step : actually encode the tid value, the highest bit is not encoded during encoding because the highest bit is definitely 1
+                // Encode the mantissa, for example if bank is 40, i.e., 0010 1000, then bitRankSize==31-26=5, bit range is [4, 0]
                 statePredictor  = & model->tid_t.bits_value[bitRankSize].state_model[state][0];
                 charPredictor   = & model->tid_t.bits_value[bitRankSize].char_model[currentChar][0];
                 staticPredictor = & model->tid_t.bits_value[bitRankSize].static_model[0];
                 mixer           = & model->tid_mixerbits_value[bitRankSize];
 
-                // bit范围为[4, 0]，为什么不到5是因为最高位肯定是1
-                for (int context = 1, bit = bitRankSize - 1; bit >= 0; --bit)  // context其实就是tid当前精确到bit的值
+                // bit range is [4, 0], why not 5 is because the highest bit is definitely 1
+                for (int context = 1, bit = bitRankSize - 1; bit >= 0; --bit)  // context is actually the value of tid accurate to bit
                 {
                     if (tid & (1 << bit))
                     {
@@ -620,17 +620,17 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
                 }
             }
         }
-        else // tid太大了，用out_of_range对应模型编码
+        else // tid is too large, use out_of_range corresponding model for encoding
         {
-            // __builtin_clz (x) ^ 31: __builtin_clz (x)表示x左边第一个1前面0的个数，譬如x为40时为26, 31 - 26 = 5
-            // 将当前字符对应的位宽-1记录到tidHistory中
+            // __builtin_clz (x) ^ 31: __builtin_clz (x) represents the number of zeros before the first 1 on the left of x, e.g., when x is 40, it is 26, 31 - 26 = 5
+            // Record the bit width of the current character minus 1 into tidHistory
             tidHistory[currentChar] = (unsigned char)fc_bit_scan_reverse(tid);
 
             statePredictor  = & model->tid_t.out_of_range.state_model[state][0];
             charPredictor   = & model->tid_t.out_of_range.char_model[currentChar][0];
             staticPredictor = & model->tid_t.out_of_range.static_model[0];
 
-            for (int context = 1, bit = maxRank; bit >= 0; --bit) // 对齐到最大的bank bits，每个tid都编码[0, maxRank]这么多bits
+            for (int context = 1, bit = maxRank; bit >= 0; --bit) // Align to the maximum bank bits, each tid encodes [0, maxRank] bits
             {
                 mixer = & model->tid_mixerout_of_range[context];
 
@@ -661,7 +661,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
             }
         }
 
-        avgRank         =   (avgRank * 125 + tid * 3) >> 7; // 当前tid被编码完，放到avgRank中去，其实这也是一个context，
+        avgRank         =   (avgRank * 125 + tid * 3) >> 7; // Current tid encoding is completed, put into avgRank, this is actually also a context,
         tid            =   tid - 1;
         history         =   runHistory[currentChar];
         state           =   lstate(contextRank0, contextRun, tid, history);

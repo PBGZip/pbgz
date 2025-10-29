@@ -1,7 +1,7 @@
 #ifndef _CODER_BWT_CM_H_
 #define _CODER_BWT_CM_H_
 
-/* 基于bwt变换后的context model编码器 */
+/* Context model encoder based on BWT transformation */
 #include <stdint.h>
 #include <algorithm>
 #include <cinttypes> 
@@ -14,7 +14,7 @@
 class coder_bwt_cm: public coder
 {
 private:
-    template <int32_t RATE> /* 用count表示概率，RATE速率值越小，表示越灵敏，影响越大，即每次来一个符号时概率很大 */
+    template <int32_t RATE> /* Use count to represent probability, smaller RATE value means more sensitive and greater impact, i.e., high probability when each symbol arrives */
     class _counter
     {
     private:
@@ -23,7 +23,7 @@ private:
     public:
         _counter()
         {
-            c = 1 << 15; /* 0.5 ， 32768，再左移一位（乘以2）就是最大值 */
+            c = 1 << 15; /* 0.5, 32768, left shift by one (multiply by 2) is the maximum value */
         }
 
         inline void update_high()
@@ -80,14 +80,14 @@ private:
         template <int32_t P_LOG>
         inline void encode_bit(int32_t bit, uint32_t p)
         {
-            const uint32_t mid = low + ((uint64_t(high - low) * p) >> P_LOG); /* 这里是把高概率符号放前面了，低概率放后面，P表示高概率符号的概率 */
+            const uint32_t mid = low + ((uint64_t(high - low) * p) >> P_LOG); /* High probability symbols are placed first, low probability symbols last, P represents the probability of high probability symbols */
 
             if (bit)
                 high = mid;
             else
                 low = mid + 1;
 
-            /* 归一化 */
+            /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
                 *(io->data + io->data_len++) = (low >> 24);
@@ -107,7 +107,7 @@ private:
             else
                 low = mid + 1;
 
-            /* 归一化 */
+            /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
                 low <<= 8;
@@ -171,12 +171,12 @@ public:
             safe_free((void**)&coder_buff);
     }
 
-    /* 对外压缩接口 */
+    /* External compression interface */
     void encode_line(const uint8_t *in, const int32_t in_len)
     {
         int32_t i;
         if (io->m != coder_io::MENC)
-        { /* 未初始化时先初始化 */
+        { /* Initialize when not initialized */
             int32_t len_buf, len_bwt, len_arr;
             // int32_t len2enc;
             const int32_t tab[10] =
@@ -204,10 +204,10 @@ public:
             // }
             const int32_t BLOCK_SIZE = (268435456);
 
-            bsize = std::min(tab[level], BLOCK_SIZE); /* 块大小 */
+            bsize = std::min(tab[level], BLOCK_SIZE); /* Block size */
             len_buf = bsize;
             len_bwt = bsize;
-            len_arr = bsize << 2; /* int32_t类型 */
+            len_arr = bsize << 2; /* int32_t type */
             coder_buff = static_cast<uint8_t*>(safe_alloc(len_buf + len_bwt + len_arr));
 
             buf_bwt = coder_buff + len_buf;
@@ -216,12 +216,12 @@ public:
 
         int32_t len2add = bsize - curr_incache;
         if (in_len < len2add)
-        { /* 不够一个block时缓存 */
+        { /* Cache when not enough for one block */
             memcpy(coder_buff + curr_incache, in, in_len);
             curr_incache += in_len;
         }
         else
-        { /* 够一个block时压缩再缓存未压缩部分 */
+        { /* Compress when enough for one block and cache uncompressed part */
             memcpy(coder_buff + curr_incache, in, len2add);
 
             const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, bsize);
@@ -231,10 +231,10 @@ public:
             //     return coder_ns::CODER_ERR_INNER;
             // }
 
-            put32(bsize); /* 编码当前长度 */
-            put32(idx);   /* 编码bwt的index */
+            put32(bsize); /* Encode current length */
+            put32(idx);   /* Encode BWT index */
 
-            for (i = 0; i < bsize; i++) /* 编码变换后的数据 */
+            for (i = 0; i < bsize; i++) /* Encode transformed data */
                 put(buf_bwt[i]);
 
             curr_incache = in_len - len2add;
@@ -243,14 +243,14 @@ public:
         }
     }
 
-    /* 编码完成后需要调用它将缓存中的数据压缩 */
+    /* Call this after encoding to compress cached data */
     void encode_flush()
     {
         int32_t i;
         if (io->m != coder_io::MENC || flushed) {
             return;
         }
-        /* 先将缓存中的数据压缩完 */
+        /* First compress all cached data */
         if (curr_incache > 0)
         {
             const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, curr_incache);
@@ -260,19 +260,19 @@ public:
             //     return coder_ns::CODER_ERR_INNER;
             // }
 
-            put32(curr_incache); /* 编码当前长度 */
-            put32(idx);          /* 编码bwt的index */
+            put32(curr_incache); /* Encode current length */
+            put32(idx);          /* Encode BWT index */
 
-            for (i = 0; i < curr_incache; i++) /* 编码变换后的数据 */
+            for (i = 0; i < curr_incache; i++) /* Encode transformed data */
                 put(buf_bwt[i]);
         }
-        /* 再置结束标识 EOF */
+        /* Then set EOF marker */
         put32(0);
         coder->encode_flush();
         flushed = true;
     }
 
-    /* 对外解压接口，返回实际解压出来的长度，当解压遇到split_ch时退出 */
+    /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
     int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
     {
         uint8_t ch;
@@ -291,7 +291,7 @@ public:
             for (;;)
             {
                 if (curr_out_offset == bsize)
-                { /* 当前block已经解压完成了，需要重新解压 */
+                { /* Current block decompression completed, need to decompress again */
                     if (decode_one_block() == 0)
                         return len;
                 }
@@ -313,7 +313,7 @@ public:
             for (;;)
             {
                 if (curr_out_offset == bsize)
-                { /* 当前block已经解压完成了，需要重新解压 */
+                { /* Current block decompression completed, need to decompress again */
                     if (decode_one_block() == 0)
                         return len;
                 }
@@ -336,14 +336,14 @@ public:
         return 0;
     }
 
-    /* 解压初始化 */
+    /* Decompression initialization */
     void decode_init()
     {
         bsize = 0;
         coder->decode_init();
     }
 
-    /* 对外接口，获取当前已经消耗数据的长度 */
+    /* External interface to get the length of currently consumed data */
     int32_t decode_inlen()
     {
         return this->io->data_len;
@@ -368,34 +368,34 @@ private:
 
     inline void put(int32_t c)
     {
-        const int32_t f = (run > 2); /* run表示前面字符连续重复的次数 */
+        const int32_t f = (run > 2); /* run represents the number of consecutive repetitions of previous characters */
 
         int32_t ctx = 1;
-        for (int32_t i = 128; i > 0; i >>= 1) /* 取当前byte c的所有bit，从高位开始取 */
+        for (int32_t i = 128; i > 0; i >>= 1) /* Get all bits of current byte c, starting from high bit */
         {
             const int32_t p0 = counter0[ctx].get();
             const int32_t p1 = counter1[c1][ctx].get();
             const int32_t p2 = counter1[c2][ctx].get();
             const int32_t p = (((p0 + p1) * 7) + p2 + p2) >> 4;
 
-            /* 通过线性插值得到辅助符号的概率 */
-            const int32_t j = p >> 12; /* j取混合概率的最高4位 , 借助sse结合ctx(即当前待处理字符c)对p_mixed做一个修正，将概率本身做ctx再做一次预测 */
+            /* Get probability of auxiliary symbols through linear interpolation */
+            const int32_t j = p >> 12; /* j takes the highest 4 bits of mixed probability, uses SSE combined with ctx (i.e., current character c to be processed) to correct p_mixed, making another prediction on the probability itself using ctx */
             const int32_t x1 = counter2[f][ctx][j].get();
             const int32_t x2 = counter2[f][ctx][j + 1].get();
             const int32_t ssep = x1 + (((x2 - x1) * (p & 4095)) >> 12);
 
-            if (c & i) /*当前bit为1 */
+            if (c & i) /* Current bit is 1 */
             {
-                coder->encode_bit<18>(1, p + ssep + ssep + ssep); /* p + ssep + ssep + ssep表示高概率符号的概率，即下个bit是1的概率 */
+                coder->encode_bit<18>(1, p + ssep + ssep + ssep); /* p + ssep + ssep + ssep represents the probability of high probability symbols, i.e., the probability that next bit is 1 */
 
                 counter0[ctx].update_high();
                 counter1[c1][ctx].update_high();
                 counter2[f][ctx][j].update_high();
                 counter2[f][ctx][j + 1].update_high();
 
-                ctx += ctx + 1; /* ctx左移一位 + 1，这里ctx为当前byte的bit的ctx */
+                ctx += ctx + 1; /* ctx left shift by one bit + 1, here ctx is the bit context of current byte */
             }
-            else /*当前bit为0 */
+            else /* Current bit is 0 */
             {
                 coder->encode_bit<18>(0, p + ssep + ssep + ssep);
 
@@ -404,14 +404,14 @@ private:
                 counter2[f][ctx][j].update_low();
                 counter2[f][ctx][j + 1].update_low();
 
-                ctx += ctx; /* ctx左移一位，这里ctx为当前byte的bit的ctx */
+                ctx += ctx; /* ctx left shift by one bit, here ctx is the bit context of current byte */
             }
         }
 
-        c2 = c1;        /* c2更新为上个字节的ctx，这里ctx即为处理字符的实际值 */
-        c1 = ctx - 256; /* c1更新为当前处理字节的ctx。其他：处理完当前字节后，ctx至少为256，因为即使当前字节全为0这种极端情况ctx==1 << 8==256 */
+        c2 = c1;        /* c2 updates to ctx of previous byte, here ctx is the actual value of processed character */
+        c1 = ctx - 256; /* c1 updates to ctx of current processed byte. Other: after processing current byte, ctx is at least 256, because even in extreme case where current byte is all 0, ctx == 1 << 8 == 256 */
 
-        if (c1 == c2)   /* 如果上当前字节与上个字节重复了，那么设置run自加1 */
+        if (c1 == c2)   /* If current byte repeats with previous byte, then increment run */
             ++run;
         else
             run = 0;
@@ -429,7 +429,7 @@ private:
             const int32_t p2 = counter1[c2][ctx].get();
             const int32_t p = (((p0 + p1) * 7) + p2 + p2) >> 4;
 
-            /* 通过线性插值得到辅助符号的概率 */
+            /* Get probability of auxiliary symbols through linear interpolation */
             const int32_t j = p >> 12;
             const int32_t x1 = counter2[f][ctx][j].get();
             const int32_t x2 = counter2[f][ctx][j + 1].get();
@@ -442,7 +442,7 @@ private:
                 counter2[f][ctx][j].update_high();
                 counter2[f][ctx][j + 1].update_high();
 
-                ctx += ctx + 1; /* ctx左移一位，这里ctx为当前byte的bit的ctx */
+                ctx += ctx + 1; /* ctx left shift by one bit, here ctx is the bit context of current byte */
             }
             else
             {
@@ -451,7 +451,7 @@ private:
                 counter2[f][ctx][j].update_low();
                 counter2[f][ctx][j + 1].update_low();
 
-                ctx += ctx; /* ctx左移一位，这里ctx为当前byte的bit的ctx */
+                ctx += ctx; /* ctx left shift by one bit, here ctx is the bit context of current byte */
             }
         }
 
@@ -485,7 +485,7 @@ private:
         }
 
         if (!buf_arr)
-        {                           /* 没有分配空间，先分配空间 */
+        {   /* Space not allocated, allocate space first */
             if (bsize >= (1 << 24)) /* 5*N */
             {
                 i = bsize + (bsize << 2) + bsize;
@@ -518,7 +518,7 @@ private:
 
         if (bsize >= (1 << 24)) /* 5*N */
         {
-            /* BW逆变换 */
+            /* BW inverse transformation */
             memset(cnt, 0, sizeof(cnt));
             for (i = 0; i < bsize; ++i)
                 ++cnt[(buf_bwt[i] = get()) + 1];
@@ -539,7 +539,7 @@ private:
         }
         else
         {   /* 4*N */
-            /* BW逆变换 */
+            /* BW inverse transformation */
             memset(cnt, 0, sizeof(cnt));
             for (i = 0; i < bsize; ++i)
                 ++cnt[(buf_arr[i] = get()) + 1];
@@ -566,17 +566,17 @@ private:
     int32_t run;
     int32_t c1;
     int32_t c2;
-    _counter<2> counter0[256]; /* counter0影响最大 */
+    _counter<2> counter0[256]; /* counter0 has the greatest impact */
     _counter<4> counter1[256][256];
     _counter<6> counter2[2][256][17];
 
-    uint8_t *coder_buff;  /* 缓存原始数据的buffer，累够一个块时才变换然后处理 */
-    int32_t curr_incache; /* 当前缓存数据的长度 */
+    uint8_t *coder_buff;  /* Buffer for caching original data, transform and process only when enough for one block */
+    int32_t curr_incache; /* Length of currently cached data */
     uint8_t *buf_bwt;
     uint32_t *buf_arr;
     int32_t bsize;
     int32_t bidx;
-    int32_t curr_out_offset; /* 解压时offset位置 */
+    int32_t curr_out_offset; /* Offset position during decompression */
     int32_t cnt[257];
     bool flushed;
 

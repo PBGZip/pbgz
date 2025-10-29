@@ -8,16 +8,16 @@ typedef struct PbgzParameter{
     std::string inputFile;
     bool showHelp;
     bool showVersion;
-    bool isDecompress;   // 标记是解压还是压缩， 默认时压缩
-    bool isDecToGZ;   // 是否解压到GZ格式
+    bool isDecompress;   // Flag for decompression or compression, default is compression
+    bool isDecToGZ;   // Whether to decompress to GZ format
     std::string outputFile;  // 
     std::string outputDir;   // 
-    bool isOverwriteOutFile;         // 是否强制覆盖输出文件
-    std::string referenceGenic;      // 参考基因
+    bool isOverwriteOutFile;         // Whether to force overwrite output file
+    std::string referenceGenic;      // Reference genome
     bool isUnpackRef;  
     uint32_t threadNum; 
     uint8_t compressLevel;
-    bool isRemoveOriginFile;    //是否删除源文件
+    bool isRemoveOriginFile;    // Whether to remove source file
     uint8_t logLevel;
     std::string logFile;
 
@@ -45,4 +45,3 @@ const uint8_t PBGZ_VERSION_PATCH = 0; // Patch version
 
 const int32_t GENE3_MAX_BASE = 1048760; // Maximum bases per FASTQ generation 3 record
 const int32_t GENE2_MAX_BASE = 2048;  // Maximum bases per FASTQ generation 2 record
-

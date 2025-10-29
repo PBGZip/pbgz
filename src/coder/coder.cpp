@@ -101,7 +101,7 @@ void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...) 
     return;
 }
 
-// 以下函数会触发进程退出，不建议在coder库内部使用
+// The following functions will trigger process exit, not recommended for use within the coder library
 void coder_exit(int16_t exit_code, const char* exit_msg_format, ...) {
     char exit_message[2048];
     va_list args;

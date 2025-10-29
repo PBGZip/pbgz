@@ -136,7 +136,7 @@ class PipeReader : public IOReader {
 public:
     PipeReader() { }
 
-    // 管道读取不需要打开和关闭
+    // Pipe reading does not require open and close operations
     int openIO() { return 0; }
     void closeIO() { return; }
 
@@ -148,7 +148,7 @@ class PipeWriter : public IOWriter {
 public:
     PipeWriter() { }
 
-    // 管道读取不需要打开和关闭
+    // Pipe writing does not require open and close operations
     int openIO() { return 0; }
     void closeIO() { return; }
 

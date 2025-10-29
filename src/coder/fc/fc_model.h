@@ -182,7 +182,7 @@ public:
 
     struct tid_t
     {
-        // 下面三个是用来编码tid条件的，譬如tid为0时会编码0，用于解码还原
+        // The following three are used to encode tid conditions, e.g., when tid is 0, encode 0, used for decoding restoration
         short static_model;
         short state_model[CHAR_SIZE];
         short char_model[CHAR_SIZE];
@@ -192,21 +192,21 @@ public:
             short static_model[8];
             short state_model[CHAR_SIZE][8];
             short char_model[CHAR_SIZE][8];
-        } bit_width; // 编码位数，即tid的有效bits数 - 1，最高位不需要编码，因为肯定是1
+        } bit_width; // Encode bit width, i.e., valid bits count of tid - 1, highest bit doesn't need encoding because it's definitely 1
 
         struct bits_value
         {
             short static_model[CHAR_SIZE];
             short state_model[CHAR_SIZE][CHAR_SIZE];
             short char_model[CHAR_SIZE][CHAR_SIZE];
-        } bits_value[8]; // 编码尾数，即tid的真实bits，最高位不需要编码，因为肯定是1
+        } bits_value[8]; // Encode mantissa, i.e., actual bits of tid, highest bit doesn't need encoding because it's definitely 1
 
         struct out_of_range
         {
             short static_model[CHAR_SIZE];
             short state_model[CHAR_SIZE][CHAR_SIZE];
             short char_model[CHAR_SIZE][CHAR_SIZE];
-        } out_of_range; // 编码avgRank大于32的tid，每个bank编码[0, maxRank]位
+        } out_of_range; // Encode tid with avgRank greater than 32, each bank encodes [0, maxRank] bits
 
     } tid_t; 
 

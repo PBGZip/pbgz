@@ -84,7 +84,7 @@ public:
         return len;
     }
 
-    /* 编码完成后需要调用它将缓存中的数据压缩 */
+    /* Call this after encoding to compress cached data */
     void encode_flush()
     {
         if (io->m != coder_io::MENC || flushed)

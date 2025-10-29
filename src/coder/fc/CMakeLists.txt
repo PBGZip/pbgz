@@ -1,6 +1,6 @@
-# FC编码器组件
+# FC encoder component
 
-# 源文件
+# Source files
 set(FC_SOURCES
     fc_model.cpp
     fc.cpp
@@ -8,16 +8,16 @@ set(FC_SOURCES
     libsais.c
 )
 
-# 设置libsais.c为C语言
+# Set libsais.c as C language
 set_source_files_properties(libsais.c PROPERTIES LANGUAGE C)
 
-# 创建FC静态库
+# Create FC static library
 add_library(pbgz_coder_fc STATIC ${FC_SOURCES})
 
-# 设置编译选项
+# Set compile options
 target_compile_options(pbgz_coder_fc PRIVATE -fPIC)
 
-# 暴露头文件目录
+# Expose header file directories
 target_include_directories(pbgz_coder_fc PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )

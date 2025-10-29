@@ -25,7 +25,7 @@
 #include "log/logger.h"
 #include "coder_json.h"
 
-// buffer作为临时存储，用于解析meta等信息，不用太大
+// Buffer as temporary storage for parsing meta and other information, no need to be too large
 const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 16 * 1024 * 1024;
 
 uint8_t* PbgzFileReader::getFileReadBuffer(){
@@ -68,7 +68,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
             return -1; // File read error
         }
         if (memcmp(pReadBuffer, PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH) != 0) {
-            // 安照16进制打印，自行解析
+            // Print in hexadecimal format, parse manually
             LOG_ERROR("IO is not a valid pbgz format, magic no is %X", (uint32_t)(*(uint32_t*)pReadBuffer));
             return -1; // Invalid magic
         }
@@ -128,7 +128,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     }
     fileMeta.setMetaChecksum(*(uint64_t*)pReadBuffer);
 
-    // 保持和header相同的序列号
+    // Keep the same serial number as header
     fileMetaMap[currentFileIndex] = fileMeta;
     return 0;
 }       
@@ -185,7 +185,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
 
     // Read the data block magic value, 4byte
     size_t readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
-    if (readLen == 0) { // 表示读取完毕
+    if (readLen == 0) { // Indicates read completion
         return 0;
     }
 
@@ -199,7 +199,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
         // It maybe a new file, try to parse the file header and meta information
          if (memcmp(pReadBuffer, &PBGZ_FILE_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
             LOG_INFO("Detected a new PBGZ file format, reinitializing file header and meta.");
-            // 由于已经读取了文件的Maigc值,不需要在读取了
+            // Since the file Magic value has already been read, no need to read again
             if (0 != initFileHeadAndMeta(true)) {
                 LOG_ERROR("Failed to initialize file header and meta.");
                 return -1; // Initialization error
@@ -254,7 +254,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
     dataBlock.setDataLength(dataLength);
 
     // Read the block data
-    // PbgzDataBlock的数据存放不是自己申请的内存, 地址是外部传入的，减少拷贝
+    // PbgzDataBlock data storage is not memory allocated by itself, the address is passed in from external, reducing copying
     readLen = ioReader->readIO(dataBlock.getDataPtr(), dataLength);
     if (readLen != dataLength) {
         LOG_ERROR("Failed to read PBGZ data block data.");
@@ -386,4 +386,3 @@ int32_t PbgzFileWriter::writeBlockData(PbgzDataBlock& dataBlock) {
     
     return 0;
 }
-

@@ -20,7 +20,7 @@ struct QUAL_MODEL
 {
     enum
     {
-        STEP = 8//18//16//12 , 18更好，20好像是效果最好的，24会变差 ,   TODO :根据数据类型，以及同一个数据动态设置STEP
+        STEP = 8,  //18//16//12 , 18 is better, 20 seems to have the best effect, 24 will get worse ,   TODO : dynamically set STEP based on data type and the same data
     };
 
     QUAL_MODEL(){};

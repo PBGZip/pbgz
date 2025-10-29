@@ -9,7 +9,7 @@
 #include "coder.h"
 
 
-/* 基于前后缀匹配的字符串编码器 */
+/* String encoder based on prefix and suffix matching */
 class coder_affix_match : public coder
 {
 public:
@@ -47,7 +47,7 @@ public:
                 encode_flush();
     }
 
-    /* 对外压缩接口, 如果调用encode后in会被释放，那么need2hold需要设置为true */
+    /* External compression interface, set need2hold to true if input will be freed after encode call */
     void encode_line(const uint8_t *in, const int32_t in_len, bool need2hold = false)
     {
         int32_t pre_len, suf_len;
@@ -63,7 +63,7 @@ public:
             last = static_cast<uint8_t*>(safe_alloc_init(this->last_capacity, ' '));
             this->plast = last;
         }
-        /* 获取前缀长度 */
+        /* Get prefix length */
         for (i = 0; i < in_len && i < last_len; i++)
         {
             if (in[i] != last[i])
@@ -71,7 +71,7 @@ public:
         }
         pre_len = i;
 
-        /* 获取后缀长度 */
+        /* Get suffix length */
         for (i = in_len - 1, j = last_len - 1; i >= 0 && j >= 0; i--, j--)
         {
             if (in[i] != last[j])
@@ -82,7 +82,7 @@ public:
             suf_len = in_len - pre_len;
 
         if (encode_higher())
-        { /* 更高压缩率压缩 */
+        { /* Higher compression rate */
             model_prefix[last_prelen].encodeSymbolOrder(&rc, pre_len);
             model_suffix[last_suflen].encodeSymbolOrder(&rc, suf_len);
             model_len[last_len].encodeSymbolOrder(&rc, in_len);
@@ -101,7 +101,7 @@ public:
         for (i = j = pre_len, k = 0; i < len2; i++, j++, k++)
         {
             last_ch = (((last[j] - 32) << 1) + match + (k << 6)) & 0x1FFF;
-            if (encode_higher()) /* 更高压缩率压缩 */
+            if (encode_higher()) /* Higher compression rate */
                 model_middle[last_ch].encodeSymbolOrder(&rc, in[i] & 0x7f);
             else
                 model_middle[last_ch].encodeSymbol(&rc, in[i] & 0x7f);
@@ -126,7 +126,7 @@ public:
         }
     }
 
-    /* 对外解压接口，如果调用decode后in会被释放，那么need2hold需要设置为true */
+    /* External decompression interface, set need2hold to true if input will be freed after decode call */
     int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
     {
         uint8_t c;
@@ -211,13 +211,13 @@ public:
         return 0;
     }
 
-    /* 对外接口，获取当前已经消耗数据的长度 */
+    /* External interface to get the length of currently consumed data */
     int32_t decode_inlen()
     {
         return rc.size_in();
     }
 
-    /* 编码完未处理的数据 */
+    /* Flush unprocessed encoded data */
     void encode_flush()
     {
         if (flushed) {
@@ -234,7 +234,7 @@ public:
     }
 
 private:
-    /* 是否启用更高压缩 */
+    /* Whether to enable higher compression */
     const bool encode_higher() const
     {
         return this->level > 1;
@@ -242,11 +242,11 @@ private:
 
 private:
     RangeCoder rc;
-    uint8_t *last, *plast; /* 上一个压缩的字符串 */
+    uint8_t *last, *plast; /* Previously compressed string */
     int32_t last_capacity;
-    int32_t last_len;    /* 上一个压缩的的长度 */
-    int32_t last_prelen; /*上一次匹配时相同的前缀长度 */
-    int32_t last_suflen; /*上一次匹配时相同的后缀长度 */
+    int32_t last_len;    /* Length of previous compression */
+    int32_t last_prelen; /* Length of same prefix in last match */
+    int32_t last_suflen; /* Length of same suffix in last match */
 
     SIMPLE_MODEL<256> model_prefix[256];
     SIMPLE_MODEL<256> model_suffix[256];
