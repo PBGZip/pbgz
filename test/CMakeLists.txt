@@ -39,6 +39,11 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 include_directories(${CMAKE_SOURCE_DIR}/src/log)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/jsoncpp/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/zstd/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/hts/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/intel/isa-l/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/libdeflate/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/bzip2/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/zlib/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/googletest/googletest/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/md5sum)
 
@@ -47,6 +52,11 @@ target_link_libraries(pbgz_test PRIVATE
     pbgz_coder
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
     ${THIRDPARTY_DIR}/release/zstd/lib/libzstd.a
+    ${THIRDPARTY_DIR}/release/hts/lib/libhts.a
+    ${THIRDPARTY_DIR}/release/intel/isa-l/lib/libisal.a
+    ${THIRDPARTY_DIR}/release/libdeflate/lib/libdeflate.a
+    ${THIRDPARTY_DIR}/release/bzip2/lib/libbz2.a
+    ${THIRDPARTY_DIR}/release/zlib/lib/libz.a
     pthread
 )
 

@@ -12,7 +12,7 @@ using coder_exit_func = std::function<void(int, const char*)>;
 
 using coder_alloc_func = std::function<uint8_t*(size_t)> ;
 
-using coder_realloc_func = std::function<uint8_t*(int&, uint8_t*, size_t)>;
+using coder_realloc_func = std::function<uint8_t*(size_t&, uint8_t*, size_t)>;
 
 using coder_free_func = std::function<void(void*&)>;
 
@@ -46,9 +46,9 @@ namespace coder_ns {
     };
 }
 
-void* safe_realloc_init(int32_t& size, uint8_t* ptr, size_t new_size, char ch); 
+void* safe_realloc_init(uint32_t& size, uint8_t* ptr, size_t new_size, char ch); 
 
-void* safe_realloc(int32_t& size, uint8_t* ptr, size_t new_size); 
+void* safe_realloc(uint32_t& size, uint8_t* ptr, size_t new_size); 
 
 void* safe_alloc(size_t size);
 
@@ -71,11 +71,11 @@ class coder
 public:
     virtual ~coder() {}
     virtual int32_t decode_line([[maybe_unused]] uint8_t *dst, 
-                                [[maybe_unused]] int32_t len, 
+                                [[maybe_unused]] uint32_t len, 
                                 [[maybe_unused]] uint8_t split_ch = '\n', 
                                 [[maybe_unused]] bool need2hold = false) { return 0; }
     virtual int32_t decode_line([[maybe_unused]] uint8_t *dst, 
-                                [[maybe_unused]] int32_t len, 
+                                [[maybe_unused]] uint32_t len, 
                                 [[maybe_unused]] uint8_t *rely = nullptr, 
                                 [[maybe_unused]] uint8_t split_ch = '\n', 
                                 [[maybe_unused]] bool need2hold = false)

@@ -33,6 +33,7 @@
 #include "coder_ppmd.h"
 #include "coder_json.h"
 #include "config_manager.h"
+#include "hardware.h"
 
 int PbgzEngine::init() {
     // Register allocation functions required by coder
@@ -71,7 +72,16 @@ int PbgzEngine::init() {
     if (parameter.inputFile == "/dev/stdin") {
         ioReader = MemoryUtil::safeNewClass<PipeReader>();
     } else {
-        ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
+        if (PathUtil::isGzFile(parameter.inputFile)) {
+            bool isSupportSimd = Hardware().isSupportSimd();
+            if (isSupportSimd) {
+                ioReader = MemoryUtil::safeNewClass<FastGzFileReader>(parameter.inputFile);
+            } else {
+                ioReader = MemoryUtil::safeNewClass<GzFileReader>(parameter.inputFile, parameter.threadNum);
+            }
+        } else {
+            ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
+        }
     }
     if (ioReader == nullptr) {
         LOG_ERROR("Create IO reader failed.");
@@ -80,9 +90,17 @@ int PbgzEngine::init() {
     ioReader->openIO();
 
     if (parameter.outputFile == "/dev/stdout") {
-        ioWriter = new PipeWriter();
+        if(parameter.isDecToGZ) {
+            ioWriter = MemoryUtil::safeNewClass<GzPipeWriter>(parameter.threadNum);
+        } else {
+            ioWriter = MemoryUtil::safeNewClass<PipeWriter>();
+        }
     } else {
-        ioWriter = new FileWriter(parameter.outputFile);
+        if(parameter.isDecToGZ) {
+            ioWriter = MemoryUtil::safeNewClass<GzFileWriter>(parameter.outputFile, parameter.threadNum);
+        } else {
+            ioWriter = MemoryUtil::safeNewClass<FileWriter>(parameter.outputFile);
+        }
     }
     if (ioWriter == nullptr) {
         LOG_ERROR("Create IO reader failed.");
@@ -299,9 +317,11 @@ int32_t PbgzEngine::startCoderTask() {
             if (ret != 0) {
                 LOG_ERROR("Coder task failed.");
                 freeInputPool.push(inBlockPtr);
+                freeOutputPool.push(outBlockPtr);
                 delete pActuator;
                 pActuator = nullptr;
-                break;
+                fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
+                continue;
             }
             delete pActuator;
             pActuator = nullptr;

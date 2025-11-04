@@ -1,7 +1,8 @@
 #pragma once
 
-#include<vector>
-#include<string>
+#include <vector>
+#include <string>
+#include <string.h>
 
 #include "coder/coder.h"
 #include "log/logger.h"
@@ -40,6 +41,14 @@ public:
     void printFileType(BlockType blockType);
 
     void printTailInfo(Timer costTime, PbgzParameter& para);
+
+    void printBufferContent(uint8_t* buffer, uint32_t bufferLen) {
+        char temp[2048 + 1] = {0};
+        bufferLen = std::min<uint32_t>(bufferLen, 2048);
+        memcpy(temp, (char*)buffer, bufferLen);
+        temp[2048] = 0;
+        LOG_DEBUG("%s", temp);
+    }
 private:
     void updateDataInfo();
 

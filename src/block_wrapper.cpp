@@ -194,7 +194,7 @@ namespace BlockUtil {
     }
 }
 
-int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
+int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute__ ((unused)) fileType) {
     if (pbgzFileReader == nullptr || blockPtr == nullptr) {
         return -1;
     }

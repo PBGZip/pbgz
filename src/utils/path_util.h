@@ -39,6 +39,12 @@ namespace PathUtil {
     /// @return Absolute path of file
     std::string getAbsPath(const std::string& fileName);
 
+    /// @brief Get absolute path of file relative to base directory
+    /// @param fileName 
+    /// @param baseDir Base directory path
+    /// @return Absolute path of file
+    std::string getAbsPath(const std::string& fileName, const std::string& baseDir);
+
     /// @brief Create directory
     /// @param dir 
     /// @return Absolute path of created directory
@@ -71,5 +77,6 @@ namespace PathUtil {
     /// @param fileName 
     /// @return File size
     int64_t getFileSize(const std::string& fileName);
-}
 
+    bool isGzFile(std::string& fileName);
+}

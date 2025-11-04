@@ -35,7 +35,7 @@ namespace MemoryUtil {
     }
 
     template<typename T>
-    T* safeRealloc(int& size, T* ptr, size_t newSize) {
+    T* safeRealloc(size_t& size, T* ptr, size_t newSize) {
         do {
             T* tempPtr = nullptr;
             if (newSize > (size_t)size) {
@@ -54,7 +54,7 @@ namespace MemoryUtil {
     }
 
     template <typename T>
-    T* safeReallocInit(int& size, T* ptr, int newSize, char ch) {
+    T* safeReallocInit(size_t& size, T* ptr, int newSize, char ch) {
         do {
             T* tempPtr = nullptr;
             if (newSize > size) {

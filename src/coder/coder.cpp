@@ -29,13 +29,13 @@ namespace coder_ns {
     }
 }
 
-void* safe_realloc_init(int32_t& size, uint8_t* ptr, size_t new_size, char ch) {
+void* safe_realloc_init(uint32_t& size, uint8_t* ptr, size_t new_size, char ch) {
     if (realloc_proc == nullptr) {
         return ptr;
     }
 
     if (new_size > size) {
-        uint8_t* temp_ptr = alloc_proc(new_size);
+        uint8_t* temp_ptr = realloc_proc((size_t&)size, ptr, new_size);
         if (temp_ptr == nullptr) {
             return ptr;
         }
@@ -48,7 +48,7 @@ void* safe_realloc_init(int32_t& size, uint8_t* ptr, size_t new_size, char ch) {
     return ptr;
 }
 
-void* safe_realloc(int32_t& size, uint8_t* ptr, size_t new_size) {
+void* safe_realloc(uint32_t& size, uint8_t* ptr, size_t new_size) {
     return safe_realloc_init(size, ptr, new_size, 0);
 }
 

@@ -300,7 +300,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
         niReader.closeIO();
     });
 
-    int bufferLen = (5 << 20);
+    uint32_t bufferLen = (5 << 20);
     uint8_t* buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
     FileWriter niWriter(niFile);
     niWriter.openIO();
@@ -316,7 +316,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
     /* Serial processing is sufficient, basically just file reading time, base_squash time can be ignored */
     std::ifstream file(refGeneFile.c_str());
     std::string line;
-    int squashBufferlen = 1024 >> 2;
+    uint32_t squashBufferlen = 1024 >> 2;
     uint8_t* squashBuffer = MemoryUtil::safeAlloc<uint8_t>(1024);
 
     uint8_t cacheActg[4];
@@ -355,7 +355,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
             } else {
                 /* Remaining is enough for cache */
                 l4Align = left >> 2 << 2;
-                squashBuffer = MemoryUtil::safeRealloc<uint8_t>(squashBufferlen, squashBuffer, (size_t)(l4Align >> 2));
+                squashBuffer = MemoryUtil::safeRealloc<uint8_t>((size_t&)squashBufferlen, squashBuffer, (size_t)(l4Align >> 2));
                 uint32_t lenSquash = actgSquash((const uint8_t *)(line.c_str() + docnt), l4Align, squashBuffer);
                 niWriter.writeIO(squashBuffer, lenSquash);
                 wlen += lenSquash;
@@ -417,7 +417,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
             FileReader confReader(conf);
             confReader.openIO();
             file_size = confReader.getFileSize();
-            buffer = MemoryUtil::safeRealloc<uint8_t>(bufferLen, buffer, file_size);
+            buffer = MemoryUtil::safeRealloc<uint8_t>((size_t&)bufferLen, buffer, file_size);
             if (confReader.readIO(buffer, file_size) != file_size) {
                 LOG_ERROR("conf file read failed: %s", conf.c_str());
                 return false;

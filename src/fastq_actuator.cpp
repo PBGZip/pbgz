@@ -16,6 +16,7 @@
 #include "io_wrapper.h"
 #include "actg.h"
 #include "city.h"
+#include "pbgz_manager.h"
 
 const uint32_t MAPPED_THRESHOLD_GEN2 = 2;
 
@@ -602,7 +603,7 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
     return;
 }
 
-void FastqActuator::mappingFastQGen3(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir) {
+void FastqActuator::mappingFastQGen3(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&) {
     LOG_ERROR("Not support FASTQ Gen3");
     return;
 }
@@ -674,6 +675,7 @@ int32_t FastqActuator::compressIdInSplit() {
     Json::Value streamMeta;
     uint32_t totalSrcLength = 0;
     uint32_t totalDstLength = 0;
+
     for (uint32_t i = 0; i < idSplitSymbols.size();++i) {
         // Variable length with all digits
         if (idSplitMaxLen[i] != idSplitMinLen[i]) {
@@ -1525,7 +1527,8 @@ int32_t FastqActuator::decompress() {
     std::string md5;
     calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
     if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("Md5 check failed, expect %s, got %s.", meta["md5"].asCString(), md5.c_str());
+        LOG_ERROR("Md5 check failed for block(%d), expect %s, got %s.", inBlockPtr->getBlockId(),  
+                  meta["md5"].asCString(), md5.c_str());
         return -1;
     }
 

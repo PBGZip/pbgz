@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include "path_util.h"
+#include "log/logger.h"
 
 
 namespace PathUtil {
@@ -130,4 +131,22 @@ namespace PathUtil {
         }
         return st.st_size;
     }
+
+    bool isGzFile(std::string& fileName) {
+        FILE* fp = fopen64(fileName.c_str(), "rb");
+        if (fp == nullptr) {
+            LOG_ERROR("File %s open failed.", fileName.c_str());
+            return false;
+        }
+        int64_t fileSize = PathUtil::getFileSize(fileName);
+        if (fileSize > 3) {
+            uint8_t tmpBuf[3] = {0};
+            fread(tmpBuf, 3, 1, fp);
+            return (tmpBuf[0] == 0x1F && tmpBuf[1] == 0x8B);
+        }
+        return false;
+    }
 }
+
+
+

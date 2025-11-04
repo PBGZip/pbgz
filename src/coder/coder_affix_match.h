@@ -48,7 +48,7 @@ public:
     }
 
     /* External compression interface, set need2hold to true if input will be freed after encode call */
-    void encode_line(const uint8_t *in, const int32_t in_len, bool need2hold = false)
+    void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold = false)
     {
         int32_t pre_len, suf_len;
         int32_t i, j, k, last_ch;
@@ -78,7 +78,7 @@ public:
                 break;
         }
         suf_len = in_len - 1 - i;
-        if (in_len - suf_len - pre_len < 0)
+        if (in_len < suf_len + pre_len)
             suf_len = in_len - pre_len;
 
         if (encode_higher())
@@ -127,7 +127,9 @@ public:
     }
 
     /* External decompression interface, set need2hold to true if input will be freed after decode call */
-    int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
+    int32_t decode_line(uint8_t *out, uint32_t __attribute__((unused)) out_len,
+                        uint8_t __attribute__((unused)) split_ch = UINT8_MAX, 
+                        bool __attribute__((unused)) need2hold = false)
     {
         uint8_t c;
         int32_t pre_len, suf_len, len;
@@ -206,7 +208,7 @@ public:
     }
 
     /* fake */
-    int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t *rely = nullptr, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
+    int32_t decode_line(uint8_t*, uint32_t, uint8_t*, uint8_t, bool)
     {
         return 0;
     }
@@ -235,7 +237,7 @@ public:
 
 private:
     /* Whether to enable higher compression */
-    const bool encode_higher() const
+    bool encode_higher() const
     {
         return this->level > 1;
     }
@@ -243,7 +245,7 @@ private:
 private:
     RangeCoder rc;
     uint8_t *last, *plast; /* Previously compressed string */
-    int32_t last_capacity;
+    uint32_t last_capacity;
     int32_t last_len;    /* Length of previous compression */
     int32_t last_prelen; /* Length of same prefix in last match */
     int32_t last_suflen; /* Length of same suffix in last match */

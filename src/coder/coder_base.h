@@ -181,7 +181,7 @@ class coder_base
             delete[] this->coders;
         }
 
-        void encode_line(const uint8_t *in, int32_t in_len, bit_coder *coder)
+        void encode_line(const uint8_t *in, uint32_t in_len, bit_coder *coder)
         {
             int32_t n, symbol;
             this->hash = 0;
@@ -193,7 +193,7 @@ class coder_base
             }
         }
 
-        int32_t decode_line(uint8_t *out, int32_t out_len, bit_coder *coder)
+        int32_t decode_line(uint8_t *out, uint32_t out_len, bit_coder *coder)
         {
             int32_t n, symbol;
             this->hash = 0;
@@ -245,12 +245,12 @@ public:
             delete coder;
     }
 
-    void encode_line(const uint8_t *in, int32_t in_len)
+    void encode_line(const uint8_t *in, uint32_t in_len)
     {
         return m.encode_line(in, in_len, coder);
     }
 
-    int32_t decode_line(uint8_t *out, int32_t out_len)
+    int32_t decode_line(uint8_t *out, uint32_t out_len)
     {
         return m.decode_line(out, out_len);
     }

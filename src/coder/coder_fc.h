@@ -45,7 +45,7 @@ public:
             encode_flush();
     }
 
-    void encode_line(const uint8_t *in, const int32_t in_len, bool need2hold = false)
+    void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold __attribute__ ((unused)) = false)
     {
         check_exit(io->m != coder_io::MENC, coder_ns::CODER_ERR_INNER, "only support block compress, not support line method"); // Not yet extended to line method
         check_exit(in_len > FC_MIN_LEN && in_len < FC_MAX_LEN,  coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, in_len);
@@ -120,7 +120,7 @@ public:
     }
 
     /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
-    int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
+    int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false)
     {
         check_exit(io->m != coder_io::MDEC, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "only support block decompress, not support line method"); // Not yet extended to line method
         check_exit(split_ch == UINT8_MAX, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, split_ch);

@@ -5,6 +5,9 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <stdint.h>
+#include <htslib/bgzf.h>
+#include <isa-l/igzip_lib.h>
+#include <zlib.h>
 
 enum class IOWhence {
     IO_WHENCE_SET = 0,
@@ -95,7 +98,6 @@ public:
 
 private:
     FileOperator fo;
-
 };
 
 class FileWriter : public IOWriter {
@@ -153,4 +155,153 @@ public:
     void closeIO() { return; }
 
     size_t writeIO(const void* pBuffer, size_t writeLen);
+};
+
+class GzFileReader : public IOReader {
+public:
+    GzFileReader(const std::string& fileName, uint32_t parall) {
+        gzFileName = fileName;
+        parallel = parall;
+    }
+
+    int openIO() override;
+
+    size_t readIO(void* pBuffer, size_t readSize) override;
+
+    void closeIO() override;
+
+    ~GzFileReader() {
+        closeIO();
+    }
+private:
+    std::string gzFileName;
+    BGZF* fpGz;
+    uint32_t parallel;
+};
+
+class GzFileWriter : public IOWriter {
+public:
+    GzFileWriter(std::string& fileName, uint32_t parall) {
+        gzFileName = fileName;
+        parallel = parall;
+    }
+
+    int openIO() override;
+
+    size_t writeIO(const void* pBuffer, size_t writeLen) override;
+
+    void closeIO() override;
+
+    ~GzFileWriter() {
+        closeIO();
+    }
+
+private:
+    std::string gzFileName;
+    BGZF* fpGz;
+    uint32_t parallel;
+};
+
+class FastGzFileReader : public IOReader {
+public:
+    FastGzFileReader(std::string& fileName) : fileReader(fileName) {
+        gzFileName = fileName;
+    }
+
+    int openIO() override;
+
+    size_t readIO(void* pBuffer, size_t readSize) override;
+
+    void closeIO() override;
+
+    ~FastGzFileReader() {
+        closeIO();
+    }
+
+private:
+    std::string gzFileName;
+    FileReader fileReader;
+
+    struct inflate_state isalState;
+    struct isal_gzip_header isalHeader;
+    size_t isalExtraEach;
+    uint8_t* isalExtraBuffer;
+    uint32_t isalExtraLen;
+    uint8_t* isalInputBuffer;
+    int64_t isalInputLength;
+    int64_t firstReadLen;
+
+    // ¸¨Öúº¯Êý
+    bool readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen, uint8_t* isalOut, uint32_t isalOutLen, bool isMultipleHeaders);
+    int64_t processMultipleGzipHeaders();
+};
+
+class GzPipeReader : public IOReader {
+public:
+    GzPipeReader(uint32_t paral);
+
+    int openIO() override;
+
+    size_t readIO(void* pBuffer, size_t readSize) override;
+
+    void closeIO() override;
+    
+    ~GzPipeReader() {
+        closeIO();
+    }
+private:
+    BGZF* fpGz;
+    uint32_t parallel;
+};
+
+class GzPipeWriter : public IOWriter {
+public:
+    GzPipeWriter(uint32_t paral);
+
+    int openIO() override;
+
+    size_t writeIO(const void* pBuffer, size_t writeLen) override;
+
+    void closeIO() override;
+    
+    ~GzPipeWriter() {
+        closeIO();
+    }
+private:
+    BGZF* fpGz;
+    uint32_t parallel;
+};
+
+class FastGzPipeReader : public IOReader {
+public:
+    FastGzPipeReader();
+
+    int openIO() override;
+    size_t readIO(void* pBuffer, size_t readSize) override;
+    void closeIO() override;
+
+    ~FastGzPipeReader() {
+        closeIO();
+    }
+private:
+    PipeReader pipeReader;
+    
+    // ISAL½âÑ¹×´Ì¬
+    struct inflate_state state;
+    bool stateInitialized;
+    
+    // ISAL gzipÍ·
+    struct isal_gzip_header gzipHeader;
+    
+    // »º³åÇø
+    uint8_t* inputBuffer;
+    uint8_t* outputBuffer;
+    uint8_t* remainingBuffer;
+    size_t inputBufferSize;
+    size_t outputBufferSize;
+    size_t remainingBufferSize;
+    size_t remainingSize;
+    
+    // ×´Ì¬±êÖ¾
+    bool streamEnded;
 };
