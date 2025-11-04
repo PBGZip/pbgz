@@ -20,12 +20,22 @@ include_directories(
     ${THIRDPARTY_DIR}/release/jsoncpp/include
     ${THIRDPARTY_DIR}/release/zstd/include
     ${THIRDPARTY_DIR}/md5sum
+    ${THIRDPARTY_DIR}/release/hts/include
+    ${THIRDPARTY_DIR}/release/intel/isa-l/include
+    ${THIRDPARTY_DIR}/release/libdeflate/include
+    ${THIRDPARTY_DIR}/release/bzip2/include
+    ${THIRDPARTY_DIR}/release/zlib/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 set(REQUIRED_LIBS
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
     ${THIRDPARTY_DIR}/release/zstd/lib/libzstd.a
+    ${THIRDPARTY_DIR}/release/hts/lib/libhts.a
+    ${THIRDPARTY_DIR}/release/intel/isa-l/lib/libisal.a
+    ${THIRDPARTY_DIR}/release/libdeflate/lib/libdeflate.a
+    ${THIRDPARTY_DIR}/release/bzip2/lib/libbz2.a
+    ${THIRDPARTY_DIR}/release/zlib/lib/libz.a
 )
 
 add_subdirectory(coder)
@@ -49,6 +59,11 @@ target_link_libraries(pbgz PRIVATE
     pbgz_coder
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
     ${THIRDPARTY_DIR}/release/zstd/lib/libzstd.a
+    ${THIRDPARTY_DIR}/release/hts/lib/libhts.a
+    ${THIRDPARTY_DIR}/release/intel/isa-l/lib/libisal.a
+    ${THIRDPARTY_DIR}/release/libdeflate/lib/libdeflate.a
+    ${THIRDPARTY_DIR}/release/bzip2/lib/libbz2.a
+    ${THIRDPARTY_DIR}/release/zlib/lib/libz.a
     pthread
 )
 

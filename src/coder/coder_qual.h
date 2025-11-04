@@ -81,7 +81,7 @@ public:
         return (((s_prev_ctx << (q_ctx_len * Q_LOG)) + q_prev_ctx ) << 4) | (sse_ctx);
     }
 
-    uint32_t get_context_gen3(uint8_t s, uint8_t q, uint32_t &s_prev_ctx, uint32_t &q_prev_ctx, uint32_t sse_ctx)
+    uint32_t get_context_gen3(uint8_t s, uint8_t q, uint32_t &s_prev_ctx, uint32_t &q_prev_ctx, uint32_t __attribute__ ((unused)) sse_ctx)
     {
         /* Get quantized value of q, quantization method
         * QUANT_Q == 1: (q + 1) / 2 , this quantization parameter is used here

@@ -172,7 +172,7 @@ public:
     }
 
     /* External compression interface */
-    void encode_line(const uint8_t *in, const int32_t in_len)
+    void encode_line(const uint8_t *in, const uint32_t in_len)
     {
         int32_t i;
         if (io->m != coder_io::MENC)
@@ -198,10 +198,6 @@ public:
             io->meta["level"] = (Json::Value::Int)level;
             
             check_exit(level <= 9 && level >= 0,  coder_ns::CODER_ERR_BAD_ARGS, "coder level should in [0, 9], current is %d", level);
-            // if (!(level <= 9 && level >= 0)) {
-            //     coder_logger(coder_ns::ERROR, "coder level should in [0, 9], current is %d", level);
-            //     return coder_ns::CODER_ERR_BAD_ARGS;
-            // }
             const int32_t BLOCK_SIZE = (268435456);
 
             bsize = std::min(tab[level], BLOCK_SIZE); /* Block size */
@@ -255,11 +251,6 @@ public:
         {
             const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, curr_incache);
             check_exit(idx >= 1,  coder_ns::CODER_ERR_INNER, "coder transform failed: idx %d", idx);
-            // if (!(idx >= 1)) {
-            //     coder_logger(coder_ns::ERROR, "coder transform failed: idx %d", idx);
-            //     return coder_ns::CODER_ERR_INNER;
-            // }
-
             put32(curr_incache); /* Encode current length */
             put32(idx);          /* Encode BWT index */
 
@@ -273,7 +264,7 @@ public:
     }
 
     /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
-    int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
+    int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false)
     {
         uint8_t ch;
         int32_t len = 0, n;
@@ -331,7 +322,7 @@ public:
     }
 
     /* fake */
-    int32_t decode_line(uint8_t *out, int32_t out_len, uint8_t *rely = nullptr, uint8_t split_ch = UINT8_MAX, bool need2hold = false)
+    int32_t decode_line(uint8_t*, uint32_t, uint8_t*, uint8_t, bool)
     {
         return 0;
     }

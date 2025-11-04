@@ -81,7 +81,7 @@ void PbgzManager::updateWriteDataLen(RoughIOBlock* blockPtr) {
 }   
 
 void PbgzManager::updateDataInfo() {
-    fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\r", "from/to", totalReadLen, totalWriteLen);;
+    fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\r", "from/to", totalReadLen, totalWriteLen);
 }
 
 void PbgzManager::printFileType(BlockType blockType) {
@@ -95,9 +95,9 @@ void PbgzManager::printHeadInfo(PbgzParameter& para) {
 
 void PbgzManager::printTailInfo(Timer costTime, PbgzParameter& para) {
     fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\033[0m\n", "from/to", totalReadLen, totalWriteLen);
-    fprintf(stderr, "\nCompress finish, cost %lum%lus.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
+    fprintf(stderr, "\nCompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
     if (!para.isDecompress) {
-        fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%\n", totalReadLen, totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen);
+        fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%%\n", totalReadLen, totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen);
     }
 }
 
