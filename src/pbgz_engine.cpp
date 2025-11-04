@@ -33,7 +33,9 @@
 #include "coder_ppmd.h"
 #include "coder_json.h"
 #include "config_manager.h"
+#ifdef __SSE4_2__ 
 #include "hardware.h"
+#endif
 
 int PbgzEngine::init() {
     // Register allocation functions required by coder
@@ -73,7 +75,10 @@ int PbgzEngine::init() {
         ioReader = MemoryUtil::safeNewClass<PipeReader>();
     } else {
         if (PathUtil::isGzFile(parameter.inputFile)) {
-            bool isSupportSimd = Hardware().isSupportSimd();
+            bool isSupportSimd = false;
+#ifdef __SSE4_2__
+            isSupportSimd = Hardware().isSupportSimd();
+#endif
             if (isSupportSimd) {
                 ioReader = MemoryUtil::safeNewClass<FastGzFileReader>(parameter.inputFile);
             } else {
