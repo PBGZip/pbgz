@@ -163,8 +163,7 @@ bool Reference::isNiFileValid(const std::string& niFileName) {
         return false;
     }
 
-    std::string conf = cfgdir;
-    conf += ".conf";
+    const std::string conf = std::string(cfgdir) + ".conf";
     if (!PathUtil::fileExists(conf)) {
         LOG_INFO("File %s not exists.", conf.c_str());
         return false;
@@ -197,7 +196,7 @@ bool Reference::isNiFileValid(const std::string& niFileName) {
     metaCoder.decoder(buffer, confFileSize, ref2niCache);
     MemoryUtil::safeFree<uint8_t>(buffer);
 
-    std::string refFileName = PathUtil::getFileName(refGeneFile);
+    const std::string refFileName = PathUtil::getFileName(refGeneFile);
     if (refFileName.empty()){
         LOG_ERROR("Get refFileName from %s failed.", refGeneFile.c_str());
         return false;
@@ -275,7 +274,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
         break;
     }
 
-    std::string refGene = refGeneFile;
+    const std::string refGene = refGeneFile;
     std::string refGeneMd5;
     int64_t refGeneLen;
 
@@ -944,7 +943,7 @@ const uint32_t* Reference::queryPosition(const uint32_t &hash, uint32_t &length)
 }
 
 void Reference::updateMatchedGene(uint64_t actgPos, uint32_t matchLength) {
-    if (matchLength == 0) {
+    if (matchLength == 0 || actgPos == 0) {
         return;
     }
     uint64_t sposStart = actgPos >> 2;
@@ -993,7 +992,7 @@ void Reference::sanitizeRefSquash(int64_t startSquashPos, int64_t len) {
 /* Get ACTG bases of specified length at specified position */
 void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) {
     uint64_t squashPos = actgPos >> 2;
-    uint8_t *p = refGeneSquash + squashPos;
+    uint8_t* p = refGeneSquash + squashPos;
     uint8_t ch = *p;
 
     uint32_t offset  = 0;
@@ -1021,8 +1020,9 @@ void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) 
     default:
         break;
     }
-    if (offset == outLen)
+    if (offset == outLen) {
         return;
+    }
 
     /* Aligned part */
     uint32_t lenNeed = (outLen - offset) >> 2;
@@ -1112,8 +1112,9 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
     default:
         break;
     }
-    if (offset == outLen)
+    if (offset == outLen) {
         return;
+    }
 
     /* Aligned part */
     uint32_t lenNeed = (outLen - offset) >> 2;
