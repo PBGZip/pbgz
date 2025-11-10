@@ -231,7 +231,7 @@ private:
     int64_t isalInputLength;
     int64_t firstReadLen;
 
-    // 辅助函数
+    // Helper function
     bool readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen, uint8_t* isalOut, uint32_t isalOutLen, bool isMultipleHeaders);
     int64_t processMultipleGzipHeaders();
 };
@@ -286,14 +286,14 @@ public:
 private:
     PipeReader pipeReader;
     
-    // ISAL解压状态
+    // ISAL decompression state
     struct inflate_state state;
     bool stateInitialized;
     
-    // ISAL gzip头
+    // ISAL gzip header
     struct isal_gzip_header gzipHeader;
     
-    // 缓冲区
+    // Buffers
     uint8_t* inputBuffer;
     uint8_t* outputBuffer;
     uint8_t* remainingBuffer;
@@ -302,6 +302,6 @@ private:
     size_t remainingBufferSize;
     size_t remainingSize;
     
-    // 状态标志
+    // Status flags
     bool streamEnded;
 };

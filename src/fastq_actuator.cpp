@@ -366,7 +366,7 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
     const uint64_t xsquash_tab[2] = {0xFCFFFFFFFFFFFFFF, 0xFCFFFFFFFFFFFFFF};
 
     /* case 1: base length is not greater than reference index corresponding base length */
-    if (baseLength <= baseGroupLen) {
+    if (baseLength <= (baseGroupLen + 4)) {
         actgEncode(base, out, baseLength);
         outLength = baseLength;
         mappingPos = 0;
@@ -428,20 +428,10 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
             }
 
             loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
-            /* Safety check: ensure loffset does not cause invalid pointer */
-            if (loffset > mt[align4_curr].squashBufferLen[match_pair]) {
-                continue; // Skip invalid offset
-            }
+
             /* caculate unmatch count */
             psquash = mt[align4_curr].getSquash(match_pair) - loffset;
-            if (psquash < baseSquashBuffer[0] || psquash >= baseSquashBuffer[0] + base_squash_align4) {
-                continue;
-            }
-
             psquash_refe = prefe_squash + match_pos - loffset;
-            if (psquash_refe < prefe_squash || psquash_refe >= prefe_squash + refe_squashlen) {
-                continue;
-            }
 
             xsquash_match = ((*((uint64_t *)(mt[align4_curr].getSquash(match_pair)))) & xsquash_tab[match_pair]);
             xsquash_macth_refe = ((*((uint64_t *)(prefe_squash + match_pos))) & xsquash_tab[match_pair]);
@@ -451,8 +441,9 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
             } 
             /* align 4 */
             unmatchs = actgSquashDiffCnt(psquash, psquash_refe, mt[align4_curr].squashBufferLen[match_pair]);
-            if (unmatchs >= best_unmatchs)
+            if (unmatchs >= best_unmatchs) {
                 continue;
+            }
 
             /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mt[0]'s pair and mt[0] offset is 0 */
             unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
@@ -475,12 +466,13 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
                 best_align4 = align4_curr;
                 best_unmatchs = unmatchs;
             }
-            if (best_unmatchs <= MAPPED_THRESHOLD_GEN2)
+            if (best_unmatchs <= MAPPED_THRESHOLD_GEN2) {
                 break;
+            }
         }
-
-        if (best_unmatchs <= MAPPED_THRESHOLD_GEN2)
+        if (best_unmatchs <= MAPPED_THRESHOLD_GEN2) {
             break;
+        }
         mt[align4_curr].incOffset();
     }
 
@@ -507,23 +499,9 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
                 }
 
                 loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
-                
-                /* Safety check: ensure loffset does not cause invalid pointer */
-                if (loffset > mt[align4_curr].squashBufferLen[match_pair]) {
-                    continue; // Skip invalid offset
-                }
-                
                 /* caculate unmatch count */
                 psquash = mt[align4_curr].getSquash(match_pair) - loffset;
                 psquash_refe = prefe_squash + match_pos - loffset;
-
-                /* Safety check: ensure pointer is within valid range */
-                if (psquash < baseSquashBuffer[0] || psquash >= baseSquashBuffer[0] + base_squash_align4) {
-                    continue;
-                }
-                if (psquash_refe < prefe_squash || psquash_refe >= prefe_squash + refe_squashlen) {
-                    continue;
-                }
 
                 xsquash_match = ((*((uint64_t *)(mt[align4_curr].getSquash(match_pair)))) & xsquash_tab[match_pair]);
                 xsquash_macth_refe = ((*((uint64_t *)(prefe_squash + match_pos))) & xsquash_tab[match_pair]);

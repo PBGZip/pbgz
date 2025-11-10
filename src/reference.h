@@ -110,6 +110,10 @@ public:
     /// @param dstActg Output buffer for storing ACTG characters
     void getActgFrom2Bits(const uint8_t* src2Bit, uint32_t src2BitsLen, uint8_t* dstActg);
 
+    /// @brief Debug function: export hash table content to file
+    /// Write hash table content to "hash_table" file for debugging and analysis
+    void dumpHashTable();
+
 private:
     /// @brief Check validity of reference genome parameters
     /// Verify key parameters like baseGroupStep and baseGroupLen meet requirements
@@ -156,10 +160,6 @@ private:
     /// @return true for success, false for failure
     bool makeNiFile(const std::string& niFile);
 
-    /// @brief Debug function: export hash table content to file
-    /// Write hash table content to "hash_table" file for debugging and analysis
-    void dumpHashTable();
-    
 private:
     // Progress bar
     GuardBar* guardBar;

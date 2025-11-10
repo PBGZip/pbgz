@@ -25,8 +25,12 @@ typedef struct {
         squashBufferLen[1] = __squashBuffCmpltLen;
         offset = _offset;
     }
+	
     inline void incOffset() { ++offset; }
-    uint8_t *getSquash(bool pair) const {return ((pair) ? (squashBuffer[1] - offset) : (squashBuffer[0] + offset));}
+
+    uint8_t* getSquash(bool pair) const {
+        return ((pair) ? (squashBuffer[1] - offset) : (squashBuffer[0] + offset));
+    }
 
     /*  squash buffer, 0 for forward strand, 1 for complementary strand */
     uint8_t *squashBuffer[2];      /* Pointer to squash buffer */
