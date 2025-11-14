@@ -60,8 +60,8 @@ TEST_F(PbgzFileWriteTest, WriteFileMeta) {
     value["test2"] = "value";
     value["test3"] = "value";
     fileMeta.setMetaData(key, value);
-    writer.setFileMeta(fileMeta);
-    writer.writeFileMeta();
+    writer.setBaseFileMeta(fileMeta);
+    writer.writeBaseFileMeta();
     writer.close();
     iowriter->closeIO();
     delete iowriter;
@@ -84,8 +84,8 @@ TEST_F(PbgzFileWriteTest, WriteBlockData) {
     value["test2"] = "value";
     value["test3"] = "value";
     fileMeta.setMetaData(key, value);
-    writer.setFileMeta(fileMeta);
-    writer.writeFileMeta();
+    writer.setBaseFileMeta(fileMeta);
+    writer.writeBaseFileMeta();
     
     PbgzDataBlock blockData;
     key = "metaTestKey";
@@ -118,8 +118,8 @@ TEST_F(PbgzFileReadTest, ReadFileMeta) {
     value["test2"] = "value";
     value["test3"] = "value";
     fileMeta.setMetaData(key, value);
-    writer.setFileMeta(fileMeta);
-    writer.writeFileMeta();
+    writer.setBaseFileMeta(fileMeta);
+    writer.writeBaseFileMeta();
     writer.close();
     iowriter->closeIO();
     delete iowriter;
@@ -131,7 +131,7 @@ TEST_F(PbgzFileReadTest, ReadFileMeta) {
     EXPECT_EQ(reader.open(), 0) << "Failed to open file for reading";
     PbgzFileHeader fileHeader = reader.getFileHeader();
     EXPECT_EQ(fileHeader.getBlockType(), FILE_HEADER) << "Invalid file magic";
-    PbgzFileMeta fileMetaRead = reader.getFileMeta();
+    PbgzFileMeta fileMetaRead = reader.getBaseFileMeta();
     EXPECT_EQ(fileMetaRead.getBlockType(), FILE_META) << "Failed to read file metadata";
     Json::Value valueRead = fileMetaRead.getMetaData("testKey");
     ASSERT_FALSE(valueRead.isNull()) << "Metadata 'testKey' not found";
@@ -160,8 +160,8 @@ TEST_F(PbgzFileReadTest, ReadBlockData) {
     value["test2"] = "value";
     value["test3"] = "value";
     fileMeta.setMetaData(key, value);
-    writer.setFileMeta(fileMeta);
-    writer.writeFileMeta();
+    writer.setBaseFileMeta(fileMeta);
+    writer.writeBaseFileMeta();
     
     PbgzDataBlock blockData;
     key = "metaTestKey";
@@ -181,7 +181,7 @@ TEST_F(PbgzFileReadTest, ReadBlockData) {
     EXPECT_EQ(reader.open(), 0) << "Failed to open file for reading";
     PbgzFileHeader fileHeader = reader.getFileHeader();
     EXPECT_EQ(fileHeader.getBlockType(), FILE_HEADER) << "Invalid file magic";
-    PbgzFileMeta fileMetaRead = reader.getFileMeta();
+    PbgzFileMeta fileMetaRead = reader.getBaseFileMeta();
     EXPECT_EQ(fileMetaRead.getBlockType(), FILE_META) << "Failed to read file metadata";
     Json::Value valueRead = fileMetaRead.getMetaData("fileTestKey");
     ASSERT_FALSE(valueRead.isNull()) << "Metadata 'fileTestKey' not found";

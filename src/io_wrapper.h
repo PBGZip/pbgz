@@ -96,6 +96,10 @@ public:
         return fo.fileSize;
     }
 
+    size_t getCurrentPos() {
+        return fo.position;
+    }
+
 private:
     FileOperator fo;
 };
@@ -128,6 +132,10 @@ public:
     }
 
     size_t getMappedSize(size_t fileSize);
+
+    size_t getCurrentPos() {
+        return fo.position;
+    }
 
 protected:
     FileOperator fo;

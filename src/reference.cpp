@@ -528,6 +528,7 @@ void Reference::getNiFileFromReference(std::string& niFile) {
     niFileName += ".ni";
     niFilePath += niFileName;
     niFile = niFilePath;
+    fastaChecksum = md5.hexstr();
 }
 
 bool Reference::makeIndex() {

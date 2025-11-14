@@ -250,21 +250,43 @@ int32_t BlockWriter::writeBlock(RoughIOBlock* blockPtr) {
 }
 
 int32_t PbgzBlockWriter::init() {
-    if (ioWriter == nullptr) {
+   if (ioWriter == nullptr || pbgzFileWriter == nullptr) {
         return -1;
     }
-    
-    if (pbgzFileWriter == nullptr) {
-        return -1;
-    }
-
     pbgzFileWriter->open();
-    pbgzFileWriter->getFileMeta().setMetaData("writer", "pbgz_writer_v" + PbgzManager::getInstance().getVersion());
-    pbgzFileWriter->getFileMeta().setMetaData("hashmethod", "md5");
-    pbgzFileWriter->getFileMeta().setMetaData("blocksize", BLOCK_SIZE);
-    pbgzFileWriter->writeFileMeta();
-
     return 0;
+}
+
+
+int32_t PbgzBlockWriter::writeBaseFileMeta() {
+    if (ioWriter == nullptr || pbgzFileWriter == nullptr) {
+        return -1;
+    }
+    pbgzFileWriter->getBaseFileMeta().setMetaData("writer", "pbgz_writer_v" + PbgzManager::getInstance().getVersion());
+    pbgzFileWriter->getBaseFileMeta().setMetaData("hashmethod", "md5");
+    pbgzFileWriter->writeBaseFileMeta();
+    return 0;
+}
+
+int32_t PbgzBlockWriter::writeDynamicFileMeta() {
+    if (ioWriter == nullptr || pbgzFileWriter == nullptr) {
+        return -1;
+    }
+    pbgzFileWriter->writeDynamicFileMeta();
+    return 0;
+}
+
+void PbgzBlockWriter::updateHeadExt(){ 
+    if (ioWriter == nullptr || pbgzFileWriter == nullptr) {
+        return;
+    }
+
+    FileWriter* pFileWrite = dynamic_cast<FileWriter*>(ioWriter);
+    if (pFileWrite == nullptr) {
+        return;
+    }
+
+    pbgzFileWriter->updateMetaOffset(pFileWrite->getCurrentPos());
 }
 
 int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
@@ -293,8 +315,7 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
 
     /// Calculate checksum of Meta and data
     dataBlock.calcChecksum();
-    pbgzFileWriter->writeBlockData(dataBlock);
-    return 0;
+    return pbgzFileWriter->writeBlockData(dataBlock);
 }
 
 

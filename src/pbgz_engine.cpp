@@ -73,6 +73,7 @@ int PbgzEngine::init() {
 
     if (parameter.inputFile == "/dev/stdin") {
         ioReader = MemoryUtil::safeNewClass<PipeReader>();
+        LOG_INFO("Create Pipe Reader.");
     } else {
         if (PathUtil::isGzFile(parameter.inputFile)) {
             bool isSupportSimd = false;
@@ -81,11 +82,15 @@ int PbgzEngine::init() {
 #endif
             if (isSupportSimd) {
                 ioReader = MemoryUtil::safeNewClass<FastGzFileReader>(parameter.inputFile);
+                LOG_INFO("Create Pipe FastGzFileReader.");
             } else {
                 ioReader = MemoryUtil::safeNewClass<GzFileReader>(parameter.inputFile, parameter.threadNum);
+                LOG_INFO("Create Pipe GzFileReader.");
             }
         } else {
             ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
+            LOG_INFO("Create Pipe FileReader.");
+            
         }
     }
     if (ioReader == nullptr) {
@@ -97,14 +102,18 @@ int PbgzEngine::init() {
     if (parameter.outputFile == "/dev/stdout") {
         if(parameter.isDecToGZ) {
             ioWriter = MemoryUtil::safeNewClass<GzPipeWriter>(parameter.threadNum);
+            LOG_INFO("Create Pipe GzPipeWriter.");
         } else {
             ioWriter = MemoryUtil::safeNewClass<PipeWriter>();
+            LOG_INFO("Create Pipe PipeWriter.");
         }
     } else {
         if(parameter.isDecToGZ) {
             ioWriter = MemoryUtil::safeNewClass<GzFileWriter>(parameter.outputFile, parameter.threadNum);
+            LOG_INFO("Create Pipe GzFileWriter.");
         } else {
             ioWriter = MemoryUtil::safeNewClass<FileWriter>(parameter.outputFile);
+            LOG_INFO("Create Pipe FileWriter.");
         }
     }
     if (ioWriter == nullptr) {
@@ -117,55 +126,48 @@ int PbgzEngine::init() {
 }
 
 PbgzEngine::~PbgzEngine() {
+    for (auto& th : coderThreads) {
+        if (th.joinable()) {
+            th.join();
+        }
+    }
+    
+    if (writeThread.joinable()) {
+        writeThread.join();
+    }
+
     // Release resources
     if (ioReader) {
         ioReader->closeIO();
-        delete ioReader;
-        ioReader = nullptr;
+        MemoryUtil::safeDeleteClass(ioReader);
     }
 
     if (ioWriter) {
         ioWriter->closeIO();
-        delete ioWriter;
-        ioWriter = nullptr;
+        MemoryUtil::safeDeleteClass(ioWriter);
     }
 
     while(!freeInputPool.empty()) {
         RoughIOBlock* inPtr = freeInputPool.get();
-        if (inPtr) {
-            delete inPtr;
-            inPtr = nullptr;
-        }
+        MemoryUtil::safeDeleteClass(inPtr);
     }
 
     while(!inputDataPool.empty()) {
         RoughIOBlock* inPtr = inputDataPool.get();
-        if (inPtr) {
-            delete inPtr;
-            inPtr = nullptr;
-        }
+        MemoryUtil::safeDeleteClass(inPtr);
     }
 
     while(!freeOutputPool.empty()) {
         RoughIOBlock* outPtr = freeOutputPool.get();
-        if (outPtr) {
-            delete outPtr;
-            outPtr = nullptr;
-        }
+        MemoryUtil::safeDeleteClass(outPtr);
     }
 
     while(!outputDataPool.empty()) {
         RoughIOBlock* outPtr = outputDataPool.get();
-        if (outPtr) {
-            delete outPtr;
-            outPtr = nullptr;
-        }
+        MemoryUtil::safeDeleteClass(outPtr);
     }
 
-    if (pRefGene) {
-        delete pRefGene;
-        pRefGene = nullptr;
-    }
+    MemoryUtil::safeDeleteClass(pRefGene);
 }
 
 int32_t PbgzEngine::start() {
@@ -193,6 +195,12 @@ int32_t PbgzEngine::start() {
     ret = startReadTask();
     if (ret != 0) {
         LOG_ERROR("Start read task failed.");
+        // 编码的终止符号
+        for (uint32_t i = 0; i < parameter.threadNum; ++i) {
+            inputDataPool.push(nullptr);
+        }
+        // 输出终止符号
+        outputDataPool.push(nullptr);
         return -1;
     }
 
@@ -200,6 +208,31 @@ int32_t PbgzEngine::start() {
         if (th.joinable()) {
             th.join();
         }
+    }
+
+    bool isPackRefeInTail = !parameter.isDecompress && pRefGene && !parameter.isUnpackRef && parameter.outputFile != "/dev/stdout";
+    if (isPackRefeInTail) {
+        std::vector<RoughIOBlock*> blockVec;
+        int64_t maxRefLen = 0;
+        int64_t totolEncLen = 0;
+        Json::Value refeMeta;
+        refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
+        refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
+        refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
+        refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
+        refeMeta["ni_name"] = PathUtil::getFileName(pRefGene->getNiFilePath());
+        FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+        if (fileWriter != nullptr) {
+            int64_t refBlockCount = packReference(blockVec, maxRefLen, totolEncLen);
+            refeMeta["max_block_len"] = maxRefLen;
+            refeMeta["blocks"] = refBlockCount;
+            // Throw to write file thread to write
+            for (auto item : blockVec) {
+                outputDataPool.pushForce(item);
+            }
+            dynamicFileMeta.setMetaData("refe", refeMeta); 
+        }
+        blockVec.clear();
     }
 
     // Write end marker
@@ -215,23 +248,29 @@ int32_t PbgzEngine::startReadTask() {
     if (parameter.isDecompress) {   // Decompression mode, read content from pbgz file
         blockReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
         PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
+        if (pbgzReader == nullptr) {
+            MemoryUtil::safeDeleteClass(blockReader);
+            return -1;
+        }
+        pbgzReader->init();
+        baseFileMeta = pbgzReader->getBaseFileMeta();
+        dynamicFileMeta = pbgzReader->getDynamicFileMeta();
         if (!initRefGeneForDecomress(pbgzReader)) {
             LOG_INFO("Init reference for decompress failed");
+            MemoryUtil::safeDeleteClass(blockReader);
+            return -1;
         }
-        fileMeta = pbgzReader->getFileMeta();
     } else {  // Compression mode, read content from non-pbgz file
         blockReader = MemoryUtil::safeNewClass<BlockReader>(ioReader);
-    }
-
-    if (blockReader == nullptr) {
-        LOG_ERROR("Create block reader failed.");
-        return -1;
-    }
-    if (0 != blockReader->init()) {
-        LOG_ERROR("BlockReader init failed");
-        delete blockReader;
-        blockReader = nullptr;
-        return -1;
+        if (blockReader == nullptr) {
+            LOG_ERROR("Create block reader failed.");
+            return -1;
+        }
+        if (0 != blockReader->init()) {
+            LOG_ERROR("BlockReader init failed");
+            MemoryUtil::safeDeleteClass(blockReader);
+            return -1;
+        }
     }
 
     BlockType fileType = TYPE_UNKNOW;
@@ -246,9 +285,6 @@ int32_t PbgzEngine::startReadTask() {
 
         ret = blockReader->readBlock(blockPtr, fileType);
         if (ret <= 0) {
-            if (ret < 0) {
-                LOG_ERROR("Read block failed.");
-            }
             // Reached end of file or error, insert empty block as end marker to data queue
             for (uint32_t i = 0; i < parameter.threadNum; ++i) {
                 inputDataPool.push(nullptr);
@@ -302,12 +338,14 @@ int32_t PbgzEngine::startCoderTask() {
                 pActuator = MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
             } else {
                 freeInputPool.push(inBlockPtr);
-                LOG_ERROR("Not support block type: %d", inBlockPtr->getBlockType());
-                break;
+                freeOutputPool.push(outBlockPtr);
+                // LOG_ERROR("Not support block type: %d", inBlockPtr->getBlockType());
+                continue;
             }
 
             if (pActuator == nullptr) {
                 freeInputPool.push(inBlockPtr);
+                freeOutputPool.push(outBlockPtr);
                 LOG_ERROR("Create actuator failed.");
                 break;
             }
@@ -346,6 +384,11 @@ int32_t PbgzEngine::startWriteTask() {
         BlockWriter* blockWriter = nullptr;
         if (parameter.isDecompress) {  // Decompression mode, file write in non-pbgz format
             blockWriter = MemoryUtil::safeNewClass<BlockWriter>(ioWriter);
+            if (blockWriter == nullptr) {
+                LOG_ERROR("Failed to create block writer.");
+                return -1;
+            }
+            blockWriter->init();
         } else {   // Compression mode, file write in pbgz format
             blockWriter = MemoryUtil::safeNewClass<PbgzBlockWriter>(ioWriter);
             PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
@@ -353,15 +396,11 @@ int32_t PbgzEngine::startWriteTask() {
                 LOG_ERROR("pbgzWriter is NULL.");
                 return -1;
             }
-            pbgzWriter->setFileMeta(fileMeta);
-        }
-        if (blockWriter == nullptr) {
-            LOG_ERROR("Failed to create block writer.");
-            return -1;
+            pbgzWriter->init();
+            pbgzWriter->setBaseFileMeta(baseFileMeta);
+            pbgzWriter->writeBaseFileMeta();
         }
         
-        blockWriter->init();
-
         int64_t blockId2Write = 0; 
         while (true) {
             RoughIOBlock* outBlockPtr = outputDataPool.get();
@@ -373,10 +412,23 @@ int32_t PbgzEngine::startWriteTask() {
                     freeOutputPool.push(outblockPtr);
                     outputSortedCache.pop_front();
                 }
+
+                // 待所有数据写入完成之后更新扩展头，并写入动态文件meta
+                PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
+                if (pbgzWriter != nullptr) {
+                    pbgzWriter->updateHeadExt();
+                    pbgzWriter->setDynamicFileMeta(dynamicFileMeta);
+                    pbgzWriter->writeDynamicFileMeta();
+                    resetReferenceOffset();
+                }
                 break;
             } else {
                 if (outBlockPtr->getBlockType() == REFERENCE) {
                     /// Writing reference blocks is one-time, release after writing
+                    FileWriter* fileWriter =  dynamic_cast<FileWriter*>(ioWriter);
+                    if (fileWriter != nullptr) {
+                        updateReferenceOffset(fileWriter->getCurrentPos());
+                    }
                     blockWriter->writeBlock(outBlockPtr);
                     PbgzManager::getInstance().updateWriteDataLen(outBlockPtr);
                     MemoryUtil::safeDeleteClass(outBlockPtr);
@@ -413,62 +465,68 @@ bool PbgzEngine::initRefGeneForDecomress(PbgzBlockReader* blockReader) {
     if (blockReader == nullptr) {
         return false;
     }
-    const PbgzFileMeta& fileMeta = blockReader->getFileMeta();
-    if (!fileMeta.getMetaData("refe").isObject()) {
+    if (!baseFileMeta.getMetaData("refe").isObject()) {
         LOG_INFO("No reference");
         return true;
     }
-    
-    Json::Value metaRefe = fileMeta.getMetaData("refe");
+    Json::Value& metaRefe = baseFileMeta.getMetaData("refe");
+    if (dynamicFileMeta.getMetaData().isMember("refe")) {
+        LOG_INFO("Read meta data from dynamic file meta");
+        metaRefe = dynamicFileMeta.getMetaData("refe");
+    }
+
     std::string fastaName = metaRefe["fasta_name"].asString();
     int64_t fastaLength = metaRefe["fasta_len"].asInt64();
     std::string niName = metaRefe["ni_name"].asString();
 
     if (metaRefe["blocks"].asInt64() > 0) {
         /*  There is pack reference in compression package, directly unpack */
-        unpackReference(blockReader);
-    } else {
-        std::string fastaNameInput = parameter.referenceGenic;
-        if (fastaNameInput.empty()) { /* No reference file specified */
-            fprintf(stderr, "need to specify the following FASTA file:\n\n");
-            fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
-            fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-            fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
-            LOG_ERROR("reference file needs to be specified to complete decompression");
-            return false;
+        if(unpackReference(blockReader, metaRefe)) {
+            return true;
         }
-
-        fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
-        int64_t fastqFileLenInput = PathUtil::getFileSize(fastaNameInput);
-        /* check whether fasta is matched */
-        if (fastaNameInput != fastaName) {
-            fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
-            LOG_ERROR("initialize reference failed: used fasta %s, should be %s", fastaNameInput.c_str(), fastaName.c_str());
-            return false;
-        }
-        if (fastaLength != fastqFileLenInput) {
-            LOG_ERROR("initialize reference failed: used fasta file len %ld, should be %ld", fastqFileLenInput, fastaLength);
-            return false;
-        }
-
-        Reference refeCheck(parameter.referenceGenic, parameter.threadNum);
-        std::string niNameInput;
-        refeCheck.getNiFileFromReference(niNameInput);
-        niNameInput = PathUtil::getAbsPath(niNameInput);
-        if (niNameInput != niName)  {
-            LOG_ERROR("initialize reference failed: used ni file %s, should be %s", niNameInput.c_str(), niName.c_str());
-            return false;
-        }
-        /* matched, do make index */
-        pRefGene = MemoryUtil::safeNewClass<Reference>(parameter.referenceGenic, parameter.threadNum);
-        if (pRefGene == nullptr) {
-            return false;
-        }
-        if (!pRefGene->initSquashByNiFile()) {
-            LOG_ERROR("initialize reference failed");
-            return false;
-        }
+    } 
+    
+    std::string fastaNameInput = parameter.referenceGenic;
+    if (fastaNameInput.empty()) { /* No reference file specified */
+        fprintf(stderr, "need to specify the following FASTA file:\n\n");
+        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
+        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
+        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+        LOG_ERROR("reference file needs to be specified to complete decompression");
+        return false;
     }
+
+    fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
+    int64_t fastqFileLenInput = PathUtil::getFileSize(fastaNameInput);
+    /* check whether fasta is matched */
+    if (PathUtil::getFileName(fastaNameInput) != fastaName) {
+        fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
+        LOG_ERROR("initialize reference failed: used fasta %s, should be %s", fastaNameInput.c_str(), fastaName.c_str());
+        return false;
+    }
+    if (fastaLength != fastqFileLenInput) {
+        LOG_ERROR("initialize reference failed: used fasta file len %ld, should be %ld", fastqFileLenInput, fastaLength);
+        return false;
+    }
+
+    Reference refeCheck(parameter.referenceGenic, parameter.threadNum);
+    std::string niNameInput;
+    refeCheck.getNiFileFromReference(niNameInput);
+    niNameInput = PathUtil::getAbsPath(niNameInput);
+    if (PathUtil::getFileName(niNameInput) != niName)  {
+        LOG_ERROR("initialize reference failed: used ni file %s, should be %s", niNameInput.c_str(), niName.c_str());
+        return false;
+    }
+    /* matched, do make index */
+    pRefGene = MemoryUtil::safeNewClass<Reference>(parameter.referenceGenic, parameter.threadNum);
+    if (pRefGene == nullptr) {
+        return false;
+    }
+    if (!pRefGene->initSquashByNiFile()) {
+        LOG_ERROR("initialize reference failed");
+        return false;
+    }
+    
     return true;
 }
 
@@ -485,38 +543,51 @@ bool PbgzEngine::initReferenceForCompress() {
     if (pRefGene) {
         Json::Value refeMeta;
         refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
-        refeMeta["fasta_name"] = PathUtil::getAbsPath(pRefGene->getFastaFileName());
+        refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
         refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
         refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
-        refeMeta["ni_name"] = PathUtil::getAbsPath(pRefGene->getNiFilePath()); /* Contains md5 information, used for decompression verification */
+        refeMeta["ni_name"] = PathUtil::getFileName(pRefGene->getNiFilePath()); /* Contains md5 information, used for decompression verification */
         std::vector<RoughIOBlock*> blockVec;
-        if (!parameter.isUnpackRef) {
+        bool isPackRefeInHeader = !parameter.isUnpackRef && parameter.outputFile == "/dev/stdout";
+        if (isPackRefeInHeader) {
             int64_t maxRefLen = 0;
             int64_t totolEncLen = 0;
-            int64_t refBlockCount = packReference(blockVec, maxRefLen, totolEncLen);
+            int64_t refBlockCount = packReference(blockVec, maxRefLen, totolEncLen, false);
             refeMeta["max_block_len"] = maxRefLen;
             refeMeta["blocks"] = refBlockCount;
-        }
-        fileMeta.setMetaData("refe",refeMeta);
-        // Throw to write file thread to write
-        if (!parameter.isUnpackRef) {
+            // Throw to write file thread to write
             for (auto item : blockVec) {
                 outputDataPool.pushForce(item);
             }
             blockVec.clear();
         }
+        baseFileMeta.setMetaData("refe",refeMeta);
     }
     return true;
 }
 
-void PbgzEngine::unpackReference(PbgzBlockReader* blockReader) {
-    Json::Value metaRefe = blockReader->getFileMeta().getMetaData("refe");
-    int64_t refeSquashLen = metaRefe["squash_len"].asInt64();
-    std::string fastaName = metaRefe["fasta_name"].asString();
-    int64_t maxLen = metaRefe["max_block_len"].asInt64();
-    int64_t blocks = metaRefe["blocks"].asInt64();
-    std::string md5Packed = metaRefe["md5"].asString();
-    
+bool PbgzEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta) {
+    int64_t refeSquashLen = refeMeta["squash_len"].asInt64();
+    std::string fastaName = refeMeta["fasta_name"].asString();
+    int64_t maxLen = refeMeta["max_block_len"].asInt64();
+    int64_t blocks = refeMeta["blocks"].asInt64();
+    std::string md5Packed = refeMeta["md5"].asString();
+    int64_t offset = 0;
+    if (refeMeta.isMember("offset")) {
+        offset = refeMeta["offset"].asInt64();
+        LOG_INFO("Reference offset = %d", offset);
+    }
+
+    FileReader* fileReader = nullptr;
+    size_t readPos = 0;
+    if (offset > 0) {
+        fileReader = dynamic_cast<FileReader*>(ioReader);
+        if (fileReader == nullptr) {
+            return false;
+        }
+        readPos = fileReader->getCurrentPos();
+        fileReader->seekIO(offset);
+    }
     int64_t pcnt = parameter.threadNum;
     RoughIOBlock* block[pcnt];
     for (int64_t n = 0; n < pcnt; n++) {
@@ -578,6 +649,10 @@ void PbgzEngine::unpackReference(PbgzBlockReader* blockReader) {
         }
     }
 
+    if (fileReader != nullptr && readPos != 0) {
+        fileReader->seekIO(readPos);
+    }
+
     for (int i= 0; i < pcnt; ++i) {
         (void)inputBlock.get();
         inputPool.push(nullptr);
@@ -590,11 +665,11 @@ void PbgzEngine::unpackReference(PbgzBlockReader* blockReader) {
     for (int64_t n = 0; n < pcnt; n++) {
         MemoryUtil::safeDeleteClass(block[n]);
     }
-    return;
+    return true;
 }
 
 /*  Save reference genome */
-int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t &maxBlockLen, int64_t &totalEncLen) {
+int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef) {
     int64_t block = 0, offset = 0;
     std::vector<std::thread> tpools;
     
@@ -602,18 +677,18 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
     int64_t each = (16 << 20);
     int64_t total = pRefGene->getSquashLength();
     int64_t remain = total;
-    maxBlockLen = totalEncLen = 0;
+    maxBlockLen =0;
+    totalEncLen = 0;
     
-    uint8_t *output = MemoryUtil::safeAlloc<uint8_t>(pcnt * each);
-    
-    BlockingQueue<RefeInfo> inputPool(pcnt * 2);
+    BlockingQueue<RefeInfo> inputPool(pcnt);
     Reference* refe = pRefGene;
     int64_t current;
     std::mutex m;
 
     // Start threads
     for (uint32_t idx = 0; idx < pcnt; ++idx) {
-        tpools.push_back(std::thread([&inputPool, &output, &m, &blockVec, &refe, &each, &maxBlockLen, &totalEncLen]() {
+        tpools.push_back(std::thread([&inputPool, &m, &blockVec, &refe, &each, &maxBlockLen, &totalEncLen, &isSanitizeRef]() {
+            uint8_t* output = MemoryUtil::safeAlloc<uint8_t>(each);
             while(true) {
                 RefeInfo refe2do = inputPool.get();
                 int64_t plen = refe2do.second.second;
@@ -621,9 +696,11 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
                     break;
                 }
                 const uint8_t *p = refe->getSquash() + refe2do.second.first;
-                refe->sanitizeRefSquash(refe2do.second.first, refe2do.second.second);
+                if (isSanitizeRef) {
+                    refe->sanitizeRefSquash(refe2do.second.first, plen);
+                }
 
-                coder_io refeIo(refe2do.first.second, each);
+                coder_io refeIo(output, each);
                 coder_ppmd cppmd(&refeIo);
                 cppmd.encode(p, plen);
                 cppmd.encode_flush();
@@ -638,11 +715,9 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
                 std::string metaString;
                 cmeta.encoder(meta, metaString); /*  Compress block meta */
             
-                m.lock();
                 int64_t currBlockLen = metaString.length() + refeIo.data_len;
                 if (currBlockLen >= plen) {
                     LOG_ERROR("reference block pack failed");
-                    m.unlock();
                     break;
                 }
                 /* Write compressed stream of current block's meta */
@@ -652,6 +727,9 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
                 memcpy(outBlock->getCurrent(), metaString.c_str(), metaString.length());
                 outBlock->setMetaLen(metaString.length());
                 outBlock->setBlockType(REFERENCE);
+                outBlock->setBlockId(refe2do.first.first);
+
+                m.lock();
                 blockVec.push_back(outBlock);
                 maxBlockLen = (currBlockLen > maxBlockLen) ? currBlockLen : maxBlockLen;
                 totalEncLen += currBlockLen;
@@ -662,7 +740,7 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
 
     while (remain > 0) {
         current = std::min(each, remain);
-        inputPool.push(std::make_pair(std::make_pair(block, output + ((block % pcnt) * each)), std::make_pair(offset, current)));
+        inputPool.push(std::make_pair(std::make_pair(block, nullptr), std::make_pair(offset, current)));
         block++;
         offset += current;
         remain -= current;
@@ -680,6 +758,23 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
         }
     }
 
-    MemoryUtil::safeFree(output);
+    std::sort(blockVec.begin(), blockVec.end(), [](RoughIOBlock* a, RoughIOBlock* b) {
+        return a->getBlockId() < b->getBlockId(); // 降序条件
+    });
+
     return block;
+}
+
+void PbgzEngine::updateReferenceOffset(int64_t offset) {
+    if (refeOffsetFLag) {
+        return;
+    }
+    LOG_INFO("Reference offset is %ld", offset);
+    refeOffsetFLag = true;
+    dynamicFileMeta.getMetaData("refe")["offset"] = offset;
+    return;
+}
+
+void PbgzEngine::resetReferenceOffset() {
+    refeOffsetFLag = false;
 }

@@ -35,18 +35,16 @@ class PbgzFileReader {
 public:
     int32_t open();
 
-    const PbgzFileHeader& getFileHeader();
+    PbgzFileHeader& getFileHeader();
 
-    const PbgzFileMeta& getFileMeta();
+    PbgzFileMeta& getBaseFileMeta();
+
+    PbgzFileMeta& getDynamicFileMeta();
 
     int32_t readDataBlock(PbgzDataBlock& dataBlock);
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
         currentFileIndex = -1;  // Initialize file index to -1, indicating no file has been read yet
-        // Implement the read logic for PBGZ file format
-        if (0 != initFileHeadAndMeta()) {
-            throw std::runtime_error("Create PbgzFileReader, load head and meta failed");
-        }
     }
 
     void close();
@@ -58,9 +56,12 @@ private:
 
     static uint8_t* getFileReadBuffer();
 
+    int32_t readFileMeta(PbgzFileMeta& fileMeta);
+
 private:
     std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers, a file may consist of multiple compressed packages concatenated together
-    std::map<int32_t, PbgzFileMeta> fileMetaMap;      // File metadata
+    std::map<int32_t, PbgzFileMeta> baseFileMetaMap;      // Base file metadata
+    std::map<int32_t, PbgzFileMeta> dynamicFileMetaMap;   // Dynamic file meta data, only exits in file reader
     int32_t currentFileIndex; // Current file sequence number, indicating which file is currently being read
     IOReader* ioReader;
 };
@@ -73,12 +74,25 @@ public:
 
     int32_t close();
 
-    int32_t writeFileMeta();
+    int32_t writeFileMeta(PbgzFileMeta& fileMeta);
+
+    int32_t writeBaseFileMeta() {
+        return writeFileMeta(baseFileMeta);
+    }
+
+    int32_t writeDynamicFileMeta() {
+        return writeFileMeta(dynamicFileMeta);
+    }
 
     int32_t writeBlockData(PbgzDataBlock& dataBlock);
 
-    int32_t setFileMeta(const PbgzFileMeta& metaInfo) {
-        fileMeta = metaInfo;
+    int32_t setBaseFileMeta(const PbgzFileMeta& metaInfo) {
+        baseFileMeta = metaInfo;
+        return 0;
+    }
+
+     int32_t setDynamicFileMeta(const PbgzFileMeta& metaInfo) {
+        dynamicFileMeta = metaInfo;
         return 0;
     }
 
@@ -92,9 +106,15 @@ public:
         return fileHeader;
     }
 
-    PbgzFileMeta& getFileMeta() {
-        return fileMeta;
+    PbgzFileMeta& getBaseFileMeta() {
+        return baseFileMeta;
     }
+
+    PbgzFileMeta& getDynamicFileMeta() {
+        return dynamicFileMeta;
+    }
+
+    void updateMetaOffset(uint64_t dynamicMetaOffset);
 
 private:
     static uint8_t* getFileWriteBuffer();
@@ -103,6 +123,7 @@ private:
 
 private:
     PbgzFileHeader fileHeader; // File header
-    PbgzFileMeta fileMeta; // File metadata
+    PbgzFileMeta baseFileMeta; // Base file meta
+    PbgzFileMeta dynamicFileMeta; // Dynamic file meta 
     IOWriter* ioWriter;
 };
