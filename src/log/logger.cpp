@@ -105,11 +105,7 @@ void Logger::log(LogLevel logLevel, const char* logMessage) {
     LogAppender appender = ConfigManager::getInstance().getLogAppender();
     switch (appender) {
         case LogAppender::CONSOLE:{
-            if (logLevel > LogLevel::ERROR) {
-                std::cerr << logMessage;
-            } else {
-                std::cout << logMessage;
-            }
+            std::cerr << logMessage;
             break;
         }
         case LogAppender::FILE:{

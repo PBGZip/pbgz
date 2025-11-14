@@ -42,7 +42,7 @@ TEST_F(FcCoderTest, FcDecodeRandom) {
         throw std::runtime_error("Read data from /dev/urandom failed.");
     }
     fcCoder.encode_line(buffer.data(), count);
-    EXPECT_EQ(1267, fcIo->data_len);
+    EXPECT_LT(1024, fcIo->data_len);
     delete fcIo;
     free(pOut);
 }

@@ -60,40 +60,19 @@ const uint32_t PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH = 4;  // Length of PBGZ data blo
 const uint32_t PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH = 8; // Length of PBGZ data block meta information checksum
 const uint32_t PBGZ_DATA_BLOCK_CHECKSUM_LENGTH = 8; // Length of PBGZ data block checksum
 
-
-class Serializable {
+class PbgzFileHeaderExt {
 public:
-    /**
-     * @brief Serialize the object to a buffer.
-     * @param buffer Destination buffer.
-     * @param bufferLength Length of the buffer.
-     * @param dataLength Actual length of serialized data.
-     * @return Status code.
-     */
-    virtual int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) = 0;
+    PbgzFileHeaderExt(){
+        dynamicMetaOffset = 0;
+    }
 
-    /**
-     * @brief Deserialize the object from a buffer.
-     * @param buffer Source buffer.
-     * @param bufferLength Length of the buffer.
-     * @return Status code.
-     */
-    virtual int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) = 0;
+public:
+    uint64_t dynamicMetaOffset;
 };
 
 /// @brief PBGZ file header
 class PbgzFileHeader {
 public:
-    // /**
-    //  * @brief Serialize the file header to a buffer.
-    //  */
-    // int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override ;
-
-    // /**
-    //  * @brief Deserialize the file header from a buffer.
-    //  */
-    // int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
-
     /**
      * @brief Get the version string of the file header.
      */
@@ -127,24 +106,33 @@ public:
         version[2] = PBGZ_VERSION_PATCH;
     }
 
+    uint64_t getDynamicMetaOffset() {
+        return pbgzHeaderExt.dynamicMetaOffset;
+    }
+
+    void setDynamicMetaOffset(uint64_t offset) {
+        pbgzHeaderExt.dynamicMetaOffset = offset;
+    }
+
+    PbgzFileHeaderExt& getFileHeaderExt() {
+        return pbgzHeaderExt;
+    }
+
 private:
     PbgzBlockType blockType;  // Block type
     uint8_t version[3];  // Version number
+    PbgzFileHeaderExt pbgzHeaderExt;
 };
+
+typedef enum {  
+    BASE_FILE_META = 0,     // Base file meta infomatiom
+    DYNAMIC_FILE_META = 1,  // Dynamic file meta infomatiom
+}FileMetaType;
+
 
 /// @brief PBGZ file meta information
 class PbgzFileMeta {
 public:
-    // /**
-    //  * @brief Serialize the file meta information to a buffer.
-    //  */
-    // int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override ;
-
-    // /**
-    //  * @brief Unserialize the file meta information from a buffer.
-    //  */
-    // int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
-
     /**
      * @brief Check if the meta data checksum is valid.
      * @return True if checksum is valid, false otherwise.
@@ -161,7 +149,7 @@ public:
         return metaData;
     }
 
-    Json::Value getMetaData(const std::string& key) const {
+    Json::Value& getMetaData(const std::string& key) {
         return metaData[key];
     }
 
@@ -186,8 +174,17 @@ public:
         metaData.clear();
     }
 
+    void setMetaType(FileMetaType type) {
+        metaType = type;
+    }
+
+    FileMetaType getMetaType() {
+        return metaType;
+    }
+
 private:
     PbgzBlockType blockType;   // Block type
+    FileMetaType metaType;     // File Meta Type
     Json::Value metaData; // Meta information in JSON format
     uint64_t metaChecksum; // Checksum for meta data
 };
@@ -237,16 +234,6 @@ public:
     }
 
     int32_t setBlockData(uint8_t* data, uint32_t length);
-
-    // /**
-    //  * @brief Serialize the data block to a buffer.
-    //  */
-    // int32_t serialize(uint8_t* buffer, uint32_t bufferLength, uint32_t& dataLength) override;
-
-    // /**
-    //  * @brief Unserialize the data block from a buffer.
-    //  */
-    // int32_t unserialize(uint8_t* buffer, uint32_t bufferLength) override;
 
     PbgzDataBlock():blockType(FILE_DATA), blockDataLength(0), pBlockData(nullptr){
         dataMetaInfo.clear();

@@ -31,13 +31,14 @@ static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *
 }
 
 /* Calculate complementary strand of bases */
-static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len)
-{
-    if (!actgp) /* Create acceleration lookup table when empty */
-    {
+static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len) {
+    if (dst == nullptr || src == nullptr || len == 0) {
+        return;
+    }
+
+    if (!actgp) { /* Create acceleration lookup table when empty */
         std::unique_lock<std::mutex> guard(actgpMutex);
-        if (!actgp)
-        {
+        if (!actgp) {
             actgp = MemoryUtil::safeAlloc<uint16_t>(65536);
             uint32_t i1, i2, k;
             uint8_t v[4] = {0, 2, 4, 6};
@@ -81,8 +82,7 @@ static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len)
 }
 
 /* Count the number of different characters between two strings */
-static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len)
-{
+static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len) {
     uint32_t n = 0, zcnt = 0;
     for (n = 0; n < len; n++) {
         zcnt += !((*(s1 + n)) ^ (*(s2 + n)));
@@ -91,8 +91,7 @@ static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t
 }
 
 /* Count the number of different ACTG bases after squash, e.g., count between 01001011 and 01101110 is 3 */
-static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len)
-{
+static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len) {
     // Add safety checks
     if (s1 == nullptr || s2 == nullptr) {
         return 0;
@@ -136,11 +135,12 @@ static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, u
 }
 
 /* Calculate mapping relationship between base and reference after squash, 2bits placed at end of byte, store 0 if content is same, otherwise store original 2bits of base */
-static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst)
-{
+static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst) {
+    if (squashBase == nullptr || squashRefe == nullptr || squashLen == 0 || dst == nullptr) {
+        return 0;
+    }
     uint32_t n, offset = 0, next;
     uint8_t chb, chr;
-
     for (n = 0, next = 2; next <= squashLen; n += 2) {
         if ((*((uint16_t *)(squashBase + n))) != *((uint16_t *)(squashRefe + n))) {
             /* first byte */
@@ -193,8 +193,7 @@ static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8
 }
 
 /* Calculate mapping relationship between base and reference after squash, 2bits placed at end of byte */
-static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst)
-{
+static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst) {
     uint32_t n, offset = 0, x32, next;
     uint64_t x64, x64_1, x64_2;
     uint8_t *p;
@@ -299,8 +298,7 @@ static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const ui
 }
 
 /* Encode ACTG, each base still occupies 1 byte after encoding, but only the last 2 bits are valid */
-static inline void actgEncode(const uint8_t *src, uint8_t *dst, uint32_t len)
-{
+static inline void actgEncode(const uint8_t *src, uint8_t *dst, uint32_t len) {
     uint32_t n, align8 = len >> 3 << 3;
 
     for (n = 0; n < align8; n += 8) {
@@ -317,8 +315,7 @@ static inline void actgEncode(const uint8_t *src, uint8_t *dst, uint32_t len)
 }
 
 /* Perform XOR operation byte by byte */
-static inline void actgXor(const uint8_t *x1, const uint8_t *x2, uint8_t *out, uint32_t len)
-{
+static inline void actgXor(const uint8_t *x1, const uint8_t *x2, uint8_t *out, uint32_t len) {
     uint32_t n, align8 = (len >> 3) << 3;
     for (n = 0; n < align8; n += 8) {
         *((uint64_t *)(out + n)) = (*((uint64_t *)(x1 + n))) ^ (*((uint64_t *)(x2 + n)));

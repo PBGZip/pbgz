@@ -24,6 +24,7 @@
 #include "pbgz_file_wrapper.h"
 #include "log/logger.h"
 #include "coder_json.h"
+#include "utils/memory_util.h"
 
 // Buffer as temporary storage for parsing meta and other information, no need to be too large
 const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 16 * 1024 * 1024;
@@ -42,6 +43,11 @@ uint8_t* PbgzFileReader::getFileReadBuffer(){
 }
 
 int32_t PbgzFileReader::open() {
+     // Implement the read logic for PBGZ file format
+    if (0 != initFileHeadAndMeta()) {
+        LOG_ERROR("Create PbgzFileReader, load head and meta failed");
+        return -1;
+    }
     return 0;
 }
 
@@ -57,7 +63,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return -1; 
     }
 
-    PbgzFileHeader header;
+    PbgzFileHeader fileHeader;
     // Read the magic value, 4 byte
     size_t readLen = 0;
     // If isCheckMagic is true, we will not read the magic value again
@@ -73,7 +79,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
             return -1; // Invalid magic
         }
     }
-    header.setBlockType(FILE_HEADER);
+    fileHeader.setBlockType(FILE_HEADER);
 
     // Read the version number, 3 byte
     readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_VERSION_LENGTH);
@@ -82,11 +88,70 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return -1; // File read error
     }   
     // Unserialize version
-    header.setVersion(pReadBuffer + PBGZ_FILE_MAGIC_LENGTH, PBGZ_FILE_VERSION_LENGTH);
-    fileHeaderMap[++currentFileIndex] = header; 
+    fileHeader.setVersion(pReadBuffer + PBGZ_FILE_MAGIC_LENGTH, PBGZ_FILE_VERSION_LENGTH);
+    
+    // 读取文件头扩展部分，
+    readLen = ioReader->readIO(pReadBuffer, sizeof(uint32_t));
+    if (readLen > 0) {    
+        uint32_t fileHeadSize = *(uint32_t*)pReadBuffer;
+        if (fileHeadSize > 0) {
+            readLen = ioReader->readIO(pReadBuffer, fileHeadSize);
+            if (readLen >= sizeof(uint64_t)) {
+                fileHeader.setDynamicMetaOffset(*(uint64_t*)pReadBuffer);
+            }
+        }
+    }
+    
+    fileHeaderMap[++currentFileIndex] = fileHeader; 
 
     // Read file meta information
-    PbgzFileMeta fileMeta;
+    PbgzFileMeta baseFileMeta;
+    baseFileMeta.setMetaType(BASE_FILE_META);
+    if (0 != readFileMeta(baseFileMeta)) {
+        LOG_ERROR("Read base file meta failed.");
+        return -1;
+    }
+    // Keep the same serial number as header
+    baseFileMetaMap[currentFileIndex] = baseFileMeta;
+
+    if (fileHeader.getDynamicMetaOffset() == 0) {
+        return 0;
+    }
+    uint64_t dynamicOffset = fileHeader.getDynamicMetaOffset();
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    if (fileReader == nullptr) {
+        return 0;   // 如果从管道读取，转换会失败，属于正常的
+    }
+
+    size_t readOffset = fileReader->getCurrentPos(); // 备份当前读取的位置
+    fileReader->seekIO(dynamicOffset);
+
+    PbgzFileMeta dyncFileMeta;
+    dyncFileMeta.setMetaType(DYNAMIC_FILE_META);
+    if (0 != readFileMeta(dyncFileMeta)) {
+        LOG_ERROR("Read dynamic file meta failed. offset = %d", dynamicOffset);
+        return -1;
+    }
+    dynamicFileMetaMap[currentFileIndex] = dyncFileMeta;
+    fileReader->seekIO(readOffset);
+
+    return 0;
+}       
+
+int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta) {
+     if (ioReader == nullptr) {
+        LOG_ERROR("IO reader is NULL.");
+        return -1;
+    }
+    // Read the file header
+    uint8_t* pReadBuffer = getFileReadBuffer();
+    if (pReadBuffer == nullptr) {
+        LOG_ERROR("Failed to get read buffer.");   
+        return -1; 
+    }
+
+    size_t readLen = 0;
+
     // read file meta magic
     readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH);
     if (readLen == 0) {
@@ -110,8 +175,8 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         LOG_ERROR("Failed to read file meta length from IO.");
         return -1; // File read error       
     }
-    const uint32_t metaLength = (uint32_t)(*(uint32_t*)(pReadBuffer));
 
+    const uint32_t metaLength = (uint32_t)(*(uint32_t*)(pReadBuffer));
     // read the the meta data 
     readLen = ioReader->readIO(pReadBuffer, metaLength);
     if (readLen != metaLength) {
@@ -127,11 +192,8 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return -1; // File read error   
     }
     fileMeta.setMetaChecksum(*(uint64_t*)pReadBuffer);
-
-    // Keep the same serial number as header
-    fileMetaMap[currentFileIndex] = fileMeta;
     return 0;
-}       
+}
 
 void PbgzFileReader::close() {
     if (ioReader) {
@@ -141,7 +203,7 @@ void PbgzFileReader::close() {
     return;
 }
 
-const PbgzFileHeader& PbgzFileReader::getFileHeader() {
+PbgzFileHeader& PbgzFileReader::getFileHeader() {
     if (currentFileIndex < 0) {
         LOG_ERROR("No file has been read yet.");
         throw std::runtime_error("No file has been read yet.");
@@ -155,20 +217,36 @@ const PbgzFileHeader& PbgzFileReader::getFileHeader() {
     return fileHeaderMap[currentFileIndex];
 }
 
-const PbgzFileMeta& PbgzFileReader::getFileMeta() {
+PbgzFileMeta& PbgzFileReader::getBaseFileMeta() {
     // if currentFileIndex is -1, it means no file has been read yet
     if (currentFileIndex < 0) {
         LOG_ERROR("No file has been read yet.");
         throw std::runtime_error("No file has been read yet.");
     }
 
-    // Return the file meta information for the current file index
-    if (fileMetaMap.find(currentFileIndex) == fileMetaMap.end()) {
-        LOG_ERROR("File meta information not found for current file index: %", currentFileIndex);   
-        throw std::runtime_error("File meta information not found for current file index.");
+    // // Return the file meta information for the current file index
+    // if (baseFileMetaMap.find(currentFileIndex) == baseFileMetaMap.end()) {
+    //     LOG_ERROR("File meta information not found for current file index: %", currentFileIndex);   
+    //     throw std::runtime_error("File meta information not found for current file index.");
+    // }
+
+    return baseFileMetaMap[currentFileIndex];
+}
+
+PbgzFileMeta& PbgzFileReader::getDynamicFileMeta() {
+     // if currentFileIndex is -1, it means no file has been read yet
+    if (currentFileIndex < 0) {
+        LOG_ERROR("No file has been read yet.");
+        throw std::runtime_error("No file has been read yet.");
     }
 
-    return fileMetaMap[currentFileIndex];
+    // // Return the file meta information for the current file index
+    // if (dynamicFileMetaMap.find(currentFileIndex) == dynamicFileMetaMap.end()) {
+    //     LOG_ERROR("File meta information not found for current file index: %", currentFileIndex);   
+    //     //throw std::runtime_error("File meta information not found for current file index.");
+    // }
+
+    return dynamicFileMetaMap[currentFileIndex];
 }
 
 int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
@@ -195,7 +273,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
     }
 
     if (memcmp(pReadBuffer, &PBGZ_DATA_BLOCK_MAGIC, PBGZ_DATA_BLOCK_MAGIC_LENGTH) != 0) {
-        LOG_ERROR("Invalid magic value for PBGZ data block. %X", (uint32_t)(*(uint32_t*)pReadBuffer));
+        LOG_INFO("Not a magic value for PBGZ data block. %X", (uint32_t)(*(uint32_t*)pReadBuffer));
         // It maybe a new file, try to parse the file header and meta information
          if (memcmp(pReadBuffer, &PBGZ_FILE_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
             LOG_INFO("Detected a new PBGZ file format, reinitializing file header and meta.");
@@ -210,6 +288,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
         }
         return -1; // Invalid magic
     }
+
     dataBlock.setBlockType(FILE_DATA);
 
     // Read the meta length, 4byte
@@ -257,7 +336,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
     // PbgzDataBlock data storage is not memory allocated by itself, the address is passed in from external, reducing copying
     readLen = ioReader->readIO(dataBlock.getDataPtr(), dataLength);
     if (readLen != dataLength) {
-        LOG_ERROR("Failed to read PBGZ data block data.");
+        LOG_ERROR("Failed to read PBGZ data block data. expect %d, actual %d", dataLength, readLen);
         return -1; // File read error
     }
 
@@ -288,11 +367,9 @@ int32_t PbgzFileWriter::open(){
     if (ioWriter == nullptr) {
         return -1;
     }
-
     if (0 != initFileHead()) {
         return -1; // Initialization error
     }
-
     return 0;
 }
 
@@ -306,15 +383,21 @@ int32_t PbgzFileWriter::initFileHead() {
         return -1; // File not open
     }
 
+    uint32_t writeLen = 0;
     // Serialize block type, 4 byte without '\0'
-    ioWriter->writeIO(PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH);
+    writeLen += ioWriter->writeIO(PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH);
     // Serialize version
-    ioWriter->writeIO(fileHeader.getVerion(), PBGZ_FILE_VERSION_LENGTH);
-
-    return 0;
+    writeLen += ioWriter->writeIO(fileHeader.getVerion(), PBGZ_FILE_VERSION_LENGTH);
+    uint32_t fileHeadExtLength = sizeof(PbgzFileHeaderExt);
+    writeLen += ioWriter->writeIO(&fileHeadExtLength, sizeof(uint32_t));
+    writeLen += ioWriter->writeIO(&fileHeader.getFileHeaderExt(), fileHeadExtLength);
+    if (writeLen > 0) {
+        return 0;
+    }
+    return -1;
 }
 
-int32_t PbgzFileWriter::writeFileMeta() {
+int32_t PbgzFileWriter::writeFileMeta(PbgzFileMeta& fileMeta){
     if (!ioWriter) {
         LOG_ERROR("IO is not open.");
         return -1; // File not open
@@ -325,20 +408,21 @@ int32_t PbgzFileWriter::writeFileMeta() {
     fileMetaCoder.encoder(fileMeta.getMetaData(), fileMetaEncodeStr);
     uint32_t metaLength = fileMetaEncodeStr.length();
 
+    uint32_t writeLen = 0;
     // write block type
-    ioWriter->writeIO(&PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH);
+    writeLen += ioWriter->writeIO(&PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH);
 
     // write meta data length
-    ioWriter->writeIO( &metaLength, PBGZ_FILE_META_SIZE_LENGTH);
+    writeLen += ioWriter->writeIO( &metaLength, PBGZ_FILE_META_SIZE_LENGTH);
 
     // write meta data
-    ioWriter->writeIO(fileMetaEncodeStr.c_str(), metaLength);
+    writeLen += ioWriter->writeIO(fileMetaEncodeStr.c_str(), metaLength);
 
     // write checksum
     uint64_t checksum = fileMeta.getMetaChecksum();
-    ioWriter->writeIO(&checksum, PBGZ_FILE_META_CHECKSUM_LENGTH);
+    writeLen += ioWriter->writeIO(&checksum, PBGZ_FILE_META_CHECKSUM_LENGTH);
 
-    return 0;
+    return writeLen;
 }
 
 int32_t PbgzFileWriter::writeBlockData(PbgzDataBlock& dataBlock) {
@@ -352,37 +436,50 @@ int32_t PbgzFileWriter::writeBlockData(PbgzDataBlock& dataBlock) {
         LOG_ERROR("Failed to get write buffer.");
         return -1; // Memory allocation error
     }
-    
+
+    uint32_t writeLen = 0;
     // Write block type
-    ioWriter->writeIO(&PBGZ_DATA_BLOCK_MAGIC, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
+    writeLen += ioWriter->writeIO(&PBGZ_DATA_BLOCK_MAGIC, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
 
     // Write meta length
     coder_json blockMetaCoder;
     std::string blockMetaOut;
     blockMetaCoder.encoder(dataBlock.getMetaData(), blockMetaOut);
     uint32_t dataMetaLength = blockMetaOut.length();
-    ioWriter->writeIO(&dataMetaLength, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
+    writeLen += ioWriter->writeIO(&dataMetaLength, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
     
     // Write meta data
-    ioWriter->writeIO(blockMetaOut.c_str(), dataMetaLength);
+    writeLen += ioWriter->writeIO(blockMetaOut.c_str(), dataMetaLength);
 
     // Write meta checksum
     uint64_t checksum = dataBlock.getMetaCheckSum();
-    ioWriter->writeIO(&checksum, PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
+    writeLen += ioWriter->writeIO(&checksum, PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
 
     // Serialize data length
     uint32_t blockDataLength = dataBlock.getDataLength();
-    ioWriter->writeIO(&blockDataLength, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
+    writeLen += ioWriter->writeIO(&blockDataLength, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
 
     // Write block data
     void* pBlockData = dataBlock.getDataPtr();
     if (pBlockData && blockDataLength > 0) {
-        ioWriter->writeIO(pBlockData, blockDataLength);
+        writeLen += ioWriter->writeIO(pBlockData, blockDataLength);
     }
 
     // Write checksums
     uint64_t dataChecksum = dataBlock.getDataCheckSum();
-    ioWriter->writeIO(&dataChecksum, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
+    writeLen += ioWriter->writeIO(&dataChecksum, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
     
-    return 0;
+    return writeLen;
+}
+
+void PbgzFileWriter::updateMetaOffset(uint64_t dynamicMetaOffset) {
+    FileWriter* pFileWrite = dynamic_cast<FileWriter*>(ioWriter);
+    if (pFileWrite == nullptr) {
+        return;
+    }
+
+    LOG_INFO("Dynamic file offset = %ld", dynamicMetaOffset);
+
+    pFileWrite->writeIOAt(11, &dynamicMetaOffset, sizeof(dynamicMetaOffset));
+    return;
 }

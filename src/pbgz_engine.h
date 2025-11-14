@@ -42,6 +42,7 @@ public:
         ioReader = nullptr;
         ioWriter = nullptr;
         pRefGene = nullptr;
+        refeOffsetFLag = false;
     }
 
     int32_t init();
@@ -59,11 +60,15 @@ private:
 
     bool initRefGeneForDecomress(PbgzBlockReader* blockReader);
 
-    void unpackReference(PbgzBlockReader* blockReader);
+    bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
 
-    int64_t packReference(std::vector<RoughIOBlock*>& blockVec, int64_t &maxBlockLen, int64_t &totalEncLen);
+    int64_t packReference(std::vector<RoughIOBlock*>& blockVec, int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef = true);
 
     bool initReferenceForCompress();
+
+    void updateReferenceOffset(int64_t offset);
+
+    void resetReferenceOffset();
 
 private:
     BlockingQueue<RoughIOBlock*> freeInputPool;   // Free queue, file reading tasks get blocks from here to read data
@@ -79,5 +84,7 @@ private:
     std::thread writeThread;
     Reference* pRefGene;
 
-    PbgzFileMeta fileMeta;
+    PbgzFileMeta baseFileMeta;
+    PbgzFileMeta dynamicFileMeta;
+    bool refeOffsetFLag;
 };

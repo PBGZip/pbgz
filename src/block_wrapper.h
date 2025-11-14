@@ -54,11 +54,15 @@ public:
 
     virtual int32_t init() override;
 
-    const PbgzFileMeta& getFileMeta() {
-        return pbgzFileReader->getFileMeta();
+    PbgzFileMeta& getBaseFileMeta() {
+        return pbgzFileReader->getBaseFileMeta();
     }
 
-    const PbgzFileHeader& getFileHeader() {
+    PbgzFileMeta& getDynamicFileMeta() {
+        return pbgzFileReader->getDynamicFileMeta();
+    }
+
+    PbgzFileHeader& getFileHeader() {
          return pbgzFileReader->getFileHeader();
     }
 
@@ -91,8 +95,12 @@ public:
     }
     virtual int32_t writeBlock(RoughIOBlock* blockPtr);
 
-    void setFileMeta(PbgzFileMeta& fileMeta) {
-        pbgzFileWriter->setFileMeta(fileMeta);
+    void setBaseFileMeta(PbgzFileMeta& fileMeta) {
+        pbgzFileWriter->setBaseFileMeta(fileMeta);
+    }
+
+    void setDynamicFileMeta(PbgzFileMeta& fileMeta) {
+        pbgzFileWriter->setDynamicFileMeta(fileMeta);
     }
 
     virtual int32_t init();
@@ -100,6 +108,12 @@ public:
     virtual ~PbgzBlockWriter() {
         MemoryUtil::safeDeleteClass(pbgzFileWriter);
     }
+
+    int32_t writeBaseFileMeta();
+
+    int32_t writeDynamicFileMeta();
+
+    void updateHeadExt();
     
 private:
     PbgzFileWriter* pbgzFileWriter;

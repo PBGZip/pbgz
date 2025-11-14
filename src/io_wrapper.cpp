@@ -185,6 +185,7 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
    
     (void)memcpy(fo.mappedAddress + fo.fileSize, pBuffer, writeLen);
     fo.fileSize = newSize;
+    fo.position = fo.fileSize;
     return newSize;
 }
 
@@ -213,6 +214,7 @@ int32_t FileWriter::writeIOAt(int32_t seekOffset, const void* pBuffer, size_t wr
 
     (void)memcpy(fo.mappedAddress + seekOffset, pBuffer, writeLen);
     fo.fileSize = newFileSize;
+    fo.position = seekOffset + writeLen;
     return newFileSize;
 }
 
@@ -221,7 +223,28 @@ size_t PipeReader::readIO(void* pBuffer, size_t readSize) {
         return -1;
     }
 
-    return read(STDIN_FILENO, pBuffer, readSize);
+    size_t totalRead = 0;
+    uint8_t* buffer = static_cast<uint8_t*>(pBuffer);
+    
+    // 循环读取直到达到请求的大小或没有更多数据
+    while (totalRead < readSize) {
+        ssize_t bytesRead = read(STDIN_FILENO, buffer + totalRead, readSize - totalRead);
+        if (bytesRead < 0) {
+            if (errno == EINTR) {
+                continue; // 被信号中断，重试
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break; // 非阻塞模式下无数据可读
+            } else {
+                return -1; // 其他错误
+            }
+        } else if (bytesRead == 0) {
+            break; // EOF，写入端关闭
+        }
+        
+        totalRead += bytesRead;
+    }
+    
+    return totalRead;
 }
 
 
