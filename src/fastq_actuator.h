@@ -70,6 +70,8 @@ public:
         baseLengthGen2Buffer = nullptr;
         baseLengthGen3Buffer = nullptr;
         refeStretchBuffer = nullptr;
+        refeBeginPos = 0;
+        refeEndPos = 0;
     }
 
     virtual ~FastqActuator() {
@@ -103,6 +105,15 @@ public:
 
     int32_t initEncoder();
 
+    std::vector<int64_t>& getRefeMappedPositons() {
+        return refeMappedPositons;
+    }
+
+    void setRefeBeginEndPos(int64_t beginPos, int64_t endPos) {
+        refeBeginPos = beginPos;
+        refeEndPos = endPos; 
+    }
+
 private:
 
     int32_t preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLe );
@@ -132,7 +143,7 @@ private:
 
     int32_t compressQuality();
 
-    int32_t initDecoder();
+    int32_t initDecoder(RoughIOBlock* outputBlock);
 
     void (FastqActuator::*mapping)(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&);
 
@@ -175,4 +186,8 @@ private:
     uint16_t* baseLengthGen2Buffer;
     uint32_t* baseLengthGen3Buffer;
     uint8_t* refeStretchBuffer;
+
+    std::vector<int64_t> refeMappedPositons;
+    uint64_t refeBeginPos;
+    uint64_t refeEndPos;
 };

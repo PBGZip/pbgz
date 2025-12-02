@@ -37,6 +37,7 @@ static PbgzArg pbgzArgs =
     {'v', "version", no_argument, "show version"},
     {'g', "loglevel", required_argument, "<1-6> sepcify log level, default 6. debug(1), info(2), warning(3), error(4), fatal(5), off(6)"},
     {'G', "logfile", required_argument, "sepcify log file"},
+    {'p', "position", required_argument, "sepecify the reference gene posision"},
 };
 
 
@@ -173,6 +174,11 @@ int checkParameters(PbgzParameter& para) {
                 return -1;
             }
         }
+
+        if (!para.refeGenePos.empty()) {
+            fprintf(stdout, "Reference position is not support in compress scenario.\n");
+            return -1;
+        }
     }
 
     if (para.outputFile != "/dev/stdout") {
@@ -228,7 +234,7 @@ int checkParameters(PbgzParameter& para) {
     }
 
     if (para.logLevel < 1 || para.logLevel > 6) {
-         fprintf(stderr, "Log level is invalid.\n");
+        fprintf(stderr, "Log level is invalid.\n");
         return -1;
     }
 
@@ -324,8 +330,12 @@ int main(int argc, char** argv) {
             parameter.logLevel = atoi(optarg);
             break;
         }
-         case 'G': {
+        case 'G': {
             parameter.logFile = optarg;
+            break;
+        }
+        case 'p':{
+            parameter.refeGenePos = optarg;
             break;
         }
         case '?':

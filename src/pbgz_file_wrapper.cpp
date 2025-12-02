@@ -138,7 +138,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     return 0;
 }       
 
-int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta) {
+int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic) {
      if (ioReader == nullptr) {
         LOG_ERROR("IO reader is NULL.");
         return -1;
@@ -153,19 +153,21 @@ int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta) {
     size_t readLen = 0;
 
     // read file meta magic
-    readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH);
-    if (readLen == 0) {
-        LOG_INFO("No file meta information found in IO");
-        return 0; // No file meta information, not an error
-    }
-    if (readLen != PBGZ_FILE_META_MAGIC_LENGTH) {
-        LOG_ERROR("IO is not a valid pbgz file.");
-        return -1;
-    }
-    if (0 != memcmp(pReadBuffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH)) {
-        LOG_ERROR("IO is not a valid pbgz format, file meta magic no is %X, expect %X", 
-            (*(uint32_t*)pReadBuffer), PBGZ_FILE_META_MAGIC);
-        return -1;
+    if (isCheckMagic) {
+        readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH);
+        if (readLen == 0) {
+            LOG_INFO("No file meta information found in IO");
+            return 0; // No file meta information, not an error
+        }
+        if (readLen != PBGZ_FILE_META_MAGIC_LENGTH) {
+            LOG_ERROR("IO is not a valid pbgz file.");
+            return -1;
+        }
+        if (0 != memcmp(pReadBuffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_META_MAGIC_LENGTH)) {
+            LOG_ERROR("IO is not a valid pbgz format, file meta magic no is %X, expect %X", 
+                (*(uint32_t*)pReadBuffer), PBGZ_FILE_META_MAGIC);
+            return -1;
+        }
     }
     fileMeta.setBlockType(FILE_META);
 
@@ -224,12 +226,6 @@ PbgzFileMeta& PbgzFileReader::getBaseFileMeta() {
         throw std::runtime_error("No file has been read yet.");
     }
 
-    // // Return the file meta information for the current file index
-    // if (baseFileMetaMap.find(currentFileIndex) == baseFileMetaMap.end()) {
-    //     LOG_ERROR("File meta information not found for current file index: %", currentFileIndex);   
-    //     throw std::runtime_error("File meta information not found for current file index.");
-    // }
-
     return baseFileMetaMap[currentFileIndex];
 }
 
@@ -239,12 +235,6 @@ PbgzFileMeta& PbgzFileReader::getDynamicFileMeta() {
         LOG_ERROR("No file has been read yet.");
         throw std::runtime_error("No file has been read yet.");
     }
-
-    // // Return the file meta information for the current file index
-    // if (dynamicFileMetaMap.find(currentFileIndex) == dynamicFileMetaMap.end()) {
-    //     LOG_ERROR("File meta information not found for current file index: %", currentFileIndex);   
-    //     //throw std::runtime_error("File meta information not found for current file index.");
-    // }
 
     return dynamicFileMetaMap[currentFileIndex];
 }
@@ -273,9 +263,9 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
     }
 
     if (memcmp(pReadBuffer, &PBGZ_DATA_BLOCK_MAGIC, PBGZ_DATA_BLOCK_MAGIC_LENGTH) != 0) {
-        LOG_INFO("Not a magic value for PBGZ data block. %X", (uint32_t)(*(uint32_t*)pReadBuffer));
+        LOG_DEBUG("Not a magic value for PBGZ data block. %X", (uint32_t)(*(uint32_t*)pReadBuffer));
         // It maybe a new file, try to parse the file header and meta information
-         if (memcmp(pReadBuffer, &PBGZ_FILE_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
+        if (memcmp(pReadBuffer, &PBGZ_FILE_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
             LOG_INFO("Detected a new PBGZ file format, reinitializing file header and meta.");
             // Since the file Magic value has already been read, no need to read again
             if (0 != initFileHeadAndMeta(true)) {
@@ -285,8 +275,14 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
 
             // continue to read the data block from new file
             return readDataBlock(dataBlock); 
+        } else if (memcmp(pReadBuffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
+            PbgzFileMeta tmpMete;
+            if (0 != readFileMeta(tmpMete, false)) {
+                LOG_INFO("Failed to read file dynamic file meta.");
+            }
+            return readDataBlock(dataBlock);
         }
-        return -1; // Invalid magic
+        return -1; // Unexpect block, maybe meta, should ignore
     }
 
     dataBlock.setBlockType(FILE_DATA);

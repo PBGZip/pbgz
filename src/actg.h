@@ -14,11 +14,9 @@ static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *
     uint8_t *squash = dst;
     int64_t len4align = (baseLen >> 2) << 2;
     int64_t len4remain = baseLen - len4align;
-
     for (int64_t n = 0; n < len4align; n += 4) {
         *squash++ = ((base[n + 3] & 0x06) >> 1) | ((base[n + 2] & 0x06) << 1) | ((base[n + 1] & 0x06) << 3) | ((base[n] & 0x06) << 5);
     }
-
     if (len4remain > 0) {
         *squash = 0;
         for (int64_t n = 0; n < len4remain; n++) {
@@ -26,7 +24,6 @@ static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *
         }
         squash++;
     }
-
     return (squash - dst);
 }
 
