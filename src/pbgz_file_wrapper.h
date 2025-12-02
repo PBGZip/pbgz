@@ -56,7 +56,7 @@ private:
 
     static uint8_t* getFileReadBuffer();
 
-    int32_t readFileMeta(PbgzFileMeta& fileMeta);
+    int32_t readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic = true);
 
 private:
     std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers, a file may consist of multiple compressed packages concatenated together

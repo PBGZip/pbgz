@@ -221,11 +221,16 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
         blockPtr->setBlockType(FASTQ_GEN3);
     } else if (blockType == "binary") {
         blockPtr->setBlockType(BINARY);
-    }  else if (blockType == "refe_gene") {
+    } else if (blockType == "refe_gene") {
         blockPtr->setBlockType(REFERENCE);
+    } else if (blockType == "refe_gene_index") {
+        blockPtr->setBlockType(REFERENCE_INDEX);
     }
     // Copy entire block information
     memcpy(blockPtr->getBuffer(), pbgzDataBlock.getDataPtr(), pbgzDataBlock.getDataLength());
+
+    LOG_DEBUG("Read One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d.", 
+        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen());
     
     return pbgzDataBlock.getDataLength();
 }   
@@ -298,6 +303,9 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
         return -1;
     }
 
+    LOG_DEBUG("Write One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d.", 
+        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen());
+
     PbgzDataBlock dataBlock;    
     dataBlock.setBlockData(blockPtr->getBuffer(), blockPtr->getTotalDataLen());
     dataBlock.setMetaData("datalen", blockPtr->getDataLen());
@@ -311,6 +319,8 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
         dataBlock.setMetaData("blocktype", "binary");
     } else if (blockPtr->getBlockType() == REFERENCE) {
         dataBlock.setMetaData("blocktype", "refe_gene");
+    } else if (blockPtr->getBlockType() == REFERENCE_INDEX) {
+        dataBlock.setMetaData("blocktype", "refe_gene_index");
     } 
 
     /// Calculate checksum of Meta and data

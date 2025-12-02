@@ -20,6 +20,7 @@ typedef struct PbgzParameter{
     bool isRemoveOriginFile;    // Whether to remove source file
     uint8_t logLevel;
     std::string logFile;
+    std::string refeGenePos;
 
     PbgzParameter() {
         showHelp = false;

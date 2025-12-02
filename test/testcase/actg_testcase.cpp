@@ -133,6 +133,17 @@ TEST_F(ActgTest, ActgSquash) {
             EXPECT_EQ(output[i], expected);
         }
     }
+
+    {
+        const uint8_t input[] = {'N', 'N', 'N', 'N', 'N', 'N', 'N'};
+        uint8_t output[2];
+        int64_t result = actgSquash(input, 7, output);
+        
+        EXPECT_EQ(result, 2);
+        EXPECT_EQ(output[0], 0xFF);
+        // NNN -> 0x11111100
+        EXPECT_EQ(output[1], 0xFC);
+    }
 }
 
 // Test actgPair function

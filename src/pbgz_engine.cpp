@@ -36,6 +36,7 @@
 #ifdef __SSE4_2__ 
 #include "hardware.h"
 #endif
+#include <set>
 
 int PbgzEngine::init() {
     // Register allocation functions required by coder
@@ -73,7 +74,7 @@ int PbgzEngine::init() {
 
     if (parameter.inputFile == "/dev/stdin") {
         ioReader = MemoryUtil::safeNewClass<PipeReader>();
-        LOG_INFO("Create Pipe Reader.");
+        LOG_INFO("Create PipeReader.");
     } else {
         if (PathUtil::isGzFile(parameter.inputFile)) {
             bool isSupportSimd = false;
@@ -82,14 +83,14 @@ int PbgzEngine::init() {
 #endif
             if (isSupportSimd) {
                 ioReader = MemoryUtil::safeNewClass<FastGzFileReader>(parameter.inputFile);
-                LOG_INFO("Create Pipe FastGzFileReader.");
+                LOG_INFO("Create FastGzFileReader.");
             } else {
                 ioReader = MemoryUtil::safeNewClass<GzFileReader>(parameter.inputFile, parameter.threadNum);
-                LOG_INFO("Create Pipe GzFileReader.");
+                LOG_INFO("Create GzFileReader.");
             }
         } else {
             ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
-            LOG_INFO("Create Pipe FileReader.");
+            LOG_INFO("Create FileReader.");
             
         }
     }
@@ -102,18 +103,18 @@ int PbgzEngine::init() {
     if (parameter.outputFile == "/dev/stdout") {
         if(parameter.isDecToGZ) {
             ioWriter = MemoryUtil::safeNewClass<GzPipeWriter>(parameter.threadNum);
-            LOG_INFO("Create Pipe GzPipeWriter.");
+            LOG_INFO("Create GzPipeWriter.");
         } else {
             ioWriter = MemoryUtil::safeNewClass<PipeWriter>();
-            LOG_INFO("Create Pipe PipeWriter.");
+            LOG_INFO("Create PipeWriter.");
         }
     } else {
         if(parameter.isDecToGZ) {
             ioWriter = MemoryUtil::safeNewClass<GzFileWriter>(parameter.outputFile, parameter.threadNum);
-            LOG_INFO("Create Pipe GzFileWriter.");
+            LOG_INFO("Create GzFileWriter.");
         } else {
             ioWriter = MemoryUtil::safeNewClass<FileWriter>(parameter.outputFile);
-            LOG_INFO("Create Pipe FileWriter.");
+            LOG_INFO("Create FileWriter.");
         }
     }
     if (ioWriter == nullptr) {
@@ -227,7 +228,8 @@ int32_t PbgzEngine::start() {
             refeMeta["max_block_len"] = maxRefLen;
             refeMeta["blocks"] = refBlockCount;
             // Throw to write file thread to write
-            for (auto item : blockVec) {
+            for (RoughIOBlock* item : blockVec) {
+                item->setBlockId(blockCount++);
                 outputDataPool.pushForce(item);
             }
             dynamicFileMeta.setMetaData("refe", refeMeta); 
@@ -235,11 +237,40 @@ int32_t PbgzEngine::start() {
         blockVec.clear();
     }
 
+    if (!parameter.isDecompress && pRefGene && parameter.outputFile != "/dev/stdout") {
+        packBlockRefePosIdx();
+    }
+
     // Write end marker
     outputDataPool.push(nullptr);
     writeThread.join();
     PbgzManager::getInstance().printTailInfo(costTimer, parameter);
     return 0;
+}
+
+int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
+    RoughIOBlock* blockPtr = freeInputPool.get();
+    if (blockPtr == nullptr) {
+        LOG_ERROR("Get free block failed.");
+        return -1;
+    }
+    blockPtr->reset();
+
+    int64_t ret = blockReader->readBlock(blockPtr, fileType);
+    if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
+        freeInputPool.push(blockPtr);
+        return -2;
+    }
+
+    if (blockPtr->getBlockId() == 0){ 
+        fileType = blockPtr->getBlockType();
+        PbgzManager::getInstance().printFileType(fileType);
+    }
+
+    PbgzManager::getInstance().updateReadDataLen(blockPtr);
+    inputDataPool.push(blockPtr);
+    blockCount++;
+    return ret;
 }
 
 int32_t PbgzEngine::startReadTask() {
@@ -260,6 +291,12 @@ int32_t PbgzEngine::startReadTask() {
             MemoryUtil::safeDeleteClass(blockReader);
             return -1;
         }
+
+        if (!initRefeIndexForDecompress(pbgzReader)) {
+            LOG_INFO("Init reference index for decompress failed");
+            MemoryUtil::safeDeleteClass(blockReader);
+            return -1;
+        }
     } else {  // Compression mode, read content from non-pbgz file
         blockReader = MemoryUtil::safeNewClass<BlockReader>(ioReader);
         if (blockReader == nullptr) {
@@ -273,37 +310,62 @@ int32_t PbgzEngine::startReadTask() {
         }
     }
 
-    BlockType fileType = TYPE_UNKNOW;
-    int64_t ret = 0;
-    do {
-        RoughIOBlock* blockPtr = freeInputPool.get();
-        if (blockPtr == nullptr) {
-            LOG_ERROR("Get free block failed.");
-            return -1;
-        }
-        blockPtr->reset();
+    if (parameter.isDecompress && !parameter.refeGenePos.empty() && pRefGene) {
+        readBlockByPostition(blockReader);
+    } else {
+        BlockType fileType = TYPE_UNKNOW;
+        int64_t ret = 0;
+        do {
+            ret = readOneBlock(blockReader, fileType);
+        } while(ret > 0 || ret == -2);
+    }
 
-        ret = blockReader->readBlock(blockPtr, fileType);
-        if (ret <= 0) {
-            // Reached end of file or error, insert empty block as end marker to data queue
-            for (uint32_t i = 0; i < parameter.threadNum; ++i) {
-                inputDataPool.push(nullptr);
-            }
-            break;
-        } 
-
-        if (blockPtr->getBlockId() == 0){ 
-            fileType = blockPtr->getBlockType();
-            PbgzManager::getInstance().printFileType(fileType);
-        }
-
-        PbgzManager::getInstance().updateReadDataLen(blockPtr);
-        inputDataPool.push(blockPtr);
-    } while(ret > 0);
+    // Reached end of file or error, insert empty block as end marker to data queue
+    for (uint32_t i = 0; i < parameter.threadNum; ++i) {
+        inputDataPool.push(nullptr);
+    }
 
     delete blockReader;
     blockReader = nullptr;
     return 0;
+}
+
+
+void PbgzEngine::readBlockByPostition(BlockReader* blockReader) {
+    if (blockReader == nullptr) {
+        return;
+    }
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    if (fileReader == nullptr) {
+        return;
+    }
+    if (0 != pRefGene->calcRefPosByDesc(parameter.refeGenePos, refeBeginPos, refeEndPos)) {
+        return;
+    }
+
+    LOG_INFO("RefeBeginPos=%ld, RefeEndPos=%ld", refeBeginPos, refeEndPos);
+
+    std::set<uint32_t> blockIds; 
+    auto lowerIt = blockRefeIndex.lower_bound(refeBeginPos);
+    auto upperIt = blockRefeIndex.upper_bound(refeEndPos);
+    for (auto it = lowerIt; it != upperIt; ++it) {
+        if (it->first >= refeBeginPos && it->first <= refeEndPos) {
+            blockIds.insert(it->second);
+        }
+    }
+    
+    BlockType fileType = TYPE_UNKNOW;
+    size_t offsetBak = fileReader->getCurrentPos();
+    for (auto blockId : blockIds) {
+        int64_t offset = dynamicFileMeta.getMetaData("block_pos")[blockId].asInt64();
+        fileReader->seekIO(offset);
+        int64_t ret = readOneBlock(blockReader, fileType);
+        if (ret == 2) {
+            continue;
+        }
+    }
+    fileReader->seekIO(offsetBak);
+    return;
 }
 
 int32_t PbgzEngine::startCoderTask() {
@@ -330,6 +392,9 @@ int32_t PbgzEngine::startCoderTask() {
                 pActuator = MemoryUtil::safeNewClass<FastqActuator>(inBlockPtr, outBlockPtr, pRefGene);
                 FastqActuator* fastqActuator = dynamic_cast<FastqActuator*>(pActuator);
                 if (fastqActuator != nullptr) {
+                    if (parameter.isDecompress && !parameter.refeGenePos.empty() && pRefGene) {
+                        fastqActuator->setRefeBeginEndPos(refeBeginPos, refeEndPos);
+                    }
                     if (!parameter.isDecompress && 0 != fastqActuator->preAnalysis()) { // Only need to analyze block content in compression scenario
                         pActuator = MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
                     }
@@ -355,6 +420,11 @@ int32_t PbgzEngine::startCoderTask() {
                 ret = pActuator->decompress();
             } else {
                 ret = pActuator->compress();
+                FastqActuator* fastqActuator = dynamic_cast<FastqActuator*>(pActuator);
+                if (fastqActuator != nullptr) {
+                    blockRefePos[outBlockPtr->getBlockId()] = fastqActuator->getRefeMappedPositons();
+                    LOG_INFO("BlockId:%d, MappedLength:%d", outBlockPtr->getBlockId(), fastqActuator->getRefeMappedPositons().size());
+                }
             }
 
             if (ret != 0) {
@@ -407,6 +477,7 @@ int32_t PbgzEngine::startWriteTask() {
             if (outBlockPtr == nullptr) {     // Got end marker
                 while (!outputSortedCache.empty()) {
                     RoughIOBlock* outblockPtr = outputSortedCache.front();
+                    setDataBlockPosition(outblockPtr->getBlockId());
                     blockWriter->writeBlock(outblockPtr);
                     PbgzManager::getInstance().updateWriteDataLen(outblockPtr);
                     freeOutputPool.push(outblockPtr);
@@ -435,6 +506,18 @@ int32_t PbgzEngine::startWriteTask() {
                     continue;
                 }
 
+                if (outBlockPtr->getBlockType() == REFERENCE_INDEX) {
+                    FileWriter* fileWriter =  dynamic_cast<FileWriter*>(ioWriter);
+                    if (fileWriter != nullptr) {
+                        LOG_INFO("Reference index offset is %ld", fileWriter->getCurrentPos());
+                        dynamicFileMeta.getMetaData("refe_index")["offset"] = fileWriter->getCurrentPos();
+                    }
+                    blockWriter->writeBlock(outBlockPtr);
+                    PbgzManager::getInstance().updateWriteDataLen(outBlockPtr);
+                    MemoryUtil::safeDeleteClass(outBlockPtr);
+                    continue;
+                }
+
                 outputSortedCache.push_back(outBlockPtr);
                 outputSortedCache.sort([](const RoughIOBlock* p1, RoughIOBlock* p2) {
                     return p1->getBlockId() <= p2->getBlockId();
@@ -442,6 +525,7 @@ int32_t PbgzEngine::startWriteTask() {
                 while (!outputSortedCache.empty()) {
                     RoughIOBlock* outblockPtr = outputSortedCache.front();
                     if (outblockPtr->getBlockId() == blockId2Write) {
+                        setDataBlockPosition(outblockPtr->getBlockId());
                         blockWriter->writeBlock(outblockPtr);
                         blockId2Write++;
                         PbgzManager::getInstance().updateWriteDataLen(outblockPtr);
@@ -484,7 +568,7 @@ bool PbgzEngine::initRefGeneForDecomress(PbgzBlockReader* blockReader) {
         if(unpackReference(blockReader, metaRefe)) {
             return true;
         }
-    } 
+    }
     
     std::string fastaNameInput = parameter.referenceGenic;
     if (fastaNameInput.empty()) { /* No reference file specified */
@@ -530,6 +614,88 @@ bool PbgzEngine::initRefGeneForDecomress(PbgzBlockReader* blockReader) {
     return true;
 }
 
+bool PbgzEngine::initRefeIndexForDecompress(PbgzBlockReader* blockReader) {
+    if (blockReader == nullptr) {
+        return false;
+    }
+
+    if (!dynamicFileMeta.getMetaData().isMember("refe_index")) {
+        return true;
+    }
+
+    FileReader* pFileReader = dynamic_cast<FileReader*>(ioReader);
+    if (pFileReader == nullptr) {
+        return false;
+    }
+
+    size_t readOffset = pFileReader->getCurrentPos(); // 备份读取位置
+    
+    Json::Value refeIndexMeta = dynamicFileMeta.getMetaData("refe_index");
+    int64_t offset = refeIndexMeta["offset"].asInt64();
+    LOG_INFO("Reference index offset = %ld", offset);
+    pFileReader->seekIO(offset);
+    RoughIOBlock* refeIndexBlock = MemoryUtil::safeNewClass<RoughIOBlock>();
+    blockReader->readBlock(refeIndexBlock);
+    coder_json cmeta;
+    Json::Value refIndexBlockMeta;
+    cmeta.decoder(refeIndexBlock->getMetaBuffer(), refeIndexBlock->getMetaLen(), refIndexBlockMeta);
+    uint32_t srcLen = refIndexBlockMeta["srclen"].asUInt();
+    uint32_t dstLen = refIndexBlockMeta["dstlen"].asUInt(); 
+    if (dstLen != refeIndexBlock->getDataLen()) {
+        LOG_ERROR("RefeIndex invalid, dstlen = %d, expecet = %d.", refeIndexBlock->getDataLen(), dstLen);
+        pFileReader->seekIO(readOffset);
+        return false;
+    }
+    Json::Value& refePosDesc = refIndexBlockMeta["refe_desc"];
+    Json::Value::iterator iter = refePosDesc.begin();
+    for(; iter != refePosDesc.end(); ++iter) {
+        std::string posPair = iter->asString();
+        size_t pos = 0;
+        if ((pos = posPair.find(",")) != std::string::npos)  {
+            int64_t offset = std::stoll(posPair.substr(0, pos));
+            int64_t length = std::stoll(posPair.substr(pos + 1));
+            pRefGene->getRefeDescPos()[iter.key().asString()] = std::make_pair(offset, length);
+        }
+    }
+
+    if (refIndexBlockMeta["coder"]["magic"].asString() != "coder_ppmd") {
+        LOG_ERROR("coder name invalid.", refIndexBlockMeta["coder"]["magic"].asCString());
+        pFileReader->seekIO(readOffset);
+        return false;
+    }
+    uint8_t* outBuffer = MemoryUtil::safeAlloc<uint8_t>(srcLen);
+    coder_io refIndexIO(refeIndexBlock->getBuffer(), refeIndexBlock->getDataLen());
+    refIndexIO.meta = refIndexBlockMeta["coder"];
+    coder_ppmd coder(&refIndexIO);
+    coder.decode(outBuffer, srcLen);
+    uint32_t readLength = 0;
+    while(readLength < srcLen) {
+        uint32_t blockId = *(uint32_t*)(outBuffer + readLength);
+        readLength += sizeof(uint32_t);
+        uint32_t refeIndexSize = *(uint32_t*)(outBuffer + readLength);
+        readLength += sizeof(uint32_t);
+        for (uint32_t idx = 0; idx < refeIndexSize; ++idx) {
+            int64_t refeIndexPos = *(int64_t*)(outBuffer + readLength);
+            blockRefeIndex[refeIndexPos] = blockId;
+            readLength += sizeof(int64_t);
+        }
+    }
+    pFileReader->seekIO(readOffset);
+
+    // Json::Value blockPos = dynamicFileMeta.getMetaData("block_pos");
+    // Json::Value::iterator jsonIter = blockPos.begin();
+    // for (; jsonIter!= blockPos.end(); ++jsonIter) {
+    //     LOG_INFO("BlockId:%d, FileOffset=%d", jsonIter.key().asUInt(), jsonIter->asInt64());
+    // }
+    // pRefGene->showRefeDesPosInfo();
+    // auto mapItem = blockRefeIndex.begin();
+    // for (; mapItem != blockRefeIndex.end(); ++mapItem) {
+    //     LOG_INFO("MappedPosition:%ld, blockId:%d", mapItem->first, mapItem->second);
+    // }
+    
+    return true;
+}
+
 bool PbgzEngine::initReferenceForCompress() {
     if (!parameter.referenceGenic.empty()){
         pRefGene = MemoryUtil::safeNewClass<Reference>(parameter.referenceGenic, parameter.threadNum);
@@ -556,7 +722,8 @@ bool PbgzEngine::initReferenceForCompress() {
             refeMeta["max_block_len"] = maxRefLen;
             refeMeta["blocks"] = refBlockCount;
             // Throw to write file thread to write
-            for (auto item : blockVec) {
+            for (RoughIOBlock* item : blockVec) {
+                item->setBlockId(blockCount++);
                 outputDataPool.pushForce(item);
             }
             blockVec.clear();
@@ -727,7 +894,6 @@ int64_t PbgzEngine::packReference(std::vector<RoughIOBlock*>& blockVec, int64_t 
                 memcpy(outBlock->getCurrent(), metaString.c_str(), metaString.length());
                 outBlock->setMetaLen(metaString.length());
                 outBlock->setBlockType(REFERENCE);
-                outBlock->setBlockId(refe2do.first.first);
 
                 m.lock();
                 blockVec.push_back(outBlock);
@@ -777,4 +943,87 @@ void PbgzEngine::updateReferenceOffset(int64_t offset) {
 
 void PbgzEngine::resetReferenceOffset() {
     refeOffsetFLag = false;
+}
+
+ void PbgzEngine::setDataBlockPosition(uint32_t blockId) {
+    FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+    if (fileWriter == nullptr) {
+        return;
+    }
+    if (!dynamicFileMeta.getMetaData().isMember("block_pos")) {
+        Json::Value meta;
+        meta[blockId] = fileWriter->getCurrentPos();
+        dynamicFileMeta.setMetaData("block_pos", meta);
+    } else {
+        dynamicFileMeta.getMetaData("block_pos")[blockId] = fileWriter->getCurrentPos();
+    }
+    return;
+ }
+
+int32_t PbgzEngine::packBlockRefePosIdx() {
+    uint32_t packLength = 0;
+    packLength += blockRefePos.size() * (sizeof(uint32_t) + sizeof(uint32_t));
+    auto iter = blockRefePos.begin();
+    for(; iter != blockRefePos.end(); ++iter) {
+        packLength += iter->second.size() * sizeof(int64_t);
+    }
+
+    uint8_t* buffer = MemoryUtil::safeAlloc<uint8_t>(packLength);
+    if (buffer == nullptr) {
+        return -1;
+    }
+
+    RoughIOBlock* outBlock = MemoryUtil::safeNewClass<RoughIOBlock>();
+    if (outBlock == nullptr) {
+        MemoryUtil::safeFree(buffer);
+        return -1;
+    }
+
+    iter = blockRefePos.begin();
+    uint32_t offset = 0;
+    for(; iter != blockRefePos.end(); ++iter) {
+        uint32_t blockId = iter->first;
+        memcpy(buffer + offset, &blockId, sizeof(uint32_t));
+        offset += 4;
+        uint32_t length = iter->second.size();
+        memcpy(buffer + offset, &length, sizeof(uint32_t));
+        offset += 4;
+        memcpy(buffer + offset, iter->second.data(), length * sizeof(int64_t));
+        offset += length * sizeof(int64_t);
+    }
+
+    coder_io idxIo(outBlock->getBuffer(), outBlock->getBufferSize());
+    coder_ppmd cppmd(&idxIo);
+    cppmd.encode(buffer, packLength);
+    cppmd.encode_flush();
+    outBlock->setDataLen(idxIo.data_len);
+
+    Json::Value meta;
+    meta["srclen"] = (Json::Value::Int)packLength;
+    meta["dstlen"] = (Json::Value::Int)idxIo.data_len;
+    meta["coder"] = idxIo.meta;
+    
+    Json::Value refePosDesMeta;
+    RefDescInfo& refDesc = pRefGene->getRefeDescPos();
+    RefDescInfoIter refDescIter = refDesc.begin();
+    for (; refDescIter != refDesc.end(); ++refDescIter ) {
+        refePosDesMeta[refDescIter->first] = std::to_string(refDescIter->second.first) + "," + std::to_string(refDescIter->second.second);
+    }
+    meta["refe_desc"] = refePosDesMeta;
+
+    coder_json cmeta;
+    std::string metaString;
+    cmeta.encoder(meta, metaString);
+    memcpy(outBlock->getCurrent(), metaString.c_str(), metaString.length());
+    outBlock->setMetaLen(metaString.length());
+    outBlock->setBlockId(blockCount++);
+    outBlock->setBlockType(REFERENCE_INDEX);
+    
+    Json::Value refeIndexMeta;
+    refeIndexMeta["blocks"] = 1;
+    dynamicFileMeta.setMetaData("refe_index", refeIndexMeta); 
+
+    outputDataPool.push(outBlock);
+    MemoryUtil::safeFree(buffer);
+    return 0;
 }
