@@ -777,6 +777,9 @@ int32_t FastqActuator::compressBaseWithRef() {
                          baseMappedBuffer, outLen, baseMappedPosBuffer[offset], baseMappedPairBuffer[offset]);
         srcLen += pBuff - baseStripNBuffer;
         matchCm->encode_line(baseMappedBuffer, outLen);
+        if (baseMappedPairBuffer[offset] != 2) {
+            refeMappedPositons.push_back(baseMappedPosBuffer[offset]);
+        }
 
         this->pReference->updateMatchedGene(baseMappedPosBuffer[offset], outLen);
         if (encBaseLen) {
@@ -1047,7 +1050,7 @@ int32_t FastqActuator::compressQuality() {
     return 0;
 }
 
-int32_t FastqActuator::initDecoder() {
+int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
     Json::Value& idStreamMeta = meta["id"]["streams"];
     if (idStreamMeta.size() != idSplitSymbols.size()) {
         LOG_ERROR("id stream meta size not match id split symbols size(%d, %d)", idStreamMeta.size(), idSplitSymbols.size());
@@ -1087,7 +1090,7 @@ int32_t FastqActuator::initDecoder() {
             baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
             coder_fc baseDecoderFc = coder_fc(&baseIo);
             // Put decompression result at the end
-            baseDecoderFc.decode_line(outBlockPtr->getBuffer() + outBlockPtr->getBufferSize() - srcBaseLen, srcBaseLen,  UINT8_MAX, false);
+            baseDecoderFc.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcBaseLen, srcBaseLen,  UINT8_MAX, false);
         } else if (baseCoderName == "coder_bwt_cm") {
             baseDecoder = new coder_bwt_cm(new coder_io(inBlockPtr->getBuffer() + readOffset, dstBaseLen));
         } else {
@@ -1318,7 +1321,7 @@ int32_t FastqActuator::decompress() {
         idSplitSymbols.push_back(idSplit.c_str()[i]);
     }
 
-    if (0 != initDecoder()) {
+    if (0 != initDecoder(outBlockPtr)) {
         LOG_ERROR("Initital decoder failed.");
         return -1;
     }
@@ -1332,20 +1335,29 @@ int32_t FastqActuator::decompress() {
     }
     uint32_t totalBaseLen = 0;
     uint64_t nposOffset = 0;
+    bool isPostionMatch = false;
 
+    RoughIOBlock* pTmpOutBlock = MemoryUtil::safeNewClass<RoughIOBlock>(outBlockPtr->getBlockSize());
+    if (pTmpOutBlock == nullptr) {
+        return -1;
+    }
+
+    int64_t  outlineBeginPos = 0;
     for (uint32_t line = 0; line < lineNum; ++line) {
-        uint8_t* idPtr = outBlockPtr->getCurrent();
+        outlineBeginPos = pTmpOutBlock->getDataLen();
+        uint8_t* idPtr = pTmpOutBlock->getCurrent();
         uint32_t idLen = 0;
         for (uint32_t splitIdx = 0; splitIdx < idDecoders.size(); ++splitIdx) {
-            uint32_t idSplitLen = idDecoders[splitIdx]->decode_line(idPtr, outBlockPtr->getRemain(), idSplitSymbols[splitIdx]);
+            uint32_t idSplitLen = idDecoders[splitIdx]->decode_line(idPtr, pTmpOutBlock->getRemain(), idSplitSymbols[splitIdx]);
             idPtr += idSplitLen;
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idSplitLen);
+            pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + idSplitLen);
             idLen += idSplitLen;
         }
 
-        uint8_t* basePtr = outBlockPtr->getCurrent();
+        uint8_t* basePtr = pTmpOutBlock->getCurrent();
         uint32_t actualBaseLen = 0;
         if (pReference == nullptr) {
+            isPostionMatch = true;
             if (minBaseLength == maxBaseLength) {
                 actualBaseLen = maxBaseLength;
                 if (meta["base"]["coder"]["magic"].asString() == "coder_fc") {
@@ -1357,9 +1369,9 @@ int32_t FastqActuator::decompress() {
                     LOG_ERROR("Unsupport coder type: %s", meta["base"]["coder"]["magic"].asString().c_str());
                     return -1;
                 }
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);  
-                *outBlockPtr->getCurrent() = '\n';
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+                pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + actualBaseLen);  
+                *pTmpOutBlock->getCurrent() = '\n';
+                pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + 1);
             } else {
                 if (meta["base"]["coder"]["magic"].asString() == "coder_fc") {
                     uint8_t* pBaseTmp = basePtr;
@@ -1378,13 +1390,25 @@ int32_t FastqActuator::decompress() {
                     LOG_ERROR("Unsupport coder type: %s", meta["base"]["coder"]["magic"].asString().c_str());
                     return -1;
                 }
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
+                pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1;  // Remove newline character
             }
         } else {
+            if (refeBeginPos == 0 && refeEndPos == 0) {
+                isPostionMatch = true;
+            } else {
+                if (baseMappedPosBuffer[baseLines] ==0 && baseMappedPairBuffer[baseLines] == 2) {
+                    isPostionMatch = false; 
+                } else if (baseMappedPosBuffer[baseLines] >= refeBeginPos && baseMappedPosBuffer[baseLines] <= refeEndPos) {
+                    LOG_INFO("RefeMappedPos: %ld matched.", baseMappedPosBuffer[baseLines]);
+                    isPostionMatch = true;
+                } else {
+                    isPostionMatch = false;
+                }
+            }
             /* decode base mapping stream with strip N */;
             actualBaseLen = (baseLengthGen2Buffer) ? (baseLengthGen2Buffer[baseLines] + minBaseLength) : maxBaseLength;
-            uint8_t* pout = outBlockPtr->getCurrent();
+            uint8_t* pout = pTmpOutBlock->getCurrent();
             
             const uint8_t actg4[4] = {'A', 'C', 'T', 'G'};
             if (baseNCount && nposOffset < baseNCount) { /* This block has N, and not all N's have been processed */
@@ -1465,29 +1489,29 @@ int32_t FastqActuator::decompress() {
                 }
             }
             totalBaseLen += actualBaseLen;
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
-            *(outBlockPtr->getCurrent()) = '\n';
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+            pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + actualBaseLen);
+            *(pTmpOutBlock->getCurrent()) = '\n';
+            pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + 1);
         }
         ++baseLines;
 
         // Decode comment
-        uint8_t* commentPtr = outBlockPtr->getCurrent();
+        uint8_t* commentPtr = pTmpOutBlock->getCurrent();
         switch (commentType) {
             case CommentType::PLUS_ONLY: {
                 *commentPtr++ = '+';
                 *commentPtr = '\n';
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 2);
+                pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + 2);
                 break;
             }
             case CommentType::SAME_AS_ID: {
                 memcpy(commentPtr, idPtr, idLen);
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idLen);
+                pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + idLen);
                 break;
             }   
             case CommentType::OTHER: {
-                int32_t commentLen = commentDecoder->decode_line(commentPtr, outBlockPtr->getRemain(), '\n', false);
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + commentLen);
+                int32_t commentLen = commentDecoder->decode_line(commentPtr, pTmpOutBlock->getRemain(), '\n', false);
+                pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + commentLen);
                 break;
             }
             default:
@@ -1495,19 +1519,29 @@ int32_t FastqActuator::decompress() {
         }
 
         // Decode quality values
-        qualityDecoder->decode_qual_gen2(basePtr, outBlockPtr->getCurrent(), actualBaseLen);
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
-        *outBlockPtr->getCurrent() = '\n';
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+        qualityDecoder->decode_qual_gen2(basePtr, pTmpOutBlock->getCurrent(), actualBaseLen);
+        pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + actualBaseLen);
+        *pTmpOutBlock->getCurrent() = '\n';
+        pTmpOutBlock->setDataLen(pTmpOutBlock->getDataLen() + 1);
+
+        if (isPostionMatch) {
+            int64_t lineLength = pTmpOutBlock->getDataLen() - outlineBeginPos;
+            memcpy(outBlockPtr->getCurrent(), pTmpOutBlock->getCurrent() - lineLength, lineLength);
+            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + lineLength);
+        }
     }
 
+    MemoryUtil::safeDeleteClass(pTmpOutBlock);
+
     // Check file MD5
-    std::string md5;
-    calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
-    if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("Md5 check failed for block(%d), expect %s, got %s.", inBlockPtr->getBlockId(),  
-                  meta["md5"].asCString(), md5.c_str());
-        return -1;
+    if (refeBeginPos == 0 && refeEndPos == 0) {
+        std::string md5;
+        calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
+        if (md5 != meta["md5"].asString()) {
+            LOG_ERROR("Md5 check failed for block(%d), expect %s, got %s.", inBlockPtr->getBlockId(),  
+                    meta["md5"].asCString(), md5.c_str());
+            return -1;
+        }
     }
 
     return 0;

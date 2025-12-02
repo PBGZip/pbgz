@@ -2,11 +2,16 @@
 
 #include <stdint.h>
 #include <string>
+#include <map>
 #include <json/json.h>
 #include "utils/guard_bar.h"
+#include "io_wrapper.h"
+#include <md5sum.h>
 
 typedef std::vector<std::pair<std::pair<uint32_t*, uint32_t>, uint32_t>> HashTable;
 typedef std::pair<std::pair<int64_t, uint8_t*>, std::pair<int64_t, int64_t>> RefeInfo;
+typedef std::map<std::string, std::pair<int64_t, int64_t>> RefDescInfo;
+typedef std::map<std::string, std::pair<int64_t, int64_t>>::iterator RefDescInfoIter;
 
 class Reference {
 private:
@@ -114,6 +119,16 @@ public:
     /// Write hash table content to "hash_table" file for debugging and analysis
     void dumpHashTable();
 
+    void dumpSquash();
+
+    RefDescInfo& getRefeDescPos() {
+        return refDescrPos;
+    }
+
+    void showRefeDesPosInfo();
+
+    int64_t calcRefPosByDesc(std::string& refDesc, int64_t& begin, int64_t& end);
+
 private:
     /// @brief Check validity of reference genome parameters
     /// Verify key parameters like baseGroupStep and baseGroupLen meet requirements
@@ -160,11 +175,60 @@ private:
     /// @return true for success, false for failure
     bool makeNiFile(const std::string& niFile);
 
+    bool getPiFileName(std::string& piFileName);
+
+    bool makePiFile();
+
+    bool writePiFile(RefDescInfo& refeDescInfo);
+
+    bool loadPiFile();
+
+private:
+    /// @brief Handle file locking for NI file creation
+    /// @param niFile NI file path
+    /// @return true if lock acquired and should proceed, false if should skip
+    bool handleNiFileLock(const std::string& niFile);
+
+    /// @brief Calculate MD5 checksum of reference genome file
+    /// @param refGeneFile Reference genome file path
+    /// @param refGeneMd5 Output MD5 string
+    /// @param refGeneLen Output file length
+    void calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen);
+
+    /// @brief Write NI file header
+    /// @param niWriter File writer for NI file
+    /// @param offset Output offset for data section
+    /// @return true for success, false for failure
+    bool writeNiFileHeader(FileWriter& niWriter, int64_t& offset);
+
+    /// @brief Process FASTA file and write compressed data
+    /// @param refGeneFile Reference genome file path
+    /// @param niWriter File writer for NI file
+    /// @param md5 MD5 context for checksum calculation
+    /// @param wlen Output written data length
+    /// @return true for success, false for failure
+    bool processFastaFile(const std::string& refGeneFile, const std::string& niFile);
+
+    /// @brief Generate and write metadata to NI file
+    /// @param niWriter File writer for NI file
+    /// @param refGeneMd5 Reference genome MD5
+    /// @param refGeneLen Reference genome length
+    /// @param md5 MD5 context for data checksum
+    /// @return true for success, false for failure
+    bool writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, MD5_CONTEXT& md5);
+
+    /// @brief Update configuration file with NI file information
+    /// @param niFile NI file path
+    /// @return true for success, false for failure
+    bool updateConfigurationFile(const std::string& niFile);
+
 private:
     // Progress bar
     GuardBar* guardBar;
     int64_t gbCurrent;
     int64_t gbTotal;
+
+    RefDescInfo refDescrPos;
     
     // FASTA file checksum, currently using MD5
     std::string fastaChecksum;
