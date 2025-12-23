@@ -40,7 +40,7 @@ public:
 
     void printFileType(BlockType blockType);
 
-    void printTailInfo(Timer costTime, PbgzParameter& para);
+    void printTailInfo(Timer costTime, bool isPrintRatio);
 
     void printBufferContent(uint8_t* buffer, uint32_t bufferLen) {
         char temp[2048 + 1] = {0};

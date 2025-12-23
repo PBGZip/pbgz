@@ -6,9 +6,6 @@
 
 typedef struct PbgzParameter{
     std::string inputFile;
-    bool showHelp;
-    bool showVersion;
-    bool isDecompress;   // Flag for decompression or compression, default is compression
     bool isDecToGZ;   // Whether to decompress to GZ format
     std::string outputFile;  // 
     std::string outputDir;   // 
@@ -21,11 +18,10 @@ typedef struct PbgzParameter{
     uint8_t logLevel;
     std::string logFile;
     std::string refeGenePos;
+    bool isMakeIndex;
+    bool showHelp;
 
     PbgzParameter() {
-        showHelp = false;
-        showVersion = false;
-        isDecompress = false;
         isDecToGZ = false;
         isOverwriteOutFile = false;
         isUnpackRef = false;
@@ -33,6 +29,8 @@ typedef struct PbgzParameter{
         compressLevel = 5;
         isRemoveOriginFile = false;
         logLevel = 6;
+        isMakeIndex = false;
+        showHelp = false;
     }
 } PbgzParameter;
 
@@ -41,7 +39,7 @@ const std::string STDIN = "/dev/stdin";
 const std::string STDOUT = "/dev/stdout";
 
 const uint8_t PBGZ_VERSION_MAJOR = 2; // Major version of PBGZ file format
-const uint8_t PBGZ_VERSION_MINOR = 0; // Minor version of PBGZ file format
+const uint8_t PBGZ_VERSION_MINOR = 1; // Minor version of PBGZ file format
 const uint8_t PBGZ_VERSION_PATCH = 0; // Patch version
 
 const int32_t GENE3_MAX_BASE = 1048760; // Maximum bases per FASTQ generation 3 record

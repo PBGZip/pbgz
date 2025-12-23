@@ -30,16 +30,19 @@
 const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 16 * 1024 * 1024;
 
 uint8_t* PbgzFileReader::getFileReadBuffer(){
-    thread_local static uint8_t* pReadBuffer = nullptr;
+	// 线程局部智能指针：自动管理内存，线程退出时析构释放
+    thread_local static std::unique_ptr<uint8_t[]> pReadBuffer;
+    
     if (!pReadBuffer) {
-        
-        pReadBuffer = new uint8_t[PBGZ_FILE_READ_BUFFER_LENGTH];
-        if (!pReadBuffer) {
-            LOG_ERROR("Failed to allocate memory for read buffer.");
-            return nullptr; // Memory allocation error
+        // 用 unique_ptr 分配内存（无需手动 delete）
+        pReadBuffer = std::make_unique<uint8_t[]>(PBGZ_FILE_READ_BUFFER_LENGTH);
+        if (!pReadBuffer) { // make_unique 失败时返回空指针（C++17+）
+            LOG_ERROR("Failed to allocate memory for write buffer.");
         }
     }
-    return pReadBuffer;
+
+    // 返回智能指针指向的原始缓冲区地址（供业务使用）
+    return pReadBuffer.get();
 }
 
 int32_t PbgzFileReader::open() {
@@ -129,7 +132,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     PbgzFileMeta dyncFileMeta;
     dyncFileMeta.setMetaType(DYNAMIC_FILE_META);
     if (0 != readFileMeta(dyncFileMeta)) {
-        LOG_ERROR("Read dynamic file meta failed. offset = %d", dynamicOffset);
+        LOG_ERROR("Read dynamic file meta failed. offset = %llu", dynamicOffset);
         return -1;
     }
     dynamicFileMetaMap[currentFileIndex] = dyncFileMeta;
@@ -348,15 +351,19 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
 
 
 uint8_t* PbgzFileWriter::getFileWriteBuffer() {
-    thread_local static uint8_t* pWriteBuffer = nullptr;
-    if (pWriteBuffer == nullptr) {
-        pWriteBuffer = new uint8_t[PBGZ_FILE_READ_BUFFER_LENGTH];
-        if (!pWriteBuffer) {
+    // 线程局部智能指针：自动管理内存，线程退出时析构释放
+    thread_local static std::unique_ptr<uint8_t[]> pWriteBuffer;
+    
+    if (!pWriteBuffer) {
+        // 用 unique_ptr 分配内存（无需手动 delete）
+        pWriteBuffer = std::make_unique<uint8_t[]>(PBGZ_FILE_READ_BUFFER_LENGTH);
+        if (!pWriteBuffer) { // make_unique 失败时返回空指针（C++17+）
             LOG_ERROR("Failed to allocate memory for write buffer.");
-            return nullptr; // Memory allocation error
         }
     }
-    return pWriteBuffer;
+
+    // 返回智能指针指向的原始缓冲区地址（供业务使用）
+    return pWriteBuffer.get();
 }
 
 int32_t PbgzFileWriter::open(){
@@ -474,7 +481,7 @@ void PbgzFileWriter::updateMetaOffset(uint64_t dynamicMetaOffset) {
         return;
     }
 
-    LOG_INFO("Dynamic file offset = %ld", dynamicMetaOffset);
+    LOG_INFO("Dynamic file offset = %llu", dynamicMetaOffset);
 
     pFileWrite->writeIOAt(11, &dynamicMetaOffset, sizeof(dynamicMetaOffset));
     return;
