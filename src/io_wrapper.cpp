@@ -8,7 +8,6 @@
 #include "utils/memory_util.h"
 
 
-
 int FileOperator::openIO() {
     if (fileName.empty()) {
         LOG_ERROR("IO Open failed, No file name gived");
@@ -62,7 +61,7 @@ void FileOperator::closeIO() {
     return;
 }
 
-int32_t FileOperator::seekIO(int32_t seekOffset, IOWhence whence) {
+int32_t FileOperator::seekIO(size_t seekOffset, IOWhence whence) {
     switch (whence) {
     case IOWhence::IO_WHENCE_SET: {
         if (seekOffset < 0) {
@@ -143,11 +142,24 @@ int32_t FileWriter::openIO() {
 }
 
 void FileWriter::closeIO() {
-        // Force flush data before exit
+    // Force flush data before exit
+    if (fo.mappedAddress != nullptr) {
         msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
-        ftruncate(fo.fd, fo.fileSize);
-        return fo.closeIO();
+        // Truncate file to actual size before unmapping
+        if (fo.fd != -1) {
+            ftruncate(fo.fd, fo.fileSize);
+        }
+        // Unmap with the actual mapped size, not fileSize
+        munmap(fo.mappedAddress, mapSize);
+        fo.mappedAddress = nullptr;
     }
+    
+    // Close file descriptor
+    if (fo.fd != -1) {
+        close(fo.fd);
+        fo.fd = -1;
+    }
+}
 
 size_t FileWriter::getMappedSize(size_t fileSize) {
     const size_t mapSizeUint = 16 * 1024 * 1024;
@@ -189,7 +201,7 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     return newSize;
 }
 
-int32_t FileWriter::writeIOAt(int32_t seekOffset, const void* pBuffer, size_t writeLen) {
+int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen) {
     if (pBuffer == nullptr || writeLen == 0) {
         LOG_ERROR("Input invalid.");
         return 0;
@@ -247,7 +259,6 @@ size_t PipeReader::readIO(void* pBuffer, size_t readSize) {
     return totalRead;
 }
 
-
 size_t PipeWriter::writeIO(const void* pBuffer, size_t writeLen) {
     if (!pBuffer) {
         return -1;
@@ -255,7 +266,6 @@ size_t PipeWriter::writeIO(const void* pBuffer, size_t writeLen) {
 
     return write(STDOUT_FILENO, pBuffer, writeLen);
 }
-
 
 int GzFileReader::openIO() {
     fpGz = bgzf_open(gzFileName.c_str(), "rb");

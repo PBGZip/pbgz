@@ -27,6 +27,7 @@
 #include <list>
 #include <vector>
 #include <thread>
+#include <memory>
 
 #include "io_block.h"
 #include "blocking_queue.h"
@@ -34,6 +35,8 @@
 #include "io_wrapper.h"
 #include "reference.h"
 #include "block_wrapper.h"
+#include "actuator.h"
+#include "pbgz_index.h"
 
 class PbgzEngine {
 public:
@@ -44,46 +47,58 @@ public:
         pRefGene = nullptr;
         refeOffsetFLag = false;
         blockCount = 0;
-        refeBeginPos = 0;
-        refeEndPos = 0;
     }
 
-    int32_t init();
+    virtual int32_t init();
 
-    int32_t start();
+    virtual int32_t start();
 
-    ~PbgzEngine();
+    virtual ~PbgzEngine();
 
-private:
+protected:
     int32_t startReadTask();
 
     int32_t startCoderTask();
 
     int32_t startWriteTask();
 
-    bool initRefGeneForDecomress(PbgzBlockReader* blockReader);
-
-    bool initRefeIndexForDecompress(PbgzBlockReader* blockReader);
-
-    bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
-
-    int64_t packReference(std::vector<RoughIOBlock*>& blockVec, int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef = true);
-
-    int32_t packBlockRefePosIdx();
-
-    bool initReferenceForCompress();
-
     void updateReferenceOffset(int64_t offset);
 
     void resetReferenceOffset();
 
-    void setDataBlockPosition(uint32_t blockId);
+    void setDataBlockPosition(uint32_t) {
+        return;
+    }
 
-    void readBlockByPostition(BlockReader* blockReader);
+    virtual BlockReader* createBlockReader() = 0;
+
+    virtual BlockWriter* createBlockWriter() = 0;
 
     int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType);
 
-private:
+    virtual void readBlocks(BlockReader* blockReader);
+
+    virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
+        return actuator;
+    }
+
+    virtual int32_t actuatorProc(Actuator*, RoughIOBlock*, RoughIOBlock*) {
+        return 0;
+    }
+
+    virtual int32_t engineStartPreProc() {
+        return 0;
+    }
+
+    virtual int32_t engineStartAfterProc() {
+        return 0;
+    }
+
+    virtual bool isPrintRatio() {
+        return false;
+    }
+
+protected:
     BlockingQueue<RoughIOBlock*> freeInputPool;   // Free queue, file reading tasks get blocks from here to read data
     BlockingQueue<RoughIOBlock*> inputDataPool;   // Data reading tasks write completed data to this queue, compression/decompression tasks get data from this queue
     BlockingQueue<RoughIOBlock*> freeOutputPool;  // Compression/decompression tasks get blocks from this queue to write processed data, output tasks write free blocks to this queue after processing
@@ -101,8 +116,6 @@ private:
     PbgzFileMeta dynamicFileMeta;
     bool refeOffsetFLag;
     uint32_t blockCount;
-    std::map<uint32_t, std::vector<int64_t>> blockRefePos;
-    std::map<int64_t, uint32_t> blockRefeIndex;
-    int64_t refeBeginPos;
-    int64_t refeEndPos;
+
+    PbgzIndex pbgzIndex;
 };
