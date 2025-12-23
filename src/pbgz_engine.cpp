@@ -264,6 +264,9 @@ void PbgzEngine::readBlocks(BlockReader* blockReader) {
 int32_t PbgzEngine::startReadTask() {
     pthread_setname_np(pthread_self(), "readtask");
     BlockReader* blockReader = createBlockReader();
+    if (blockReader == nullptr) {
+        return -1;
+    }
     readBlocks(blockReader);
     // Reached end of file or error, insert empty block as end marker to data queue
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
@@ -349,6 +352,10 @@ int32_t PbgzEngine::startWriteTask() {
     auto writerTask = [this]() -> int32_t {
         pthread_setname_np(pthread_self(), "writetask");
         BlockWriter* blockWriter = createBlockWriter();
+        if (blockWriter == nullptr) {
+            PbgzManager::getInstance().exitProc(-1, "Inner error");
+            return -1;
+        }
         int64_t blockId2Write = 0; 
         while (true) {
             RoughIOBlock* outBlockPtr = outputDataPool.get();
