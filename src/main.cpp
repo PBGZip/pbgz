@@ -99,7 +99,7 @@ public:
                         return -1;
                     }
                 }
-                parameter.outputFile = outPath + inFileName + ".pbgz";
+                // parameter.outputFile = outPath + inFileName + ".pbgz";
             }
         } else if (!parameter.outputFile.empty()) {     // File output specified
             // Convert output file to absolute path
@@ -224,7 +224,19 @@ public:
         }
 
         if (parameter.outputFile.empty() && parameter.outputDir.empty()) {
-            parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + PathUtil::getFileName(parameter.inputFile) + ".pbgz";
+            std::string inputFile = PathUtil::getFileName(parameter.inputFile);
+            if (inputFile.length() > 3 && PathUtil::suffixCheck(inputFile, ".gz")) {
+                inputFile = inputFile.substr(0, inputFile.length() - 3);
+            }
+            parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + inputFile + ".pbgz";
+        }
+
+        if (!parameter.outputDir.empty() && parameter.outputFile.empty()) {
+            std::string inputFile = PathUtil::getFileName(parameter.inputFile);
+            if (inputFile.length() > 3 && PathUtil::suffixCheck(inputFile, ".gz")) {
+                inputFile = inputFile.substr(0, inputFile.length() - 3);
+            }
+            parameter.outputFile = PathUtil::getFilePath(parameter.outputDir) + inputFile + ".pbgz";
         }
         return 0;
     }
@@ -272,7 +284,7 @@ public:
         if (0 != CommandProc::reconstructPorc()) {
             return -1;
         }
-        if (parameter.outputFile.empty() && parameter.outputDir.empty()) { 
+        if (parameter.outputFile.empty()) { 
             // Decompression scenario, remove pbgz suffix from file
             std::string name = PathUtil::getFileName(parameter.inputFile);
             if (name.length() <= 5) {
@@ -284,8 +296,16 @@ public:
                 return -1;
             }
             name.resize(name.length() - 5);
-            parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + name;
-        }
+            if (parameter.outputDir.empty()) {
+                parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + name;
+            } else {
+                parameter.outputFile = PathUtil::getAbsPath(parameter.outputDir) + name;
+            }
+
+            if (parameter.isDecToGZ) {
+                parameter.outputFile = parameter.outputFile + ".gz";
+            }
+        } 
 
         return 0;
     }
@@ -372,7 +392,7 @@ static std::vector<SubCommand> subCommands = {
     {   
         "decompress", 
         "Decompress file from pbgz file",
-        {'h', 'v', 'o', 'O', 'f', 'r', 't', 'e', 'p', 'g', 'G', 'h'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 't', 'e', 'p', 'g', 'G', 'h', 'z'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<DecompressCmdProc>(para);
         },
@@ -633,7 +653,6 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    int result = 0;
     if (processor->reconstruct() != 0) {
         LOG_ERROR("Command reconstruction failed");
         return -1;
