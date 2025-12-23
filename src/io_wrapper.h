@@ -57,7 +57,7 @@ public:
         closeIO();
     } 
 
-    int32_t seekIO(int32_t seekOffset, IOWhence whence);
+    int32_t seekIO(size_t seekOffset, IOWhence whence);
 
 protected:
     int32_t mmapFile(size_t mapFileSize);
@@ -88,7 +88,7 @@ public:
 
     void* getAt(size_t pos);
 
-    int32_t seekIO(int32_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
+    int32_t seekIO(uint64_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
         return fo.seekIO(seekOffset, whence);
     }
 
@@ -118,11 +118,11 @@ public:
         mapSize = 0;
     }
 
-    int32_t seekIO(int32_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
+    int32_t seekIO(size_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
         return fo.seekIO( seekOffset, whence);
     }
 
-    int32_t writeIOAt(int32_t seekOffset, const void* pBuffer, size_t writeLen);
+    int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen);
 
     void flushIO() {
         msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
