@@ -21,7 +21,6 @@ BlockReader* DecompressEngine::createBlockReader() {
     if (parameter.inputFile != "/dev/stdin" && !parameter.refeGenePos.empty()) {
         if (!initRefeIndex(pbgzReader)) {
             LOG_INFO("Init reference index for decompress failed");
-            MemoryUtil::safeDeleteClass(pbgzReader);
         }
     }
 
