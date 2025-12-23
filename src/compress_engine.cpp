@@ -99,27 +99,6 @@ bool CompressEngine::initReference() {
             MemoryUtil::safeDeleteClass(pRefGene);
         }
     }
-    // Refresh file meta
-    if (pRefGene) {
-        Json::Value refeMeta;
-        refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
-        refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
-        refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
-        refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
-        refeMeta["ni_name"] = PathUtil::getFileName(pRefGene->getNiFilePath()); /* Contains md5 information, used for decompression verification */
-        refeMeta["max_block_len"] = 16 << 20;
-        bool isPackRefeInHeader = !parameter.isUnpackRef && parameter.outputFile == "/dev/stdout";
-        if (isPackRefeInHeader) {
-            refeMeta["blocks"] = calcPackRefeBlockSize();
-            baseFileMeta.setMetaData("refe",refeMeta);
-            int64_t maxRefLen = 0;
-            int64_t totolEncLen = 0;
-            (void)packReference(maxRefLen, totolEncLen, false);
-        } else {
-            refeMeta["blocks"] = 0;
-            baseFileMeta.setMetaData("refe",refeMeta);
-        }
-    }
     return true;
 }
 
@@ -274,4 +253,30 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     }
 
     return;
+ }
+
+ int32_t CompressEngine::beforeCoderProc() {
+    // Refresh file meta
+    if (pRefGene) {
+        Json::Value refeMeta;
+        refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
+        refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
+        refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
+        refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
+        refeMeta["ni_name"] = PathUtil::getFileName(pRefGene->getNiFilePath()); /* Contains md5 information, used for decompression verification */
+        refeMeta["max_block_len"] = 16 << 20;
+        bool isPackRefeInHeader = !parameter.isUnpackRef && parameter.outputFile == "/dev/stdout";
+        if (isPackRefeInHeader) {
+            refeMeta["blocks"] = calcPackRefeBlockSize();
+            baseFileMeta.setMetaData("refe",refeMeta);
+            int64_t maxRefLen = 0;
+            int64_t totolEncLen = 0;
+            (void)packReference(maxRefLen, totolEncLen, false);
+        } else {
+            refeMeta["blocks"] = 0;
+            baseFileMeta.setMetaData("refe",refeMeta);
+        }
+    }
+
+    return 0;
  }
