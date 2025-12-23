@@ -26,7 +26,7 @@ std::string& ConfigManager::getLogFileName() {
 }
 
 ConfigManager::ConfigManager() {
-    logLevel = LogLevel::INFO;
+    logLevel = LogLevel::OFF;
     logAppender = LogAppender::CONSOLE;
 }
 

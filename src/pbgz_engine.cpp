@@ -187,6 +187,12 @@ int32_t PbgzEngine::start() {
         return -1;
     }
 
+    ret = beforeCoderProc();
+    if (ret != 0) {
+        LOG_ERROR("Start write task failed.");
+        return -1;
+    }
+
     ret = startCoderTask();
     if (ret != 0) {
         LOG_ERROR("Start coder task failed.");  

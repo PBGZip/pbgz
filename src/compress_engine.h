@@ -35,6 +35,8 @@ protected:
 
     void startWriteIndexTask();
 
+    virtual int32_t beforeCoderProc();
+
 private:
     bool initReference();
 
