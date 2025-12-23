@@ -70,6 +70,10 @@ protected:
         return;
     }
 
+    virtual int32_t beforeCoderProc() {
+        return 0;
+    }
+
     virtual BlockReader* createBlockReader() = 0;
 
     virtual BlockWriter* createBlockWriter() = 0;
