@@ -229,7 +229,7 @@ public:
         return 0;
     }
     
-    int32_t checkProc() override {
+    virtual int32_t checkProc() override {
         if (0 != CommandProc::checkProc()) {
             return -1;
         }
@@ -636,19 +636,19 @@ int main(int argc, char** argv) {
     int result = 0;
     if (processor->reconstruct() != 0) {
         LOG_ERROR("Command reconstruction failed");
-        result = -1;
+        return -1;
     } 
     
     if (processor->check() != 0) {
         LOG_ERROR("Command parameter check failed");
-        result = -1;
+        return -1;
     } 
     
     if (processor->startEngine() != 0) {
         LOG_ERROR("Command start failed");
-        result = -1;
+        return -1;
     }
 
     MemoryUtil::safeDeleteClass(processor);
-    return result;
+    return 0;
 }
