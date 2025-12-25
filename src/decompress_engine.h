@@ -24,7 +24,7 @@ protected:
 private:
     bool initRefGene(PbgzBlockReader* blockReader);
 
-    bool initRefeIndex(PbgzBlockReader* blockReader);
+    bool initRefeIndex();
 
     void readBlockByPostition(BlockReader* blockReader);
 

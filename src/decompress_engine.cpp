@@ -19,7 +19,7 @@ BlockReader* DecompressEngine::createBlockReader() {
     }
 
     if (parameter.inputFile != "/dev/stdin" && !parameter.refeGenePos.empty()) {
-        if (!initRefeIndex(pbgzReader)) {
+        if (!initRefeIndex()) {
             LOG_INFO("Init reference index for decompress failed");
         }
     }
@@ -108,7 +108,7 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     return true;
 }
 
-bool DecompressEngine::initRefeIndex(PbgzBlockReader* blockReader) {
+bool DecompressEngine::initRefeIndex() {
     if (pbgzIndex.initIndex() != 0) {
         return false;
     }
