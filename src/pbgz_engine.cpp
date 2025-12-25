@@ -55,7 +55,7 @@ int32_t PbgzEngine::init() {
     uint32_t blockBufferSize = ConfigManager::getInstance().getBlockSizeByCompressLevel(parameter.compressLevel);
     // First push empty blocks to free queue
     for (uint32_t i = 0; i < freeInputPool.getCapility(); ++i) {
-        RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize); 
+        RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
         if (inPtr == nullptr) {
             LOG_ERROR("PbgzEngine init failed.");
             return -1;

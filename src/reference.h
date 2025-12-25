@@ -10,8 +10,6 @@
 
 typedef std::vector<std::pair<std::pair<uint32_t*, uint32_t>, uint32_t>> HashTable;
 typedef std::pair<std::pair<int64_t, uint8_t*>, std::pair<int64_t, int64_t>> RefeInfo;
-typedef std::map<std::string, std::pair<int64_t, int64_t>> RefDescInfo;
-typedef std::map<std::string, std::pair<int64_t, int64_t>>::iterator RefDescInfoIter;
 
 class Reference {
 private:
@@ -121,14 +119,6 @@ public:
 
     void dumpSquash();
 
-    RefDescInfo& getRefeDescPos() {
-        return refDescrPos;
-    }
-
-    void showRefeDesPosInfo();
-
-    int64_t calcRefPosByDesc(std::string& refDesc, int64_t& begin, int64_t& end);
-
 private:
     /// @brief Check validity of reference genome parameters
     /// Verify key parameters like baseGroupStep and baseGroupLen meet requirements
@@ -175,14 +165,6 @@ private:
     /// @return true for success, false for failure
     bool makeNiFile(const std::string& niFile);
 
-    bool getPiFileName(std::string& piFileName);
-
-    bool makePiFile();
-
-    bool writePiFile(RefDescInfo& refeDescInfo);
-
-    bool loadPiFile();
-
 private:
     /// @brief Handle file locking for NI file creation
     /// @param niFile NI file path
@@ -227,8 +209,6 @@ private:
     GuardBar* guardBar;
     int64_t gbCurrent;
     int64_t gbTotal;
-
-    RefDescInfo refDescrPos;
     
     // FASTA file checksum, currently using MD5
     std::string fastaChecksum;

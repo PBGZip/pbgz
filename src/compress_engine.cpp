@@ -76,11 +76,10 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
     return actuator;
 }
 
-int32_t CompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock* outBlockPtr) {
+int32_t CompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
     int32_t ret = actuator->compress();
     return ret;
 }
-
 
 int32_t CompressEngine::engineStartPreProc() {
     if (!initReference()) {

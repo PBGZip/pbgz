@@ -169,7 +169,7 @@ TEST(PipeReaderTest, PipeReaderRead) {
     close(saved_stdin);
     
     // 关闭管道
-    pclose(pipe);
+    // pclose(pipe);
     
     // Clean up
     remove(fileName.c_str());
