@@ -148,40 +148,10 @@ bool Reference::initSquashByNiFile() {
        MemoryUtil::safeFree(metaBuf);
     }
     fastaChecksum = niMeta["refe_orgfile_md5"].asString();
-    if (!makePiFile()) {
-        return false;
-    }
-
-    return loadPiFile();
-}
-
-bool Reference::loadPiFile() {
-    std::string piFileName;
-    if (!getPiFileName(piFileName)) {
-        return false;
-    }
-    std::ifstream piFile(piFileName.c_str());
-    if (!piFile.is_open()) {
-        LOG_ERROR("pi file %s open failed.", piFileName.c_str());
-        return false;
-    }
-
-    std::string line;
-    while(std::getline(piFile, line)) {
-        std::vector<std::string> result;
-        std::stringstream ss(line);
-        std::string token;
-        while(std::getline(ss, token, '\t')) {
-            result.push_back(token);
-        }
-        if (result.size() != 3) {
-            LOG_ERROR("PI file format error.");
-            continue;
-        }
-        refDescrPos[result[0]] = std::make_pair(std::stoll(result[1]), std::stoll(result[2]));
-    }
     return true;
 }
+
+
 
 uint8_t* Reference::initSquashByStream(int64_t squashLength) {
     refGeneSquashlen = squashLength;
@@ -386,27 +356,14 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
     int64_t left;
     uint8_t ch;
     uint32_t l4Align;
-    int64_t actgOffset = 0;
-    int64_t actgLength = 0;
     std::string actgChr = "";
-    RefDescInfo descInfo;
     for (;;) {
         if (!std::getline(file, line)) {
-            descInfo[actgChr].second = actgLength;
             break;
         }
         if (line[0] == '>') {
-            if (actgChr != "") {
-                descInfo[actgChr].second = actgLength;
-            }
-            actgChr = line.substr(1);
-            descInfo[actgChr] = std::make_pair(actgOffset, 0);
-            actgLength = 0;
             continue;
         }
-        actgOffset += line.length();
-        actgLength += line.length();
-
         if (cacheLen + line.length() < 4) {
             memcpy(cacheActg + cacheLen, line.c_str(), line.length());
             cacheLen += line.length();
@@ -466,48 +423,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
         return false;
     }
     niWriter.closeIO();
-
-    if (!writePiFile(descInfo)) {
-        return false;
-    }
-
     return true;
-}
-
-bool Reference::makePiFile() {
-     std::string piFileName;
-    if (!getPiFileName(piFileName)) {
-        return false;
-    }
-
-    if (PathUtil::fileExists(piFileName)) {
-        return true;
-    }
-
-    RefDescInfo descInfo;
-    std::ifstream file(refGeneFile.c_str());
-    std::string line;
-    int64_t actgOffset = 0;
-    int64_t actgLength = 0;
-    std::string actgChr = "";
-    for (;;) {
-        if (!std::getline(file, line)) {
-            descInfo[actgChr].second = actgLength;
-            break;
-        }
-        if (line[0] == '>') {
-            if (actgChr != "") {
-                descInfo[actgChr].second = actgLength;
-            }
-            actgChr = line.substr(1);
-            descInfo[actgChr] = std::make_pair(actgOffset, 0);
-            actgLength = 0;
-            continue;
-        }
-        actgOffset += line.length();
-        actgLength += line.length();
-    }
-    return writePiFile(descInfo);
 }
 
 bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, MD5_CONTEXT& md5) {
@@ -619,37 +535,6 @@ bool Reference::makeNiFile(const std::string& niFile) {
     if (!updateConfigurationFile(niFile)) {
         return false;
     }
-    return true;
-}
-
-bool Reference::getPiFileName(std::string& piFileName) {
-    char cfgdir[MAX_PATH];
-    get_user_data_folder(cfgdir, sizeof(cfgdir), PBGZ_FILE_MAGIC.c_str());
-    if (cfgdir[0] == 0) {
-        return false;
-    }
-
-    piFileName = cfgdir;
-    piFileName += PathUtil::getFileName(refGeneFile);
-    piFileName += "." + fastaChecksum.substr(0, 8) + ".pi";
-    return true;
-}
-
-bool Reference::writePiFile(RefDescInfo& refeDescInfo) {
-    std::string piFileName;
-    if (!getPiFileName(piFileName)) {
-        return false;
-    }
-    (void)remove(piFileName.c_str());
-
-    FileWriter piWriter(piFileName);
-    std::string line;
-    piWriter.openIO();
-    for (auto chr : refeDescInfo) {
-         line = chr.first + "\t" + std::to_string(chr.second.first) + "\t" + std::to_string(chr.second.second) + "\n";
-         piWriter.writeIO(line.c_str(), line.length());
-    }
-    piWriter.closeIO();
     return true;
 }
 
@@ -1349,40 +1234,4 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
     default:
         break;
     }
-}
-
-int64_t Reference::calcRefPosByDesc(std::string& refDesc, int64_t& begin, int64_t& end) {
-    size_t pos1 = refDesc.find(":");
-    if (pos1 == std::string::npos) {
-        return -1;
-    }
-    size_t pos2 = refDesc.find("-", pos1 + 1);
-    if (pos2 == std::string::npos) {
-        return -1;
-    }
-
-    // chr1:1000-2000
-    std::string name = refDesc.substr(0, pos1);  // chr1
-    int64_t beginPos = std::stoll(refDesc.substr(pos1 + 1, pos2 - pos1 - 1).c_str());  // 1000
-    int64_t endPos = std::stoll(refDesc.substr(pos2 + 1)); // 2000
-
-    if (refDescrPos.find(name) == refDescrPos.end()) {
-        return -1;
-    }    
-    if (endPos - beginPos > refDescrPos[name].second) {
-        return -1;
-    }
-
-    begin = refDescrPos[name].first + beginPos;
-    end = refDescrPos[name].first + endPos;
-
-    return 0;
-}
-
-void Reference::showRefeDesPosInfo() {
-    RefDescInfoIter iter = refDescrPos.begin();
-    for (; iter != refDescrPos.end(); ++iter) {
-        LOG_INFO("Desc: %s, %ld %ld",iter->first.c_str(), iter->second.first, iter->second.second);
-    }
-    return;
 }

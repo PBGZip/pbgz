@@ -68,7 +68,7 @@ protected:
         quash = MemoryUtil::safeAlloc<uint8_t>(quashLen); 
         
         // Initialize with a pattern that will be different from actual squash
-        for (int i = 0; i < quashLen; ++i) {
+        for (uint32_t i = 0; i < quashLen; ++i) {
             quash[i] = 0x00;
         }
 
@@ -165,33 +165,6 @@ TEST_F(ReferenceTest, ReferenceMapping) {
     EXPECT_EQ(bitsBuffer[3], 0x03);  // G = 11
 }
 
-TEST_F(ReferenceTest, ReferenceChrTest) {
-    Reference refe(testFastaFile, 1);
-    refe.makeIndex();
-
-    RefDescInfo& info = refe.getRefeDescPos();
-    EXPECT_EQ(info.size(), 5);
-    
-    // Check chromosome 1 (actual: 369 bases)
-    EXPECT_EQ(info["chr1"].first, 0);
-    EXPECT_EQ(info["chr1"].second, 369);
-    
-    // Check chromosome 2 (actual: 245 bases)
-    EXPECT_EQ(info["chr2"].first, 369);
-    EXPECT_EQ(info["chr2"].second, 245);
-    
-    // Check chromosome 3 (actual: 61 bases)
-    EXPECT_EQ(info["chr3"].first, 614);
-    EXPECT_EQ(info["chr3"].second, 60);
-    
-    // Check chromosome 4 (actual: 182 bases)
-    EXPECT_EQ(info["chr4"].first, 674);
-    EXPECT_EQ(info["chr4"].second, 182);
-    
-    // Check chromosome 5 (actual: 182 bases)
-    EXPECT_EQ(info["chr5"].first, 856);
-    EXPECT_EQ(info["chr5"].second, 182);
-}
 
 TEST_F(ReferenceTest, MakeIndexFetchBaseGroupTest) {
     Reference refe(testFastaFile, 1);
@@ -230,29 +203,6 @@ TEST_F(ReferenceTest, MakeIndexFetchBaseGroupTest) {
     }
 }
 
-TEST_F(ReferenceTest, CalcRefPosByDescTest) {
-    Reference refe(testFastaFile, 1);
-    refe.makeIndex();
-    int64_t begin;
-    int64_t end;
-    std::string posDesc = "chr1:100-200";
-    refe.calcRefPosByDesc(posDesc, begin, end);
-    EXPECT_EQ(begin, 100);
-    EXPECT_EQ(end, 200);
-
-    posDesc = "chr2:100-200";
-    refe.calcRefPosByDesc(posDesc, begin, end);
-    EXPECT_EQ(begin, 469);
-    EXPECT_EQ(end, 569);
-}
-
-
-TEST_F(ReferenceTest, RefeDescPosSplitTest) {
-    std::string posdesc = "2244545,545545";
-    size_t pos = posdesc.find(",");
-    fprintf(stderr, "%s\n", posdesc.substr(0, pos).c_str());
-    fprintf(stderr, "%s\n", posdesc.substr(pos+1).c_str());
-}
 
 
 
