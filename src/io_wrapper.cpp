@@ -64,7 +64,7 @@ void FileOperator::closeIO() {
 int32_t FileOperator::seekIO(size_t seekOffset, IOWhence whence) {
     switch (whence) {
     case IOWhence::IO_WHENCE_SET: {
-        if (seekOffset < 0) {
+        if (seekOffset > fileSize) {
             return -1;
         }
 
