@@ -1,5 +1,5 @@
 /*
- * logger.cpp - CPP file for pbgz_v2 project
+ * logger.cpp - CPP file for pbgz project
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
