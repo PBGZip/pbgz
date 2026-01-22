@@ -1,11 +1,33 @@
+/*
+ * reference.h - Header file for pbgz project
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include <fstream>
 #include <utility>
 
 #include "spinlock/spinlock-pthread.h"
 #include "city.h"
 #include "cfgpath/cfgpath.h"
-#include <md5sum.h>
-
+#include "utils/md5_util.h"
 #include "reference.h"
 #include "pbgz_errno.h"
 #include "log/logger.h"
@@ -285,7 +307,8 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
     std::thread calc_md5([&refGeneFile, &refGeneMd5, &refGeneLen]() {                                 
         uint32_t bufferLen = 4096, len;
         refGeneLen = 0;
-        MD5_CONTEXT md5;
+        md5_ctx md5;
+        uint8_t digest[16];
         uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
         md5_init(&md5);
         FileReader niReader(refGeneFile);
@@ -293,13 +316,13 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
         for (;;) {
             len = niReader.readIO(buffer, bufferLen);
             refGeneLen += len;
-            md5_write(&md5, buffer, len);
+            md5_update(&md5, buffer, len);
             if (len != bufferLen) {
                 break;
             }
         }
-        md5_final(&md5);
-        refGeneMd5 = md5.hexstr();
+        md5_final(digest, &md5);
+        refGeneMd5 = md5_to_string(digest);
         niReader.closeIO();
         MemoryUtil::safeFree(buffer);
     });
@@ -344,7 +367,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
     }
 
     // Process FASTA file and write compressed data
-    MD5_CONTEXT md5;
+    md5_ctx md5;
     md5_init(&md5);
 
     std::ifstream file(refGeneFile.c_str());
@@ -374,7 +397,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
             actgSquash((uint8_t *)cacheActg, 4, &ch);
             niWriter.writeIO(&ch, 1);
             wlen += 1;
-            md5_write(&md5, &ch, 1);
+            md5_update(&md5, &ch, 1);
             cacheLen = 0;
 
             left = line.length() - docnt;
@@ -399,7 +422,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
                 uint32_t lenSquash = actgSquash((const uint8_t *)(line.c_str() + docnt), l4Align, squashBuffer);
                 niWriter.writeIO(squashBuffer, lenSquash);
                 wlen += lenSquash;
-                md5_write(&md5, squashBuffer, lenSquash);
+                md5_update(&md5, squashBuffer, lenSquash);
 
                 /* Process unprocessed bytes not aligned to 4 */
                 docnt += l4Align;
@@ -416,8 +439,10 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
     // Update data length in header
     niWriter.writeIOAt(offset, (uint8_t *)(&wlen), sizeof(wlen));
     // Finalize MD5 and write metadata
-    md5_final(&md5);
-    if (!writeNiFileMetadata(niWriter, refGeneMd5, refGeneLen, md5)) {
+    uint8_t digest[16];
+    md5_final(digest, &md5);
+    std::string md5String = md5_to_string(digest);
+    if (!writeNiFileMetadata(niWriter, refGeneMd5, refGeneLen, md5String)) {
         niWriter.closeIO();
         MemoryUtil::safeFree(buffer);
         return false;
@@ -426,13 +451,13 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
     return true;
 }
 
-bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, MD5_CONTEXT& md5) {
+bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5) {
     std::string refename = PathUtil::getFileName(refGeneFile);
     Json::Value meta;
     meta["refe_name"] = refename;
     meta["refe_len"] = Json::Value::UInt64(refGeneLen);
     meta["refe_orgfile_md5"] = refGeneMd5; /* Original MD5 of reference file, i.e., directly read without decompression */
-    meta["ni_data_md5"] = md5.hexstr();  /* MD5 of ni file data content */
+    meta["ni_data_md5"] = md5;  /* MD5 of ni file data content */
     fastaLength = refGeneLen;
     fastaChecksum = refGeneMd5;
 
@@ -539,7 +564,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
 }
 
 void Reference::getNiFileFromReference(std::string& niFile) {
-    MD5_CONTEXT md5;
+    md5_ctx md5;
     md5_init(&md5);
     std::string niFileName = PathUtil::getFileName(refGeneFile);
     char cfgdir[MAX_PATH];
@@ -575,7 +600,7 @@ void Reference::getNiFileFromReference(std::string& niFile) {
             return;
         } 
         *((int64_t *)(buffer + fileSize)) = fileSize;
-        md5_write(&md5, buffer, fileSize + sizeof(fileSize));
+        md5_update(&md5, buffer, fileSize + sizeof(fileSize));
     } else {
         uint8_t buffer[(readEach << 2) + sizeof(fileSize)];
         int64_t offset = 0, len = 0;
@@ -594,13 +619,14 @@ void Reference::getNiFileFromReference(std::string& niFile) {
             len += readEach;
         }
         *((int64_t *)(buffer + len)) = fileSize;
-        md5_write(&md5, buffer, (readEach << 2) + sizeof(fileSize));
+        md5_update(&md5, buffer, (readEach << 2) + sizeof(fileSize));
     }
     fclose(fp);
-
-    md5_final(&md5);
+    
+    uint8_t digest[16];
+    md5_final(digest, &md5);
     niFileName += ".";
-    niFileName += std::string(md5.hexstr().c_str(), 8); /* Take first 8 digits of MD5 */
+    niFileName += std::string(md5_to_string(digest).c_str(), 8); /* Take first 8 digits of MD5 */
     niFileName += ".ni";
     niFilePath += niFileName;
     niFile = niFilePath;

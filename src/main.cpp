@@ -1,3 +1,26 @@
+/*
+ * main.cpp - Source file for pbgz project
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include <iostream>
 #include <getopt.h>
 #include <filesystem>
@@ -264,7 +287,7 @@ public:
     }
     
     int32_t startEngine() override {
-        // ÊµÏÖÆô¶¯Ñ¹ËõÒýÇæµÄÂß¼­
+        // Êµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¼ï¿½
         engine = new CompressEngine(parameter);
         if (engine->init() != 0) {
             LOG_ERROR("Compress engine init error.");
@@ -330,7 +353,7 @@ public:
     
 
     int32_t startEngine() override {
-        // ÊµÏÖÆô¶¯½âÑ¹ËõÒýÇæµÄÂß¼­
+        // Êµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¼ï¿½
         engine = new DecompressEngine(parameter);
         if (engine->init() != 0) {
             return -1;
@@ -361,7 +384,7 @@ public:
     }
     
     int32_t startEngine() override {
-        // ÊµÏÖÆô¶¯Ë÷ÒýÒýÇæµÄÂß¼­
+        // Êµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¼ï¿½
         engine = new IndexEngine(parameter);
         if (engine->init() != 0) {
             return -1;
@@ -372,11 +395,11 @@ public:
 
 using CommandHandler = std::function<CommandProc*(PbgzParameter&)>;
 
-// ¶þ¼¶ÃüÁî½á¹¹
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½á¹¹
 struct SubCommand {
-    std::string name;               // ÃüÁîÃû³Æ£¨Èç "compress"£©
-    std::string description;        // ÃüÁîÃèÊö
-    std::vector<char> args;          // ¸ÃÃüÁîÖ§³ÖµÄÑ¡Ïî
+    std::string name;               // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ£ï¿½ï¿½ï¿½ "compress"ï¿½ï¿½
+    std::string description;        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    std::vector<char> args;          // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö§ï¿½Öµï¿½Ñ¡ï¿½ï¿½
     CommandHandler handler;
 };
 
@@ -416,7 +439,7 @@ void printUsage(const std::string& subCommandName = "") {
     fprintf(fp, "pbgz: %s\n", PbgzManager::getInstance().getVersion().c_str());
     
     if (subCommandName.empty()) {
-        // ÏÔÊ¾Í¨ÓÃ°ïÖúÐÅÏ¢
+        // ï¿½ï¿½Ê¾Í¨ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢
         fprintf(fp, "Usage: pbgz subCommand [FILE] [OPTION]\n\n");
         fprintf(fp, "Available subcommands:\n");
         for (auto& cmd : subCommands) {
@@ -429,7 +452,7 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
         fprintf(fp, "  pbgz index human.fq.gz.pbgz\n\n");
     } else {
-        // ÏÔÊ¾ÌØ¶¨×ÓÃüÁîµÄ°ïÖúÐÅÏ¢
+        // ï¿½ï¿½Ê¾ï¿½Ø¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä°ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢
         SubCommand* targetCmd = nullptr;
         for (auto& cmd : subCommands) {
             if (cmd.name == subCommandName) {
@@ -452,7 +475,7 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "Description: %s\n\n", targetCmd->description.c_str());
         fprintf(fp, "Options for %s:\n", subCommandName.c_str());
         
-        // ÏÔÊ¾¸Ã×ÓÃüÁîÖ§³ÖµÄÑ¡Ïî
+        // ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö§ï¿½Öµï¿½Ñ¡ï¿½ï¿½
         for (auto &a : pbgzArgs) {
             bool supported = false;
             for (char supportedArg : targetCmd->args) {
@@ -466,7 +489,7 @@ void printUsage(const std::string& subCommandName = "") {
             }
         }
         
-        // ÏÔÊ¾Ê¾Àý
+        // ï¿½ï¿½Ê¾Ê¾ï¿½ï¿½
         if (subCommandName == "compress") {
             fprintf(fp, "\nExample:\n");
             fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
@@ -493,14 +516,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ¼ì²éµÚÒ»¸ö²ÎÊýÊÇ·ñÊÇ help »ò version
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½ help ï¿½ï¿½ version
     std::string firstArg = argv[1];
     if (firstArg == "help") {
         if (argc >= 3) {
-            // ÏÔÊ¾ÌØ¶¨×ÓÃüÁîµÄ°ïÖúÐÅÏ¢
+            // ï¿½ï¿½Ê¾ï¿½Ø¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä°ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢
             printUsage(argv[2]);
         } else {
-            // ÏÔÊ¾Í¨ÓÃ°ïÖúÐÅÏ¢
+            // ï¿½ï¿½Ê¾Í¨ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢
             printUsage();
         }
         return 0;
@@ -527,16 +550,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Ê¹ÓÃ×ÓÃüÁîµÄÐÂÂß¼­
+    // Ê¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¼ï¿½
     PbgzParameter parameter;
 
-    // ¹¹½¨Ñ¡Ïî×Ö·û´®£¬Ö»°üº¬×ÓÃüÁîÖ§³ÖµÄÑ¡Ïî
+    // ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö§ï¿½Öµï¿½Ñ¡ï¿½ï¿½
     std::string argOption = "";
     option longopts[pbgzArgs.size() + 1];
     int optIndex = 0;
     
     for (uint32_t i = 0; i < pbgzArgs.size(); ++i) {
-        // ¼ì²éÕâ¸öÑ¡ÏîÊÇ·ñ±»µ±Ç°×ÓÃüÁîÖ§³Ö
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½Ç·ñ±»µï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö§ï¿½ï¿½
         bool supported = false;
         for (char supportedArg : selectedSubCommand->args) {
             if (pbgzArgs[i].argShort == supportedArg) {
@@ -565,7 +588,7 @@ int main(int argc, char** argv) {
     }
     longopts[optIndex] = {nullptr, 0, nullptr, 0};
 
-    // ÖØÖÃoptindÒÔÌø¹ý×ÓÃüÁîÃû³Æ
+    // ï¿½ï¿½ï¿½ï¿½optindï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     optind = 2;
     
     int opt = 0;
@@ -637,7 +660,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ´¦ÀíÊ£ÓàµÄ²ÎÊý£¨ÊäÈëÎÄ¼þµÈ£©
+    // ï¿½ï¿½ï¿½ï¿½Ê£ï¿½ï¿½ï¿½Ä²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½È£ï¿½
     if (optind < argc) {
         if (argc - optind > 1) {
             fprintf(stdout, "Only one file is allowed");
@@ -646,7 +669,7 @@ int main(int argc, char** argv) {
         parameter.inputFile = argv[optind];
     }
 
-    // ´´½¨²¢Ö´ÐÐ×ÓÃüÁî´¦ÀíÆ÷
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½î´¦ï¿½ï¿½ï¿½ï¿½
     CommandProc* processor = selectedSubCommand->handler(parameter);
     if (!processor) {
         LOG_ERROR("Failed to create command processor");
