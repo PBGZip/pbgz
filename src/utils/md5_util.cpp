@@ -24,16 +24,16 @@
 #include "md5_util.h"
 #include <string.h>
 
-/* 基本MD5函数定义 */
+/* Basic MD5 function definitions */
 #define F(x, y, z) (((x) & (y)) | ((~x) & (z)))
 #define G(x, y, z) (((x) & (z)) | ((y) & (~z)))
 #define H(x, y, z) ((x) ^ (y) ^ (z))
 #define I(x, y, z) ((y) ^ ((x) | (~z)))
 
-/* 循环左移 */
+/* Rotate left */
 #define ROTATE_LEFT(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
 
-/* 四轮变换中的一步 */
+/* One step in four-round transformation */
 #define FF(a, b, c, d, x, s, ac) { \
     (a) += F((b), (c), (d)) + (x) + (uint32_t)(ac); \
     (a) = ROTATE_LEFT((a), (s)); \
@@ -58,9 +58,9 @@
     (a) += (b); \
 }
 
-/* 字节顺序转换（小端系统） */
+/* Byte order conversion (little-endian system) */
 #ifndef WORDS_BIGENDIAN
-#define byte_reverse(words, byte_count) /* 小端系统不需要反转 */
+#define byte_reverse(words, byte_count) /* Little-endian system doesn't need reversal */
 #else
 static void byte_reverse(uint8_t *buf, size_t words) {
     uint32_t t;
@@ -73,7 +73,7 @@ static void byte_reverse(uint8_t *buf, size_t words) {
 }
 #endif
 
-/* S表 - 每轮的移位量 */
+/* S table - shift amounts for each round */
 static const uint8_t S[4][4] = {
     { 7, 12, 17, 22 },
     { 5,  9, 14, 20 },
@@ -81,7 +81,7 @@ static const uint8_t S[4][4] = {
     { 6, 10, 15, 21 }
 };
 
-/* T表 - 常量 */
+/* T table - constants */
 static const uint32_t T[64] = {
     0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
     0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
@@ -101,12 +101,12 @@ static const uint32_t T[64] = {
     0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
 };
 
-/* MD5核心变换，处理一个64字节块 */
+/* MD5 core transformation, processes one 64-byte block */
 static void md5_transform(uint32_t state[4], const uint8_t block[64]) {
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
     uint32_t x[16];
     
-    /* 将块转换为16个32位字 */
+    /* Convert block to 16 32-bit words */
 #ifdef WORDS_BIGENDIAN
     memcpy(x, block, 64);
     byte_reverse((uint8_t *)x, 16);
@@ -114,7 +114,7 @@ static void md5_transform(uint32_t state[4], const uint8_t block[64]) {
     memcpy(x, block, 64);
 #endif
     
-    /* 第1轮 */
+    /* Round 1 */
     FF(a, b, c, d, x[ 0], S[0][0], T[ 0]);
     FF(d, a, b, c, x[ 1], S[0][1], T[ 1]);
     FF(c, d, a, b, x[ 2], S[0][2], T[ 2]);
@@ -132,7 +132,7 @@ static void md5_transform(uint32_t state[4], const uint8_t block[64]) {
     FF(c, d, a, b, x[14], S[0][2], T[14]);
     FF(b, c, d, a, x[15], S[0][3], T[15]);
     
-    /* 第2轮 */
+    /* Round 2 */
     GG(a, b, c, d, x[ 1], S[1][0], T[16]);
     GG(d, a, b, c, x[ 6], S[1][1], T[17]);
     GG(c, d, a, b, x[11], S[1][2], T[18]);
@@ -150,7 +150,7 @@ static void md5_transform(uint32_t state[4], const uint8_t block[64]) {
     GG(c, d, a, b, x[ 7], S[1][2], T[30]);
     GG(b, c, d, a, x[12], S[1][3], T[31]);
     
-    /* 第3轮 */
+    /* Round 3 */
     HH(a, b, c, d, x[ 5], S[2][0], T[32]);
     HH(d, a, b, c, x[ 8], S[2][1], T[33]);
     HH(c, d, a, b, x[11], S[2][2], T[34]);
@@ -168,7 +168,7 @@ static void md5_transform(uint32_t state[4], const uint8_t block[64]) {
     HH(c, d, a, b, x[15], S[2][2], T[46]);
     HH(b, c, d, a, x[ 2], S[2][3], T[47]);
     
-    /* 第4轮 */
+    /* Round 4 */
     II(a, b, c, d, x[ 0], S[3][0], T[48]);
     II(d, a, b, c, x[ 7], S[3][1], T[49]);
     II(c, d, a, b, x[14], S[3][2], T[50]);
@@ -192,32 +192,32 @@ static void md5_transform(uint32_t state[4], const uint8_t block[64]) {
     state[3] += d;
 }
 
-/* 初始化MD5上下文 */
+/* Initialize MD5 context */
 void md5_init(md5_ctx *context) {
     context->count[0] = context->count[1] = 0;
     
-    /* 加载幻数 */
+    /* Load magic numbers */
     context->state[0] = 0x67452301;
     context->state[1] = 0xefcdab89;
     context->state[2] = 0x98badcfe;
     context->state[3] = 0x10325476;
 }
 
-/* 更新MD5计算 */
+/* Update MD5 calculation */
 void md5_update(md5_ctx *context, const uint8_t *input, size_t input_len) {
     size_t i, index, part_len;
     
-    /* 计算当前缓冲区中的字节数 */
+    /* Calculate number of bytes in current buffer */
     index = (size_t)((context->count[0] >> 3) & 0x3F);
     
-    /* 更新比特数 */
+    /* Update bit count */
     if ((context->count[0] += ((uint32_t)input_len << 3)) < ((uint32_t)input_len << 3))
         context->count[1]++;
     context->count[1] += ((uint32_t)input_len >> 29);
     
     part_len = 64 - index;
     
-    /* 尽可能多地填充缓冲区并变换 */
+    /* Fill buffer as much as possible and transform */
     if (input_len >= part_len) {
         memcpy(&context->buffer[index], input, part_len);
         md5_transform(context->state, context->buffer);
@@ -230,30 +230,30 @@ void md5_update(md5_ctx *context, const uint8_t *input, size_t input_len) {
         i = 0;
     }
     
-    /* 剩余输入缓冲区 */
+    /* Remaining input buffer */
     memcpy(&context->buffer[index], &input[i], input_len - i);
 }
 
-/* 完成MD5计算 */
+/* Finalize MD5 calculation */
 void md5_final(uint8_t digest[16], md5_ctx *context) {
     uint8_t bits[8];
     size_t index, pad_len;
     
-    /* 保存比特数 */
+    /* Save bit count */
     for (int i = 0; i < 8; i++)
         bits[i] = (uint8_t)((context->count[i >> 2] >> ((i & 3) * 8)) & 0xFF);
     
-    /* 填充：添加1比特后跟足够的0比特，使得长度 ≡ 448 mod 512 */
+    /* Padding: add 1 bit followed by enough 0 bits to make length ≡ 448 mod 512 */
     index = (size_t)((context->count[0] >> 3) & 0x3F);
     pad_len = (index < 56) ? (56 - index) : (120 - index);
     md5_update(context, (const uint8_t *)"\x80", 1);
     while (pad_len-- > 1)
         md5_update(context, (const uint8_t *)"\0", 1);
     
-    /* 附加长度（以比特为单位） */
+    /* Append length (in bits) */
     md5_update(context, bits, 8);
     
-    /* 将状态存储到摘要中 */
+    /* Store state to digest */
     for (int i = 0; i < 4; i++) {
         digest[i * 4] = (uint8_t)(context->state[i] & 0xFF);
         digest[i * 4 + 1] = (uint8_t)((context->state[i] >> 8) & 0xFF);
@@ -261,11 +261,11 @@ void md5_final(uint8_t digest[16], md5_ctx *context) {
         digest[i * 4 + 3] = (uint8_t)((context->state[i] >> 24) & 0xFF);
     }
     
-    /* 清零敏感信息 */
+    /* Clear sensitive information */
     memset(context, 0, sizeof(*context));
 }
 
-/* 方便的包装函数 */
+/* Convenient wrapper function */
 void md5_compute(const uint8_t *input, size_t length, uint8_t digest[16]) {
     md5_ctx context;
     md5_init(&context);
@@ -273,7 +273,7 @@ void md5_compute(const uint8_t *input, size_t length, uint8_t digest[16]) {
     md5_final(digest, &context);
 }
 
-/* 转换为十六进制字符串 */
+/* Convert to hexadecimal string */
 void md5_to_hex(const uint8_t digest[16], char output[33]) {
     static const char hex[] = "0123456789abcdef";
     
@@ -295,4 +295,3 @@ std::string md5_to_string(const uint8_t digest[16]) {
     output[32] = '\0';
     return std::string(output);
 }
-

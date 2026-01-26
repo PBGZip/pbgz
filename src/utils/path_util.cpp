@@ -21,7 +21,6 @@
  * SOFTWARE.
  */
 
-
 #include <cstring>
 #include <filesystem>
 #include <system_error>

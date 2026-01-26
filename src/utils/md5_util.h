@@ -33,54 +33,54 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 
-/* MD5上下文结构 */
+/* MD5 context structure */
 typedef struct {
-    uint32_t state[4];    /* 状态 (ABCD) */
-    uint32_t count[2];    /* 比特数 (低位, 高位) */
-    uint8_t buffer[64];   /* 输入缓冲区 */
+    uint32_t state[4];    /* state (ABCD) */
+    uint32_t count[2];    /* bit count (low, high) */
+    uint8_t buffer[64];   /* input buffer */
 } md5_ctx;
 
-/* 函数声明 */
+/* Function declarations */
 
 /**
- * 初始化MD5上下文
- * @param context 要初始化的上下文
+ * Initialize MD5 context
+ * @param context The context to initialize
  */
 void md5_init(md5_ctx *context);
 
 /**
- * 更新MD5计算（可多次调用）
- * @param context MD5上下文
- * @param input 输入数据
- * @param input_len 输入数据的长度
+ * Update MD5 calculation (can be called multiple times)
+ * @param context MD5 context
+ * @param input Input data
+ * @param input_len Length of input data
  */
 void md5_update(md5_ctx *context, const uint8_t *input, size_t input_len);
 
 /**
- * 完成MD5计算，输出摘要
- * @param digest 输出的16字节摘要（二进制格式）
- * @param context MD5上下文
+ * Finalize MD5 calculation and output digest
+ * @param digest Output 16-byte digest (binary format)
+ * @param context MD5 context
  */
 void md5_final(uint8_t digest[16], md5_ctx *context);
 
 /**
- * 方便的包装函数：直接计算字符串的MD5
- * @param input 输入字符串
- * @param length 输入长度（0表示自动计算以null结尾的字符串长度）
- * @param digest 输出的16字节摘要
+ * Convenience wrapper function: directly compute MD5 of string
+ * @param input Input string
+ * @param length Input length (0 means automatically calculate null-terminated string length)
+ * @param digest Output 16-byte digest
  */
 void md5_compute(const uint8_t *input, size_t length, uint8_t digest[16]);
 
 /**
- * 将16字节二进制摘要转换为33字节的十六进制字符串（包含结尾的null）
- * @param digest 16字节的二进制摘要
- * @param output 33字节的输出缓冲区
+ * Convert 16-byte binary digest to 33-byte hexadecimal string (including trailing null)
+ * @param digest 16-byte binary digest
+ * @param output 33-byte output buffer
  */
 void md5_to_hex(const uint8_t digest[16], char output[33]);
 
 /**
- * 将16字节二进制摘要转换为字符串对象
- * @param digest 16字节的二进制摘要
+ * Convert 16-byte binary digest to string object
+ * @param digest 16-byte binary digest
  * @return std::string
  */
 std::string md5_to_string(const uint8_t digest[16]);

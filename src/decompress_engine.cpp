@@ -253,7 +253,7 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
     }
 
     uint32_t poolSize = tpools.size();
-    for (int i= 0; i < poolSize; ++i) {
+    for (uint32_t i= 0; i < poolSize; ++i) {
         (void)inputBlock.get();
         inputPool.push(nullptr);
     }
