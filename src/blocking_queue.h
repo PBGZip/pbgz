@@ -45,9 +45,9 @@ public:
      **/
     void push(const T &item) {
         std::unique_lock<std::mutex> lock(mutex);
-        conditonVar.wait(lock, [this]{return (0 == maxQueueSize) ? true : (dataQueue.size() < maxQueueSize);});
+        notFullCondVar.wait(lock, [this]{return (0 == maxQueueSize) ? true : (dataQueue.size() < maxQueueSize);});
         dataQueue.push(std::move(item));
-        conditonVar.notify_one();
+        notEmptyCondVar.notify_one();
     }
 
     /*
@@ -56,7 +56,7 @@ public:
     void pushForce(const T &item) {
         std::unique_lock<std::mutex> lock(mutex);
         dataQueue.push(std::move(item));
-        conditonVar.notify_one();
+        notEmptyCondVar.notify_one();
     }
 
     /*
@@ -64,10 +64,10 @@ public:
      **/
     T get() {
         std::unique_lock<std::mutex> lock(mutex);
-        conditonVar.wait(lock, [this]{return !this->dataQueue.empty();});
+        notEmptyCondVar.wait(lock, [this]{return !this->dataQueue.empty();});
         T value = std::move(dataQueue.front());
         dataQueue.pop();
-        conditonVar.notify_one();
+        notFullCondVar.notify_one();
         return value;
     }
 
@@ -105,6 +105,7 @@ public:
 private:
     uint32_t maxQueueSize;
     mutable std::mutex mutex;
-    mutable std::condition_variable conditonVar;
+    mutable std::condition_variable notFullCondVar;
+    mutable std::condition_variable notEmptyCondVar;
     std::queue<T> dataQueue;
 };

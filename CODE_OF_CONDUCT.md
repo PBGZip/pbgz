@@ -1,201 +1,201 @@
-# 行为准则
+# Code of Conduct
 
-## 我们的承诺
+## Our Promise
 
-为了营造开放和友好的环境，我们作为贡献者和维护者承诺，无论年龄、体型、残疾、种族、性别认同和表达、经验水平、国籍个人形象、种族、宗教或性取向如何，参与我们项目和社区的每个人都能享受无骚扰的体验。
+To foster an open and friendly environment, we as contributors and maintainers pledge to make participation in our project and community a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, gender identity and expression, level of experience, nationality, personal appearance, race, religion, or sexual orientation.
 
-## 我们的标准
+## Our Standards
 
-有助于创造积极环境的行为包括：
+Behaviors that contribute to creating a positive environment include:
 
-### ✅ 鼓励的行为
+### ✅ Encouraged Behaviors
 
-- 🤝 **尊重和包容**: 使用友好和包容的语言
-- 🎯 **尊重不同观点和经验**: 接受不同的意见和经验
-- 🤝 **优雅地接受批评**: 专注于对社区最有利的事情
-- 🎯 **关注对社区最有利的事情**: 对社区表现出同理心
-- 🌟 **对其他社区成员表示友善**: 善待其他社区成员
+- 🤝 **Respect and Inclusivity**: Use welcoming and inclusive language
+- 🎯 **Respect Different Viewpoints and Experiences**: Accept different opinions and experiences
+- 🤝 **Gracefully Accept Criticism**: Focus on what is best for the community
+- 🎯 **Focus on What's Best for the Community**: Show empathy towards other community members
+- 🌟 **Be Kind to Other Community Members**: Treat other community members with kindness
 
-### ❌ 不当行为
+### ❌ Unacceptable Behavior
 
-不可接受的行为包括：
+Unacceptable behaviors include:
 
-- 🚫 **性别化语言或图像**: 使用性化的语言或图像，以及不受欢迎的性关注或性骚扰
-- 🚫 **恶意评论**: 恶意的评论、诋毁/贬损的攻击，以及人身或政治攻击
-- 🚫 **公开或私人骚扰**: 公开或私下的骚扰
-- 🚫 **未经明确许可发布他人的私人信息**: 发布他人的私人信息，如物理或电子地址，未经明确许可
-- 🚫 **其他可能被视为不当的行为**: 在专业环境中可能被认为不当的其他行为
+- 🚫 **Sexualized Language or Images**: Use of sexualized language or images, and unwelcome sexual attention or sexual harassment
+- 🚫 **Malicious Comments**: Malicious comments, libelous/defamatory attacks, and personal or political attacks
+- 🚫 **Public or Private Harassment**: Public or private harassment
+- 🚫 **Publishing Private Information**: Publishing others' private information, such as physical or electronic addresses, without explicit permission
+- 🚫 **Other Inappropriate Behavior**: Other behaviors that may be considered inappropriate in a professional environment
 
-## 我们的责任
+## Our Responsibilities
 
-项目维护者有责任澄清可接受行为的标准，并期望对任何不可接受的行为采取适当和公平的纠正措施。
+Project maintainers are responsible for clarifying the standards of acceptable behavior and are expected to take appropriate and fair corrective action in response to any instances of unacceptable behavior.
 
-项目维护者有权利和责任删除、编辑或拒绝与本行为准则不符的评论、提交、代码、wiki 编辑、问题和其他贡献，或者暂时或永久禁止任何他们认为有不适当、威胁、冒犯或有害行为的贡献者。
+Project maintainers have the right and responsibility to remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that are not aligned with this Code of Conduct, or to temporarily or permanently ban any contributor for behaviors that they deem inappropriate, threatening, offensive, or harmful.
 
-## 适用范围
+## Scope
 
-本行为准则适用于所有项目空间，包括但不限于：
+This Code of Conduct applies to all project spaces, including but not limited to:
 
-- 📁 **代码仓库**: GitHub 仓库、Issue、Pull Request
-- 💬 **讨论区**: GitHub Discussions、Issue 评论
-- 📧 **私人通信**: 与项目相关的私人通信
-- 🎤 **公开活动**: 项目相关的公开活动、演示、会议
+- 📁 **Code Repositories**: GitHub repositories, Issues, Pull Requests
+- 💬 **Discussion Areas**: GitHub Discussions, Issue comments
+- 📧 **Private Communications**: Private communications related to the project
+- 🎤 **Public Events**: Project-related public events, presentations, conferences
 
-当个人代表项目或其社区时，本行为准则也适用于公共空间。代表项目或社区的示例包括使用官方项目电子邮件地址、通过官方社交媒体账户发布或在线上或线下活动中担任指定代表。
+This Code of Conduct also applies when an individual represents the project or its community in public spaces. Examples of representing a project or community include using an official project email address, posting via an official social media account, or acting as an appointed representative at an online or offline event.
 
-## 执行
+## Enforcement
 
-### 报告不当行为
+### Reporting Unacceptable Behavior
 
-如果您遇到或目睹了违反本行为准则的行为，请通过以下方式报告：
+If you experience or witness behavior that violates this Code of Conduct, please report it through the following channels:
 
-📧 **联系方式**:
-- 邮箱: [需要填写实际邮箱]
-- GitHub: [创建私有 Issue 或联系维护者]
+📧 **Contact Information**:
+- Email: [wenjinyang2729@phytiumn.com.cn]
+- GitHub: [Create a private Issue or contact maintainers]
 
-🔒 **保密性**: 所有报告都将严格保密，我们将在保护报告者隐私的前提下进行调查。
+🔒 **Confidentiality**: All reports will be kept strictly confidential, and we will investigate while protecting the reporter's privacy.
 
-### 处理流程
+### Handling Process
 
-1. **接收报告**: 我们会认真对待所有报告
-2. **初步调查**: 维护者将进行初步调查
-3. **采取措施**: 根据情况采取适当措施
-4. **跟进反馈**: 向报告者反馈处理结果（在保护隐私的前提下）
+1. **Receive Report**: We take all reports seriously
+2. **Preliminary Investigation**: Maintainers will conduct a preliminary investigation
+3. **Take Action**: Take appropriate measures based on the situation
+4. **Follow-up Feedback**: Provide feedback on the outcome to the reporter (while protecting privacy)
 
-### 可能的措施
+### Possible Actions
 
-对于违反行为准则的行为，我们可能采取以下措施：
+For violations of the Code of Conduct, we may take the following measures:
 
-- ⚠️ **正式警告**: 私下的正式警告
-- 🚫 **临时禁令**: 临时禁止参与项目
-- 🔴 **永久禁令**: 永久禁止参与项目
-- 📢 **公开道歉**: 要求公开道歉（如适用）
-- 🗑️ **内容删除**: 删除不当内容
+- ⚠️ **Formal Warning**: Private formal warning
+- 🚫 **Temporary Ban**: Temporary prohibition from participating in the project
+- 🔴 **Permanent Ban**: Permanent prohibition from participating in the project
+- 📢 **Public Apology**: Requirement for public apology (if applicable)
+- 🗑️ **Content Removal**: Removal of inappropriate content
 
-## 指导原则
+## Guiding Principles
 
-### 🎯 建设性对话
+### 🎯 Constructive Dialogue
 
-- 专注于技术和内容，而非个人
-- 提供具体、可操作的反馈
-- 假设善意，除非有明确证据
+- Focus on technology and content, not individuals
+- Provide specific, actionable feedback
+- Assume good faith unless there is clear evidence
 
-### 🤝 相互尊重
+### 🤝 Mutual Respect
 
-- 承认并感谢他人的贡献
-- 尊重不同的经验和背景
-- 耐心帮助新贡献者
+- Acknowledge and appreciate others' contributions
+- Respect different experiences and backgrounds
+- Patiently help new contributors
 
-### 📚 持续学习
+### 📚 Continuous Learning
 
-- 承认我们都在学习中
-- 对新观点保持开放
-- 愿意承认错误并改正
+- Acknowledge that we are all learning
+- Be open to new perspectives
+- Be willing to admit mistakes and correct them
 
-## 具体场景指南
+## Specific Scenario Guidelines
 
-### 💻 代码审查
+### 💻 Code Reviews
 
-**做**:
-- 提供具体、建设性的反馈
-- 解释为什么需要某些更改
-- 承认好的设计和实现
+**Do**:
+- Provide specific, constructive feedback
+- Explain why certain changes are needed
+- Acknowledge good design and implementation
 
-**不做**:
-- 进行人身攻击
-- 使用贬损性语言
-- 无视他人的努力
+**Don't**:
+- Make personal attacks
+- Use derogatory language
+- Disregard others' efforts
 
-### 🐛 Bug 报告
+### 🐛 Bug Reports
 
-**做**:
-- 提供详细的复现步骤
-- 包含环境信息
-- 保持耐心和专业
+**Do**:
+- Provide detailed reproduction steps
+- Include environment information
+- Be patient and professional
 
-**不做**:
-- 使用强硬或指责性语言
-- 忽略报告者的努力
-- 期望立即修复
+**Don't**:
+- Use aggressive or accusatory language
+- Ignore the reporter's efforts
+- Expect immediate fixes
 
-### 💡 功能请求
+### 💡 Feature Requests
 
-**做**:
-- 清楚描述使用场景
-- 解释为什么需要这个功能
-- 愿意参与实现
+**Do**:
+- Clearly describe use cases
+- Explain why this feature is needed
+- Be willing to contribute to implementation
 
-**不做**:
-- 提出模糊或不合理的要求
-- 忽视现有的替代方案
-- 对拒绝的回应表现出不满
+**Don't**:
+- Make vague or unreasonable demands
+- Ignore existing alternatives
+- Show dissatisfaction with rejections
 
-## 多元化和包容性
+## Diversity and Inclusion
 
-我们致力于创建一个多元化的社区，欢迎来自不同背景的贡献者：
+We are committed to creating a diverse community that welcomes contributors from different backgrounds:
 
-### 🌍 地理和语言
-- 欢迎来自世界各地的贡献者
-- 支持多语言交流（主要是中文和英文）
-- 理解文化差异
+### 🌍 Geographic and Language
+- Welcome contributors from around the world
+- Support multilingual communication (primarily Chinese and English)
+- Understand cultural differences
 
-### 👥 技能和经验
-- 欢迎不同技能水平的贡献者
-- 鼓励 mentorship 程序
-- 提供学习资源
+### 👥 Skills and Experience
+- Welcome contributors with different skill levels
+- Encourage mentorship programs
+- Provide learning resources
 
-### ♿ 可访问性
-- 确保项目对所有人都可访问
-- 考虑不同用户的特殊需求
-- 使用可访问的文档格式
+### ♿ Accessibility
+- Ensure the project is accessible to everyone
+- Consider special needs of different users
+- Use accessible documentation formats
 
-## 社区健康
+## Community Health
 
-### 🏆 积极参与
+### 🏆 Active Participation
 
-我们鼓励社区成员：
+We encourage community members to:
 
-- 🎯 **主动参与**: 不等待被邀请就参与讨论
-- 🤝 **帮助他人**: 回答问题，帮助新贡献者
-- 📢 **分享经验**: 分享使用经验和最佳实践
-- 🎉 **庆祝成功**: 认可和庆祝项目的里程碑
+- 🎯 **Participate Proactively**: Engage in discussions without waiting to be invited
+- 🤝 **Help Others**: Answer questions, help new contributors
+- 📢 **Share Experiences**: Share usage experiences and best practices
+- 🎉 **Celebrate Success**: Recognize and celebrate project milestones
 
-### 🛠️ 解决冲突
+### 🛠️ Conflict Resolution
 
-当出现分歧时：
+When disagreements arise:
 
-1. **私下沟通**: 首先尝试私下解决
-2. **寻求调解**: 如需要，请维护者调解
-3. **保持专业**: 始终保持专业的态度
-4. **关注项目**: 记住项目目标比个人更重要
+1. **Private Communication**: First try to resolve privately
+2. **Seek Mediation**: If needed, ask maintainers to mediate
+3. **Maintain Professionalism**: Always maintain a professional attitude
+4. **Focus on the Project**: Remember that project goals are more important than individuals
 
-## 额外资源
+## Additional Resources
 
-### 📚 推荐阅读
+### 📚 Recommended Reading
 
-- [GitHub 社区准则](https://docs.github.com/en/github/site-policy/github-community-guidelines)
+- [GitHub Community Guidelines](https://docs.github.com/en/github/site-policy/github-community-guidelines)
 - [Contributor Covenant](https://www.contributor-covenant.org/)
-- [开源社区行为准则最佳实践](https://opensource.guide/code-of-conduct/)
+- [Open Source Community Code of Conduct Best Practices](https://opensource.guide/code-of-conduct/)
 
-### 🆘 获得帮助
+### 🆘 Getting Help
 
-如果您对本行为准则有疑问或需要帮助：
+If you have questions about this Code of Conduct or need help:
 
-- 📧 联系项目维护者
-- 💬 在 GitHub Discussions 中讨论
-- 🔍 查看相关资源
+- 📧 Contact project maintainers
+- 💬 Discuss in GitHub Discussions
+- 🔍 Review related resources
 
-## 许可和归属
+## License and Attribution
 
-本行为准则改编自 [Contributor Covenant](https://www.contributor-covenant.org/)，
-版本 1.4，可在 https://www.contributor-covenant.org/version/1/4/code-of-conduct.html 查看。
+This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org/),
+version 1.4, available at https://www.contributor-covenant.org/version/1/4/code-of-conduct.html.
 
-## 社区影响指南
+## Community Impact Guidelines
 
-有关此行为准则的常见问题及其解答，请参阅
-https://www.contributor-covenant.org/faq。翻译版本可在
-https://www.contributor-covenant.org/translations [获得]。
+For answers to common questions about this Code of Conduct, see
+https://www.contributor-covenant.org/faq. Translations are available at
+https://www.contributor-covenant.org/translations.
 
 ---
 
-让我们共同努力，为 PBGZ 项目创造一个友好、包容、高效的开发环境！🌟
+Let's work together to create a friendly, inclusive, and efficient development environment for the PBGZ project! 🌟

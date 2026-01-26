@@ -1,115 +1,127 @@
-# PBGZ 开源声明
+# PBGZ Open Source Notice
 
-## 项目许可证
+## Project License
 
-本项目采用 MIT 许可证，详细的许可证内容请参见 [LICENSE](LICENSE) 文件。
+This project is licensed under the MIT License. For detailed license terms, please see the [LICENSE](LICENSE) file.
 
-## 第三方组件声明
+## Third-Party Components Notice
 
-### 项目概述
-PBGZ (Parallel BGZF) 是一个并行 BGZF 文件压缩/解压缩库，主要用于生物信息学领域的高性能数据处理。
+### Project Overview
 
-### 第三方依赖库
+- **PBGZ** can be understood as: A highly competitive high-speed, high-compression-ratio large-scale **G**enomic data or large-scale general data compression (**Z**ip) tool initiated by researchers from **Phytium** & **BIG**.
+- **PBGZ** can also be understood as: A compression (**Zip**) tool that supports petabyte-level **G**enomic data or large-scale general data.
 
-本项目使用了以下开源第三方组件，特此致谢：
+### Advantages of PBGZ 🚀
 
-#### 1. HTSlib (版本 1.12)
-- **许可证**: BSD 3-Clause License
-- **用途**: 处理 HTS (High-Throughput Sequencing) 数据格式
-- **源码**: https://github.com/samtools/htslib
-- **修改**: 本项目包含 HTSlib 的部分代码，用于 BGZF 格式支持
+- **📦 Extreme Compression Ratio**: Up to 8x higher than gzip
+- **⚡ Extreme Compression/Decompression Speed**: Up to 13x faster than gzip
+- **🧠 Advanced Algorithm**: Uses the FC high-efficiency compression algorithm that won 2nd place in the balanced category at the 2021 Global Compression Competition by Phytium ResearchLab
+- **🌐 Multi-platform Support**: Efficiently runs on both Intel/AMD x86_64 and Phytium ARMv8 architecture CPUs; supports Kylin, Ubuntu, and other Linux as well as MAC OSX operating systems
+- **🧬 Multiple Data Support**: Specifically optimized for genomic data while supporting compression of arbitrary binary files
+- **🔓 Fully Free and Open**: Based on MIT License open source, allowing any individual or organization to use, modify, and distribute
 
-#### 2. FarmHash
-- **许可证**: MIT License
-- **用途**: 哈希函数实现
-- **源码**: https://github.com/google/farmhash
-- **修改**: 未修改，直接用于文件完整性校验
+### Third-Party Dependency Libraries 📚
 
-#### 3. SAIS (Suffix Array Induced Sorting)
-- **许可证**: BSD License
-- **用途**: 后缀数组排序算法
-- **源码**: 包含在 src/coder/bcm_libsais.cpp 中
-- **修改**: 集成到项目编码器中
+This project uses the following open-source third-party components, and we hereby express our gratitude 🙏:
 
-#### 4. ZLIB (版本 1.2.11)
-- **许可证**: zlib License
-- **用途**: 数据压缩库
-- **源码**: https://zlib.net/
+#### 1. 🧬 HTSlib (Version 1.12)
+- **📜 License**: BSD 3-Clause License
+- **🎯 Purpose**: Handling HTS (High-Throughput Sequencing) data formats
+- **🔗 Source**: https://github.com/samtools/htslib
+- **🔧 Modifications**: This project includes partial code from HTSlib for BGZF format support
 
-#### 5. BZIP2
-- **许可证**: BSD-style License
-- **用途**: 压缩算法支持
-- **源码**: https://sourceware.org/bzip2/
+#### 2. 🔑 FarmHash
+- **📜 License**: MIT License
+- **🎯 Purpose**: Hash function implementation
+- **🔗 Source**: https://github.com/google/farmhash
+- **🔧 Modifications**: Unmodified, directly used for file integrity verification
 
-#### 6. LIBDEFLATE (版本 1.7)
-- **许可证**: MIT License
-- **用途**: 高性能 DEFLATE 压缩/解压缩
-- **源码**: https://github.com/ebiggers/libdeflate
+#### 3. 📊 SAIS (Suffix Array Induced Sorting)
+- **📜 License**: BSD License
+- **🎯 Purpose**: Suffix array sorting algorithm
+- **📂 Source**: Included in src/coder/bcm_libsais.cpp
+- **🔧 Modifications**: Integrated into the project encoder
 
-#### 7. ZSTD (版本 1.5.0)
-- **许可证**: BSD + GPLv2 Dual License
-- **用途**: Zstandard 压缩算法支持
-- **源码**: https://github.com/facebook/zstd
+#### 4. 🗜️ ZLIB (Version 1.2.11)
+- **📜 License**: zlib License
+- **🎯 Purpose**: Data compression library
+- **🔗 Source**: https://zlib.net/
 
-#### 8. JSONCPP (版本 1.9.4)
-- **许可证**: MIT License
-- **用途**: JSON 解析和生成
-- **源码**: https://github.com/open-source-parsers/jsoncpp
+#### 5. 📦 BZIP2
+- **📜 License**: BSD-style License
+- **🎯 Purpose**: Compression algorithm support
+- **🔗 Source**: https://sourceware.org/bzip2/
 
-#### 9. Google Test
-- **许可证**: BSD 3-Clause License
-- **用途**: 单元测试框架
-- **源码**: https://github.com/google/googletest
+#### 6. ⚡ LIBDEFLATE (Version 1.7)
+- **📜 License**: MIT License
+- **🎯 Purpose**: High-performance DEFLATE compression/decompression
+- **🔗 Source**: https://github.com/ebiggers/libdeflate
 
-#### 10. SPINLOCK 实现
-- **许可证**: various (各实现有不同许可证)
-- **用途**: 多种自旋锁实现
-- **源码**: 包含在 src/spinlock/ 目录下
+#### 7. 🚀 ZSTD (Version 1.5.0)
+- **📜 License**: BSD + GPLv2 Dual License
+- **🎯 Purpose**: Zstandard compression algorithm support
+- **🔗 Source**: https://github.com/facebook/zstd
 
-### 构建工具
-本项目使用了以下构建工具：
-- **Autoconf** (版本 2.69) - GPL v3
-- **Automake** (版本 1.17) - GPL v3
-- **Libtool** (版本 2.4.6) - GPL v3
-- **NASM** (版本 2.14.02) - BSD 2-Clause
-- **YASM** (版本 1.3.0) - BSD 2-Clause
+#### 8. 📝 JSONCPP (Version 1.9.4)
+- **📜 License**: MIT License
+- **🎯 Purpose**: JSON parsing and generation
+- **🔗 Source**: https://github.com/open-source-parsers/jsoncpp
 
-## 许可证兼容性
+#### 9. 🧪 Google Test
+- **📜 License**: BSD 3-Clause License
+- **🎯 Purpose**: Unit testing framework
+- **🔗 Source**: https://github.com/google/googletest
 
-本项目选择的 MIT 许可证与所有使用的第三方组件许可证兼容：
+#### 10. 🔄 SPINLOCK Implementations
+- **📜 License**: various (different implementations have different licenses)
+- **🎯 Purpose**: Various spinlock implementations
+- **📂 Source**: Included in src/spinlock/ directory
 
-- MIT 许可证与 BSD 系列、zlib License、Apache 2.0 等许可证完全兼容
-- 与 GPL 系列许可证兼容（本代码不包含 GPL 代码）
-- 所有依赖项均为宽松许可证，可以进行商业使用
+### 🔨 Build Tools
+This project uses the following build tools:
+- **🔧 Autoconf** (Version 2.69) - GPL v3
+- **⚙️ Automake** (Version 1.17) - GPL v3
+- **🔗 Libtool** (Version 2.4.6) - GPL v3
+- **💻 NASM** (Version 2.14.02) - BSD 2-Clause
+- **⚡ YASM** (Version 1.3.0) - BSD 2-Clause
 
-## 版权声明
+## 🔐 License Compatibility
 
-### 主要版权
-- PBGZ 项目版权所有 (C) 2021
-- 详见源文件中的具体版权声明
+The MIT License chosen for this project is compatible with all used third-party component licenses ✅:
 
-### 第三方版权
-各第三方组件的版权信息请参考其源码包中的 COPYRIGHT 或 LICENSE 文件。
+- **✅ MIT License** is fully compatible with BSD series, zlib License, Apache 2.0, and other licenses
+- **✅ Compatible** with GPL series licenses (this code does not contain GPL code)
+- **🏢 All dependencies** are permissive licenses and can be used commercially
 
-## 免责声明
+## ©️ Copyright Notice
 
-本软件按"原样"提供，不提供任何明示或暗示的保证。在任何情况下，作者或版权持有人均不对任何索赔、损害或其他责任负责，无论是合同、侵权或其他方面的责任。
+### 📋 Main Copyright
+- **PBGZ Project** Copyright (C) 2025
+- See specific copyright notices in source files for details
 
-## 联系信息
+### 📚 Third-Party Copyright
+For copyright information of third-party components, please refer to the COPYRIGHT or LICENSE files in their source packages.
 
-如有关于许可证或第三方使用的疑问，请通过以下方式联系：
+## ⚠️ Disclaimer
 
-- 项目主页: https://github.com/PBGZip/pbgz
-- 问题报告: https://github.com/PBGZip/pbgz/issues
+This software is provided "as is", without any express or implied warranties. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
 
-## 完整的许可证文本
+## 📞 Contact Information
 
-### MIT 许可证
+For questions regarding licenses or third-party usage, please contact us through the following methods:
+
+- 🏠 **Project homepage**: https://github.com/PBGZip/pbgz
+- 🐛 **Issue reporting**: https://github.com/PBGZip/pbgz/issues
+- 💬 **Discussions**: https://github.com/PBGZip/pbgz/discussions
+
+## Complete License Text
+
+### MIT License
 
 ```
 MIT License
 
-Copyright (c) 2021 PBGZ
+Copyright (c) 2025 PBGZip
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -132,4 +144,31 @@ SOFTWARE.
 
 ---
 
-*本文件最后更新时间：2026-01-14*
+### 📊 Dependency Summary Table
+
+| Dependency | Version | License | Purpose | Status |
+|------------|---------|---------|---------|--------|
+| HTSlib | 1.12 | BSD 3-Clause | HTS data formats | ✅ Integrated |
+| FarmHash | Latest | MIT | Hash functions | ✅ Used |
+| SAIS | Embedded | BSD | Sorting algorithm | ✅ Integrated |
+| ZLIB | 1.2.11 | zlib | Compression | ✅ Supported |
+| BZIP2 | Latest | BSD | Compression | ✅ Supported |
+| LIBDEFLATE | 1.7 | MIT | DEFLATE | ✅ Supported |
+| ZSTD | 1.5.0 | BSD + GPLv2 | Zstandard | ✅ Supported |
+| JSONCPP | 1.9.4 | MIT | JSON parsing | ✅ Used |
+| Google Test | Latest | BSD 3-Clause | Testing | ✅ Dev-only |
+| SPINLOCK | Multiple | Various | Concurrency | ✅ Integrated |
+
+### 🔍 License Compatibility Matrix
+
+| Our License | BSD | MIT | zlib | Apache 2.0 | GPL | LGPL |
+|-------------|-----|-----|------|------------|-----|------|
+| **MIT** | ✅ Compatible | ✅ Compatible | ✅ Compatible | ✅ Compatible | ✅ Compatible | ✅ Compatible |
+
+---
+
+*This file was last updated on: January 2026*
+
+---
+
+**📢 Note**: This notice is provided for transparency and compliance purposes. All third-party components are used according to their respective licenses. If you believe any attribution is missing or incorrect, please file an issue on our GitHub repository. 🙏

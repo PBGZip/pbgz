@@ -1,281 +1,213 @@
-# 安全政策
+# Security Policy
+
+## Supported Versions
+
+| Version | Supported          |
+|---------|--------------------|
+| 2.1     | ✅                 |
+| 2.0     | ✅                 |
+| < 2.0   | ❌                 |
+
+## Security Contact Information
+
+To report a security vulnerability, please use the following channels:
+
+### Primary Contact
+- **Email**: wenjinyang2729@phytiumn.com.cn
+- **PGP Key**: 642C 2089 D438 0E27 E045 59D2 6068 D10B AF91 9AA7
+
+### Alternative Contacts
+- **GitHub Issues**: Use the private vulnerability reporting feature on GitHub
+
+## Vulnerability Disclosure Process
+
+### 1. Discovery and Reporting
+- **Initial Contact**: Report discovered vulnerabilities to the primary email
+- **PGP Encryption**: Please encrypt sensitive vulnerability details using the PGP key
+- **Information Required**: Include detailed vulnerability descriptions and proof-of-concept
+- **Response Time**: Initial response within 48-72 hours
+
+### 2. Assessment and Classification
+- **Triage Process**: Security team assesses impact and severity within 5 business days
+- **Severity Levels**: 
+  - **Critical**: Direct code execution, privilege escalation, data compromise
+  - **High**: Significant security impact with limited exploitation potential
+  - **Medium**: Moderate security impact with user interaction required
+  - **Low**: Minimal security impact
+
+### 3. Resolution Timeline
+| Severity | Fix Time | Public Disclosure |
+|----------|-----------|-------------------|
+| Critical | 2-4 weeks | At fix release |
+| High | 4-8 weeks | At fix release |
+| Medium | 8-12 weeks | At fix release |
+| Low | Next release | At fix release |
+
+### 4. Disclosure Policy
+- **Coordinated Disclosure**: We follow coordinated vulnerability disclosure
+- **Public Disclosure**: Details disclosed after fix is available
+- **Credit**: Security researchers credited in advisories and acknowledgments
+
+## Security Scope
+
+### In Scope
+- PBGZ core compression/decompression algorithms
+- File handling and parsing components
+- Network communication protocols
+- Authentication and authorization mechanisms
+- Data encryption and integrity verification
+- Input validation and sanitization
+- Memory management and buffer handling
+- Configuration and parameter processing
+
+### Out of Scope
+- Dependencies and third-party libraries (handled separately)
+- Physical security of hardware components
+- Social engineering attacks
+- DoS attacks against network infrastructure
+- Vulnerabilities in outdated versions
+
+## Security Assurance
+
+### Threat Modeling
+- **Data Centered Approach**: Focus on genomic data protection throughout lifecycle
+- **Attack Surfaces**: Identify and mitigate potential attack vectors
+- **Data Flows**: Secure data handling across compression pipeline
+- **Trust Boundaries**: Clear separation between components and privilege levels
+
+### Secure Development
+- **Input Validation**: Comprehensive validation of FASTQ/FASTA inputs
+- **Memory Safety**: Secure memory management to prevent data leaks
+- **Configuration Security**: Secure handling of compression parameters and keys
+- **Error Handling**: Secure error reporting without information disclosure
+
+### Testing and Verification
+- **Fuzz Testing**: Comprehensive fuzz testing of input parsing
+- **Penetration Testing**: Regular security assessments
+- **Code Audits**: Static and dynamic security analysis
+- **Regression Testing**: Security regression test suite
+
+## Data Security Classification
+
+### Genomic Data Sensitivity
+- **PHI (Protected Health Information)**: Personal identifiers
+- **Genetic Information**: Sensitive genomic variants, disease markers
+- **Research Data**: Proprietary or confidential research results
+- **Clinical Data**: Patient diagnostic and treatment information
+
+### Protection Requirements
+- **Encryption**: AES encryption for data at rest and in transit
+- **Access Control**: Role-based access to compressed data
+- **Audit Trail**: Complete audit logging of data operations
+- **Integrity**: MD5 integrity verification of compressed files
+- **Retention**: Secure data handling and deletion procedures
+
+## Security Best Practices
+
+### For Users
+- **Access Control**: Restrict access to compressed files using file permissions
+- **Network Security**: Use secure channels for file transfer
+- **Backup Security**: Secure backup of compression configuration files
+- **Monitoring**: Monitor compression/decompression operations
+- **Updates**: Keep software updated to latest secure versions
 
-## 安全承诺
+### For Administrators
+- **System Hardening**: Apply OS and filesystem security configurations
+- **Resource Limits**: Set appropriate CPU, memory, and disk limits
+- **Logging**: Enable comprehensive logging and monitoring
+- **Vulnerability Management**: Regular security scanning and updates
+- **Incident Response**: Establish security incident procedures
 
-PBGZ 项目致力于维护开源生态系统的安全。我们重视社区的安全和隐私，并建立了完善的漏洞报告和处理流程。
+## Security Related Documents
 
-## 支持的版本
+For detailed technical security information, please refer to:
+- **[Security Analysis Report](security_analysis_report.md)**: Comprehensive security analysis
+- **[Threat Assessment](docs/threat_model.md)**: Threat model and analysis
+- **[Security Best Practices](docs/security_guide.md)**: Security configuration guide
+- **[Vulnerability Management](docs/vulnerability_process.md)**: Vulnerability handling process
 
-我们为以下版本提供安全更新：
+## Incidence Response
 
-| 版本系列 | 支持状态 | 发布时间 | 安全补丁 |
-|---------|---------|---------|---------|
-| v2.1.x  | ✅ 当前支持 | 2024-当前 | 定期更新 |
-| v2.0.x  | ⚠️ 有限支持 | 2023-2024 | 重要修复 |
-| v1.x.x  | ❌ 不再支持 | 2023之前 | 无更新 |
+### Security Incident Categories
+- **Data Compromise**: Unauthorized access to sensitive genomic data
+- **Service Disruption**: Attacks affecting compression service availability
+- **_privilege Escalation**: Unauthorized elevation of system privileges
+- **Data Integrity**: Unauthorized modification of compressed data
+- **System Compromise**: Full system takeover or malware infection
 
-**注意**: 只有最新版本系列接受安全更新。如果您使用的是不支持的版本，请升级到支持的版本。
+### Response Process
+1. **Detection**: Security monitoring and alerting
+2. **Assessment**: Incident classification and impact analysis
+3. **Containment**: Immediate isolation of affected systems
+4. **Eradication**: Remove threat and security vulnerabilities
+5. **Recovery**: Restore secure operations
+6. **Lessons Learned**: Post-incident review and improvement
 
-## 报告漏洞
+### Reporting Contacts
+| Time Zone | Contact Information | Response Time |
+|-----------|-------------------|---------------|
+| Weekdays (9:00-18:00 UTC+8) | Security Team | < 2 hours |
+| Weekends/Holidays | Security Team | < 8 hours |
+| Critical Incidents | Security Team | < 1 hour |
 
-### 🚨 私密报告
+## Security Tools
 
-**请不要在公开的 Issue 中报告安全漏洞**，因为这会向所有人暴露漏洞，给用户带来风险。
+### Recommended Security Tools
+- **Static Analysis**: CodeQL, SonarQube
+- **Dynamic Analysis**: Valgrind, AddressSanitizer
+- **Fuzz Testing**: AFL++, libFuzzer
+- **Dependency Scanning**: OWASP Dependency-Check
+- **Container Security**: Docker Security Scanning
+- **File Integrity**: AIDE, Tripwire
 
-### 📧 如何报告
+### Security Configuration
+- **SELinux/AppArmor**: Mandatory access control
+- **Firewall**: Network traffic filtering
+- **Intrusion Detection**: OSSEC, Snort
+- **Log Management**: ELK Stack, Splunk
+- **Security Monitoring**: Wazuh, OpenVAS
 
-如果您发现安全漏洞，请发送邮件至：
+---
 
-🔒 **安全邮箱**: `[pbgz-security@example.com]` (需要填写实际邮箱)
+| zstd       | 1.5.0   | Compression | ✅ Secure |
+| jsoncpp    | 1.9.4   | Configuration | ✅ Secure |
 
-**报告内容应包含**:
+### Dependency Security Updates
 
-- 📋 **漏洞描述**: 清楚描述漏洞的性质
-- 🎯 **影响范围**: 受影响的版本和配置
-- 📝 **复现步骤**: 详细的复现步骤
-- 💻 **环境信息**: 操作系统、编译器、依赖版本等
-- 🛡️ **缓解措施**: 如果您知道缓解方法，请分享
-- 📎 **相关文件**: 任何相关的日志、截图或代码片段
+We regularly audit and update dependencies:
 
-### ⏰ 响应时间
+- 📅 **Regular Checks**: Monthly security advisory checks
+- 🔄 **Automatic Updates**: Critical security patches updated automatically
+- 🧪 **Test Verification**: Comprehensive testing after updates
 
-我们承诺在以下时间内响应：
+## Threat Model
 
-- **确认收到**: 1 个工作日内
-- **初步评估**: 3-5 个工作日内
-- **详细分析**: 7-10 个工作日内
-- **修复发布**: 根据严重程度尽快发布
+### 🎯 Potential Threats
 
-## 漏洞分类
+#### Data Integrity Threats
 
-### 🔴 严重 (Critical)
+- 🗂️ **File Tampering**: Malicious modification of compressed files
+- 🔍 **Index Corruption**: Index file corruption or tampering
+- 📊 **Data Leakage**: Sensitive data leakage through compressed files
 
-- 远程代码执行
-- 权限提升
-- 数据泄露/篡改
-- 拒绝服务（系统级）
+#### Availability Threats
 
-**响应时间**: 48 小时内发布修复
+- 💥 **Denial of Service**: Program crashes through malicious input
+- 🔄 **Resource Exhaustion**: Resource exhaustion from large file processing
+- ⏰ **Performance Degradation**: Performance degradation through specially crafted input
 
-### 🟠 高危 (High)
+#### Configuration Threats
 
-- 本地权限提升
-- 信息泄露
-- 认证绕过
-- 拒绝服务（应用级）
+- ⚙️ **Configuration Injection**: Malicious configuration files
+- 🏗️ **Build Attacks**: Security vulnerabilities in build process
+- 🔌 **Plugin Security**: Security risks from third-party plugins
 
-**响应时间**: 1 周内发布修复
+### 🛡️ Mitigation Measures
 
-### 🟡 中危 (Medium)
-
-- 跨站脚本（如适用）
-- 配置错误
-- 中等影响的信息泄露
-
-**响应时间**: 2 周内发布修复
-
-### 🟢 低危 (Low)
-
-- 轻微信息泄露
-- 文档错误
-- 对安全性影响较小的问题
-
-**响应时间**: 1 个月内发布修复
-
-## 处理流程
-
-### 1. 📥 接收报告
-
-1. 我们会确认收到您的报告
-2. 分配唯一的跟踪编号
-3. 评估报告的完整性和可复现性
-
-### 2. 🔍 初步评估
-
-1. 确认漏洞的真实性
-2. 评估影响范围和严重程度
-3. 确定受影响的版本
-
-### 3. 🛠️ 开发修复
-
-1. 开发修复补丁
-2. 进行全面测试
-3. 更新相关文档
-
-### 4. 🚀 协调发布
-
-1. 确定发布时间表
-2. 准备安全公告
-3. 与相关社区协调
-
-### 5. 📢 公开披露
-
-1. 发布安全更新
-2. 公开漏洞详情（在修复可用后）
-3. 致谢报告者贡献
-
-## 安全最佳实践
-
-### 🔧 开发者指南
-
-#### 代码安全
-
-- 🛡️ **输入验证**: 始终验证来自外部的输入
-- 🔒 **缓冲区保护**: 防止缓冲区溢出
-- 🔑 **密钥管理**: 妥善管理密钥和敏感信息
-- 📝 **错误处理**: 安全地处理错误情况
-
-#### 依赖管理
-
-```cmake
-# 在 CMakeLists.txt 中使用安全的依赖版本
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(HTSLIB REQUIRED libhts>=1.12)
-```
-
-#### 编译选项
-
-```cmake
-# 启用安全编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fstack-protector-strong")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_FORTIFY_SOURCE=2")
-```
-
-### 🏭 部署安全
-
-#### 系统配置
-
-- 🔒 **权限控制**: 运行最小权限原则
-- 📁 **文件权限**: 正确设置文件和目录权限
-- 🌐 **网络安全**: 在网络环境中使用时考虑安全因素
-
-#### 监控和日志
-
-- 📊 **访问日志**: 记录文件访问日志
-- 🚨 **异常检测**: 监控异常行为
-- 📋 **审计跟踪**: 保持操作审计记录
-
-## 已知安全问题
-
-### 历史漏洞
-
-| CVE 编号 | 严重程度 | 影响版本 | 修复版本 | 发布日期 |
-|---------|---------|---------|---------|---------|
-| 暂无 | - | - | - | - |
-
-### 安全公告
-
-- [查看所有安全公告](链接到 GitHub Security Advisories)
-
-## 安全架构
-
-### 🏗️ 设计原则
-
-PBGZ 的安全设计基于以下原则：
-
-#### 🎯 最小权限
-
-- 组件只请求必要的权限
-- 文件操作遵循最小权限原则
-- 网络访问限制在必需范围
-
-#### 🛡️ 纵深防御
-
-- 多层安全检查
-- 输入验证和输出编码
-- 错误处理和异常管理
-
-#### 📦 安全默认
-
-- 默认配置安全
-- 敏感功能需要显式启用
-- 重要操作需要确认
-
-### 🔒 关键安全特性
-
-#### 文件完整性
+#### Input Validation
 
 ```cpp
-// MD5 校验确保文件完整性
-#include "utils/md5_util.h"
-
-bool verify_file_integrity(const std::string& file_path, 
-                          const std::string& expected_md5) {
-    std::string actual_md5 = md5_file(file_path);
-    return actual_md5 == expected_md5;
-}
-```
-
-#### 内存安全
-
-- 使用 RAII 管理资源
-- 避免原始指针操作
-- 启用编译器安全检查
-
-#### 输入验证
-
-```cpp
-// 示例：文件名验证
-bool is_valid_filename(const std::string& filename) {
-    // 检查路径遍历攻击
-    if (filename.find("..") != std::string::npos) {
-        return false;
-    }
-    // 检查非法字符
-    const std::string invalid_chars = "<>:\"|?*";
-    return filename.find_first_of(invalid_chars) == std::string::npos;
-}
-```
-
-## 第三方依赖安全
-
-### 依赖项列表
-
-| 依赖项 | 版本 | 用途 | 安全状态 |
-|--------|------|------|---------|
-| zlib | 1.2.11 | 压缩 | ✅ 安全 |
-| bzlib | 1.0.8 | 压缩 | ✅ 安全 |
-| libdeflate | 1.7 | 压缩 | ✅ 安全 |
-| htslib | 1.12 | 生物信息 | ✅ 安全 |
-| zstd | 1.5.0 | 压缩 | ✅ 安全 |
-| jsoncpp | 1.9.4 | 配置 | ✅ 安全 |
-
-### 依赖项安全更新
-
-我们定期审计和更新依赖项：
-
-- 📅 **定期检查**: 每月检查安全公告
-- 🔄 **自动更新**: 关键安全补丁自动更新
-- 🧪 **测试验证**: 更新后进行全面测试
-
-## 威胁模型
-
-### 🎯 潜在威胁
-
-#### 数据完整性威胁
-
-- 🗂️ **文件篡改**: 压缩文件被恶意修改
-- 🔍 **索引损坏**: 索引文件损坏或被篡改
-- 📊 **数据泄露**: 敏感数据通过压缩文件泄露
-
-#### 可用性威胁
-
-- 💥 **拒绝服务**: 通过恶意输入导致程序崩溃
-- 🔄 **资源耗尽**: 大文件处理导致资源耗尽
-- ⏰ **性能降级**: 通过特殊构造的输入降低性能
-
-#### 配置威胁
-
-- ⚙️ **配置注入**: 恶意配置文件
-- 🏗️ **构建攻击**: 构建过程中的安全漏洞
-- 🔌 **插件安全**: 第三方插件的安全风险
-
-### 🛡️ 缓解措施
-
-#### 输入验证
-
-```cpp
-// 严格验证所有输入
+// Strict validation of all inputs
 class InputValidator {
 public:
     static bool validate_file_size(size_t size) {
@@ -293,124 +225,124 @@ public:
 };
 ```
 
-#### 错误处理
+#### Error Handling
 
 ```cpp
-// 安全的错误处理
+// Secure error handling
 try {
-    // 危险操作
+    // Dangerous operation
     process_file(file_path);
 } catch (const std::exception& e) {
-    // 记录错误但不暴露敏感信息
+    // Log errors without exposing sensitive information
     log_error("Processing failed: " + std::string(e.what()));
-    // 安全地恢复
+    // Secure recovery
     cleanup();
     return false;
 }
 ```
 
-## 安全测试
+## Security Testing
 
-### 🧪 测试策略
+### 🧪 Testing Strategy
 
-#### 单元测试
+#### Unit Testing
 
-- 边界条件测试
-- 异常输入测试
-- 错误路径测试
+- Boundary condition testing
+- Exceptional input testing
+- Error path testing
 
-#### 集成测试
+#### Integration Testing
 
-- 文件处理测试
-- 网络安全测试
-- 并发安全测试
+- File processing testing
+- Network security testing
+- Concurrency security testing
 
-#### 渗透测试
+#### Penetration Testing
 
-- 模糊测试
-- 边界扫描
-- 代码审计
+- Fuzz testing
+- Boundary scanning
+- Code audit
 
-### 📊 安全指标
+### 📊 Security Metrics
 
-- 🐛 漏洞密度
-- ⏱️ 平均修复时间
-- 📈 安全覆盖率
-- ✅ 合规性检查
+- 🐛 Vulnerability density
+- ⏱️ Mean time to fix
+- 📈 Security coverage rate
+- ✅ Compliance checks
 
-## 合规性
+## Compliance
 
-### 📋 法规遵循
+### 📋 Regulatory Compliance
 
-PBGZ 遵循相关的安全法规和标准：
+PBGZ follows relevant security regulations and standards:
 
-- **GPL-3.0 许可证**: 开源许可证合规
-- **数据保护**: 遵循数据保护最佳实践
-- **出口管制**: 遵循相关出口管制法规
+- **MIT License**: Open source license compliance
+- **Data Protection**: Follow data protection best practices
+- **Export Control**: Comply with relevant export control regulations
 
-### 🔍 审计和认证
+### 🔍 Audit and Certification
 
-- 📊 **代码审计**: 定期进行代码安全审计
-- 🏆 **安全认证**: 计划获得相关安全认证
-- 📝 **合规报告**: 定期发布合规性报告
+- 📊 **Code Audits**: Regular code security audits
+- 🏆 **Security Certification**: Plan to obtain relevant security certifications
+- 📝 **Compliance Reports**: Regular publication of compliance reports
 
-## 社区安全
+## Community Security
 
-### 👥 安全团队
+### 👥 Security Team
 
-我们的安全团队负责：
+Our security team is responsible for:
 
-- 🔍 漏洞评估和修复
-- 📋 安全策略制定
-- 🛠️ 安全工具开发
-- 📚 安全意识培训
+- 🔍 Vulnerability assessment and remediation
+- 📋 Security policy development
+- 🛠️ Security tool development
+- 📚 Security awareness training
 
-### 🤝 社区参与
+### 🤝 Community Participation
 
-我们鼓励社区参与安全工作：
+We encourage community participation in security work:
 
-- 🐛 报告潜在安全问题
-- 💡 提出安全改进建议
-- 🔬 参与安全测试
-- 📖 贡献安全文档
+- 🐛 Report potential security issues
+- 💡 Propose security improvements
+- 🔬 Participate in security testing
+- 📖 Contribute security documentation
 
-## 联系信息
+## Contact Information
 
-### 🆘 紧急联系
+### 🆘 Emergency Contact
 
-如果您需要报告紧急安全问题：
+If you need to report urgent security issues:
 
-- 📧 **安全邮箱**: `[pbgz-security@example.com]`
-- 🔑 **PGP 密钥**: `[提供 PGP 密钥指纹]`
+- 📧 **Security Email**: `[wenjinyang2729@phytiumn.com.cn]`
+- 🔑 **PGP Key**: `[642C 2089 D438 0E27 E045 59D2 6068 D10B AF91 9AA7]`
 
-### 📞 一般咨询
+### 📞 General Inquiries
 
-对于一般安全相关问题：
+For general security-related questions:
 
-- 💬 **GitHub Discussions**: 在安全频道讨论
-- 📧 **项目邮箱**: `[pbgz@example.com]`
+- 💬 **GitHub Discussions**: Discuss in security channel
+- 📧 **Project Email**: `[wenjinyang2729@phytiumn.com.cn]`
 
-## 致谢
+## Acknowledgments
 
-我们感谢以下人员和组织对 PBGZ 安全工作的贡献：
+We thank the following individuals and organizations for their contributions to PBGZ security:
 
-- 🌟 **安全研究者**: 报告漏洞的研究者
-- 🏢 **组织机构**: 提供支持的机构
-- 👥 **社区成员**: 参与安全测试的社区成员
+- 🌟 **Security Researchers**: Researchers who reported vulnerabilities
+- 🏢 **Organizations**: Supporting institutions
+- 👥 **Community Members**: Community members who participated in security testing
 
-## 更新日志
+## Changelog
 
-### 安全更新
+### Security Updates
 
-| 日期 | 版本 | 更新类型 | 描述 |
-|------|------|---------|------|
-| [待补充] | v2.1.0 | 🛡️ 安全增强 | 初始安全框架 |
+| Date | Version | Update Type | Description |
+|------|---------|-------------|-------------|
+| 2026-1-26 | v2.1.0 | 🛡️ Security Enhancement | Initial security framework |
 | | | | |
 
 ---
 
-**安全是每个人的责任**。如果您发现任何安全问题或有改进建议，请务必告诉我们。让我们一起维护 PBGZ 项目的安全！🔒
+**Security is everyone's responsibility**. If you discover any security issues or have suggestions for improvement, please let us know. Together, let's maintain the security of the PBGZ project! 🔒
 
 ---
 
-*最后更新: 2024年1月*
+*Last updated: January 2026*
