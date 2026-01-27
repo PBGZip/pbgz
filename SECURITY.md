@@ -167,10 +167,6 @@ For detailed technical security information, please refer to:
 - **Log Management**: ELK Stack, Splunk
 - **Security Monitoring**: Wazuh, OpenVAS
 
----
-
-| zstd       | 1.5.7   | Compression | ✅ Secure |
-| jsoncpp    | 1.9.6   | Configuration | ✅ Secure |
 
 ### Dependency Security Updates
 
@@ -276,9 +272,9 @@ try {
 
 PBGZ follows relevant security regulations and standards:
 
-- **MIT License**: Open source license compliance
 - **Data Protection**: Follow data protection best practices
 - **Export Control**: Comply with relevant export control regulations
+- **License**: See [LICENSE](LICENSE) file for license information
 
 ### 🔍 Audit and Certification
 
@@ -312,15 +308,15 @@ We encourage community participation in security work:
 
 If you need to report urgent security issues:
 
-- 📧 **Security Email**: `[wenjinyang2729@phytiumn.com.cn]`
-- 🔑 **PGP Key**: `[642C 2089 D438 0E27 E045 59D2 6068 D10B AF91 9AA7]`
+- 📧 **Security Email**: wenjinyang2729@phytiumn.com.cn
+- 🔑 **PGP Key**: 642C 2089 D438 0E27 E045 59D2 6068 D10B AF91 9AA7
 
 ### 📞 General Inquiries
 
 For general security-related questions:
 
 - 💬 **GitHub Discussions**: Discuss in security channel
-- 📧 **Project Email**: `[wenjinyang2729@phytiumn.com.cn]`
+- 📧 **Project Email**: wenjinyang2729@phytiumn.com.cn
 
 ## Acknowledgments
 
