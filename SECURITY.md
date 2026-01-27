@@ -169,8 +169,8 @@ For detailed technical security information, please refer to:
 
 ---
 
-| zstd       | 1.5.0   | Compression | ✅ Secure |
-| jsoncpp    | 1.9.4   | Configuration | ✅ Secure |
+| zstd       | 1.5.7   | Compression | ✅ Secure |
+| jsoncpp    | 1.9.6   | Configuration | ✅ Secure |
 
 ### Dependency Security Updates
 
