@@ -24,7 +24,7 @@ This project is licensed under the MIT License. For detailed license terms, plea
 
 This project uses the following open-source third-party components, and we hereby express our gratitude 🙏:
 
-#### 1. 🧬 HTSlib (Version 1.12)
+#### 1. 🧬 HTSlib (Version 1.22)
 - **📜 License**: BSD 3-Clause License
 - **🎯 Purpose**: Handling HTS (High-Throughput Sequencing) data formats
 - **🔗 Source**: https://github.com/samtools/htslib
@@ -42,7 +42,7 @@ This project uses the following open-source third-party components, and we hereb
 - **📂 Source**: Included in src/coder/bcm_libsais.cpp
 - **🔧 Modifications**: Integrated into the project encoder
 
-#### 4. 🗜️ ZLIB (Version 1.2.11)
+#### 4. 🗜️ ZLIB (Version 1.3.1)
 - **📜 License**: zlib License
 - **🎯 Purpose**: Data compression library
 - **🔗 Source**: https://zlib.net/
@@ -57,12 +57,12 @@ This project uses the following open-source third-party components, and we hereb
 - **🎯 Purpose**: High-performance DEFLATE compression/decompression
 - **🔗 Source**: https://github.com/ebiggers/libdeflate
 
-#### 7. 🚀 ZSTD (Version 1.5.0)
+#### 7. 🚀 ZSTD (Version 1.5.7)
 - **📜 License**: BSD + GPLv2 Dual License
 - **🎯 Purpose**: Zstandard compression algorithm support
 - **🔗 Source**: https://github.com/facebook/zstd
 
-#### 8. 📝 JSONCPP (Version 1.9.4)
+#### 8. 📝 JSONCPP (Version 1.9.6)
 - **📜 License**: MIT License
 - **🎯 Purpose**: JSON parsing and generation
 - **🔗 Source**: https://github.com/open-source-parsers/jsoncpp
@@ -148,14 +148,14 @@ SOFTWARE.
 
 | Dependency | Version | License | Purpose | Status |
 |------------|---------|---------|---------|--------|
-| HTSlib | 1.12 | BSD 3-Clause | HTS data formats | ✅ Integrated |
+| HTSlib | 1.22 | BSD 3-Clause | HTS data formats | ✅ Integrated |
 | FarmHash | Latest | MIT | Hash functions | ✅ Used |
 | SAIS | Embedded | BSD | Sorting algorithm | ✅ Integrated |
-| ZLIB | 1.2.11 | zlib | Compression | ✅ Supported |
+| ZLIB | 1.3.1 | zlib | Compression | ✅ Supported |
 | BZIP2 | Latest | BSD | Compression | ✅ Supported |
 | LIBDEFLATE | 1.7 | MIT | DEFLATE | ✅ Supported |
-| ZSTD | 1.5.0 | BSD + GPLv2 | Zstandard | ✅ Supported |
-| JSONCPP | 1.9.4 | MIT | JSON parsing | ✅ Used |
+| ZSTD | 1.5.7 | BSD + GPLv2 | Zstandard | ✅ Supported |
+| JSONCPP | 1.9.6 | MIT | JSON parsing | ✅ Used |
 | Google Test | Latest | BSD 3-Clause | Testing | ✅ Dev-only |
 | SPINLOCK | Multiple | Various | Concurrency | ✅ Integrated |
 
