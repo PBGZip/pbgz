@@ -62,7 +62,6 @@ Thumbs.db
 # Log files
 *.log
 logs/
-log/
 
 # Runtime files
 *.pid
@@ -124,8 +123,6 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
-*.cmake
-!cmake/
 
 # Build directories (comprehensive)
 build*/
