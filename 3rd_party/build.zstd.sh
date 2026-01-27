@@ -23,7 +23,7 @@ mkdir -p $installpath/include
 echo "----[install path: $installpath]----"
 
 root=`pwd`
-libname=zstd-1.5.0
+libname=zstd-1.5.7
 rm -rf $root/$libname || true # Ignore errors from rm
 tar -xvf $libname.tar.gz
 cd $libname
@@ -35,10 +35,10 @@ if [ $buildtype == "release" ] ; then
   # Use cp -f instead of yes|cp
   cp -f $root/$libname/lib/libzstd.a $installpath/lib/
   cp -f $root/$libname/lib/zstd.h $installpath/include/
+  cp -f $root/$libname/lib/zstd_errors.h $installpath/include/
 else
   echo "----[error type: build type $buildtype not defined]----"
   exit 1
 fi
 
 cd $root && rm -rf $root/$libname || true # Ignore errors from rm
-
