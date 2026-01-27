@@ -15,13 +15,13 @@ export BUILDTYPE=$buildtype
 echo "----[build type: $buildtype]----"
 
 # build path
-buildpath=`pwd`/../3rd_party/$buildtype
+buildpath=`pwd`/$buildtype
 if [ ! -d "$buildpath" ]; then
   mkdir -p $buildpath
 fi
 echo "----[build path: $buildpath]----"
 
-libname=htslib-1.12
+libname=htslib-1.22
 rm -rf $libname || true # Ignore errors from rm command
 tar -xvf $libname.tar.bz2
 cd $libname
@@ -35,7 +35,7 @@ export C_INCLUDE_PATH=$buildpath/libdeflate/include:$buildpath/bzip2/include
 # start to build
  if [ $buildtype == "release" ] ; then
     autoreconf -i
-    ./configure CFLAGS=-fPIC --prefix=$buildpath/hts --disable-lzma --with-libdeflate --enable-bz2 --disable-libcurl --disable-s3
+    ./configure CFLAGS=-fPIC --prefix=$buildpath/hts --disable-lzma --with-libdeflate --enable-bz2 --disable-libcurl --disable-s3 --disable-ref-cache
     make -j $(nproc) # Using nproc instead of cat /proc/cpuinfo for better portability
     make install 
 else
@@ -45,4 +45,3 @@ fi
 
 
 cd ../ && rm -rf $libname || true # Ignore errors from rm command
-

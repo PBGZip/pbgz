@@ -21,7 +21,7 @@ if [ ! -d "$buildpath" ]; then
 fi
 echo "----[build path: $buildpath]----"
 
-libname=zlib-1.2.11
+libname=zlib-1.3.1
 root=`pwd`/$libname
 rm -rf $libname || true # Ignore errors from rm command
 tar -xvf $libname.tar.gz
@@ -38,4 +38,3 @@ else
 fi
 
 rm -rf $root || true # Ignore errors from rm command
-

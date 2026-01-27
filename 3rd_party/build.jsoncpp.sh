@@ -20,7 +20,7 @@ fi
 echo "----[install path: $installpath]----"
 
 root=`pwd`
-libname=jsoncpp-1.9.4
+libname=jsoncpp-1.9.6
 rm -rf $libname || true # Ignore errors from rm command
 tar -xvf $libname.tar.gz
 cd $libname
