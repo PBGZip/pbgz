@@ -50,7 +50,7 @@ This Code of Conduct also applies when an individual represents the project or i
 If you experience or witness behavior that violates this Code of Conduct, please report it through the following channels:
 
 📧 **Contact Information**:
-- Email: [wenjinyang2729@phytiumn.com.cn]
+- Email: wenjinyang2729@phytium.com.cn
 - GitHub: [Create a private Issue or contact maintainers]
 
 🔒 **Confidentiality**: All reports will be kept strictly confidential, and we will investigate while protecting the reporter's privacy.
