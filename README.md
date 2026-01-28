@@ -177,6 +177,7 @@ PBGZ 使用子命令格式，主要参数如下：
 
 #### 示例1：压缩 FASTQ 文件
 
+
 ```bash
 # 压缩基因测序数据
 pbgz compress sample_NovaSeq.fastq -o sample_NovaSeq.pbgz -r hg38.fa -l 9 -t 16
@@ -270,4 +271,4 @@ pbgz decompress compressed.pbgz -o - | grep "sequence"
 
 - 项目主页: https://github.com/PBGZip/pbgz
 - 问题报告: https://github.com/PBGZip/pbgz/issues
-- 邮箱: wenjinyang2729@phytiumn.com.cn
+- 邮箱: wenjinyang2729@phytium.com.cn

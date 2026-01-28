@@ -13,7 +13,7 @@
 To report a security vulnerability, please use the following channels:
 
 ### Primary Contact
-- **Email**: wenjinyang2729@phytiumn.com.cn
+- **Email**: wenjinyang2729@phytium.com.cn
 - **PGP Key**: 642C 2089 D438 0E27 E045 59D2 6068 D10B AF91 9AA7
 
 ### Alternative Contacts
@@ -308,15 +308,15 @@ We encourage community participation in security work:
 
 If you need to report urgent security issues:
 
-- 📧 **Security Email**: wenjinyang2729@phytiumn.com.cn
-- 🔑 **PGP Key**: 642C 2089 D438 0E27 E045 59D2 6068 D10B AF91 9AA7
+- 📧 **Security Email**: wenjinyang2729@phytium.com.cn
+- 🔑 **PGP Key**: C586 BCF9 3221 374E 77C7 333B A5F1 2E20 9F96 F119
 
 ### 📞 General Inquiries
 
 For general security-related questions:
 
 - 💬 **GitHub Discussions**: Discuss in security channel
-- 📧 **Project Email**: wenjinyang2729@phytiumn.com.cn
+- 📧 **Project Email**: wenjinyang2729@phytium.com.cn
 
 ## Acknowledgments
 
