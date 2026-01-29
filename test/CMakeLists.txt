@@ -26,8 +26,6 @@ file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp
 
 list(REMOVE_ITEM PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
-set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
-
 # Add main test file
 set(TEST_MAIN ${CMAKE_CURRENT_SOURCE_DIR}/pbgz_test_main.cpp)
 
@@ -45,7 +43,6 @@ include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/libdeflate/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/bzip2/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/zlib/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/googletest/googletest/include)
-include_directories(${CMAKE_SOURCE_DIR}/3rd_party/md5sum)
 
 # Link to libraries - Add PRIVATE keyword to match style with CoreServices linkage
 target_link_libraries(pbgz_test PRIVATE
