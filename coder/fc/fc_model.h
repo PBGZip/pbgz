@@ -76,8 +76,8 @@ const int FC_RANK_PP_TH0 =   22; const int FC_RANK_PP_AR0 =  964;
 const int FC_RANK_PP_TH1 =   -2; const int FC_RANK_PP_AR1 = 1110;
 const int FC_RANK_PM_TH0 = -194; const int FC_RANK_PM_AR0 =   21;
 const int FC_RANK_PM_TH1 = -129; const int FC_RANK_PM_AR1 =   20;
-const int FC_RANK_PM_LR0 =  480; const int FC_RANK_PM_LR1 =  202;
-const int FC_RANK_PM_LR2 =   17;
+const int FC_RANK_PM_LR0 =  197; const int FC_RANK_PM_LR1 =   83;
+const int FC_RANK_PM_LR2 =   11;
 
 const int FC_RUN_TS_TH0 =  -93; const int FC_RUN_TS_AR0 =   34;
 const int FC_RUN_TS_TH1 =   -4; const int FC_RUN_TS_AR1 =   51;
@@ -87,8 +87,8 @@ const int FC_RUN_TP_TH0 =  275; const int FC_RUN_TP_AR0 =  450;
 const int FC_RUN_TP_TH1 =   -6; const int FC_RUN_TP_AR1 =  579;
 const int FC_RUN_TM_TH0 =  -68; const int FC_RUN_TM_AR0 =   25;
 const int FC_RUN_TM_TH1 =    1; const int FC_RUN_TM_AR1 =   64;
-const int FC_RUN_TM_LR0 =   15; const int FC_RUN_TM_LR1 =   50;
-const int FC_RUN_TM_LR2 =   20;
+const int FC_RUN_TM_LR0 =   31; const int FC_RUN_TM_LR1 =  103;
+const int FC_RUN_TM_LR2 =   42;
 
 const int FC_RUN_ES_TH0 = -116; const int FC_RUN_ES_AR0 =   31;
 const int FC_RUN_ES_TH1 =   43; const int FC_RUN_ES_AR1 =   45;
