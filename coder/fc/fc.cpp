@@ -39,6 +39,17 @@ See also the bsc and libbsc web site:
 #include <stddef.h>
 #include <stdio.h>
 
+// 在 contextRank4 里挤出 2 bit 给 avgRank bucket
+// 把 avgRank 映射到 4 个粗粒度 bucket（0..3）
+static INLINE int fc_avgRank_bucket(int avgRank)
+{
+    // avgRank ~ MTF rank 的指数滑动平均，范围大致 0..maxRank
+    if (avgRank < 2)  return 0;  // 极度局部：几乎总在 tid=0/1
+    if (avgRank < 4)  return 1;  // 偏局部：小 rank 为主
+    if (avgRank < 8)  return 2;  // 中等
+    return 3;                    // rank 经常偏大
+}
+
 // #define FC_DEBUG
 
 #if FC_CPU_TYPES >= FC_CPU_TYPES_SSE41
@@ -452,7 +463,6 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
     const unsigned char * inputEnd      = input  + inputSize;
     const unsigned char * tidArrayEnd  = buffer + inputSize;
 
-    int current;
     for (; tidArray < tidArrayEnd; ) // 循环处理每个tid，即transform的内容
     {
         // if (((tidArrayEnd - tidArray) & 0xFF) == 0)
@@ -667,9 +677,10 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         }
 
         avgRank         =   (avgRank * 125 + tid * 3) >> 7; // 当前tid被编码完，放到avgRank中去，其实这也是一个context，
-        tid            =   tid - 1;
+        tid             =   tid - 1;
         history         =   runHistory[currentChar];
-        state           =   lstate(contextRank0, contextRun, tid, history);
+        int avgBucket   =   fc_avgRank_bucket(avgRank); // 新增 avgRank 的 bucket（0..3）
+        state           =   lstate(contextRank0, contextRun, tid, history, avgBucket); // lstate 里内部再把 tid 压成 0,1,2,>=3 的 2 bit
         statePredictor  = & model->run_t.state_model[state];
         charPredictor   = & model->run_t.char_model[currentChar];
         staticPredictor = & model->run_t.static_model;
@@ -762,9 +773,19 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
             }
         }
 
-        contextRank0 = ((contextRank0 << 1) | (tid == 0   ? 1    : 0)) & 0x7;
-        contextRank4 = ((contextRank4 << 2) | (tid < 3    ? tid : 3)) & 0xff;
-        contextRun   = ((contextRun   << 1) | (runSize < 3 ? 1    : 0)) & 0xf;
+        contextRank0 = ((contextRank0 << 1) | (tid == 0 ? 1 : 0)) & 0x7;
+
+        // 1) 把 tid 历史压成 3 个事件 * 2bit = 6bit，放在低 6 位
+        int tidBucket = (tid < 3 ? tid : 3);        // 0,1,2,3
+        avgBucket = fc_avgRank_bucket(avgRank); // 0..3
+        int rank_hist = ((contextRank4 & 0x3f) << 2) | tidBucket; // 仅低 6 位左移并塞入新的 bucket
+        rank_hist &= 0x3f;                                        // 防止溢出
+
+        // 2) 高 2 位放 avgRank bucket
+        contextRank4 = rank_hist | (avgBucket << 6);
+
+        // run 历史保持不变
+        contextRun = ((contextRun << 1) | (runSize < 3 ? 1 : 0)) & 0xf;
     }
 
     return coder.FinishEncoder();
@@ -840,7 +861,6 @@ int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 
         prevChar = currentChar; usedChar[currentChar] = 1;
     }
 
-    int current;
     for (int i = 0; i < n;)
     {
         // current = (i* 100) / n;
@@ -987,9 +1007,10 @@ int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 
         }
 
         avgRank         =   (avgRank * 125 + tid * 3) >> 7;
-        tid            =   tid - 1;
+        tid             =   tid - 1;
         history         =   runHistory[currentChar];
-        state           =   lstate(contextRank0, contextRun, tid, history);
+        int avgBucket   =   fc_avgRank_bucket(avgRank);
+        state           =   lstate(contextRank0, contextRun, tid, history, avgBucket);
         statePredictor  = & model->run_t.state_model[state];
         charPredictor   = & model->run_t.char_model[currentChar];
         staticPredictor = & model->run_t.static_model;
@@ -1066,9 +1087,13 @@ int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 
             mixer->UpdateBit0(FC_RUN_TM_LR0, FC_RUN_TM_LR1, FC_RUN_TM_LR2, FC_RUN_TM_TH0, FC_RUN_TM_AR0);
         }
 
-        contextRank0 = ((contextRank0 << 1) | (tid == 0   ? 1    : 0)) & 0x7;
-        contextRank4 = ((contextRank4 << 2) | (tid < 3    ? tid : 3)) & 0xff;
-        contextRun   = ((contextRun   << 1) | (runSize < 3 ? 1    : 0)) & 0xf;
+        contextRank0 = ((contextRank0 << 1) | (tid == 0 ? 1 : 0)) & 0x7;
+        int tidBucket = (tid < 3 ? tid : 3);
+        avgBucket = fc_avgRank_bucket(avgRank);
+        int rank_hist = ((contextRank4 & 0x3f) << 2) | tidBucket;
+        rank_hist &= 0x3f;
+        contextRank4 = rank_hist | (avgBucket << 6);
+        contextRun = ((contextRun << 1) | (runSize < 3 ? 1 : 0)) & 0xf;
 
         for (; runSize > 0; --runSize) output[i++] = currentChar;
     }
