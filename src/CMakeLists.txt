@@ -19,7 +19,6 @@ set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rd_party)
 include_directories(
     ${THIRDPARTY_DIR}/release/jsoncpp/include
     ${THIRDPARTY_DIR}/release/zstd/include
-    ${THIRDPARTY_DIR}/md5sum
     ${THIRDPARTY_DIR}/release/hts/include
     ${THIRDPARTY_DIR}/release/intel/isa-l/include
     ${THIRDPARTY_DIR}/release/libdeflate/include
@@ -45,9 +44,6 @@ file(GLOB PBGZ_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/log/*.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/utils/*.cpp
 )
-
-# Directly compiled open source code
-set(PBGZ_OPEN_SOURCES ${THIRDPARTY_DIR}/md5sum/md5sum.cpp)
 
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp )
 

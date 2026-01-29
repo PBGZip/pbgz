@@ -1,3 +1,26 @@
+/*
+ * main.cpp - Source file for pbgz project
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include <iostream>
 #include <getopt.h>
 #include <filesystem>
@@ -264,7 +287,7 @@ public:
     }
     
     int32_t startEngine() override {
-        // 实现启动压缩引擎的逻辑
+        // Implement compression engine startup logic
         engine = new CompressEngine(parameter);
         if (engine->init() != 0) {
             LOG_ERROR("Compress engine init error.");
@@ -330,7 +353,7 @@ public:
     
 
     int32_t startEngine() override {
-        // 实现启动解压缩引擎的逻辑
+        // Implement decompression engine startup logic
         engine = new DecompressEngine(parameter);
         if (engine->init() != 0) {
             return -1;
@@ -361,7 +384,7 @@ public:
     }
     
     int32_t startEngine() override {
-        // 实现启动索引引擎的逻辑
+        // Implement index engine startup logic
         engine = new IndexEngine(parameter);
         if (engine->init() != 0) {
             return -1;
@@ -372,11 +395,11 @@ public:
 
 using CommandHandler = std::function<CommandProc*(PbgzParameter&)>;
 
-// 二级命令结构
+// Subcommand structure
 struct SubCommand {
-    std::string name;               // 命令名称（如 "compress"）
-    std::string description;        // 命令描述
-    std::vector<char> args;          // 该命令支持的选项
+    std::string name;               // Subcommand name, e.g., "compress"
+    std::string description;        // Subcommand description
+    std::vector<char> args;          // Options supported by subcommand
     CommandHandler handler;
 };
 
@@ -416,7 +439,7 @@ void printUsage(const std::string& subCommandName = "") {
     fprintf(fp, "pbgz: %s\n", PbgzManager::getInstance().getVersion().c_str());
     
     if (subCommandName.empty()) {
-        // 显示通用帮助信息
+        // Display general help information
         fprintf(fp, "Usage: pbgz subCommand [FILE] [OPTION]\n\n");
         fprintf(fp, "Available subcommands:\n");
         for (auto& cmd : subCommands) {
@@ -429,7 +452,7 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
         fprintf(fp, "  pbgz index human.fq.gz.pbgz\n\n");
     } else {
-        // 显示特定子命令的帮助信息
+        // Display specific subcommand help information
         SubCommand* targetCmd = nullptr;
         for (auto& cmd : subCommands) {
             if (cmd.name == subCommandName) {
@@ -452,7 +475,7 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "Description: %s\n\n", targetCmd->description.c_str());
         fprintf(fp, "Options for %s:\n", subCommandName.c_str());
         
-        // 显示该子命令支持的选项
+        // Display options supported by subcommand
         for (auto &a : pbgzArgs) {
             bool supported = false;
             for (char supportedArg : targetCmd->args) {
@@ -466,7 +489,7 @@ void printUsage(const std::string& subCommandName = "") {
             }
         }
         
-        // 显示示例
+        // Display examples
         if (subCommandName == "compress") {
             fprintf(fp, "\nExample:\n");
             fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
@@ -493,14 +516,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // 检查第一个参数是否是 help 或 version
+    // Check if the first argument is help or version
     std::string firstArg = argv[1];
     if (firstArg == "help") {
         if (argc >= 3) {
-            // 显示特定子命令的帮助信息
+            // Display specific subcommand help information
             printUsage(argv[2]);
         } else {
-            // 显示通用帮助信息
+            // Display general help information
             printUsage();
         }
         return 0;
@@ -527,16 +550,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // 使用子命令的新逻辑
+    // Use command line argument processing logic
     PbgzParameter parameter;
 
-    // 构建选项字符串，只包含子命令支持的选项
+    // Build option string containing only options supported by current subcommand
     std::string argOption = "";
     option longopts[pbgzArgs.size() + 1];
     int optIndex = 0;
     
     for (uint32_t i = 0; i < pbgzArgs.size(); ++i) {
-        // 检查这个选项是否被当前子命令支持
+        // Check if subcommand option is supported by current subcommand
         bool supported = false;
         for (char supportedArg : selectedSubCommand->args) {
             if (pbgzArgs[i].argShort == supportedArg) {
@@ -565,7 +588,7 @@ int main(int argc, char** argv) {
     }
     longopts[optIndex] = {nullptr, 0, nullptr, 0};
 
-    // 重置optind以跳过子命令名称
+    // Reset optind to skip program name and subcommand
     optind = 2;
     
     int opt = 0;
@@ -637,7 +660,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // 处理剩余的参数（输入文件等）
+    // Process remaining arguments (such as input files, etc.)
     if (optind < argc) {
         if (argc - optind > 1) {
             fprintf(stdout, "Only one file is allowed");
@@ -646,7 +669,7 @@ int main(int argc, char** argv) {
         parameter.inputFile = argv[optind];
     }
 
-    // 创建并执行子命令处理器
+    // Create and execute command processor
     CommandProc* processor = selectedSubCommand->handler(parameter);
     if (!processor) {
         LOG_ERROR("Failed to create command processor");

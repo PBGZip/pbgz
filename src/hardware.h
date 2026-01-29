@@ -1,6 +1,29 @@
+/*
+ * hardware.h - Header file for pbgz project
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #pragma once
 
-/* 指令集检测*/
+/* Instruction set detection */
 
 #include <stdio.h>
 #include <stdint.h>
@@ -13,10 +36,10 @@
 #define CPUID_REGION_SHIFT_FID 20
 #define CPUID_REGION_SHIFT_LEN 5
 
-#define CPUID_REGION_MASK_REG 0x00000C00        /* 寄存器: 0:EAX, 1:EBX, 2:ECX, 3:EDX */
-#define CPUID_REGION_MASK_FID_SUB 0x000FF000 /* 子功能号(低8位) */
-#define CPUID_REGION_MASK_POS 0x0000001F         /* [0,31] bit偏移 */
-#define CPUID_REGION_MASK_LEN 0x000003E0         /* [1, 32] bit长 */
+#define CPUID_REGION_MASK_REG 0x00000C00        /* Register: 0:EAX, 1:EBX, 2:ECX, 3:EDX */
+#define CPUID_REGION_MASK_FID_SUB 0x000FF000 /* Sub-function ID (low 8 bits) */
+#define CPUID_REGION_MASK_POS 0x0000001F         /* [0,31] bit offset */
+#define CPUID_REGION_MASK_LEN 0x000003E0         /* [1, 32] bit length */
 
 #define CPUID_REGION_PRODUCE(f, fs, r, p, l) (((f)&0xF0000000) \
     | ((f) << CPUID_REGION_SHIFT_FID & 0x0FF00000) \
@@ -62,7 +85,7 @@ private:
                      : "memory");
     }
 
-    /* 根据CPUIDREGION获取CPUID区域 */
+    /* Get CPUID region based on CPUIDREGION */
     static inline uint32_t getCpuIdRegion(const uint32_t &cInfo)
     {
         uint32_t buffer[4];
@@ -101,11 +124,11 @@ private:
         return sseLevel;
     }
 
-    /* 获取AVX系列指令集的支持级别 */
+    /* Get AVX series instruction set support level */
     static inline int getSimdAvxLevel()
     {
         int avxLevel = 0;
-        /* 获取处理器信息*/
+        /* Get processor information */
         if (0 != getCpuIdRegion(CPUF_AVX))
         {
             ++avxLevel;
@@ -113,7 +136,7 @@ private:
                 ++avxLevel;
         }
 
-        /*  检查操作系统是否支持*/
+        /* Check if operating system supports it */
         if (0 != getCpuIdRegion(CPUF_OSXSAVE)) /* XGETBV enabled for application use */
         {
             uint32_t n = getCpuIdRegion(CPUF_XFSM); /* XCR0: XFeatureSupportedMask register */
