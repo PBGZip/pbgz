@@ -74,11 +74,11 @@ http://msdn.microsoft.com/en-us/windows/hardware/gg487368.aspx#E2
 Special Notes:
 ------------------------
 
-1. It is based on BSC
+1. It is based on the BSC algorithm with optimized improvements.
 
 2. Modifications include at least the following aspects:
- 2.1 Adjustments to LZP's hashsize and minlen parameters
- 2.2 Block size configuration aligned with the default setting for FASTQ compression
- 2.3 Context-adaptive coding model improvements including probability update mechanisms
+ 2.1 Optimize the context-adaptive coding model, including optimizing the probability update model (e.g., modifying the tid history) and updating the corresponding state tables, and so on.
+ 2.2 Adjustments to LZP's hashsize and minlen parameters
+ 2.3 Block size configuration aligned with the default setting for FASTQ compression
  2.4 Interface adaptations specifically modified for a designated BSC version, with appropriate feature pruning to prevent potential conflicts with the native libbsc implementation
 
