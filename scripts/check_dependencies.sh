@@ -3,7 +3,7 @@
 # Script to check third-party library dependencies
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-THIRDPARTY_DIR="$ROOT_DIR/3rdlib/release"
+THIRDPARTY_DIR="$ROOT_DIR/3rd_party/release"
 MISSING_LIBS=0
 
 echo "Checking third-party library dependencies..."

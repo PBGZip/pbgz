@@ -1,5 +1,4 @@
 #!/bin/bash
-# filepath: /Users/ligen/workspace/pbgz/build-debug.sh
 set -e
 
 # Get script directory
