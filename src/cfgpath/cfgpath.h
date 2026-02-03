@@ -350,7 +350,17 @@ static inline void get_user_data_folder(char *out, unsigned int maxlen, const ch
 		out += config_len;
 		/* Make the .local/share folder if it doesn't already exist */
 		*out = '\0';
-		mkdir(out_orig, 0755);
+		// Fixed: Create parent directory first to handle missing .local directory
+		// This fix ensures recursive directory creation for Linux XDG compliance
+		// Modified: 2026-02-02 to fix issue where .local directory doesn't exist
+		char temp_path[MAX_PATH];
+		strcpy(temp_path, out_orig);
+		char *last_slash = strrchr(temp_path, '/');
+		if (last_slash) {
+			*last_slash = '\0';
+			mkdir(temp_path, 0755);  // Create .local
+		}
+		mkdir(out_orig, 0755);      // Create .local/share
 	}
 	memcpy(out, appname, appname_len);
 	out += appname_len;

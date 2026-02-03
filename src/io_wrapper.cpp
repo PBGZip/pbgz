@@ -150,6 +150,45 @@ void* FileReader::getAt(size_t pos) {
     return fo.mappedAddress + pos;
 }
 
+size_t FileReader::readLine(std::string& line) {
+    line.clear();
+    
+    if (fo.mappedAddress == nullptr || fo.position >= fo.fileSize) {
+        return 0;
+    }
+    
+    size_t startPos = fo.position;
+    uint8_t* current = fo.mappedAddress + fo.position;
+    
+    // Find newline character
+    while (fo.position < fo.fileSize) {
+        if (*current == '\n') {
+            break;
+        }
+        current++;
+        fo.position++;
+    }
+    
+    size_t lineLength = fo.position - startPos;
+    
+    // If newline found, skip it
+    if (fo.position < fo.fileSize && *current == '\n') {
+        fo.position++;
+    }
+    
+    // Handle Windows-style line breaks \r\n
+    if (lineLength > 0 && fo.mappedAddress[startPos + lineLength - 1] == '\r') {
+        lineLength--;
+    }
+    
+    // Build string
+    if (lineLength > 0) {
+        line.append(reinterpret_cast<char*>(fo.mappedAddress + startPos), lineLength);
+    }
+    
+    return lineLength;
+}
+
 int32_t FileWriter::openIO() {
     if (0 != fo.openIO()) {
         LOG_ERROR("File writer open failed.");
@@ -261,25 +300,80 @@ size_t PipeReader::readIO(void* pBuffer, size_t readSize) {
     size_t totalRead = 0;
     uint8_t* buffer = static_cast<uint8_t*>(pBuffer);
     
-    // 循环读取直到达到请求的大小或没有更多数据
+    // Loop read until reaching requested size or no more data
     while (totalRead < readSize) {
         ssize_t bytesRead = read(STDIN_FILENO, buffer + totalRead, readSize - totalRead);
         if (bytesRead < 0) {
             if (errno == EINTR) {
-                continue; // 被信号中断，重试
+                continue; // Interrupted by signal, retry
             } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break; // 非阻塞模式下无数据可读
+                break; // No data available in non-blocking mode
             } else {
-                return -1; // 其他错误
+                return -1; // Other errors
             }
         } else if (bytesRead == 0) {
-            break; // EOF，写入端关闭
+            break; // EOF, write end closed
         }
         
         totalRead += bytesRead;
     }
     
     return totalRead;
+}
+
+size_t PipeReader::readLine(std::string& line) {
+    line.clear();
+    
+    // Initialize buffer (if not already allocated)
+    if (lineBuffer == nullptr) {
+        bufferSize = 8192;  // 8KB buffer
+        lineBuffer = new char[bufferSize];
+        bufferPos = 0;
+        bytesRead = 0;
+    }
+    
+    size_t totalRead = 0;
+    
+    while (true) {
+        // If buffer data has been processed, read new data
+        if (bufferPos >= static_cast<size_t>(bytesRead)) {
+            bytesRead = read(STDIN_FILENO, lineBuffer, bufferSize);
+            if (bytesRead <= 0) {
+                // EOF or error, return number of characters read
+                return totalRead;
+            }
+            bufferPos = 0;
+        }
+        
+        // Process characters in buffer
+        while (bufferPos < static_cast<size_t>(bytesRead)) {
+            char c = lineBuffer[bufferPos++];
+            totalRead++;
+            
+            // If newline encountered, stop reading
+            if (c == '\n') {
+                return totalRead;
+            }
+            
+            // If carriage return encountered, skip it (Windows-style line breaks)
+            if (c == '\r') {
+                continue;
+            }
+            
+            // Add character to line
+            line += c;
+        }
+    }
+    
+    return totalRead;
+}
+
+PipeReader::~PipeReader() {
+    // Clean up buffer
+    if (lineBuffer != nullptr) {
+        delete[] lineBuffer;
+        lineBuffer = nullptr;
+    }
 }
 
 size_t PipeWriter::writeIO(const void* pBuffer, size_t writeLen) {
@@ -319,6 +413,63 @@ void GzFileReader::closeIO() {
         bgzf_close(fpGz);
         fpGz = nullptr;
     }
+    
+    // Clean up buffer
+    if (lineBuffer != nullptr) {
+        delete[] lineBuffer;
+        lineBuffer = nullptr;
+    }
+}
+
+size_t GzFileReader::readLine(std::string& line) {
+    line.clear();
+    
+    if (fpGz == nullptr) {
+        return 0;
+    }
+    
+    // Initialize buffer (if not already allocated)
+    if (lineBuffer == nullptr) {
+        bufferSize = 8192;  // 8KB buffer
+        lineBuffer = new char[bufferSize];
+        bufferPos = 0;
+        bytesRead = 0;
+    }
+    
+    size_t totalRead = 0;
+    
+    while (true) {
+        // If buffer data has been processed, read new data
+        if (bufferPos >= static_cast<size_t>(bytesRead)) {
+            bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
+            if (bytesRead <= 0) {
+                // EOF or error, return number of characters read
+                return totalRead;
+            }
+            bufferPos = 0;
+        }
+        
+        // Process characters in buffer
+        while (bufferPos < static_cast<size_t>(bytesRead)) {
+            char c = lineBuffer[bufferPos++];
+            totalRead++;
+            
+            // If newline encountered, stop reading
+            if (c == '\n') {
+                return totalRead;
+            }
+            
+            // If carriage return encountered, skip it (Windows-style line breaks)
+            if (c == '\r') {
+                continue;
+            }
+            
+            // Add character to line
+            line += c;
+        }
+    }
+    
+    return totalRead;
 }
 
 int GzFileWriter::openIO() {
@@ -413,7 +564,7 @@ size_t FastGzFileReader::readIO(void* pBuffer, size_t readSize) {
                 return -1;
             }
 
-            // 读取更多数据并重置状态
+            // Read more data and reset state
             if (!readMoreDataAndReset(isalIn, isalInLen, isalOut, isalOutLen, false)) {
                 return -1;
             }
@@ -428,7 +579,7 @@ size_t FastGzFileReader::readIO(void* pBuffer, size_t readSize) {
                 isalState.avail_in = fileReader.readIO(isalState.next_in, readLen);
                 fileDone = isalState.avail_in == 0;
             } else {
-                // 处理多gzip头的情况
+                // Handle multiple gzip headers case
                 isalRes = processMultipleGzipHeaders();
                 if (isalRes != ISAL_DECOMP_OK) {
                     return -1;
@@ -449,6 +600,59 @@ void FastGzFileReader::closeIO() {
     fileReader.closeIO();
     MemoryUtil::safeFree(isalExtraBuffer);
     MemoryUtil::safeFree(isalInputBuffer);
+    
+    // Clean up buffer
+    if (lineBuffer != nullptr) {
+        delete[] lineBuffer;
+        lineBuffer = nullptr;
+    }
+}
+
+size_t FastGzFileReader::readLine(std::string& line) {
+    line.clear();
+    
+    // Initialize buffer (if not already allocated)
+    if (lineBuffer == nullptr) {
+        bufferSize = 8192;  // 8KB buffer
+        lineBuffer = new char[bufferSize];
+        bufferPos = 0;
+        bytesRead = 0;
+    }
+    
+    size_t totalRead = 0;
+    
+    while (true) {
+        // If buffer data has been processed, read new data
+        if (bufferPos >= bytesRead) {
+            bytesRead = readIO(lineBuffer, bufferSize);
+            if (bytesRead == 0) {
+                // EOF, return number of characters read
+                return totalRead;
+            }
+            bufferPos = 0;
+        }
+        
+        // Process characters in buffer
+        while (bufferPos < bytesRead) {
+            char c = lineBuffer[bufferPos++];
+            totalRead++;
+            
+            // If newline encountered, stop reading
+            if (c == '\n') {
+                return totalRead;
+            }
+            
+            // If carriage return encountered, skip it (Windows-style line breaks)
+            if (c == '\r') {
+                continue;
+            }
+            
+            // Add character to line
+            line += c;
+        }
+    }
+    
+    return totalRead;
 }
 
 bool FastGzFileReader::readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen, uint8_t* isalOut, uint32_t isalOutLen, bool isMultipleHeaders) {
@@ -472,7 +676,7 @@ bool FastGzFileReader::readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen,
     isalState.avail_out = isalOutLen;
     isalState.next_out = isalOut;
 
-    // 如果读取的数据为0，说明文件已结束
+    // If read data is 0, it means file has ended
     if (actualReadLen == 0) {
         LOG_ERROR("Invalid gz file. errno = %d.", ISAL_END_INPUT);
         return false;
@@ -482,16 +686,16 @@ bool FastGzFileReader::readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen,
 
 int64_t FastGzFileReader::processMultipleGzipHeaders() {
     for (;;) {
-        /* 记录当前解压位置信息，包括原始数据的位置的长度，输出数据的位置和长度 */
+        /* Record current decompression position info, including original data position and length, output data position and length */
         uint8_t* isalIn = isalState.next_in;
         int64_t isalInLen = isalState.avail_in;
         uint8_t* isalOut = isalState.next_out;
         int64_t isalOutLen = isalState.avail_out;
 
-        /* 当遇到有些特别特殊的，有多个头的gz文件时，intel gz需要重置header */
+        /* When encountering some special gz files with multiple headers, intel gz needs to reset header */
         isal_inflate_reset(&isalState);
         int64_t isalRes = isal_read_gzip_header(&isalState, &isalHeader);
-        if (ISAL_DECOMP_OK == isalRes) {/* 解压gz ok，退出*/
+        if (ISAL_DECOMP_OK == isalRes) {/* Gz decompression ok, exit*/
             break;
         }
         if (isalRes != ISAL_END_INPUT) {
@@ -508,6 +712,10 @@ int64_t FastGzFileReader::processMultipleGzipHeaders() {
 
 GzPipeReader::GzPipeReader(uint32_t paral) {
     parallel = paral;
+    lineBuffer = nullptr;
+    bufferSize = 0;
+    bufferPos = 0;
+    bytesRead = 0;
 }
 
 int GzPipeReader::openIO() {
@@ -539,6 +747,63 @@ void GzPipeReader::closeIO() {
         bgzf_close(fpGz);
         fpGz = nullptr;
     }
+    
+    // Clean up buffer
+    if (lineBuffer != nullptr) {
+        delete[] lineBuffer;
+        lineBuffer = nullptr;
+    }
+}
+
+size_t GzPipeReader::readLine(std::string& line) {
+    line.clear();
+    
+    if (fpGz == nullptr) {
+        return 0;
+    }
+    
+    // Initialize buffer (if not already allocated)
+    if (lineBuffer == nullptr) {
+        bufferSize = 8192;  // 8KB buffer
+        lineBuffer = new char[bufferSize];
+        bufferPos = 0;
+        bytesRead = 0;
+    }
+    
+    size_t totalRead = 0;
+    
+    while (true) {
+        // If buffer data has been processed, read new data
+        if (bufferPos >= static_cast<size_t>(bytesRead)) {
+            bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
+            if (bytesRead <= 0) {
+                // EOF or error, return number of characters read
+                return totalRead;
+            }
+            bufferPos = 0;
+        }
+        
+        // Process characters in buffer
+        while (bufferPos < static_cast<size_t>(bytesRead)) {
+            char c = lineBuffer[bufferPos++];
+            totalRead++;
+            
+            // If newline encountered, stop reading
+            if (c == '\n') {
+                return totalRead;
+            }
+            
+            // If carriage return encountered, skip it (Windows-style line breaks)
+            if (c == '\r') {
+                continue;
+            }
+            
+            // Add character to line
+            line += c;
+        }
+    }
+    
+    return totalRead;
 }
 
 GzPipeWriter::GzPipeWriter(uint32_t paral) {
@@ -583,23 +848,23 @@ FastGzPipeReader::FastGzPipeReader() : stateInitialized(false), inputBuffer(null
 }
 
 int FastGzPipeReader::openIO() {
-    // 初始化管道读取器
+    // Initialize pipe reader
     int ret = pipeReader.openIO();
     if (ret != 0) {
         return ret;
     }
 
-    // 初始化ISAL解压状态
+    // Initialize ISAL decompression state
     isal_inflate_init(&state);
     state.crc_flag = ISAL_GZIP_NO_HDR_VER;
     stateInitialized = true;
 
-    // 初始化gzip头
+    // Initialize gzip header
     isal_gzip_header_init(&gzipHeader);
 
-    // 分配缓冲区
-    inputBufferSize = 64 * 1024; // 64KB输入缓冲区
-    outputBufferSize = 128 * 1024; // 128KB输出缓冲区
+    // Allocate buffers
+    inputBufferSize = 64 * 1024; // 64KB input buffer
+    outputBufferSize = 128 * 1024; // 128KB output buffer
     remainingBufferSize = outputBufferSize;
     
     inputBuffer = MemoryUtil::safeAlloc<uint8_t>(inputBufferSize);
@@ -628,18 +893,18 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
         return 0;
     }
 
-    // 直接使用ISAL状态，参考FastGzFileReader的模式
+    // Directly use ISAL state, referencing FastGzFileReader pattern
     state.next_out = static_cast<uint8_t*>(pBuffer);
     state.avail_out = readSize;
     
     size_t totalCopied = 0;
     
     while (totalCopied < readSize) {
-        // 如果没有更多输入数据，需要从管道读取
+        // If no more input data available, read from pipe
         if (state.avail_in == 0) {
             size_t bytesRead = pipeReader.readIO(inputBuffer, inputBufferSize);
             if (bytesRead == 0) {
-                // 没有更多数据可读，结束
+                // No more data to read, end
                 streamEnded = true;
                 break;
             }
@@ -647,12 +912,12 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
             state.next_in = inputBuffer;
             state.avail_in = bytesRead;
             
-            // 如果是第一次读取或有新的gzip流，需要读取gzip头
+            // If first read or new gzip stream, need to read gzip header
             if (state.avail_in > 0) {
                 int ret = isal_read_gzip_header(&state, &gzipHeader);
                 if (ret != ISAL_DECOMP_OK) {
                     if (ret == ISAL_END_INPUT) {
-                        // 需要更多数据才能解析头
+                        // Need more data to parse header
                         continue;
                     } else {
                         LOG_ERROR("Invalid gzip header, error: %d", ret);
@@ -662,28 +927,28 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
             }
         }
         
-        // 执行解压
+        // Perform decompression
         uint32_t ret = isal_inflate(&state);
         
-        // 计算本次解压的数据量
+        // Calculate amount of data decompressed this time
         size_t decompressedSize = readSize - state.avail_out;
         totalCopied += decompressedSize;
         
         if (ret == ISAL_DECOMP_OK) {
-            // 解压完成，继续下一轮
+            // Decompression complete, continue to next round
             continue;
         } else if (ret == ISAL_END_INPUT) {
-            // 当前gzip流结束，准备下一个流
+            // Current gzip stream ended, prepare for next stream
             isal_inflate_reset(&state);
             state.crc_flag = ISAL_GZIP_NO_HDR_VER;
             isal_gzip_header_init(&gzipHeader);
             
-            // 如果还有输入数据，尝试解析下一个gzip头
+            // If still have input data, try to parse next gzip header
             if (state.avail_in > 0) {
                 ret = isal_read_gzip_header(&state, &gzipHeader);
                 if (ret != ISAL_DECOMP_OK) {
                     if (ret == ISAL_END_INPUT) {
-                        // 需要更多数据
+                        // Need more data
                         continue;
                     } else {
                         LOG_ERROR("Invalid gzip header in next stream, error: %d", ret);
@@ -696,7 +961,7 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
             return totalCopied;
         }
         
-        // 如果已经满足请求的大小，退出
+        // If requested size is satisfied, exit
         if (totalCopied >= readSize) {
             break;
         }
@@ -708,7 +973,7 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
 void FastGzPipeReader::closeIO() {
     pipeReader.closeIO();
     
-    // 清理缓冲区
+    // Clean up buffers
     if (inputBuffer) {
         MemoryUtil::safeFree(inputBuffer);
         inputBuffer = nullptr;
@@ -722,11 +987,55 @@ void FastGzPipeReader::closeIO() {
         remainingBuffer = nullptr;
     }
     
-    // 重置状态
+    // Reset state
     remainingSize = 0;
     streamEnded = false;
     inputBufferSize = 0;
     outputBufferSize = 0;
     remainingBufferSize = 0;
     stateInitialized = false;
+}
+
+size_t FastGzPipeReader::readLine(std::string& line) {
+    line.clear();
+    
+    // Use larger buffer for batch reading to improve efficiency
+    const size_t BUFFER_SIZE = 8192;  // 8KB buffer
+    char buffer[BUFFER_SIZE];
+    size_t totalRead = 0;
+    size_t bufferPos = 0;
+    size_t bytesRead = 0;
+    
+    while (true) {
+        // If buffer data has been processed, read new data
+        if (bufferPos >= bytesRead) {
+            bytesRead = readIO(buffer, BUFFER_SIZE);
+            if (bytesRead == 0) {
+                // EOF, return number of characters read
+                return totalRead;
+            }
+            bufferPos = 0;
+        }
+        
+        // Process characters in buffer
+        while (bufferPos < bytesRead) {
+            char c = buffer[bufferPos++];
+            totalRead++;
+            
+            // If newline encountered, stop reading
+            if (c == '\n') {
+                return totalRead;
+            }
+            
+            // If carriage return encountered, skip it (Windows-style line breaks)
+            if (c == '\r') {
+                continue;
+            }
+            
+            // Add character to line
+            line += c;
+        }
+    }
+    
+    return totalRead;
 }
