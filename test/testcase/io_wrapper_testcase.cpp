@@ -360,3 +360,412 @@ TEST(FastPileGzReaderTest, FastPileGzReaderRead) {
     // Clean up
     remove(gzFileName.c_str());
 }
+
+// FileReader readLine测试 - 基本功能
+TEST(FileReaderTest, ReadLineBasic) {
+    std::string fileName = "readline_basic.txt";
+    (void)remove(fileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    writer.writeIO("Line 1\nLine 2\nLine 3\n", 21);
+    writer.closeIO();
+
+    FileReader reader(fileName);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    
+    // FileReader返回的是行内容长度（不包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 6);  // "Line 1" = 6个字符
+    EXPECT_EQ(line, "Line 1");
+    
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 6);  // "Line 2" = 6个字符
+    EXPECT_EQ(line, "Line 2");
+    
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 6);  // "Line 3" = 6个字符
+    EXPECT_EQ(line, "Line 3");
+    
+    // 读取EOF
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 0);
+    
+    reader.closeIO();
+    remove(fileName.c_str());
+}
+
+// FileReader readLine测试 - 超长行（超过8KB缓冲区）
+TEST(FileReaderTest, ReadLineLongLine) {
+    std::string fileName = "readline_long.txt";
+    (void)remove(fileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    
+    // 创建一个超过8KB的长行
+    std::string longLine(10000, 'X');  // 10KB长行
+    longLine += "\n";
+    writer.writeIO(longLine.c_str(), longLine.length());
+    
+    // 添加一个短行
+    writer.writeIO("Short\n", 6);
+    writer.closeIO();
+
+    FileReader reader(fileName);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    
+    // FileReader返回的是行内容长度（不包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 10000);  // 10000个'X'（不包括换行符）
+    EXPECT_EQ(line.length(), 10000);
+    EXPECT_EQ(line[0], 'X');
+    EXPECT_EQ(line[9999], 'X');
+    
+    // 读取短行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 5);  // "Short" = 5个字符
+    EXPECT_EQ(line, "Short");
+    
+    reader.closeIO();
+    remove(fileName.c_str());
+}
+
+// FileReader readLine测试 - 跨缓冲区场景
+TEST(FileReaderTest, ReadLineCrossBuffer) {
+    std::string fileName = "readline_cross_buffer.txt";
+    (void)remove(fileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    
+    // 创建多个行，总长度超过8KB，确保跨缓冲区读取
+    std::string content;
+    for (int i = 0; i < 100; i++) {
+        content += "Line " + std::to_string(i) + ": " + std::string(80, 'A' + (i % 26)) + "\n";
+    }
+    writer.writeIO(content.c_str(), content.length());
+    writer.closeIO();
+
+    FileReader reader(fileName);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t totalBytes = 0;
+    int lineCount = 0;
+    
+    // 读取所有行
+    while (true) {
+        size_t bytesRead = reader.readLine(line);
+        if (bytesRead == 0) break;
+        
+        totalBytes += bytesRead;
+        lineCount++;
+        
+        // 验证行内容格式
+        EXPECT_GT(line.length(), 0);
+        EXPECT_TRUE(line.find("Line ") == 0);
+        
+        // 验证行号
+        std::string expectedPrefix = "Line " + std::to_string(lineCount - 1) + ": ";
+        EXPECT_TRUE(line.find(expectedPrefix) == 0);
+    }
+    
+    // 验证读取了所有行
+    EXPECT_EQ(lineCount, 100);
+    EXPECT_GT(totalBytes, 8000);  // 确保总字节数超过8KB
+    
+    reader.closeIO();
+    remove(fileName.c_str());
+}
+
+// FileReader readLine测试 - Windows换行符
+TEST(FileReaderTest, ReadLineWindowsCRLF) {
+    std::string fileName = "readline_crlf.txt";
+    (void)remove(fileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    
+    // 写入Windows风格的换行符
+    std::string content = "Line 1\r\nLine 2\r\nLine 3\r\n";
+    writer.writeIO(content.c_str(), content.length());
+    writer.closeIO();
+
+    FileReader reader(fileName);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    
+    // 读取第一行（应该去掉\r）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 6);
+    EXPECT_EQ(line, "Line 1");
+    
+    // 读取第二行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 6);
+    EXPECT_EQ(line, "Line 2");
+    
+    // 读取第三行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 6);
+    EXPECT_EQ(line, "Line 3");
+    
+    reader.closeIO();
+    remove(fileName.c_str());
+}
+
+// FileReader readLine测试 - 空行和单字符行
+TEST(FileReaderTest, ReadLineEdgeCases) {
+    std::string fileName = "readline_edge.txt";
+    (void)remove(fileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    
+    // 写入各种边界情况
+    std::string content = "\nA\n\nBC\n\n\n";
+    writer.writeIO(content.c_str(), content.length());
+    writer.closeIO();
+
+    FileReader reader(fileName);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    
+    // 读取空行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 0);
+    EXPECT_EQ(line, "");
+    
+    // 读取单字符行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 1);
+    EXPECT_EQ(line, "A");
+    
+    // 读取空行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 0);
+    EXPECT_EQ(line, "");
+    
+    // 读取两字符行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 2);
+    EXPECT_EQ(line, "BC");
+    
+    // 读取连续空行
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 0);
+    EXPECT_EQ(line, "");
+    
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 0);
+    EXPECT_EQ(line, "");
+    
+    reader.closeIO();
+    remove(fileName.c_str());
+}
+
+// GzFileReader readLine测试 - 基本功能
+TEST(GzFileReaderTest, ReadLineBasic) {
+    std::string fileName = "gz_readline_basic.txt";
+    std::string gzFileName = "gz_readline_basic.txt.gz";
+    (void)remove(fileName.c_str());
+    (void)remove(gzFileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    writer.writeIO("Line 1\nLine 2\nLine 3\n", 21);
+    writer.closeIO();
+
+    system("gzip gz_readline_basic.txt -f");
+
+    GzFileReader reader(gzFileName, 1);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    
+    // 读取第一行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 7);  // "Line 1\n" = 7个字符
+    EXPECT_EQ(line, "Line 1");
+    
+    // 读取第二行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 7);  // "Line 2\n" = 7个字符
+    EXPECT_EQ(line, "Line 2");
+    
+    // 读取第三行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 7);  // "Line 3\n" = 7个字符
+    EXPECT_EQ(line, "Line 3");
+    
+    // 读取EOF
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 0);
+    
+    reader.closeIO();
+    remove(gzFileName.c_str());
+    remove(fileName.c_str());
+}
+
+// GzFileReader readLine测试 - 超长行和跨缓冲区
+TEST(GzFileReaderTest, ReadLineLongAndCrossBuffer) {
+    std::string fileName = "gz_readline_long.txt";
+    std::string gzFileName = "gz_readline_long.txt.gz";
+    (void)remove(fileName.c_str());
+    (void)remove(gzFileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    
+    // 创建超长行和多个行，测试跨缓冲区
+    std::string content;
+    content += std::string(12000, 'X') + "\n";  // 12KB长行
+    for (int i = 0; i < 50; i++) {
+        content += "GzLine " + std::to_string(i) + ": " + std::string(100, 'A' + (i % 26)) + "\n";
+    }
+    writer.writeIO(content.c_str(), content.length());
+    writer.closeIO();
+
+    system("gzip gz_readline_long.txt -f");
+
+    GzFileReader reader(gzFileName, 1);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    int lineCount = 0;
+    
+    // 读取超长行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 12001);  // 12000个'X' + 1个换行符
+    EXPECT_EQ(line.length(), 12000);
+    lineCount++;
+    
+    // 读取后续所有行
+    while (true) {
+        bytesRead = reader.readLine(line);
+        if (bytesRead == 0) break;
+        
+        lineCount++;
+        // 验证行内容格式
+        EXPECT_TRUE(line.find("GzLine ") == 0);
+    }
+    
+    // 验证读取了所有行
+    EXPECT_EQ(lineCount, 51);  // 1个长行 + 50个普通行
+    
+    reader.closeIO();
+    remove(gzFileName.c_str());
+    remove(fileName.c_str());
+}
+
+// FastGzFileReader readLine测试
+TEST(FastGzFileReaderTest, ReadLineBasic) {
+    std::string fileName = "fastgz_readline_basic.txt";
+    std::string gzFileName = "fastgz_readline_basic.txt.gz";
+    (void)remove(fileName.c_str());
+    (void)remove(gzFileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    writer.writeIO("FastLine1\nFastLine2\nFastLine3\n", 30);
+    writer.closeIO();
+
+    system("gzip fastgz_readline_basic.txt -f");
+
+    FastGzFileReader reader(gzFileName);
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    
+    // 读取所有行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 10);  // "FastLine1\n" = 10个字符
+    EXPECT_EQ(line, "FastLine1");
+    
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 10);  // "FastLine2\n" = 10个字符
+    EXPECT_EQ(line, "FastLine2");
+    
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 10);  // "FastLine3\n" = 10个字符
+    EXPECT_EQ(line, "FastLine3");
+    
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 0);
+    
+    reader.closeIO();
+    remove(gzFileName.c_str());
+    remove(fileName.c_str());
+}
+
+// PipeReader readLine测试
+TEST(PipeReaderTest, ReadLineBasic) {
+    std::string fileName = "pipe_readline.txt";
+    (void)remove(fileName.c_str());
+    
+    FileWriter writer(fileName);
+    writer.openIO();
+    std::string content = "PipeLine1\nPipeLine2\n";
+    content += std::string(9000, 'Y') + "\n";  // 9KB长行，测试跨缓冲区
+    content += "PipeLine3\n";
+    writer.writeIO(content.c_str(), content.length());
+    writer.closeIO();
+
+    // 通过管道发送数据
+    std::string cmd = "cat " + fileName;
+    FILE* pipe = popen(cmd.c_str(), "r");
+    EXPECT_NE(pipe, nullptr);
+    
+    int saved_stdin = dup(STDIN_FILENO);
+    dup2(fileno(pipe), STDIN_FILENO);
+    
+    PipeReader reader;
+    EXPECT_EQ(reader.openIO(), 0);
+    
+    std::string line;
+    size_t bytesRead;
+    
+    // 读取第一行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 10);  // "PipeLine1\n" = 10个字符
+    EXPECT_EQ(line, "PipeLine1");
+    
+    // 读取第二行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 10);  // "PipeLine2\n" = 10个字符
+    EXPECT_EQ(line, "PipeLine2");
+    
+    // 读取长行（跨缓冲区，包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 9001);  // 9000个'Y' + 1个换行符
+    EXPECT_EQ(line.length(), 9000);
+    EXPECT_EQ(line[0], 'Y');
+    EXPECT_EQ(line[8999], 'Y');
+    
+    // 读取第三行（包括换行符）
+    bytesRead = reader.readLine(line);
+    EXPECT_EQ(bytesRead, 10);  // "PipeLine3\n" = 10个字符
+    EXPECT_EQ(line, "PipeLine3");
+    
+    reader.closeIO();
+    
+    dup2(saved_stdin, STDIN_FILENO);
+    close(saved_stdin);
+    pclose(pipe);
+    
+    remove(fileName.c_str());
+}

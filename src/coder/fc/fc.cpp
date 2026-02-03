@@ -39,6 +39,17 @@ See also the bsc and libbsc web site:
 #include <stddef.h>
 #include <stdio.h>
 
+// Squeeze 2 bits from contextRank4 for avgRank bucket
+// Map avgRank to 4 coarse-grained buckets (0..3)
+static INLINE int fc_avgRank_bucket(int avgRank)
+{
+    // avgRank ~ exponential moving average of MTF rank, range approximately 0..maxRank
+    if (avgRank < 2)  return 0;  // extremely local: almost always at tid=0/1
+    if (avgRank < 4)  return 1;  // somewhat local: mainly small ranks
+    if (avgRank < 8)  return 2;  // medium
+    return 3;                    // rank often large
+}
+
 // #define FC_DEBUG
 
 #if FC_CPU_TYPES >= FC_CPU_TYPES_SSE41
@@ -452,15 +463,14 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
     const unsigned char * inputEnd      = input  + inputSize;
     const unsigned char * tidArrayEnd  = buffer + inputSize;
 
-    int current;
-    for (; tidArray < tidArrayEnd; ) // Loop to process each tid, the content of transform
+    for (; tidArray < tidArrayEnd; ) // Process each tid in loop, i.e., the content of transform
     {
         if (coder.is_end())
         {
             return FC_FAILED_ZIP;
         }
         
-        // Calculate how many times the current character loops, recorded as runSize, and input offsets to the next non-repeating character
+        // Calculate how many times the current character repeats, recorded as runSize, and input advances to the next non-repeating character
         int currentChar = *input, runSize;
         {
             const unsigned char * inputStart = input++;
@@ -507,7 +517,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
             runSize = (int)(input - inputStart);
         }
 
-        // Modeling approach: First describe the variables involved in the current process: tid, current character (MTFTable), runSize (how many times the character repeats)
+        // Modeling approach: First describe the variables involved in the current process: tid, current character (MTFTable), runSize (character repetition count)
         int tid = *tidArray++;
         int history = tidHistory[currentChar]; // This history value is the number of valid bits for the tid corresponding to the current character minus 1, tidHistory should be less than 8, i.e., only 3 bits
         int state = model_tid_state(contextRank4, contextRun, history);
@@ -664,7 +674,8 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         avgRank         =   (avgRank * 125 + tid * 3) >> 7; // Current tid encoding is completed, put into avgRank, this is actually also a context,
         tid            =   tid - 1;
         history         =   runHistory[currentChar];
-        state           =   lstate(contextRank0, contextRun, tid, history);
+        int avgBucket   =   fc_avgRank_bucket(avgRank); // Add avgRank bucket (0..3)
+        state           =   lstate(contextRank0, contextRun, tid, history, avgBucket); // lstate internally compresses tid into 0,1,2,>=3 as 2 bits
         statePredictor  = & model->run_t.state_model[state];
         charPredictor   = & model->run_t.char_model[currentChar];
         staticPredictor = & model->run_t.static_model;
@@ -757,9 +768,19 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
             }
         }
 
-        contextRank0 = ((contextRank0 << 1) | (tid == 0   ? 1    : 0)) & 0x7;
-        contextRank4 = ((contextRank4 << 2) | (tid < 3    ? tid : 3)) & 0xff;
-        contextRun   = ((contextRun   << 1) | (runSize < 3 ? 1    : 0)) & 0xf;
+        contextRank0 = ((contextRank0 << 1) | (tid == 0 ? 1 : 0)) & 0x7;
+
+        // 1) Compress tid history into 3 events * 2bit = 6bit, placed in low 6 bits
+        int tidBucket = (tid < 3 ? tid : 3);        // 0,1,2,3
+        avgBucket = fc_avgRank_bucket(avgRank); // 0..3
+        int rank_hist = ((contextRank4 & 0x3f) << 2) | tidBucket; // Only low 6 bits shifted left and new bucket inserted
+        rank_hist &= 0x3f;                                        // Prevent overflow
+
+        // 2) High 2 bits store avgRank bucket
+        contextRank4 = rank_hist | (avgBucket << 6);
+
+        // run history remains unchanged
+        contextRun = ((contextRun << 1) | (runSize < 3 ? 1 : 0)) & 0xf;
     }
 
     return coder.FinishEncoder();
@@ -835,7 +856,6 @@ int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 
         prevChar = currentChar; usedChar[currentChar] = 1;
     }
 
-    int current;
     for (int i = 0; i < n;)
     {
         // current = (i* 100) / n;
@@ -984,7 +1004,8 @@ int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 
         avgRank         =   (avgRank * 125 + tid * 3) >> 7;
         tid            =   tid - 1;
         history         =   runHistory[currentChar];
-        state           =   lstate(contextRank0, contextRun, tid, history);
+        int avgBucket   =   fc_avgRank_bucket(avgRank);
+        state           =   lstate(contextRank0, contextRun, tid, history, avgBucket);
         statePredictor  = & model->run_t.state_model[state];
         charPredictor   = & model->run_t.char_model[currentChar];
         staticPredictor = & model->run_t.static_model;
@@ -1061,9 +1082,13 @@ int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 
             mixer->UpdateBit0(FC_RUN_TM_LR0, FC_RUN_TM_LR1, FC_RUN_TM_LR2, FC_RUN_TM_TH0, FC_RUN_TM_AR0);
         }
 
-        contextRank0 = ((contextRank0 << 1) | (tid == 0   ? 1    : 0)) & 0x7;
-        contextRank4 = ((contextRank4 << 2) | (tid < 3    ? tid : 3)) & 0xff;
-        contextRun   = ((contextRun   << 1) | (runSize < 3 ? 1    : 0)) & 0xf;
+        contextRank0 = ((contextRank0 << 1) | (tid == 0 ? 1 : 0)) & 0x7;
+        int tidBucket = (tid < 3 ? tid : 3);
+        avgBucket = fc_avgRank_bucket(avgRank);
+        int rank_hist = ((contextRank4 & 0x3f) << 2) | tidBucket;
+        rank_hist &= 0x3f;
+        contextRank4 = rank_hist | (avgBucket << 6);
+        contextRun = ((contextRun << 1) | (runSize < 3 ? 1 : 0)) & 0xf;
 
         for (; runSize > 0; --runSize) output[i++] = currentChar;
     }
@@ -1106,4 +1131,3 @@ int fc_decode(const unsigned char * input, unsigned char * output)
     }
     return FC_LACK_OF_MEMORY;
 }
-
