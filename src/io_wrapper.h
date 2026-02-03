@@ -47,6 +47,8 @@ public:
     virtual size_t readIO(void* pBuffer, size_t readSize) = 0;
 
     virtual ~IOReader() {};
+
+    virtual size_t readLine(std::string& line) = 0;
 };
 
 class IOWriter {
@@ -103,6 +105,8 @@ public:
     void closeIO() {return fo.closeIO();}
 
     size_t readIO(void* pBuffer, size_t readSize);
+
+    size_t readLine(std::string& line) override;
 
     FileReader(const std::string& inFileName): fo(inFileName) {
         fo.openMode = O_RDONLY;
@@ -167,13 +171,22 @@ protected:
 
 class PipeReader : public IOReader {
 public:
-    PipeReader() { }
+    PipeReader() : lineBuffer(nullptr), bufferSize(0), bufferPos(0), bytesRead(0) { }
 
     // Pipe reading does not require open and close operations
     int openIO() { return 0; }
     void closeIO() { return; }
 
     size_t readIO(void* pBuffer, size_t readSize);
+    size_t readLine(std::string& line) override;
+    
+    ~PipeReader();
+
+private:
+    char* lineBuffer;      // Buffer pointer
+    size_t bufferSize;     // Buffer size
+    size_t bufferPos;      // Current buffer position
+    ssize_t bytesRead;     // Number of bytes read this time
 };
 
 
@@ -193,11 +206,17 @@ public:
     GzFileReader(const std::string& fileName, uint32_t parall) {
         gzFileName = fileName;
         parallel = parall;
+        lineBuffer = nullptr;
+        bufferSize = 0;
+        bufferPos = 0;
+        bytesRead = 0;
     }
 
     int openIO() override;
 
     size_t readIO(void* pBuffer, size_t readSize) override;
+
+    size_t readLine(std::string& line) override;
 
     void closeIO() override;
 
@@ -208,6 +227,12 @@ private:
     std::string gzFileName;
     BGZF* fpGz;
     uint32_t parallel;
+    
+    // Buffer state management
+    char* lineBuffer;      // Buffer pointer
+    size_t bufferSize;     // Buffer size
+    size_t bufferPos;      // Current buffer position
+    ssize_t bytesRead;     // Number of bytes read this time
 };
 
 class GzFileWriter : public IOWriter {
@@ -235,13 +260,19 @@ private:
 
 class FastGzFileReader : public IOReader {
 public:
-    FastGzFileReader(std::string& fileName) : fileReader(fileName) {
+    FastGzFileReader(const std::string& fileName) : fileReader(fileName) {
         gzFileName = fileName;
+        lineBuffer = nullptr;
+        bufferSize = 0;
+        bufferPos = 0;
+        bytesRead = 0;
     }
 
     int openIO() override;
 
     size_t readIO(void* pBuffer, size_t readSize) override;
+
+    size_t readLine(std::string& line) override;
 
     void closeIO() override;
 
@@ -262,6 +293,12 @@ private:
     int64_t isalInputLength;
     int64_t firstReadLen;
 
+    // Buffer state management
+    char* lineBuffer;      // Buffer pointer
+    size_t bufferSize;     // Buffer size
+    size_t bufferPos;      // Current buffer position
+    ssize_t bytesRead;     // Number of bytes read this time
+
     // Helper function
     bool readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen, uint8_t* isalOut, uint32_t isalOutLen, bool isMultipleHeaders);
     int64_t processMultipleGzipHeaders();
@@ -275,6 +312,8 @@ public:
 
     size_t readIO(void* pBuffer, size_t readSize) override;
 
+    size_t readLine(std::string& line) override;
+
     void closeIO() override;
     
     ~GzPipeReader() {
@@ -283,6 +322,12 @@ public:
 private:
     BGZF* fpGz;
     uint32_t parallel;
+    
+    // Buffer state management
+    char* lineBuffer;      // Buffer pointer
+    size_t bufferSize;     // Buffer size
+    size_t bufferPos;      // Current buffer position
+    ssize_t bytesRead;     // Number of bytes read this time
 };
 
 class GzPipeWriter : public IOWriter {
@@ -309,6 +354,7 @@ public:
 
     int openIO() override;
     size_t readIO(void* pBuffer, size_t readSize) override;
+    size_t readLine(std::string& line) override;
     void closeIO() override;
 
     ~FastGzPipeReader() {

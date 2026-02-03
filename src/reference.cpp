@@ -39,6 +39,7 @@
 #include "utils/file_lock.h"
 #include "pbgz_manager.h"
 #include "actg.h"
+#include "hardware.h"
 
 Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
     // Initialize all pointers to nullptr to avoid wild pointers
@@ -311,19 +312,85 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
         uint8_t digest[16];
         uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
         md5_init(&md5);
-        FileReader niReader(refGeneFile);
-        niReader.openIO();
-        for (;;) {
-            len = niReader.readIO(buffer, bufferLen);
-            refGeneLen += len;
-            md5_update(&md5, buffer, len);
-            if (len != bufferLen) {
-                break;
+        
+        // Use PathUtil to detect if it's a gzip file
+        bool isGzFile = PathUtil::isGzFile(refGeneFile);
+        // Choose appropriate reader based on file type
+        if (isGzFile) {
+            // Detect hardware SIMD support and choose optimal gzip reader
+            bool useFastGzReader = Hardware::isSupportSimd();
+            if (useFastGzReader) {
+                // Use FastGzFileReader to read gzip file (Intel ISA-L accelerated)
+                FastGzFileReader fastGzReader(refGeneFile);
+                if (fastGzReader.openIO() == 0) {
+                    for (;;) {
+                        len = fastGzReader.readIO(buffer, bufferLen);
+                        if (len == 0 && bufferLen > 0) { // Check error return value - 0 means read failed or file ended
+                            LOG_ERROR("Failed to read gzip file with FastGzFileReader: %s", refGeneFile.c_str());
+                            refGeneMd5 = "";
+                            refGeneLen = 0;
+                            MemoryUtil::safeFree(buffer);
+                            return;
+                        }
+                        refGeneLen += len;
+                        md5_update(&md5, buffer, len);
+                        if (len != bufferLen) {
+                            break;
+                        }
+                    }
+                    fastGzReader.closeIO();
+                } else {
+                    LOG_ERROR("Failed to open gzip file with FastGzFileReader: %s", refGeneFile.c_str());
+                    refGeneMd5 = "";
+                    refGeneLen = 0;
+                    MemoryUtil::safeFree(buffer);
+                    return;
+                }
+            } else {
+                // Use GzFileReader to read gzip file (standard implementation)
+                GzFileReader gzReader(refGeneFile, 1); // Use single thread reading
+                if (gzReader.openIO() == 0) {
+                    for (;;) {
+                        len = gzReader.readIO(buffer, bufferLen);
+                        refGeneLen += len;
+                        md5_update(&md5, buffer, len);
+                        if (len != bufferLen) {
+                            break;
+                        }
+                    }
+                    gzReader.closeIO();
+                } else {
+                    LOG_ERROR("Failed to open gzip file: %s", refGeneFile.c_str());
+                    refGeneMd5 = "";
+                    refGeneLen = 0;
+                    MemoryUtil::safeFree(buffer);
+                    return;
+                }
+            }
+        } else {
+            // Use FileReader to read regular text file
+            FileReader fileReader(refGeneFile);
+            if (fileReader.openIO() == 0) {
+                for (;;) {
+                    len = fileReader.readIO(buffer, bufferLen);
+                    refGeneLen += len;
+                    md5_update(&md5, buffer, len);
+                    if (len != bufferLen) {
+                        break;
+                    }
+                }
+                fileReader.closeIO();
+            } else {
+                LOG_ERROR("Failed to open file: %s", refGeneFile.c_str());
+                refGeneMd5 = "";
+                refGeneLen = 0;
+                MemoryUtil::safeFree(buffer);
+                return;
             }
         }
+        
         md5_final(digest, &md5);
         refGeneMd5 = md5_to_string(digest);
-        niReader.closeIO();
         MemoryUtil::safeFree(buffer);
     });
     calc_md5.join();
@@ -336,6 +403,28 @@ bool Reference::writeNiFileHeader(FileWriter& niWriter, int64_t& offset) {
     offset = PBGZ_FILE_MAGIC.length() + 3 + 2;
     niWriter.writeIO((uint8_t *)(&offset), sizeof(offset));
     return true;
+}
+
+
+// Helper function to create appropriate IOReader based on file type and hardware support
+std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName) {
+    bool isGz = PathUtil::isGzFile(fileName);
+    if (isGz) {
+        // Detect hardware SIMD support and choose optimal gzip reader
+        bool useFastGzReader = Hardware::isSupportSimd();
+        if (useFastGzReader) {
+            // Use FastGzFileReader to read gzip file (Intel ISA-L accelerated)
+            // Create a mutable copy since FastGzFileReader requires non-const string reference
+            std::string mutableFileName = fileName;
+            return std::make_unique<FastGzFileReader>(mutableFileName);
+        } else {
+            // Use GzFileReader to read gzip file (standard implementation)
+            return std::make_unique<GzFileReader>(fileName, 1); // Use single thread reading
+        }
+    } else {
+        // Use FileReader to read regular text file
+        return std::make_unique<FileReader>(fileName);
+    }
 }
 
 bool Reference::processFastaFile(const std::string& refGeneFile,  const std::string& niFile) {
@@ -366,11 +455,19 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
         return false;
     }
 
+    // Create appropriate IOReader based on file type and hardware support
+    std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
+    if (reader->openIO() != 0) {
+        LOG_ERROR("Failed to open file: %s", refGeneFile.c_str());
+        niWriter.closeIO();
+        MemoryUtil::safeFree(buffer);
+        return false;
+    }
+
     // Process FASTA file and write compressed data
     md5_ctx md5;
     md5_init(&md5);
 
-    std::ifstream file(refGeneFile.c_str());
     std::string line;
     uint8_t cacheActg[4];
     uint32_t cacheLen = 0;
@@ -380,9 +477,11 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
     uint8_t ch;
     uint32_t l4Align;
     std::string actgChr = "";
-    for (;;) {
-        if (!std::getline(file, line)) {
-            break;
+    
+    // Use IOReader::readLine instead of std::getline
+    while (reader->readLine(line) > 0) {
+        if (line.empty()) {
+            continue;
         }
         if (line[0] == '>') {
             continue;
@@ -416,6 +515,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
                         squashBufferlen = newBufferSize;
                     } else {
                         LOG_ERROR("Memory realloc failed");
+                        reader->closeIO();
                         return false;
                     }
                 }
@@ -434,6 +534,8 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
             }
         }
     }
+    
+    reader->closeIO();
     MemoryUtil::safeFree(squashBuffer);
 
     // Update data length in header

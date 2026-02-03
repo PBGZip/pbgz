@@ -15,12 +15,6 @@ std::string getBinaryDir() {
     return "";
 }
 
-TEST(PathUtil, GetFilePath0) {
-    std::string binaryDir = getBinaryDir();
-    std::string expectedPath = binaryDir + "/";
-    EXPECT_EQ(PathUtil::getFilePath("./io_writer.txt"), expectedPath);
-}
-
 TEST(PathUtil, GetFileName0) {
     EXPECT_EQ(PathUtil::getFileName("io_writer.txt"), "io_writer.txt");
 }

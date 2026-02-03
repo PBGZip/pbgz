@@ -27,6 +27,7 @@ public:
         coder_ns::register_free_func(MemoryUtil::safeFree<void>);
         
         pInBlock = new RoughIOBlock(FastqRefTestData::MAX_BLOCK_SIZE);
+        pInBlock->setMaxLineLen(80);
         pOutBlock = new RoughIOBlock(FastqRefTestData::MAX_BLOCK_SIZE);
         pReference = new Reference(FastqRefTestData::testRefFile, 1);
         pReference->makeIndex();
