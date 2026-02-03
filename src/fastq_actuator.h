@@ -105,7 +105,6 @@ public:
         MemoryUtil::safeDeleteClass(commentDecoder);
         MemoryUtil::safeDeleteClass(qualityDecoder);
         MemoryUtil::safeFree(mappingBuffer);
-
     }
 
     int32_t decompress() override ;

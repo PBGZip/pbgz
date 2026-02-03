@@ -203,6 +203,154 @@ TEST_F(ReferenceTest, MakeIndexFetchBaseGroupTest) {
     }
 }
 
+// Test gzip file support in calculateReferenceMd5
+TEST_F(ReferenceTest, CalculateReferenceMd5GzipSupport) {
+    // Create a simple FASTA file
+    std::string textFastaFile = "test_text.fasta";
+    std::ofstream textFile(textFastaFile);
+    textFile << ">chr1\n";
+    textFile << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";
+    textFile << "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT\n";
+    textFile.close();
+
+    // Create gzip compressed version
+    std::string gzipFastaFile = "test_gzip.fasta";
+    std::string command = "gzip -c " + textFastaFile + " > " + gzipFastaFile;
+    system(command.c_str());
+
+    // Create gzip file without .gz extension to test content-based detection
+    std::string gzipNoExtFile = "test_gzip_noext";
+    std::string command2 = "cp " + gzipFastaFile + " " + gzipNoExtFile;
+    system(command2.c_str());
+
+    // Test 1: Text file MD5 calculation
+    std::string textMd5, gzipMd5, gzipNoExtMd5;
+    int64_t textLength, gzipLength, gzipNoExtLength;
+    
+    Reference textRef(textFastaFile, 1);
+    textRef.calculateReferenceMd5(textFastaFile, textMd5, textLength);
+    
+    // Verify text file MD5 is calculated correctly
+    EXPECT_FALSE(textMd5.empty());
+    EXPECT_GT(textLength, 0);
+    
+    // Test 2: Gzip file with .gz extension
+    Reference gzipRef(gzipFastaFile, 1);
+    gzipRef.calculateReferenceMd5(gzipFastaFile, gzipMd5, gzipLength);
+    
+    // Verify gzip file MD5 is calculated correctly
+    EXPECT_FALSE(gzipMd5.empty());
+    EXPECT_GT(gzipLength, 0);
+    
+    // Test 3: Gzip file without .gz extension (content-based detection)
+    Reference gzipNoExtRef(gzipNoExtFile, 1);
+    gzipNoExtRef.calculateReferenceMd5(gzipNoExtFile, gzipNoExtMd5, gzipNoExtLength);
+    
+    // Verify gzip file without extension is detected correctly
+    EXPECT_FALSE(gzipNoExtMd5.empty());
+    EXPECT_GT(gzipNoExtLength, 0);
+    
+    // Test 4: MD5 values should be the same for all three files (same content)
+    EXPECT_EQ(textMd5, gzipMd5);
+    EXPECT_EQ(textMd5, gzipNoExtMd5);
+    
+    // Test 5: File lengths should be the same for all three files
+    EXPECT_EQ(textLength, gzipLength);
+    EXPECT_EQ(textLength, gzipNoExtLength);
+    
+    // Clean up test files
+    std::filesystem::remove(textFastaFile);
+    std::filesystem::remove(gzipFastaFile);
+    std::filesystem::remove(gzipNoExtFile);
+}
+
+// Test file type detection based on content
+TEST_F(ReferenceTest, FileTypeDetectionByContent) {
+    // Create a text file
+    std::string textFile = "test_text.txt";
+    std::ofstream tf(textFile);
+    tf << ">chr1\n";
+    tf << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";
+    tf.close();
+    
+    // Create a gzip file with different extension
+    std::string gzipFile = "test_compressed.bin";
+    std::string command = "echo '>chr1' | gzip -c > " + gzipFile;
+    system(command.c_str());
+    
+    // Test text file detection
+    FILE* fp = fopen(textFile.c_str(), "rb");
+    ASSERT_NE(fp, nullptr);
+    uint8_t header[2];
+    size_t read = fread(header, 1, 2, fp);
+    fclose(fp);
+    
+    // Text file should not have gzip magic number
+    EXPECT_EQ(read, 2);
+    EXPECT_FALSE(header[0] == 0x1f && header[1] == 0x8b);
+    
+    // Test gzip file detection
+    fp = fopen(gzipFile.c_str(), "rb");
+    ASSERT_NE(fp, nullptr);
+    read = fread(header, 1, 2, fp);
+    fclose(fp);
+    
+    // Gzip file should have gzip magic number 0x1f 0x8b
+    EXPECT_EQ(read, 2);
+    EXPECT_TRUE(header[0] == 0x1f && header[1] == 0x8b);
+    
+    // Clean up
+    std::filesystem::remove(textFile);
+    std::filesystem::remove(gzipFile);
+}
+
+// Test index creation with both text and gzip reference files
+TEST_F(ReferenceTest, IndexCreationWithGzipReference) {
+    // Create a simple FASTA file
+    std::string textFastaFile = "test_ref.fasta";
+    std::ofstream textFile(textFastaFile);
+    textFile << ">chr1\n";
+    textFile << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";
+    textFile << "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT\n";
+    textFile.close();
+
+    // Create gzip compressed version
+    std::string gzipFastaFile = "test_ref.fasta.gz";
+    std::string command = "gzip -c " + textFastaFile + " > " + gzipFastaFile;
+    int result = system(command.c_str());
+    
+    // Verify gzip file was created successfully
+    EXPECT_EQ(result, 0);
+    EXPECT_TRUE(std::filesystem::exists(gzipFastaFile));
+
+    // Test 1: Create index with text reference file
+    Reference textRef(textFastaFile, 1);
+    bool textIndexResult = textRef.makeIndex();
+    EXPECT_TRUE(textIndexResult);
+    if (textIndexResult) {
+        EXPECT_NE(textRef.getSquash(), nullptr);
+        EXPECT_GT(textRef.getSquashLength(), 0);
+        EXPECT_EQ(textRef.getFastaFileName(), textFastaFile);
+    }
+    
+    // Test 2: Create index with gzip reference file
+    Reference gzipRef(gzipFastaFile, 1);
+    bool gzipIndexResult = gzipRef.makeIndex();
+    EXPECT_TRUE(gzipIndexResult);
+    if (gzipIndexResult) {
+        EXPECT_NE(gzipRef.getSquash(), nullptr);
+        EXPECT_GT(gzipRef.getSquashLength(), 0);
+        EXPECT_EQ(gzipRef.getFastaFileName(), gzipFastaFile);
+    }
+    
+    // The main goal is to test that both text and gzip files can be processed
+    // without errors. Content comparison is complex due to different processing paths.
+    
+    // Clean up
+    std::filesystem::remove(textFastaFile);
+    std::filesystem::remove(gzipFastaFile);
+}
+
 
 
 

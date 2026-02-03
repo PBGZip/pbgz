@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <string>
 #include <map>
+#include <memory>
 #include <json/json.h>
 #include "utils/guard_bar.h"
 #include "io_wrapper.h"
@@ -140,6 +141,16 @@ public:
     void dumpHashTable();
 
     void dumpSquash();
+
+    /// @brief Detect if file is in gzip format
+    /// @param fileName File path to check
+    /// @return true if gzip file, false otherwise
+    bool isGzipFile(const std::string& fileName);
+
+    /// @brief Create appropriate IOReader based on file type and hardware support
+    /// @param fileName File path to read
+    /// @return Unique pointer to IOReader instance
+    std::unique_ptr<IOReader> createIOReader(const std::string& fileName);
 
 private:
     /// @brief Check validity of reference genome parameters
