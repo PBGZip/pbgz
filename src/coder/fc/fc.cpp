@@ -1002,7 +1002,7 @@ int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 
         }
 
         avgRank         =   (avgRank * 125 + tid * 3) >> 7;
-        tid            =   tid - 1;
+        tid             =   tid - 1;
         history         =   runHistory[currentChar];
         int avgBucket   =   fc_avgRank_bucket(avgRank);
         state           =   lstate(contextRank0, contextRun, tid, history, avgBucket);
