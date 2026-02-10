@@ -154,7 +154,8 @@ int32_t FastqActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) {
             lastPos = pos + 1;
         }
 
-        if (pos > bufferLen) {
+        if (pos >= bufferLen) {
+            LOG_DEBUG("preAnalysisId meet exception: block(%d) will compress id in all mode", inBlockPtr->getBlockId());
             idPosLength = UINT32_MAX; // Mark as unavailable
             break;
         }
@@ -925,7 +926,7 @@ int32_t FastqActuator::compressBaseWithoutRef() {
     }
 
     std::shared_ptr<coder_io> baseIo;
-    if (baseSrcLength <= FC_MIN_LEN || baseSrcLength > FC_MAX_LEN) {
+    if (baseSrcLength <= FC_MIN_LEN || baseSrcLength >= FC_MAX_LEN) {
         baseIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
         std::shared_ptr<coder_bwt_cm> baseCoder = std::make_shared<coder_bwt_cm>(baseIo.get());
 
@@ -967,7 +968,7 @@ int32_t FastqActuator::compressBaseWithoutRef() {
 
 int32_t FastqActuator::compressComment() {
     std::shared_ptr<coder_io> commentIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_fc> commentCoder = std::make_shared<coder_fc>(commentIo.get());
+    std::shared_ptr<coder_bwt_cm> commentCoder = std::make_shared<coder_bwt_cm>(commentIo.get());
     
     Json::Value commentMeta;
     switch (commentType) {
