@@ -39,7 +39,9 @@
 #include "utils/file_lock.h"
 #include "pbgz_manager.h"
 #include "actg.h"
+#ifdef __SSE4_2__
 #include "hardware.h"
+#endif
 
 Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
     // Initialize all pointers to nullptr to avoid wild pointers
@@ -173,8 +175,6 @@ bool Reference::initSquashByNiFile() {
     fastaChecksum = niMeta["refe_orgfile_md5"].asString();
     return true;
 }
-
-
 
 uint8_t* Reference::initSquashByStream(int64_t squashLength) {
     refGeneSquashlen = squashLength;
@@ -318,7 +318,10 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
         // Choose appropriate reader based on file type
         if (isGzFile) {
             // Detect hardware SIMD support and choose optimal gzip reader
-            bool useFastGzReader = Hardware::isSupportSimd();
+            bool useFastGzReader = false;
+#ifdef __SSE4_2__
+            useFastGzReader = Hardware::isSupportSimd();
+#endif
             if (useFastGzReader) {
                 // Use FastGzFileReader to read gzip file (Intel ISA-L accelerated)
                 FastGzFileReader fastGzReader(refGeneFile);
@@ -411,7 +414,10 @@ std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName)
     bool isGz = PathUtil::isGzFile(fileName);
     if (isGz) {
         // Detect hardware SIMD support and choose optimal gzip reader
-        bool useFastGzReader = Hardware::isSupportSimd();
+        bool useFastGzReader = false;
+#ifdef __SSE4_2__
+        useFastGzReader = Hardware::isSupportSimd();
+#endif 
         if (useFastGzReader) {
             // Use FastGzFileReader to read gzip file (Intel ISA-L accelerated)
             // Create a mutable copy since FastGzFileReader requires non-const string reference
