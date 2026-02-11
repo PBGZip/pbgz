@@ -91,10 +91,10 @@ public:
 
     virtual int32_t reconstructPorc() {
         if (parameter.inputFile.empty()) {
-            parameter.inputFile = "/dev/stdin";
+            parameter.inputFile = STDIN;
         }
         if ("-" == parameter.outputFile ) {
-            parameter.outputFile = "/dev/stdout";
+            parameter.outputFile = STDOUT;
         }
         parameter.inputFile = PathUtil::getAbsPath(parameter.inputFile);
 
@@ -102,7 +102,7 @@ public:
             fprintf(stderr, "Output directory and filename cannot be specified simultaneously.\n");
             return -1;
         } else if(!parameter.outputDir.empty()) {   // Only output directory specified
-            if (parameter.inputFile == "/dev/stdin") {
+            if (parameter.inputFile == STDIN) {
                 fprintf(stderr, "Specify an output filename, or do not specify both the filename and the directory.\n");
                 return -1;
             } else {
@@ -113,8 +113,15 @@ public:
                     return -1;
                 }
 
+                // 当输入的目录路径没有/结尾时，追加一个/
+                if (!(parameter.outputDir.back() == '/' || parameter.outputDir.back() == '\\')) {
+                    std::filesystem::path outputDir = parameter.outputDir;
+                    outputDir = outputDir / "";
+                    parameter.outputDir = outputDir.string();
+                }
+                
                 std::string outPath = PathUtil::getFilePath(parameter.outputDir);
-                if (outPath.empty()) {
+                if (!PathUtil::fileExists(outPath)) {
                     // Try to create directory if it doesn't exist
                     outPath = PathUtil::createDir(parameter.outputDir);
                     if (outPath.empty()) {
@@ -122,14 +129,13 @@ public:
                         return -1;
                     }
                 }
-                // parameter.outputFile = outPath + inFileName + ".pbgz";
             }
         } else if (!parameter.outputFile.empty()) {     // File output specified
             // Convert output file to absolute path
             parameter.outputFile = PathUtil::getAbsPath(parameter.outputFile);
         } else {  // Neither output directory nor file specified
-            if (parameter.inputFile == "/dev/stdin") {
-                parameter.outputFile = "/dev/stdout";
+            if (parameter.inputFile == STDIN) {
+                parameter.outputFile = STDOUT;
             } else {
                 if (!PathUtil::fileExists(parameter.inputFile)) {
                     fprintf(stderr, "%s not exits or no permission to access.\n", parameter.inputFile.c_str());
@@ -165,7 +171,7 @@ public:
     }
 
     virtual int32_t checkProc() {
-        if (parameter.outputFile != "/dev/stdout") {
+        if (parameter.outputFile != STDOUT) {
             // Output file exists, remind to use -f to force overwrite
             if (PathUtil::fileExists(parameter.outputFile) && !parameter.isOverwriteOutFile) {
                 fprintf(stdout, "%s exits, use -f to force overwrite.\n", parameter.outputFile.c_str());
@@ -189,7 +195,7 @@ public:
 
                 std::string path = parameter.outputFile.substr(0, pos + 1);
                 if (!PathUtil::fileExists(path)) {
-                    fprintf(stderr, "%s not exists.\n", parameter.outputFile.c_str());
+                    fprintf(stderr, "%s not exists.\n", path.c_str());
                     return -1;
                 }
 
@@ -200,7 +206,7 @@ public:
             }
         }
 
-        if (parameter.inputFile != "/dev/stdin") {
+        if (parameter.inputFile != STDIN) {
             if (!PathUtil::fileExists(parameter.inputFile)) {
                 fprintf(stderr, "%s not exits.\n", parameter.inputFile.c_str());
                 return -1;
@@ -269,7 +275,7 @@ public:
             return -1;
         }
 
-        if ("/dev/stdout" != parameter.outputFile){
+        if (STDOUT != parameter.outputFile){
             if (PathUtil::isDir(parameter.outputFile)) {
                 fprintf(stdout, "Output file cannot be directory.\n");
                 return -1;
@@ -337,7 +343,7 @@ public:
         if (0 != CommandProc::checkProc()) {
             return -1;
         }
-        if ("/dev/stdin" != parameter.inputFile) {
+        if (STDIN != parameter.inputFile) {
             if (PathUtil::isDir(parameter.inputFile)) {
                 fprintf(stdout, "Decompress file cannot be directory.\n");
                 return -1;
