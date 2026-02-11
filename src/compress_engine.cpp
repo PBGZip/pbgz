@@ -235,7 +235,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
 }
 
 int32_t CompressEngine::engineStartAfterProc() {
-    bool isPackRefeInTail = pRefGene && !parameter.isUnpackRef && parameter.outputFile != "/dev/stdout";
+    bool isPackRefeInTail = pRefGene && !parameter.isUnpackRef && parameter.outputFile != STDOUT;
     if (isPackRefeInTail) {
         int64_t maxRefLen = 0;
         int64_t totolEncLen = 0;
@@ -287,7 +287,7 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
         refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
         refeMeta["ni_name"] = PathUtil::getFileName(pRefGene->getNiFilePath()); /* Contains md5 information, used for decompression verification */
         refeMeta["max_block_len"] = 16 << 20;
-        bool isPackRefeInHeader = !parameter.isUnpackRef && parameter.outputFile == "/dev/stdout";
+        bool isPackRefeInHeader = !parameter.isUnpackRef && parameter.outputFile == STDOUT;
         if (isPackRefeInHeader) {
             refeMeta["blocks"] = calcPackRefeBlockSize();
             baseFileMeta.setMetaData("refe",refeMeta);

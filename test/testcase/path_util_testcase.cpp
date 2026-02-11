@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <limits.h>
 
-// 获取当前二进制所在目录
+// Get the directory where the current binary is located
 std::string getBinaryDir() {
     char path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);

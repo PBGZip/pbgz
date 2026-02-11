@@ -29,6 +29,7 @@
 #include "coder_ppmd.h"
 #include <set>
 #include "fastq_actuator.h"
+#include "pbgz_types.h"
 
 BlockReader* DecompressEngine::createBlockReader() {
     PbgzBlockReader* pbgzReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
@@ -41,7 +42,7 @@ BlockReader* DecompressEngine::createBlockReader() {
         return nullptr;
     }
 
-    if (parameter.inputFile != "/dev/stdin" && !parameter.refeGenePos.empty()) {
+    if (parameter.inputFile != STDIN && !parameter.refeGenePos.empty()) {
         if (!initRefeIndex()) {
             LOG_INFO("Init reference index for decompress failed");
         }

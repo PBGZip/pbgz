@@ -72,7 +72,7 @@ int32_t PbgzEngine::init() {
         freeOutputPool.push(outPtr);
     }
 
-    if (parameter.inputFile == "/dev/stdin") {
+    if (parameter.inputFile == STDIN) {
         ioReader = MemoryUtil::safeNewClass<PipeReader>();
         LOG_INFO("Create PipeReader.");
     } else {
@@ -100,7 +100,7 @@ int32_t PbgzEngine::init() {
     }
     ioReader->openIO();
 
-    if (parameter.outputFile == "/dev/stdout") {
+    if (parameter.outputFile == STDOUT) {
         if(parameter.isDecToGZ) {
             ioWriter = MemoryUtil::safeNewClass<GzPipeWriter>(parameter.threadNum);
             LOG_INFO("Create GzPipeWriter.");
@@ -202,11 +202,11 @@ int32_t PbgzEngine::start() {
     ret = startReadTask();
     if (ret != 0) {
         LOG_ERROR("Start read task failed.");
-        // 编码的终止符号
+        // Termination symbol for encoding
         for (uint32_t i = 0; i < parameter.threadNum; ++i) {
             inputDataPool.push(nullptr);
         }
-        // 输出终止符号
+        // Output termination symbol
         outputDataPool.push(nullptr);
         return -1;
     }
@@ -375,7 +375,7 @@ int32_t PbgzEngine::startWriteTask() {
                     outputSortedCache.pop_front();
                 }
 
-                // 待所有数据写入完成之后更新扩展头，并写入动态文件meta
+                // Update extended header and write dynamic file meta after all data is written
                 PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
                 if (pbgzWriter != nullptr) {
                     pbgzWriter->updateHeadExt();

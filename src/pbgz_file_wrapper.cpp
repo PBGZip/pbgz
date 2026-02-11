@@ -30,18 +30,18 @@
 const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 16 * 1024 * 1024;
 
 uint8_t* PbgzFileReader::getFileReadBuffer(){
-	// 线程局部智能指针：自动管理内存，线程退出时析构释放
+	// Thread-local smart pointer: automatically manages memory, destructs and releases when thread exits
     thread_local static std::unique_ptr<uint8_t[]> pReadBuffer;
     
     if (!pReadBuffer) {
-        // 用 unique_ptr 分配内存（无需手动 delete）
+        // Allocate memory with unique_ptr (no need for manual delete)
         pReadBuffer = std::make_unique<uint8_t[]>(PBGZ_FILE_READ_BUFFER_LENGTH);
-        if (!pReadBuffer) { // make_unique 失败时返回空指针（C++17+）
+        if (!pReadBuffer) { // make_unique returns null pointer when it fails (C++17+)
             LOG_ERROR("Failed to allocate memory for write buffer.");
         }
     }
 
-    // 返回智能指针指向的原始缓冲区地址（供业务使用）
+    // Return the raw buffer address pointed by the smart pointer (for business use)
     return pReadBuffer.get();
 }
 
@@ -93,7 +93,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     // Unserialize version
     fileHeader.setVersion(pReadBuffer + PBGZ_FILE_MAGIC_LENGTH, PBGZ_FILE_VERSION_LENGTH);
     
-    // 读取文件头扩展部分，
+    // Read file header extension part
     readLen = ioReader->readIO(pReadBuffer, sizeof(uint32_t));
     if (readLen > 0) {    
         uint32_t fileHeadSize = *(uint32_t*)pReadBuffer;
@@ -123,10 +123,10 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     uint64_t dynamicOffset = fileHeader.getDynamicMetaOffset();
     FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
     if (fileReader == nullptr) {
-        return 0;   // 如果从管道读取，转换会失败，属于正常的
+        return 0;   // If reading from pipe, conversion will fail, this is normal
     }
 
-    size_t readOffset = fileReader->getCurrentPos(); // 备份当前读取的位置
+    size_t readOffset = fileReader->getCurrentPos(); // Backup current read position
     fileReader->seekIO(dynamicOffset);
 
     PbgzFileMeta dyncFileMeta;
@@ -351,18 +351,18 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
 
 
 uint8_t* PbgzFileWriter::getFileWriteBuffer() {
-    // 线程局部智能指针：自动管理内存，线程退出时析构释放
+    // Thread-local smart pointer: automatically manages memory, destructs and releases when thread exits
     thread_local static std::unique_ptr<uint8_t[]> pWriteBuffer;
     
     if (!pWriteBuffer) {
-        // 用 unique_ptr 分配内存（无需手动 delete）
+        // Allocate memory with unique_ptr (no need for manual delete)
         pWriteBuffer = std::make_unique<uint8_t[]>(PBGZ_FILE_READ_BUFFER_LENGTH);
-        if (!pWriteBuffer) { // make_unique 失败时返回空指针（C++17+）
+        if (!pWriteBuffer) { // make_unique returns null pointer when it fails (C++17+)
             LOG_ERROR("Failed to allocate memory for write buffer.");
         }
     }
 
-    // 返回智能指针指向的原始缓冲区地址（供业务使用）
+    // Return the raw buffer address pointed by the smart pointer (for business use)
     return pWriteBuffer.get();
 }
 
