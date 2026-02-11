@@ -113,7 +113,7 @@ public:
                     return -1;
                 }
 
-                // 当输入的目录路径没有/结尾时，追加一个/
+                // Append a '/' if the input directory path doesn't end with one
                 if (!(parameter.outputDir.back() == '/' || parameter.outputDir.back() == '\\')) {
                     std::filesystem::path outputDir = parameter.outputDir;
                     outputDir = outputDir / "";
