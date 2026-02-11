@@ -102,7 +102,7 @@ namespace PathUtil {
         if (std::filesystem::exists(dir) && !std::filesystem::is_directory(dir)) {
             return "";
         }
-        if (std::filesystem::create_directory(dir, ec)) {
+        if (std::filesystem::create_directories(dir, ec)) {
             return getAbsPath(dir);
         }
         return "";

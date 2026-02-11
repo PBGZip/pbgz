@@ -99,17 +99,17 @@ protected:
     Reference* pReference;
 };
 
-// 测试mappingFastqGen2函数的基本功能
+// Test basic functionality of mappingFastqGen2 function
 TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
-    // 创建FastqActuator实例
+    // Create FastqActuator instance
     FastqActuator actuator(pInBlock, pOutBlock, pReference);
     
-    // 初始化编码器
+    // Initialize encoder
     int32_t result = actuator.initEncoder();
     EXPECT_EQ(result, 0);
 
     uint32_t baseLength = 80;
-    // 准备输出缓冲区
+    // Prepare output buffer
     uint8_t* outBuffer = new uint8_t[baseLength * 2];
     uint8_t* out = outBuffer;
     uint32_t outLength = 0;
@@ -117,13 +117,13 @@ TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
     uint8_t mappingDir = 0;
     
     {
-        // 准备测试数据 - 一个简单的DNA序列
+        // Prepare test data - a simple DNA sequence
         const uint8_t* base = (const uint8_t*)"ATCGATCGATCGATCGATCG";
         const uint8_t expOut[] = {0x27, 0x27, 0x27, 0x27, 0x27};
-        // 调用mappingFastqGen2函数
+        // Call mappingFastqGen2 function
         actuator.mappingFastqGen2(base, 20, out, outLength, mappingPos, mappingDir);
         
-        // 验证结果
+        // Verify result
         EXPECT_EQ(mappingPos, 0);
         EXPECT_EQ(mappingDir, 2);
         EXPECT_EQ(outLength, 20);
@@ -132,13 +132,13 @@ TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
 
     {
         const uint8_t* base = (const uint8_t*)"ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG";
-         // 调用mappingFastqGen2函数
+         // Call mappingFastqGen2 function
         actuator.mappingFastqGen2(base, baseLength, out, outLength, mappingPos, mappingDir);
 
         fprintf(stderr, "outLength=%d, mappingPos=%ld", outLength, mappingPos);
         EXPECT_EQ(mappingDir, 1);
     }
     
-    // 清理资源
+    // Clean up resources
     delete[] outBuffer;
 }

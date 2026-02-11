@@ -41,18 +41,18 @@ private:
     void generateFastqFile(const std::string& filename, int numRecords) {
         std::ofstream file(filename);
         if (!file.is_open()) {
-            // 如果无法在当前目录打开，尝试在测试目录中创建
+            // If unable to open in current directory, try to create in test directory
             std::string testPath = "./test/" + filename;
             file.open(testPath);
             if (!file.is_open()) {
-                // 如果还是失败，尝试在构建目录中创建
+                // If still fails, try to create in build directory
                 testPath = "../test/" + filename;
                 file.open(testPath);
             }
         }
         
         if (!file.is_open()) {
-            return; // 无法创建文件
+            return; // Unable to create file
         }
         
         std::random_device rd;
