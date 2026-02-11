@@ -42,7 +42,7 @@ TEST_F(PbgzFileWriteTest, WriteNewFile) {
     iowriter->closeIO();
     delete iowriter;
     
-    // 清理测试生成的文件
+    // Clean up test generated files
     PathUtil::removeFile(fileName);
 }
 
@@ -66,7 +66,7 @@ TEST_F(PbgzFileWriteTest, WriteFileMeta) {
     iowriter->closeIO();
     delete iowriter;
     
-    // 清理测试生成的文件
+    // Clean up test generated files
     PathUtil::removeFile(fileName);
 }
 
@@ -98,14 +98,14 @@ TEST_F(PbgzFileWriteTest, WriteBlockData) {
     iowriter->closeIO();
     delete iowriter;
     
-    // 清理测试生成的文件
+    // Clean up test generated files
     PathUtil::removeFile(fileName);
 }
 
 TEST_F(PbgzFileReadTest, ReadFileMeta) {
     std::string fileName = "pbgz_write_file_meta_test.pbgz";
     
-    // 首先创建测试文件
+    // First create test file
     (void)remove(fileName.c_str());
     IOWriter* iowriter = new FileWriter(fileName);
     iowriter->openIO();
@@ -124,7 +124,7 @@ TEST_F(PbgzFileReadTest, ReadFileMeta) {
     iowriter->closeIO();
     delete iowriter;
     
-    // 现在读取文件
+    // Now read file
     IOReader* ioreader = new FileReader(fileName);
     ioreader->openIO();
     PbgzFileReader reader(ioreader);
@@ -140,14 +140,14 @@ TEST_F(PbgzFileReadTest, ReadFileMeta) {
     ioreader->closeIO();
     delete ioreader;
     
-    // 清理测试生成的文件
+    // Clean up test generated files
     PathUtil::removeFile(fileName);
 }
 
 TEST_F(PbgzFileReadTest, ReadBlockData) {
     std::string fileName = "pbgz_write_data_block_test.pbgz";
     
-    // 首先创建测试文件
+    // First create test file
     (void)remove(fileName.c_str());
     IOWriter* iowriter = new FileWriter(fileName);
     iowriter->openIO();
@@ -174,7 +174,7 @@ TEST_F(PbgzFileReadTest, ReadBlockData) {
     iowriter->closeIO();
     delete iowriter;
     
-    // 现在读取文件
+    // Now read file
     IOReader* ioreader = new FileReader(fileName);
     ioreader->openIO();
     PbgzFileReader reader(ioreader);
@@ -203,6 +203,6 @@ TEST_F(PbgzFileReadTest, ReadBlockData) {
     ioreader->closeIO();
     delete ioreader;
     
-    // 清理测试生成的文件
+    // Clean up test generated files
     PathUtil::removeFile(fileName);
 }
