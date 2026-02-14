@@ -469,6 +469,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
         MemoryUtil::safeFree(buffer);
         return false;
     }
+    MemoryUtil::safeFree(buffer);
 
     // Process FASTA file and write compressed data
     md5_ctx md5;
@@ -552,7 +553,6 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
     std::string md5String = md5_to_string(digest);
     if (!writeNiFileMetadata(niWriter, refGeneMd5, refGeneLen, md5String)) {
         niWriter.closeIO();
-        MemoryUtil::safeFree(buffer);
         return false;
     }
     niWriter.closeIO();

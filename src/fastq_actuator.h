@@ -96,14 +96,12 @@ public:
     }
 
     virtual ~FastqActuator() {
-        for (auto ptr : idDecoders) {
-            MemoryUtil::safeDeleteClass(ptr);
-        }
+        qualityDecoder.reset();
+        baseDecoder.reset();
+        commentDecoder.reset();
         idDecoders.clear();
 
-        MemoryUtil::safeDeleteClass(baseDecoder);
-        MemoryUtil::safeDeleteClass(commentDecoder);
-        MemoryUtil::safeDeleteClass(qualityDecoder);
+        ioVecters.clear();
         MemoryUtil::safeFree(mappingBuffer);
     }
 
@@ -166,10 +164,11 @@ private:
     std::vector<std::pair<uint16_t, uint16_t>> qualityFreqTable; // Quality value frequency statistics
     Reference* pReference;
 
-    std::vector<coder*> idDecoders;
-    coder* baseDecoder;
-    coder* commentDecoder;
-    coder_qual* qualityDecoder;
+    std::vector<std::shared_ptr<coder>> idDecoders;
+    std::vector<std::shared_ptr<coder_io>> ioVecters;
+    std::shared_ptr<coder> baseDecoder;
+    std::shared_ptr<coder> commentDecoder;
+    std::shared_ptr<coder_qual> qualityDecoder;
 
     bool isGen2;
 

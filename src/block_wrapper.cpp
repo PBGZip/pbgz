@@ -180,6 +180,9 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
             blockPtr->getNpos().pop_back(); // Remove last newline position
         }
     }
+
+    LOG_DEBUG("Read One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d,lineNum=%d.", 
+        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen(),blockPtr->getNpos().size());
     
     return totalLen;
 }
@@ -252,8 +255,8 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
     // Copy entire block information
     memcpy(blockPtr->getBuffer(), pbgzDataBlock.getDataPtr(), pbgzDataBlock.getDataLength());
 
-    LOG_DEBUG("Read One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d.", 
-        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen());
+    LOG_DEBUG("Read One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d,lineNum=%d.", 
+        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen(),blockPtr->getNpos().size());
     
     return pbgzDataBlock.getDataLength();
 }   
@@ -273,7 +276,11 @@ int32_t BlockWriter::writeBlock(RoughIOBlock* blockPtr) {
     if (blockPtr == nullptr || ioWriter == nullptr) {
         return -1;
     }
-    ioWriter->writeIO(blockPtr->getBuffer(), blockPtr->getDataLen());
+    if (blockPtr->getDataLen() != 0 || blockPtr->getMetaLen() != 0) {
+        ioWriter->writeIO(blockPtr->getBuffer(), blockPtr->getDataLen());
+    }
+    LOG_DEBUG("Write One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d,lineNum=%d.", 
+        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen(),blockPtr->getNpos().size());
     return 0;
 }
 
@@ -326,8 +333,12 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
         return -1;
     }
 
-    LOG_DEBUG("Write One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d.", 
-        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen());
+    LOG_DEBUG("Write One Block, blockId=%d,blockType=%d,dataLen=%d,metalen=%d,lineNum=%d.", 
+        blockPtr->getBlockId(), blockPtr->getBlockType(), blockPtr->getDataLen(),blockPtr->getMetaLen(),blockPtr->getNpos().size());
+    
+    if (blockPtr->getDataLen() == 0 && blockPtr->getMetaLen() == 0) {
+        return 0;
+    }
 
     PbgzDataBlock dataBlock;    
     dataBlock.setBlockData(blockPtr->getBuffer(), blockPtr->getTotalDataLen());

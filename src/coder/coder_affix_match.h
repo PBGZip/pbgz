@@ -170,7 +170,7 @@ public:
             //check_exit(last, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Error: Insufficient memory: need %" PRIu64 " MB\n",  static_cast<uint64_t>(this->last_capacity) >> 20);
             if (!last) {
                 coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",  
-                    static_cast<uint64_t>(this->last_capacity) >> 2);
+                    static_cast<uint64_t>(this->last_capacity) >> 20);
                 return coder_ns::CODER_ERR_MEM_ALLOC_FAIL;
             }
             
@@ -195,7 +195,8 @@ public:
 
         len2 = len - suf_len, match = pre_len ? 1 : 0;
         for (i = j = pre_len, k = 0; i < len2; i++, j++, k++) {
-            last_ch = (((last[j] - 32) << 1) + match + (k << 6)) & 0x1FFF;
+            uint8_t ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            last_ch = (((ch - 32) << 1) + match + (k << 6)) & 0x1FFF;
             if (encode_higher())
                 c = model_middle[last_ch].decodeSymbolOrder(&rc);
             else
@@ -203,17 +204,27 @@ public:
 
             out[i] = c;
 
-            if (c == ' ' && last[j] != ' ') j++;
-            if (c != ' ' && last[j] == ' ') j--;
-            if (c == ':' && last[j] != ':') j++;
-            if (c != ':' && last[j] == ':') j--;
+            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            if (c == ' ' && ch != ' ') j++;
+            
+            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            if (c != ' ' && ch == ' ') j--;
+            
+            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            if (c == ':' && ch != ':') j++;
+            
+            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            if (c != ':' && ch == ':') j--;
+            
             if (out[i] == ':' || out[i] == ' ') k = (k + 3) >> 2 << 2;
-
-            match = c == last[j];
+            
+            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            match = c == ch;
         }
 
-        for (j = last_len - suf_len; i < len; i++, j++)
-            out[i] = last[j];
+        for (j = last_len - suf_len; i < len; i++, j++) {
+            out[i] = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';;
+        }
 
         if (need2hold)
         {

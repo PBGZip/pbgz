@@ -110,8 +110,8 @@ public:
             fc_buff = this->io->data;
         }
 
-        result = fcinit();
-        check_exit(FC_OK == result, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d, in_len %d", __LINE__, result, in_len);
+        // result = fcinit();
+        // check_exit(FC_OK == result, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d, in_len %d", __LINE__, result, in_len);
         result = fc_encode(lout, fc_buff + 1, lzSize, (lzSize << 1) - 1);
         check_exit(result >= 0, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d, in_len %d", __LINE__, result, in_len);
         result = (fc_buff[0] = 1, result + 1);
@@ -149,14 +149,14 @@ public:
         check_exit(split_ch == UINT8_MAX, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, split_ch);
 
         // fprintf(stderr, "decompress...");
-        int result = fcinit();
-        check_exit(FC_OK == result, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, result);
+        // int result = fcinit();
+        // check_exit(FC_OK == result, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, result);
 
         uint8_t *lout;
         lout = static_cast<uint8_t*>(safe_alloc(out_len));
         check_exit(lout, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Memory not enough");
 
-        result = fc_decode(io->data + 1, lout);
+        int result = fc_decode(io->data + 1, lout);
         int lzSize = result;
         check_exit(lzSize > 0 && lzSize <= out_len, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, lzSize);
 
