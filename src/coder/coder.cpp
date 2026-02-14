@@ -22,6 +22,7 @@
  */
 
 #include "coder.h"
+#include "coder_fc.h"
 
 coder_exit_func exit_proc = nullptr;
 coder_alloc_func alloc_proc = nullptr;
@@ -49,6 +50,11 @@ namespace coder_ns {
 
     void register_free_func(coder_free_func proc) {
         free_proc = proc;
+    }
+
+    void initFcCoder() {
+        int result = fcinit();
+        check_exit(FC_OK == result, coder_ns::CODER_ERR_INNER, "fcinit failed (%d) : %d.", __LINE__, result);
     }
 }
 

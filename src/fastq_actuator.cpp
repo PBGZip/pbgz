@@ -308,6 +308,7 @@ int32_t FastqActuator::preAnalysis() {
         }
         qualityFreqTable.push_back(std::make_pair(qualityFrequnce[i].first - '!', 1));
     }
+    LOG_INFO("minBaseLen=%d, maxBaseLen=%d", minBaseLength, maxBaseLength);
     return 0;
 }
 
@@ -887,6 +888,8 @@ int32_t FastqActuator::compressBaseWithRef() {
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + nposIo->data_len);
         totalSrcLen += srcLen;
         totalDstLen += nposIo->data_len;
+    } else {
+        LOG_INFO("NCount is 0, base info not contains npos stream");
     }
     metaBase["ncount"] = (Json::Value::UInt)baseNCount;
 
@@ -906,6 +909,8 @@ int32_t FastqActuator::compressBaseWithRef() {
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + lenIo->data_len);
         totalSrcLen += srcLen;
         totalDstLen += lenIo->data_len;
+    } else {
+        LOG_INFO("Base length is same, base info not contains baselen stream");
     }
     metaBase["minlen"] = (Json::Value::UInt)minBaseLength;
     metaBase["maxlen"] = (Json::Value::UInt)maxBaseLength;
@@ -1083,10 +1088,14 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
         std::string coderName = idStreamMeta[idx]["coder"]["magic"].asString();
         uint32_t dstLen = idStreamMeta[idx]["dstlen"].asUInt();
         if (coderName == "coder_affix_match") {
-            idDecoders.push_back(new coder_affix_match(new coder_io(inBlockPtr->getBuffer() + readOffset, dstLen)));
+            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+            ioVecters.push_back(io);
+            idDecoders.push_back(std::make_shared<coder_affix_match>(io.get()));
             idDecoders.back()->set_level(idStreamMeta[idx]["coder"]["level"].asInt());
         } else if (coderName == "coder_bwt_cm") {
-            idDecoders.push_back(new coder_bwt_cm(new coder_io(inBlockPtr->getBuffer() + readOffset, dstLen)));
+            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+            ioVecters.push_back(io);
+            idDecoders.push_back(std::make_shared<coder_bwt_cm>(io.get()));
             idDecoders.back()->set_level(idStreamMeta[idx]["coder"]["level"].asInt());
         } else {
             LOG_ERROR("unsupported coder name: %s", coderName.c_str());
@@ -1108,16 +1117,16 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
             coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstBaseLen);
             baseIo.meta = baseMeta;
             baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
-            coder_fc baseDecoderFc = coder_fc(&baseIo);
-            // Put decompression result at the end
+            coder_fc baseDecoderFc(&baseIo);
             baseDecoderFc.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcBaseLen, srcBaseLen,  UINT8_MAX, false);
         } else if (baseCoderName == "coder_bwt_cm") {
-            baseDecoder = new coder_bwt_cm(new coder_io(inBlockPtr->getBuffer() + readOffset, dstBaseLen));
+            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstBaseLen);
+            ioVecters.push_back(io);
+            baseDecoder = std::make_shared<coder_bwt_cm>(io.get());
         } else {
             LOG_ERROR("unsupported coder name: %s", baseCoderName.c_str());
             return -1;
         }
-
         readOffset += dstBaseLen;
     } else {
         Json::Value metaStreams = baseMeta["streams"];
@@ -1141,8 +1150,10 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
             return -1;
         }
         uint32_t baseDstLen = metaStreams[id]["dstlen"].asUInt();
-        if (metaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
-            baseDecoder = new coder_bwt_cm(new coder_io(inBlockPtr->getBuffer() + readOffset, baseDstLen));
+        if (metaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {   
+            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, baseDstLen);
+            ioVecters.push_back(io);
+            baseDecoder = std::make_shared<coder_bwt_cm>(io.get());
         } else {
             LOG_ERROR("check sub stream failed: coder name unmatch");
             return -1;
@@ -1150,7 +1161,7 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
         readOffset += baseDstLen;
 
         /* check sub streams 2 */
-        id = 1;
+        id++;
         baseMappedPosBuffer = nullptr;
         uint8_t* temBuffer = nullptr;
         uint32_t srcLen = 0;
@@ -1176,9 +1187,9 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
             ps += srcLen;
             coder_io posIo(temBuffer, dstLen);
             posIo.meta = metaStreams[id];
-            posIo.meta["dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
-            coder_fc posCm(&posIo);
-            posCm.decode_line((uint8_t*)baseMappedPosBuffer, srcLen, UINT8_MAX, false);
+            // posIo.meta["dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
+            coder_fc posFc(&posIo);
+            posFc.decode_line((uint8_t*)baseMappedPosBuffer, srcLen, UINT8_MAX, false);
         } else {
             LOG_ERROR("check sub stream failed: coder name unmatch");
             return -1;
@@ -1187,7 +1198,7 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
         readOffset += metaStreams[id]["dstlen"].asUInt();
 
         /* check sub stream 3 */
-        id = 2;
+        id++;
         baseMappedPairBuffer = nullptr;
         if (metaStreams[id]["sname"].asString() != "mpair") {
             LOG_ERROR("check sub stream failed: %s", metaStreams[id]["sname"].asString().c_str());
@@ -1210,9 +1221,9 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
             ps += srcLen;
             coder_io pairIo(temBuffer, dstLen);
             pairIo.meta = metaStreams[id];
-            pairIo.meta["tot_dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
-            coder_fc pairCm(&pairIo);
-            pairCm.decode_line(baseMappedPairBuffer, srcLen, UINT8_MAX, false);
+            // pairIo.meta["tot_dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
+            coder_fc pairFc(&pairIo);
+            pairFc.decode_line(baseMappedPairBuffer, srcLen, UINT8_MAX, false);
         } else{
             LOG_ERROR("check sub stream failed: coder name unmatch");
             return -1;
@@ -1222,7 +1233,7 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
         /* check sub stream 4 */
         baseNPosBuffer = nullptr;
         if (baseMeta["ncount"].asUInt()) {
-            id = 3;
+            id++;
             if (metaStreams[id]["sname"].asString() != "npos") {
                 LOG_ERROR("check sub stream failed: %s", metaStreams[id]["sname"].asString().c_str());
                 return -1;
@@ -1241,12 +1252,14 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
                 return -1;
             }
             readOffset += metaStreams[id]["dstlen"].asUInt();
+        } else {
+            LOG_INFO("NCount is %d, not contain ncount stream", baseMeta["ncount"].asUInt());
         }
 
         /* check sub stream 5 */
         baseLengthGen2Buffer = nullptr;
         if (baseMeta["minlen"].asUInt() != baseMeta["maxlen"].asUInt()) {
-            id = 4;
+            id++;
             if (metaStreams[id]["sname"].asString() != "baselen") {
                 LOG_ERROR("check sub stream failed: %s", metaStreams[id]["sname"].asString().c_str());
                 return -1;
@@ -1265,6 +1278,8 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
                 return -1;
             }
             readOffset += metaStreams[id]["dstlen"].asUInt();
+        } else {
+            LOG_INFO("Base length is same(%d, %d),  not contain baselen stream", baseMeta["minlen"].asUInt(), baseMeta["maxlen"].asUInt());
         }
     }
 
@@ -1278,7 +1293,9 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
         commentType = CommentType::OTHER;
         uint32_t commentDstLen = commentMeta["dstlen"].asUInt();
         if (commentMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
-            commentDecoder = new coder_bwt_cm(new coder_io(inBlockPtr->getBuffer() + readOffset, commentDstLen));
+            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, commentDstLen);
+            ioVecters.push_back(io);
+            commentDecoder = std::make_shared<coder_bwt_cm>(io.get());
         } else {
             LOG_ERROR("Not support coder name = %s.", commentMeta["coder"]["magic"].asCString());
             return -1;
@@ -1313,9 +1330,12 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
             qualityFreqTable.push_back(std::make_pair(qualFreqArray[idx], qualFreqArray[idx + 1]));
         }
 
+        delete [] qualFreqArray;
+
         if (streamsMeta[0]["coder"]["magic"].asString() == "coder_qual") {
-            qualityDecoder = new coder_qual(new coder_io(inBlockPtr->getBuffer() + readOffset, qualityDstLen),
-                                       true, qualityFreqTable);
+            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualityDstLen);
+            ioVecters.push_back(io);
+            qualityDecoder = std::make_shared<coder_qual>(io.get(), true, qualityFreqTable);
         } else {
             LOG_ERROR("Unsupport coder type: %s", streamsMeta[0]["coder"]["magic"].asString().c_str());
             return -1;
@@ -1522,7 +1542,6 @@ int32_t FastqActuator::decompress() {
         *outBlockPtr->getCurrent() = '\n';
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
     }
-
 
     // Check file MD5
     std::string md5;
