@@ -53,10 +53,13 @@ namespace coder_ns {
 
     void register_free_func(coder_free_func proc);
 
+    void initFcCoder();
+
     enum coder_errcode {
         CODER_ERR_BAD_ARGS = (-1),
         CODER_ERR_MEM_ALLOC_FAIL = (CODER_ERR_BAD_ARGS) - 1,
         CODER_ERR_INNER = (CODER_ERR_MEM_ALLOC_FAIL) -1,
+        CODER_ERR_INVALID_STATE = CODER_ERR_INNER - 1,
 
     };
 

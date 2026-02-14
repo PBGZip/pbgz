@@ -37,6 +37,7 @@ public:
         this->io->m = coder_io::MUNSET;
         this->io->appen_magic("coder_ppmd");
 
+        charReader = nullptr;
         flushed = false;
     }
 
@@ -45,6 +46,10 @@ public:
         if (io->m != coder_io::MENC && !flushed)
             encode_flush();
         Ppmd8_Free(&ppmd, &ialloc);
+        if (charReader != nullptr) {
+            delete charReader;
+            charReader = nullptr;
+        }
     }
 
     int64_t encode(const uint8_t *src, int64_t src_len)
@@ -85,8 +90,9 @@ public:
             opt_order = (info & 0xf) + 1;
             opt_mem = ((info >> 4) & 0xff) + 1;
 
-            struct CharReader cr = {Read, io};
-            ppmd.Stream.In = (IByteIn *)&cr;
+            // Allocate CharReader on heap to avoid stack-use-after-scope
+            charReader = new CharReader{Read, io};
+            ppmd.Stream.In = (IByteIn *)charReader;
             Ppmd8_Construct(&ppmd);
             Ppmd8_Alloc(&ppmd, opt_mem << 20, &ialloc);
             Ppmd8_RangeDec_Init(&ppmd);
@@ -165,6 +171,7 @@ private:
 
 private:
     struct CharWriter cw;
+    CharReader* charReader;
 
     CPpmd8 ppmd;
     uint16_t info;
