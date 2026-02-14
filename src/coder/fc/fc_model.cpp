@@ -35,6 +35,8 @@ See also the bsc and libbsc web site:
 
 #include "fc_model.h"
 #include "fc_header.h"
+#include <shared_mutex>
+#include <mutex>
 
 fcModel1 gfcModel1;
 fcModel2 gfcModel2;
@@ -84,8 +86,12 @@ void fcmemset(void * dst, int size, short v)
     for (int i = 0; i < size / 2; ++i) ((short *)dst)[i] = v;
 }
 
+static std::shared_mutex model_mutex;
+
 int fcinit_model()
 {
+    std::unique_lock<std::shared_mutex> lock(model_mutex);
+
     for (int mixer = 0; mixer < CHAR_SIZE; ++mixer)
     {
         gfcModel1.tid_mixer[mixer].Init();
@@ -122,10 +128,12 @@ int fcinit_model()
 
 void fcinit_model(fcModel1 * model)
 {
+    std::shared_lock<std::shared_mutex> lock(model_mutex);
     memcpy(model, &gfcModel1, sizeof(fcModel1));
 }
 
 void fcinit_model(fcModel2 * model)
 {
+    std::shared_lock<std::shared_mutex> lock(model_mutex);
     memcpy(model, &gfcModel2, sizeof(fcModel2));
 }

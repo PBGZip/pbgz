@@ -45,6 +45,7 @@ int32_t PbgzEngine::init() {
     coder_ns::register_exit_proc(pbgzExitProc);
     coder_ns::register_free_func(MemoryUtil::safeFree<void>);
     coder_ns::resister_logger_proc(coderLog);
+    coder_ns::initFcCoder();
 
     // Create queues
     freeInputPool.setCapility(parameter.threadNum);
@@ -239,6 +240,11 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     blockPtr->reset();
 
     int64_t ret = blockReader->readBlock(blockPtr, fileType);
+    if (ret <= 0) {
+        freeInputPool.push(blockPtr);
+        return ret;
+    }
+
     if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
         freeInputPool.push(blockPtr);
         return -2;
@@ -251,9 +257,7 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
 
     PbgzManager::getInstance().updateReadDataLen(blockPtr);
     inputDataPool.push(blockPtr);
-    if (ret > 0) {
-        blockCount++;
-    }
+    blockCount++;
     return ret;
 }
 
@@ -309,9 +313,6 @@ int32_t PbgzEngine::startCoderTask() {
                 }
                 pActuator = MemoryUtil::safeNewClass<FastqActuator>(inBlockPtr, outBlockPtr, pRefGene);
                 pActuator = actuatorPreProc(pActuator, inBlockPtr, outBlockPtr);
-                if (pActuator == nullptr) {
-                    break;
-                }
             } else if (inBlockPtr->getBlockType() == BINARY) {
                 if (parameter.isMakeIndex) {
                     fprintf(stderr, "Binary file will not make index.");
@@ -319,31 +320,36 @@ int32_t PbgzEngine::startCoderTask() {
                 }
                 pActuator = MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
             } else {
+                LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
+
                 freeInputPool.push(inBlockPtr);
-                freeOutputPool.push(outBlockPtr);
-                // LOG_ERROR("Not support block type: %d", inBlockPtr->getBlockType());
+                outBlockPtr->reset();
+                outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+                // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
+                outputDataPool.push(outBlockPtr);
                 continue;
             }
 
             if (pActuator == nullptr) {
+                LOG_ERROR("Create actuator failed.");
                 freeInputPool.push(inBlockPtr);
                 freeOutputPool.push(outBlockPtr);
-                LOG_ERROR("Create actuator failed.");
                 break;
             }
 
             int32_t ret = actuatorProc(pActuator, inBlockPtr, outBlockPtr);
             if (ret != 0) {
-                LOG_ERROR("Coder task failed.");
-                freeInputPool.push(inBlockPtr);
-                freeOutputPool.push(outBlockPtr);
-                delete pActuator;
-                pActuator = nullptr;
+                LOG_ERROR("Coder task failed for blcock(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
+                freeInputPool.push(inBlockPtr);
+                outBlockPtr->reset();
+                outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+                // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
+                outputDataPool.push(outBlockPtr);
+                MemoryUtil::safeDeleteClass(pActuator);
                 continue;
             }
-            delete pActuator;
-            pActuator = nullptr;
+            MemoryUtil::safeDeleteClass(pActuator);
             freeInputPool.push(inBlockPtr);
             outputDataPool.push(outBlockPtr);
         }
