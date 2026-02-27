@@ -187,14 +187,14 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 std::string metaString;
                 cmeta.encoder(meta, metaString); /*  Compress block meta */
             
-                int64_t currBlockLen = metaString.length() + refeIo.data_len;
-                if (currBlockLen >= plen) {
-                    LOG_ERROR("reference block pack failed");
-                    break;
-                }
                 /* Write compressed stream of current block's meta */
                 RoughIOBlock* outBlock = freeOutput.get();
                 outBlock->reset();
+                 int64_t currBlockLen = metaString.length() + refeIo.data_len;
+                if (currBlockLen >= outBlock->getRemain()) {
+                    LOG_ERROR("reference block pack failed");
+                    break;
+                }
                 memcpy(outBlock->getCurrent(), refeIo.data, refeIo.data_len);
                 outBlock->setDataLen(refeIo.data_len);
                 memcpy(outBlock->getCurrent(), metaString.c_str(), metaString.length());

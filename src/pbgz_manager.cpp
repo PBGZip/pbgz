@@ -118,9 +118,11 @@ void PbgzManager::printHeadInfo(PbgzParameter& para) {
 
 void PbgzManager::printTailInfo(Timer costTime, bool isPrintRatio) {
     fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\033[0m\n", "from/to", totalReadLen, totalWriteLen);
-    fprintf(stderr, "\nCompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
     if (isPrintRatio) {
+        fprintf(stderr, "\nCompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
         fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%%\n", totalReadLen, totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen);
+    } else {
+        fprintf(stderr, "\nDecompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
     }
 }
 
