@@ -308,7 +308,7 @@ int32_t FastqActuator::preAnalysis() {
         }
         qualityFreqTable.push_back(std::make_pair(qualityFrequnce[i].first - '!', 1));
     }
-    LOG_INFO("minBaseLen=%d, maxBaseLen=%d", minBaseLength, maxBaseLength);
+    LOG_DEBUG("minBaseLen=%d, maxBaseLen=%d", minBaseLength, maxBaseLength);
     return 0;
 }
 
@@ -681,6 +681,7 @@ int32_t FastqActuator::compressIdInSplit() {
 
     for (uint32_t i = 0; i < idSplitSymbols.size();++i) {
         // Variable length with all digits
+        LOG_DEBUG("split symbol(%d, %c), minlen = %d, maxlen = %d.", i, idSplitSymbols[i], idSplitMinLen[i], idSplitMaxLen[i]);
         if (idSplitMaxLen[i] != idSplitMinLen[i]) {
             uint32_t currIdPos = idPositions[i];
             uint32_t currLineOffset = 0;
@@ -697,13 +698,14 @@ int32_t FastqActuator::compressIdInSplit() {
 
             bool idDigit = true;
             for (uint32_t j = 0; j < currLen; ++j) {
-                if (*(data + j) < '0' || *(data + j) < '9') {
+                if (*(data + j) < '0' || *(data + j) > '9') {
                     idDigit = false;
                     break;
                 }
             }
 
             if (idDigit) {
+                LOG_DEBUG("Is all digit(%d), use coder_bwt_cm.", i);
                 std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
                 std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
                 uint32_t srcLength = 0;
@@ -719,6 +721,7 @@ int32_t FastqActuator::compressIdInSplit() {
         }
 
         // Fixed length or not all digits scenario
+        LOG_DEBUG("Not all digit or fix length(%d), use coder_affix_match.", i);
         std::shared_ptr<coder_io> idIoAM = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
         std::shared_ptr<coder_affix_match> idCoderAm = std::make_shared<coder_affix_match>(idIoAM.get());
         uint32_t srcLength = 0;
@@ -759,9 +762,12 @@ int32_t FastqActuator::compressId() {
 }
 
 int32_t FastqActuator::compressBase() {
-    if (pReference != nullptr) {
+    if (pReference != nullptr && isGen2) {
         return compressBaseWithRef();
     } else {
+        if (!isGen2) {
+            fprintf(stderr ,"This block(%d) is Gen3 FASTQ, which currently does not support high-factor compression for this file type. Compression will be performed without a reference genome.", inBlockPtr->getBlockId());
+        }
         return compressBaseWithoutRef();
     }
 }
@@ -1109,7 +1115,8 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
     minBaseLength = baseMeta["minlen"].asUInt();
     maxBaseLength = baseMeta["maxlen"].asUInt();
     baseNCount = baseMeta["ncount"].asUInt();
-    if (pReference == nullptr) {
+    bool isUseReference = (pReference != nullptr) && baseMeta.isMember("streams"); 
+    if (!isUseReference) {
         std::string baseCoderName = baseMeta["coder"]["magic"].asString();
         uint32_t srcBaseLen = baseMeta["totalsrclen"].asUInt();
         uint32_t dstBaseLen = baseMeta["totaldstlen"].asUInt();
@@ -1375,6 +1382,7 @@ int32_t FastqActuator::decompress() {
     }
     uint32_t totalBaseLen = 0;
     uint64_t nposOffset = 0;
+    bool isUseReference = (pReference != nullptr) && meta["base"].isMember("streams"); 
     for (uint32_t line = 0; line < lineNum; ++line) {
         uint8_t* idPtr = outBlockPtr->getCurrent();
         uint32_t idLen = 0;
@@ -1387,7 +1395,7 @@ int32_t FastqActuator::decompress() {
 
         uint8_t* basePtr = outBlockPtr->getCurrent();
         uint32_t actualBaseLen = 0;
-        if (pReference == nullptr) {
+        if (!isUseReference) {
             if (minBaseLength == maxBaseLength) {
                 actualBaseLen = maxBaseLength;
                 if (meta["base"]["coder"]["magic"].asString() == "coder_fc") {
