@@ -1938,7 +1938,7 @@ static void libsais_reconstruct_compacted_lms_suffixes_32s_2k(int * RESTRICT T, 
 {
     if (f > 0)
     {
-        memcpy(&SA[n - m - 1], &SA[n + fs - m], (size_t)f * sizeof(int));
+        memmove(&SA[n - m - 1], &SA[n + fs - m], (size_t)f * sizeof(int));
 
         libsais_count_and_gather_compacted_lms_suffixes_32s_2k(T, SA, n, k, buckets);
         libsais_reconstruct_lms_suffixes(SA, n, m - f);
