@@ -766,7 +766,7 @@ int32_t FastqActuator::compressBase() {
         return compressBaseWithRef();
     } else {
         if (!isGen2) {
-            fprintf(stderr ,"This block(%d) is Gen3 FASTQ, which currently does not support high-factor compression for this file type. Compression will be performed without a reference genome.", inBlockPtr->getBlockId());
+            fprintf(stderr ,"This block(%d) is Gen3 FASTQ, which currently does not support high-factor compression for this file type. Compression will be performed without a reference genome.\n", inBlockPtr->getBlockId());
         }
         return compressBaseWithoutRef();
     }
