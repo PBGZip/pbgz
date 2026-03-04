@@ -158,10 +158,6 @@ public:
     }
 
     int32_t afterConstructProc() {
-        // If file exists and force overwrite is configured, delete output file
-        if (PathUtil::fileExists(parameter.outputFile) && parameter.isOverwriteOutFile) {
-            PathUtil::removeFile(parameter.outputFile);
-        }
         ConfigManager::getInstance().init(parameter);
         return 0;
     }
@@ -235,6 +231,18 @@ public:
             }
         }
 
+        return 0;
+    }
+
+    int32_t afterCheck() {
+        return afterCheckProc();
+    }
+
+    virtual int32_t afterCheckProc() {
+        // If file exists and force overwrite is configured, delete output file
+        if (PathUtil::fileExists(parameter.outputFile) && parameter.isOverwriteOutFile) {
+            PathUtil::removeFile(parameter.outputFile);
+        }
         return 0;
     }
 
@@ -691,6 +699,11 @@ int main(int argc, char** argv) {
         LOG_ERROR("Command parameter check failed");
         return -1;
     } 
+
+    if (processor->afterCheck() != 0) {
+        LOG_ERROR("Command parameter after check processs failed");
+        return -1;
+    }
     
     if (processor->startEngine() != 0) {
         LOG_ERROR("Command start failed");

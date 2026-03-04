@@ -37,6 +37,7 @@
 #include "block_wrapper.h"
 #include "actuator.h"
 #include "pbgz_index.h"
+#include "utils/path_util.h"
 
 class PbgzEngine {
 public:
@@ -95,6 +96,10 @@ protected:
     }
 
     virtual int32_t engineStartAfterProc() {
+        if (parameter.isRemoveOriginFile) {
+            PathUtil::removeFile(parameter.inputFile);
+        }
+
         return 0;
     }
 
