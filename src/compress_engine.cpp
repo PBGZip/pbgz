@@ -254,7 +254,8 @@ int32_t CompressEngine::engineStartAfterProc() {
             dynamicFileMeta.getMetaData("refe")["blocks"] = refBlockCount;
         }
     }
-    return 0;
+    
+    return PbgzEngine::engineStartAfterProc();
 }
 
 void CompressEngine::setDataBlockPosition(uint32_t blockId) {
