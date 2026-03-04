@@ -228,6 +228,7 @@ int32_t PbgzEngine::start() {
     outputDataPool.push(nullptr);
     writeThread.join();
     PbgzManager::getInstance().printTailInfo(costTimer, isPrintRatio());
+
     return 0;
 }
 
