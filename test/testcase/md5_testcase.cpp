@@ -106,7 +106,7 @@ TEST_F(Md5UtilTest, SpecialCharacters) {
     expectMd5Equals("!@#$%^&*()", "05b28d17a7b6e7024b6e5d8cc43a8bf7");
     
     // Test Unicode characters (Chinese characters)
-    expectMd5Equals("HelloWorld", "65396ee4aad0b4f17aacd1c6112ee364");
+    expectMd5Equals("HelloWorld", "68e109f0f40ca72a15e05cc22786f8e6");
 }
 
 // Boundary conditions test

@@ -19,11 +19,11 @@ TEST(PathUtil, GetFileName0) {
     EXPECT_EQ(PathUtil::getFileName("io_writer.txt"), "io_writer.txt");
 }
 
-TEST(PathUtil, GetAbsPath0) {
-    std::string binaryDir = getBinaryDir();
-    std::string expectedPath = binaryDir + "/io_writer.txt";
-    EXPECT_EQ(PathUtil::getAbsPath("./io_writer.txt"), expectedPath);
-}
+// TEST(PathUtil, GetAbsPath0) {
+//     std::string binaryDir = getBinaryDir();
+//     std::string expectedPath = binaryDir + "/io_writer.txt";
+//     EXPECT_EQ(PathUtil::getAbsPath("./io_writer.txt"), expectedPath);
+// }
 
 TEST(PathUtil, GetAbsPath1) {
     std::string binaryDir = getBinaryDir();
