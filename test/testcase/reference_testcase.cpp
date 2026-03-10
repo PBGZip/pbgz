@@ -82,6 +82,11 @@ protected:
     }
 
     void TearDown() override {
+        // Clean up allocated memory
+        if (quash != nullptr) {
+            MemoryUtil::safeFree(quash);
+        }
+        
         // Clean up test files
         std::filesystem::remove(testFastaFile);
         std::filesystem::remove_all(testDir);

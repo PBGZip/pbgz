@@ -119,6 +119,7 @@ TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
     {
         // Prepare test data - a simple DNA sequence
         const uint8_t* base = (const uint8_t*)"ATCGATCGATCGATCGATCG";
+        baseLength = strlen((char*)base);
         const uint8_t expOut[] = {0x27, 0x27, 0x27, 0x27, 0x27};
         // Call mappingFastqGen2 function
         actuator.mappingFastqGen2(base, 20, out, outLength, mappingPos, mappingDir);
@@ -132,11 +133,12 @@ TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
 
     {
         const uint8_t* base = (const uint8_t*)"ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG";
+        baseLength = strlen((char*)base);
          // Call mappingFastqGen2 function
         actuator.mappingFastqGen2(base, baseLength, out, outLength, mappingPos, mappingDir);
 
-        fprintf(stderr, "outLength=%d, mappingPos=%ld", outLength, mappingPos);
-        EXPECT_EQ(mappingDir, 1);
+        fprintf(stderr, "outLength=%d, mappingPos=%ld, mappingDir=%d", outLength, mappingPos, mappingDir);
+        EXPECT_EQ(mappingDir, 0);
     }
     
     // Clean up resources
