@@ -50,6 +50,7 @@ public:
         this->io->m = coder_io::MUNSET;
         this->io->appen_magic("coder_affix_match");
         this->plast = nullptr;
+        this->last = nullptr;
 
         last_len = last_prelen = last_suflen = 0;
         this->flushed = false;
@@ -83,11 +84,12 @@ public:
             rc.StartEncode();
             io->m = coder_io::MENC;
             this->last_capacity = in_len;
-            last = static_cast<uint8_t*>(safe_alloc_init(this->last_capacity, ' '));
+            this->last = static_cast<uint8_t*>(safe_alloc_init(this->last_capacity, ' '));
+            this->last_len = 0;
             this->plast = last;
         }
         /* Get prefix length */
-        for (i = 0; i < in_len && i < last_len; i++)
+        for (i = 0; i < (int32_t)in_len && i < last_len; i++)
         {
             if (in[i] != last[i])
                 break;
@@ -101,7 +103,7 @@ public:
                 break;
         }
         suf_len = in_len - 1 - i;
-        if (in_len < suf_len + pre_len)
+        if ((int32_t)in_len < suf_len + pre_len)
             suf_len = in_len - pre_len;
 
         if (encode_higher())
@@ -123,24 +125,54 @@ public:
         match = !!pre_len;
         for (i = j = pre_len, k = 0; i < len2; i++, j++, k++)
         {
-            last_ch = (((last[j] - 32) << 1) + match + (k << 6)) & 0x1FFF;
+            uint8_t ch = (j < (int32_t)last_len && j >= 0) ? last[j] : ' ';
+            last_ch = (((ch - 32) << 1) + match + (k << 6)) & 0x1FFF;
             if (encode_higher()) /* Higher compression rate */
                 model_middle[last_ch].encodeSymbolOrder(&rc, in[i] & 0x7f);
             else
                 model_middle[last_ch].encodeSymbol(&rc, in[i] & 0x7f);
 
-            if (in[i] == ' ' && last[j] != ' ') j++;
-            if (in[i] != ' ' && in[j] == ' ') j--;
-            if (in[i] == ':' && in[j] != ':') j++;
-            if (in[i] != ':' && in[j] == ':') j--;
+            ch = (j < (int32_t)last_len && j >= 0) ? last[j] : ' ';
+            if (in[i] == ' ' && ch != ' ') j++;
+
+            ch = (j < (int32_t)last_len && j >= 0) ? last[j] : ' ';
+            if (in[i] != ' ' && ch == ' ') j--;
+
+            ch = (j < (int32_t)last_len && j >= 0) ? last[j] : ' ';
+            if (in[i] == ':' && ch != ':') j++;
+
+            ch = (j < (int32_t)last_len && j >= 0) ? last[j] : ' ';
+            if (in[i] != ':' && ch == ':') j--;
+
             if (in[i] == ':' || in[i] == ' ') k = (k + 3) >> 2 << 2;
 
-            match = (in[i] == last[j]);
+            ch = (j < (int32_t)last_len && j >= 0) ? last[j] : ' ';
+            match = (in[i] == ch);
         }
 
         if (need2hold)
         {
-            this->last = static_cast<uint8_t*>(safe_realloc(this->last_capacity, this->last, in_len));
+            /* Allocate new memory to avoid in-place reallocation issues */
+            if (in_len > this->last_capacity) 
+            {
+                uint8_t* new_last = static_cast<uint8_t*>(safe_alloc(in_len));
+                if (new_last) {
+                    memcpy(new_last, in, in_len);
+                    if (last != in && this->last) 
+                    {
+                        safe_free((void**)&this->last);
+                    }
+                    this->last = new_last;
+                    this->last_len = in_len;
+                    this->last_capacity = in_len;
+                    this->plast = last;
+                }
+            } 
+            else 
+            {
+                memcpy(this->last, in, in_len);
+                this->last_len = in_len;
+            }
         }
         else
         {
@@ -168,20 +200,24 @@ public:
             this->last_capacity = 1024;
             last = static_cast<uint8_t*>(safe_alloc_init(this->last_capacity, ' '));
             //check_exit(last, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Error: Insufficient memory: need %" PRIu64 " MB\n",  static_cast<uint64_t>(this->last_capacity) >> 20);
-            if (!last) {
+            if (!last) 
+            {
                 coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",  
                     static_cast<uint64_t>(this->last_capacity) >> 20);
                 return coder_ns::CODER_ERR_MEM_ALLOC_FAIL;
             }
-            
+            this->last_len = 0;
             this->plast = last;
         }
 
-        if (encode_higher()) {
+        if (encode_higher()) 
+        {
             pre_len = model_prefix[last_prelen].decodeSymbolOrder(&rc);
             suf_len = model_suffix[last_suflen].decodeSymbolOrder(&rc);
             len = model_len[last_len].decodeSymbolOrder(&rc);
-        } else {
+        } 
+        else 
+        {
             pre_len = model_prefix[last_prelen].decodeSymbol(&rc);
             suf_len = model_suffix[last_suflen].decodeSymbol(&rc);
             len = model_len[last_len].decodeSymbol(&rc);
@@ -194,8 +230,9 @@ public:
             out[i] = last[i];
 
         len2 = len - suf_len, match = pre_len ? 1 : 0;
-        for (i = j = pre_len, k = 0; i < len2; i++, j++, k++) {
-            uint8_t ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+        for (i = j = pre_len, k = 0; i < len2; i++, j++, k++) 
+        {
+            uint8_t ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             last_ch = (((ch - 32) << 1) + match + (k << 6)) & 0x1FFF;
             if (encode_higher())
                 c = model_middle[last_ch].decodeSymbolOrder(&rc);
@@ -204,33 +241,51 @@ public:
 
             out[i] = c;
 
-            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c == ' ' && ch != ' ') j++;
             
-            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c != ' ' && ch == ' ') j--;
             
-            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c == ':' && ch != ':') j++;
             
-            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c != ':' && ch == ':') j--;
             
             if (out[i] == ':' || out[i] == ' ') k = (k + 3) >> 2 << 2;
             
-            ch = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';
+            ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             match = c == ch;
         }
 
-        for (j = last_len - suf_len; i < len; i++, j++) {
-            out[i] = (j < (int32_t)this->last_capacity && j >= 0) ? last[j] : ' ';;
+        for (j = last_len - suf_len; i < len; i++, j++) 
+        {
+            out[i] = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
         }
 
         if (need2hold)
         {
-            this->last = static_cast<uint8_t*>(safe_realloc(this->last_capacity, this->last, len));
-            memcpy(this->last, out, len);
-            last_len = len;
+            if (len > (int32_t)this->last_capacity) {
+                uint8_t* new_last = static_cast<uint8_t*>(safe_alloc(len));
+                if (new_last) 
+                {
+                    memcpy(new_last, out, len);
+                    if (this->last) 
+                    {
+                        safe_free((void**)&this->last);
+                    }
+                    this->last = new_last;
+                    this->last_len = len;
+                    this->last_capacity = len;
+                    this->plast = last;
+                }
+            } 
+            else 
+            {
+                memcpy(this->last, out, len);
+                last_len = len;
+            }
         }
         else
         {

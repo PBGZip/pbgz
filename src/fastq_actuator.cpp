@@ -765,8 +765,10 @@ int32_t FastqActuator::compressBase() {
     if (pReference != nullptr && isGen2) {
         return compressBaseWithRef();
     } else {
-        if (!isGen2) {
-            fprintf(stderr ,"This block(%ld) is Gen3 FASTQ, compression will be performed without a reference genome.\n", inBlockPtr->getBlockId());
+        static bool isPrint = false;
+        if (!isGen2 && pReference != nullptr && !isPrint) {
+            fprintf(stderr ,"This file is Gen3 FASTQ, compression will be performed without a reference genome.\n");
+            isPrint = true;
         }
         return compressBaseWithoutRef();
     }

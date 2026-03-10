@@ -54,6 +54,10 @@ public:
         pIoReader->openIO(); 
         BlockReader*  pBlockReader = new BlockReader(pIoReader); 
         pBlockReader->readBlock(pInBlock, TYPE_UNKNOW);
+        
+        // Clean up allocated resources
+        delete pBlockReader;
+        delete pIoReader;
     }
 
     void generateFastqFile(const std::string& filename, int numRecords) {
