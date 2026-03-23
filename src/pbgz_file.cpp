@@ -26,6 +26,7 @@
 #include "pbgz_file.h"
 #include "log/logger.h"
 #include "coder_json.h"
+#include "farmhash/src/farmhash.h"
 
 
 std::string PbgzFileHeader::getVersionStr() {
@@ -52,12 +53,20 @@ int32_t PbgzDataBlock::setBlockData(uint8_t* data, uint32_t length) {
 }
 
 void PbgzDataBlock::calcChecksum() {
-
+    dataBlockChecksum = util::Hash64((char*)pBlockData, (size_t)blockDataLength);
+    Json::StreamWriterBuilder writer;
+    std::string jsonStr = Json::writeString(writer, dataMetaInfo);
+    metaChecksum = util::Hash64(jsonStr);
 }
 
 int32_t PbgzDataBlock::verifyCheckSum() {
-    return 0;
+    if (dataBlockChecksum == util::Hash64((char*)pBlockData, (size_t)blockDataLength)) {
+        Json::StreamWriterBuilder writer;
+        std::string jsonStr = Json::writeString(writer, dataMetaInfo);
+        if (metaChecksum == util::Hash64(jsonStr)) {
+            return 0;
+        }
+        return -1;
+    }
+    return -1;
 }
-
-
-

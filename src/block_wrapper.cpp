@@ -40,6 +40,24 @@ BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
         return BAM;
     }
 
+    // 以@HD，@SQ，@RG,@PG,@CO开头，检测是否是SAM文件
+    bool isNeedCheckSam = false;
+    // 第一个块检查文件头，后续块根据第一个块的结果处理
+    if (blockPtr->getBlockId() == 0 && blockPtr->getDataLen() >= 4 && buffer[0] == '@') {
+        std::string head((char*)buffer, 3);
+        if (head == "@HD" || head == "@SQ" || head == "@RG" || head == "@PG" || head == "@CO") {
+            isNeedCheckSam = true;
+        }
+    }
+    if (isNeedCheckSam || blockPtr->getBlockType() == SAM) {
+        for (int64_t pos = 0; pos < blockPtr->getDataLen(); ++pos) {
+            if (buffer[pos] == '\n') {
+                blockPtr->getNpos().push_back(static_cast<uint32_t>(pos));
+            }
+        }
+        return SAM;
+    }
+
     if (buffer[0] == '@') {   // FASTQ format
         // Determine if it's GEN2 or GEN3
         int64_t lineNum = 0;   // Line count
@@ -150,7 +168,7 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         if (blockPtr->getBlockId() == 0) {
             blockPtr->setBlockType(type);
         } else {
-            if (type == BINARY && (fileType == BAM || fileType == GZIP)) {
+            if (type == BINARY && (fileType == BAM || fileType == GZIP || fileType == SAM)) {
                 blockPtr->setBlockType(fileType);
             } else {
                 blockPtr->setBlockType(type);
@@ -158,12 +176,21 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         }
     } else {
         blockPtr->setBlockType(fileType);
+        if (BlockUtil::isSAMBlock(fileType)) {
+            (void)constructBlock(blockPtr);
+        }
     }
 
-    if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) {
+    if (BlockUtil::isFastqBlock(blockPtr->getBlockType()) || BlockUtil::isSAMBlock(blockPtr->getBlockType())) {
         // If FASTQ format, ensure block integrity
         int32_t lineNum = static_cast<int32_t>(blockPtr->getNpos().size());
-        int64_t remainLen = totalLen - blockPtr->getNpos()[((lineNum >> 2) << 2) - 1] - 1;
+        int64_t remainLen = 0;
+        if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) { 
+            remainLen = totalLen - blockPtr->getNpos()[((lineNum >> 2) << 2) - 1] - 1;
+        } else if (BlockUtil::isSAMBlock(blockPtr->getBlockType())) {
+            remainLen = totalLen - blockPtr->getNpos()[lineNum - 1] - 1;
+        }
+        
         if (remainLen > 0) {
             // If there's still data in cache, do memmove first
             if (cacheLen > 0) {
@@ -176,8 +203,10 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         }
 
         blockPtr->setDataLen(static_cast<int64_t>(totalLen));
-        for (int t = 0; t < lineNum - ((lineNum >> 2) << 2); ++t)  {
-            blockPtr->getNpos().pop_back(); // Remove last newline position
+        if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) {
+            for (int t = 0; t < lineNum - ((lineNum >> 2) << 2); ++t)  {
+                blockPtr->getNpos().pop_back(); // Remove last newline position
+            }
         }
     }
 
@@ -190,6 +219,10 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 namespace BlockUtil {
     bool isFastqBlock(BlockType type) {
         return (type == FASTQ_GEN2 || type == FASTQ_GEN3 || type == FASTQ_GEN2_GZIP || type == FASTQ_GEN3_GZIP);
+    }
+
+    bool isSAMBlock(BlockType type) {
+        return (type == SAM);
     }
 
     std::string getBlockTypeName(BlockType type) {
@@ -212,6 +245,8 @@ namespace BlockUtil {
                 return "FASTQ_GEN3_GZIP";
             case BAM:
                 return "BAM";
+            case SAM:
+                return "SAM";
             case PBGZFILE:
                 return "PBGZFILE";
             default:
@@ -251,6 +286,8 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
         blockPtr->setBlockType(REFERENCE);
     } else if (blockType == "refe_gene_index") {
         blockPtr->setBlockType(REFERENCE_INDEX);
+    } else if (blockType == "sam") {
+        blockPtr->setBlockType(SAM);
     }
     // Copy entire block information
     memcpy(blockPtr->getBuffer(), pbgzDataBlock.getDataPtr(), pbgzDataBlock.getDataLength());
@@ -355,7 +392,9 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
         dataBlock.setMetaData("blocktype", "refe_gene");
     } else if (blockPtr->getBlockType() == REFERENCE_INDEX) {
         dataBlock.setMetaData("blocktype", "refe_gene_index");
-    } 
+    } else if (blockPtr->getBlockType() == SAM) {
+        dataBlock.setMetaData("blocktype", "sam");
+    }
 
     /// Calculate checksum of Meta and data
     dataBlock.calcChecksum();

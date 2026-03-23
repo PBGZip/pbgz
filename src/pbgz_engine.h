@@ -48,6 +48,7 @@ public:
         pRefGene = nullptr;
         refeOffsetFLag = false;
         blockCount = 0;
+        syncFlag = false;
     }
 
     virtual int32_t init();
@@ -107,6 +108,8 @@ protected:
         return false;
     }
 
+    bool isNeedNotify(bool flag);
+
 protected:
     BlockingQueue<RoughIOBlock*> freeInputPool;   // Free queue, file reading tasks get blocks from here to read data
     BlockingQueue<RoughIOBlock*> inputDataPool;   // Data reading tasks write completed data to this queue, compression/decompression tasks get data from this queue
@@ -127,4 +130,8 @@ protected:
     uint32_t blockCount;
 
     PbgzIndex pbgzIndex;
+
+    mutable std::mutex mutex;
+    mutable std::condition_variable conditionVar;
+    bool syncFlag;
 };

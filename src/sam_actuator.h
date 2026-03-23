@@ -1,0 +1,210 @@
+#pragma once
+
+#include <map>
+#include <vector>
+
+#include "actuator.h"
+#include "coder.h"
+#include "coder_io.h"
+#include "coder_qual.h"
+#include "reference.h"
+#include "sam_info.h"
+#include "coder_bwt_cm.h"
+
+class SamActuator : public Actuator {
+public:
+    SamActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRefeGene = nullptr);
+    virtual ~SamActuator() override;
+
+    int32_t preAnalysis();
+    
+    int32_t compress() override;
+    int32_t decompress() override;
+
+    virtual bool getNotifyFlag() override {
+        return inBlockPtr->getNpos().size() > (size_t)headEndLine;
+    }
+
+private:
+    int32_t preAnalysisIdLine(uint8_t* buffer, uint32_t length);
+
+    int32_t preAnalysisIdFirstLine(uint8_t* buffer, uint32_t length);
+
+    // compress SAM Head
+    int32_t compressSamHeader();
+
+    // Field-by-field compression
+    int32_t compressSamByFields(); 
+
+    // Field-by-field decompression
+    int32_t decompressSamByFields(); 
+
+    // ID field split compression
+    int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
+
+    // ID field whole compression
+    int32_t compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
+
+    // Regular field compression
+    int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
+
+    template<typename T>
+    int32_t compressNumber(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+        std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+        uint32_t lineNum = npos.size();
+        uint8_t* buffer = inBlockPtr->getBuffer();
+        
+        // Create encoder for regular field compression
+        std::shared_ptr<coder_io> numberIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<coder_bwt_cm> numberCoder = std::make_shared<coder_bwt_cm>(numberIo.get());
+        
+        fieldSrcLen = 0;
+        // Process each line and extract the current field
+        for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+            uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+            uint32_t lineEnd = npos[lineIdx] - lineStart;
+
+            uint8_t* line = buffer + lineStart;
+            // Skip header lines (starting with @)
+            if (*line == '@') {
+                continue;
+            }
+            
+            // Middle fields: between tabs
+            uint32_t contentIdx = lineIdx - headEndLine;
+            uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+            uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+            uint8_t* fieldStart = line + prevTabPos + 1;
+            uint32_t fieldLength = currTabPos - prevTabPos - 1;
+
+            std::string str = std::string((char*)fieldStart, fieldLength);
+            T value = (T)std::stoll(str);
+            // Encode the field data
+            numberCoder->encode_line(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
+            fieldSrcLen += sizeof(T);
+            
+            if (fieldIdx == 3 && value != 0) {
+                mappedPos[lineIdx] = value;
+            } else if (fieldIdx == 1 && value != 0) {
+                mappedFlag[lineIdx] = value;
+            } else if (fieldIdx == 7 && value != 0) {
+                nextMappedPos[lineIdx] = value;
+            } 
+        }
+        
+        // Flush the encoder for this field
+        numberCoder->encode_flush();
+        
+        // Update output block data length
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + numberIo->data_len);
+        
+        // Set field metadata
+        fieldMeta["srclen"] = fieldSrcLen;
+        fieldMeta["dstlen"] = numberIo->data_len;
+        fieldMeta["coder"] = numberIo->meta;
+        fieldMeta["field"] = fieldIdx;
+        
+        return numberIo->data_len;
+    }
+
+    int32_t compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+
+    int32_t compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+
+    int32_t compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+    
+    // Helper methods
+    void setReference(Reference* ref) { pRefeGene = ref; }
+    
+    int32_t compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+
+    // Parse chromosome information from @SQ line
+    int32_t parseChromosomeInfo(const std::string& sqLine);
+
+    int32_t decompressHeader();
+
+    int32_t initDecoder(RoughIOBlock* outputBlock);
+
+    int32_t decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag);
+
+    int32_t decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta);
+
+    int32_t decompressChrName(uint32_t fieldIdx, uint32_t lineNo);
+
+    int32_t decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
+                                    uint32_t& nposOffset, uint32_t& totalBaseLength, uint8_t* basePtr);
+
+    int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen);
+
+    template<typename T>
+    int32_t decompressNumber(uint32_t fieldIdx, uint32_t lineNo) {
+        uint32_t outLen = sizeof(T);
+        uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), outLen, UINT8_MAX, false);
+        if (outLen != fieldLen) {
+            LOG_ERROR("Decode failed, filed = %u, lineNo = %u", fieldIdx, lineNo);
+            return -1;
+        }
+
+        T val = *(T*)outBlockPtr->getCurrent();
+        std::string strVal = std::to_string(val);
+        if (fieldIdx == 1) {
+            mappedFlag[lineNo] = val;
+        } else if (fieldIdx == 3) {
+            mappedPos[lineNo] = val;
+        } else if (fieldIdx == 7) {
+            nextMappedChr[lineNo] = val;
+        }
+        memcpy(outBlockPtr->getCurrent(), strVal.c_str(), strVal.length());
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + strVal.length());
+        *outBlockPtr->getCurrent() = '\t';
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+        return strVal.length() + 1;
+    }
+
+private:
+    int64_t headEndLine;
+    std::vector<std::vector<int64_t>> contentPos;
+    
+    Reference* pRefeGene;
+    
+    // ID analysis related members (similar to FastqActuator)
+    uint32_t idPosLength;
+    std::vector<uint8_t> idSplitSymbols;
+    std::vector<std::vector<int32_t>> idSplitPos; // Position of each separator in ID field for each line
+    std::vector<uint32_t> idSplitMinLen; // Minimum length of each separator
+    std::vector<uint32_t> idSplitMaxLen; // Maximum length of each separator
+    const std::string idSplitDefault = "/:= _.,-#\r\t\n";
+    uint16_t maxFieldSize = 0;
+    std::vector<std::pair<int64_t, uint16_t>> lineFiledCount;
+    std::map<uint32_t, int64_t> mappedPos;
+    std::map<uint32_t, uint16_t> mappedChr;
+    std::map<uint32_t, int64_t> nextMappedPos;
+    std::map<uint32_t, uint16_t> nextMappedChr;
+    std::map<uint32_t, uint16_t> mappedFlag;
+
+    uint32_t baseNCount;
+    uint32_t* baseNPosBuffer; 
+    uint32_t* baseLengthBuffer;
+    uint32_t minBaseLength = UINT32_MAX;
+    uint32_t maxBaseLength = 0;
+    
+    // SAM header compression related members
+    uint32_t headerSrcLen; // SAM文件头原始长度
+    uint32_t headerDstLen; // SAM文件头压缩后长度
+    
+    // Quality compression related members
+    std::vector<std::pair<uint16_t, uint16_t>> qualFreqTable;   
+
+    uint32_t readOffset;
+
+    std::vector<std::shared_ptr<coder_io>> ioVector;
+    std::vector<std::shared_ptr<coder>> idDecoders;
+    std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
+    std::shared_ptr<coder_qual> qualCoder;
+
+    uint8_t* baseSquashBuffer;
+    uint8_t* baseDiffSquashBuffer;
+    uint8_t* refeStrecchBuffer;
+
+    const uint8_t atcg4[4] = {'A', 'C', 'T', 'G'}; 
+};
