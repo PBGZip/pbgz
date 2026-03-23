@@ -406,6 +406,10 @@ int32_t PbgzFileWriter::writeFileMeta(PbgzFileMeta& fileMeta){
         return -1; // File not open
     }
 
+    if (fileMeta.getMetaData().empty()) {
+        return 0;
+    }
+
     coder_json fileMetaCoder;
     std::string fileMetaEncodeStr;
     fileMetaCoder.encoder(fileMeta.getMetaData(), fileMetaEncodeStr);

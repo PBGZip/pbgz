@@ -43,6 +43,7 @@ add_subdirectory(coder)
 file(GLOB PBGZ_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/log/*.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/utils/*.cpp
+                       ${CMAKE_CURRENT_SOURCE_DIR}/farmhash/src/farmhash.cc
 )
 
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp )

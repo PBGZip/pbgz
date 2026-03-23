@@ -28,6 +28,7 @@
 #include "utils/path_util.h"
 #include "coder_ppmd.h"
 #include "coder_json.h"
+#include "sam_actuator.h"
 
 int32_t CompressEngine::init() {
     if (0 != PbgzEngine::init()) {
@@ -96,6 +97,16 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
             return MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
         }
     }
+
+    SamActuator* samActuator = dynamic_cast<SamActuator*>(actuator);
+    if (samActuator != nullptr) {
+        if (0 != samActuator->preAnalysis()) {
+            LOG_INFO("sam preAnalysis failed");
+            MemoryUtil::safeDeleteClass(samActuator);
+            return MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
+        }
+    }
+    
     return actuator;
 }
 

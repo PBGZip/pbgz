@@ -241,8 +241,7 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
                     inputBlock.push(currBlock);
                 }
             }));
-        }
-        else {
+        } else {
             RoughIOBlock* current = inputBlock.get(); 
             blockReader->readBlock(current);
             inputPool.push(current);
