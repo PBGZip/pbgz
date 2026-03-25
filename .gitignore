@@ -165,3 +165,10 @@ test-data/
 
 # File
 pbgz
+
+#MCP config
+*mcprules*
+
+#memory-bank
+memory-bank/
+
