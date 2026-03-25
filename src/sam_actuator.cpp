@@ -880,7 +880,7 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
         uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
         
         // Skip if chromosome ID is invalid
-        if (chrId == 0xFFFF || startPos == 0 || flag&0x04) {
+        if (chrId == 0xFFFF) {
             continue;
         }
         
@@ -946,8 +946,8 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
         }
         // Encode the mapped data
         if (outLen > 0) {
-            matchCm->encode_line(baseMappedBuffer.get(), outLen);
-            srcLen += outLen;
+            matchCm->encode_line(baseMappedBuffer.get(), seqLength);
+            srcLen += seqLength;
         }
         offset++;
     }
@@ -1581,35 +1581,38 @@ int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, u
             // 没有匹配上
             if (mapFlag & 0x04) {
                 decoderLen = fieldDecoders[fieldIdx]->decode_line(baseSquashBuffer, actualBaseLen, UINT8_MAX, false);
+                if (decoderLen != actualBaseLen) {
+                    LOG_ERROR("base decode failed in block %llu, expect len %d, actural len %d", inBlockPtr->getBlockId(), actualBaseLen, decoderLen);
+                    return -1;
+                }
                 for (uint32_t o = 0; o < decoderLen; ++o) {
                     outBlockPtr->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
                 }
             } else {
                 decoderLen = fieldDecoders[fieldIdx]->decode_line(baseDiffSquashBuffer, actualBaseLen, UINT8_MAX, false);
-                // 获取在参考基因的位置
-                int64_t refeChrPos = SamInfo::getInstance().getPosistionByIndex(mappedChr[lineNo]);
-                if (refeMappedPos == -1) {
-                    LOG_ERROR("Get reference posistion failed(%ld)", refeMappedPos);
+                if (decoderLen != actualBaseLen) {
+                    LOG_ERROR("base decode failed in block %llu, expect len %d, actural len %d", inBlockPtr->getBlockId(), actualBaseLen, decoderLen);
                     return -1;
                 }
-                LOG_DEBUG("Get mapped begin = %lu, pos = %lu", refeMappedPos, mappedPos[lineNo]);
-                refeMappedPos += mappedPos[lineNo];
+                // 获取在参考基因的位置
+                int64_t refeChrPos = SamInfo::getInstance().getPosistionByIndex(mappedChr[lineNo]);
+                if (refeChrPos == -1) {
+                    LOG_ERROR("Get reference posistion failed(%ld)", refeChrPos);
+                    return -1;
+                }
+                int64_t refeMappedPos = refeChrPos + mappedPos[lineNo] - 1;
 
                 pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, actualBaseLen, refeMappedPos);
-                actgXor(baseSquashBuffer, refeStrecchBuffer, baseSquashBuffer,actualBaseLen);
-                if (mappedFlag[lineNo] & 0x80) {
-                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, refeStrecchBuffer);
-                    actgPair(outBlockPtr->getCurrent(), refeStrecchBuffer, actualBaseLen);
+                actgXor(refeStrecchBuffer, baseDiffSquashBuffer, baseSquashBuffer,actualBaseLen);
+                if (mappedFlag[lineNo] & 0x10) {
+                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, baseSquashBuffer);
+                    actgPair(outBlockPtr->getCurrent(), baseSquashBuffer, actualBaseLen);
                 } else {
                     pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outBlockPtr->getCurrent());
                 }
             }
-            if (decoderLen != actualBaseLen) {
-                LOG_ERROR("base decode failed in block %llu, expect len %d, actural len %d", inBlockPtr->getBlockId(), actualBaseLen, decoderLen);
-                return -1;
-            }
+            
             // 将N填充回来
-            LOG_DEBUG("nposOffset = %d,baseNCount = %d,  totalBaseLen = %d", nposOffset, baseNCount, totalBaseLen);
             for (uint32_t n = 0; n < actualBaseLen; ++n) {
                 if (nposOffset < baseNCount && baseNPosBuffer[nposOffset] == totalBaseLen + n) {
                     *(outBlockPtr->getCurrent() + n) = 'N';
