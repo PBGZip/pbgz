@@ -297,7 +297,7 @@ private:
     char* lineBuffer;      // Buffer pointer
     size_t bufferSize;     // Buffer size
     size_t bufferPos;      // Current buffer position
-    ssize_t bytesRead;     // Number of bytes read this time
+    size_t bytesRead;     // Number of bytes read this time
 
     // Helper function
     bool readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen, uint8_t* isalOut, uint32_t isalOutLen, bool isMultipleHeaders);
