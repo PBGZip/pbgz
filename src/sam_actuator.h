@@ -83,11 +83,11 @@ private:
             numberCoder->encode_line(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
             fieldSrcLen += sizeof(T);
             
-            if (fieldIdx == 3 && value != 0) {
+            if (fieldIdx == 3) {
                 mappedPos[lineIdx] = value;
-            } else if (fieldIdx == 1 && value != 0) {
+            } else if (fieldIdx == 1) {
                 mappedFlag[lineIdx] = value;
-            } else if (fieldIdx == 7 && value != 0) {
+            } else if (fieldIdx == 7) {
                 nextMappedPos[lineIdx] = value;
             } 
         }
@@ -132,7 +132,7 @@ private:
     int32_t decompressChrName(uint32_t fieldIdx, uint32_t lineNo);
 
     int32_t decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
-                                    uint32_t& nposOffset, uint32_t& totalBaseLength, uint8_t* basePtr);
+                                    uint32_t& nposOffset, uint32_t& totalBaseLength);
 
     int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen);
 

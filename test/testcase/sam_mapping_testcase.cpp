@@ -789,6 +789,8 @@ public:
         pIoReader->openIO(); 
         BlockReader*  pBlockReader = new BlockReader(pIoReader); 
         pBlockReader->readBlock(pInBlock, TYPE_UNKNOW);
+        delete(pBlockReader);
+        delete(pIoReader);
     }
 
 protected:
@@ -879,15 +881,15 @@ TEST_F(SamMappingTest, testMapingData) {
             }
         }
         
-        if (chrId != 0xFFFF && chrId != 0xFFFE && startPos > 0) {
+        if (chrId != 0xFFFF && chrId != 0xFFFE) {
             // Get chromosome start position from SamInfo
             const ChromosomeInfo& chrInfo = SamInfo::getInstance().getChromosomeInfo(chrId);
             uint64_t chrStartPos = chrInfo.position;
             // Calculate actual reference position
-            uint64_t refPos = chrStartPos + startPos - 1; // SAM is 1-based
+            int64_t refPos = chrStartPos + startPos - 1; // SAM is 1-based
 
             uint8_t shiftBitLength = (refPos % 4);
-            uint64_t refSquashPos = refPos / 4;
+            int64_t refSquashPos = refPos / 4;
             
             // Determine strand direction from FLAG bit 4
             uint32_t squashBufferLength = 0;
@@ -898,7 +900,12 @@ TEST_F(SamMappingTest, testMapingData) {
             } else {
                 squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
             }
-            uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);;
+
+            if (refGene.getSquashLength() < refSquashPos + squashBufferLength) {
+                continue;
+            }
+
+            uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);
             if (shiftBitLength == 0) {
                 memcpy(refeMappedPos, actuator.pRefeGene->getSquash() + refSquashPos, squashBufferLength);
             } else if (shiftBitLength == 1) {
@@ -919,9 +926,15 @@ TEST_F(SamMappingTest, testMapingData) {
             }
             outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer);
             outLen = outLen;
+            MemoryUtil::safeFree(refeMappedPos);
         } 
         offset++;
     }
+
+    MemoryUtil::safeFree(basePairBuffer);
+    MemoryUtil::safeFree(baseSquashBuffer);
+    MemoryUtil::safeFree(baseMappedBuffer);
+    MemoryUtil::safeFree(actuator.baseNPosBuffer);
 }
 
 TEST_F(SamMappingTest, testShirftMemory) {
@@ -958,4 +971,7 @@ TEST_F(SamMappingTest, testShirftMemory) {
         }
         printf("\n");
     }
+
+    MemoryUtil::safeFree(src);
+    MemoryUtil::safeFree(dst);
 }

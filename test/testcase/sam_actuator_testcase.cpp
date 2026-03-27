@@ -132,6 +132,7 @@ public:
         file << "read8_11.7\t16\tchr4\t1\t60\t76M\t*\t0\t0\tTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGGCAACAATCGGCGGCC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
         file << "read9_11.8\t0\tchrX\t1\t60\t76M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGACGCAATCGCCGGCCTAAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
         file << "read10_11.9\t16\tchrY\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
+        file << "read10_11.10\t16\tchrY\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
 
         file.close();
     }
@@ -407,13 +408,6 @@ TEST_F(SamActuatorTest, testSetReference) {
 TEST_F(SamActuatorTest, testDecompress) {
     loadSamData(SamTestData::testSamFile);
     
-    // 打印压缩前的原始内容
-    std::cout << "=== 压缩前的原始内容 ===" << std::endl;
-    std::cout << "原始数据长度: " << pInBlock->getDataLen() << std::endl;
-    std::cout << "原始内容:" << std::endl;
-    std::cout.write(reinterpret_cast<const char*>(pInBlock->getBuffer()), pInBlock->getDataLen());
-    std::cout << std::endl << std::endl;
-    
     // 创建一个用于压缩的SamActuator对象
     SamActuator compressor(pInBlock, pOutBlock);
     
@@ -443,13 +437,6 @@ TEST_F(SamActuatorTest, testDecompress) {
     result = decompressor.decompress();
     EXPECT_EQ(result, 0);
     
-    // 打印解压后的内容
-    std::cout << "=== 解压后的内容 ===" << std::endl;
-    std::cout << "解压后数据长度: " << pOutBlock->getDataLen() << std::endl;
-    std::cout << "解压后内容:" << std::endl;
-    std::cout.write(reinterpret_cast<const char*>(pOutBlock->getBuffer()), pOutBlock->getDataLen());
-    std::cout << std::endl << std::endl;
-    
     // 基本检查：确保解压缩产生了数据
     EXPECT_GT(pOutBlock->getDataLen(), 0);
 }
@@ -457,13 +444,6 @@ TEST_F(SamActuatorTest, testDecompress) {
 TEST_F(SamActuatorTest, testDecompressWithRef) {
     loadSamData(SamTestData::testSamFile);
     
-    // 打印压缩前的原始内容
-    std::cout << "=== 压缩前的原始内容 ===" << std::endl;
-    std::cout << "原始数据长度: " << pInBlock->getDataLen() << std::endl;
-    std::cout << "原始内容:" << std::endl;
-    std::cout.write(reinterpret_cast<const char*>(pInBlock->getBuffer()), pInBlock->getDataLen());
-    std::cout << std::endl << std::endl;
-
     Reference reference = createTestReference();
     
     // 创建一个用于压缩的SamActuator对象
@@ -494,13 +474,6 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     // 解压缩不需要preAnalysis，直接调用decompress
     result = decompressor.decompress();
     EXPECT_EQ(result, 0);
-    
-    // 打印解压后的内容
-    std::cout << "=== 解压后的内容 ===" << std::endl;
-    std::cout << "解压后数据长度: " << pOutBlock->getDataLen() << std::endl;
-    std::cout << "解压后内容:" << std::endl;
-    std::cout.write(reinterpret_cast<const char*>(pOutBlock->getBuffer()), pOutBlock->getDataLen());
-    std::cout << std::endl << std::endl;
     
     // 基本检查：确保解压缩产生了数据
     EXPECT_GT(pOutBlock->getDataLen(), 0);
