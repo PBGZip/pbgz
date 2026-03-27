@@ -113,7 +113,7 @@ int32_t SamActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen) {
             lastPos = pos + 1;
         }
 
-        if (pos > bufferLen) {
+        if (pos >= bufferLen) {
             idPosLength = UINT32_MAX; // Mark as unavailable
             break;
         }

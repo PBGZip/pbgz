@@ -246,6 +246,35 @@ TEST_F(SamActuatorTest, testPreAnalysis) {
     EXPECT_EQ(actuator.contentPos.size(), 10);  // 有10条比对记录
 }
 
+TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
+    // 生成大型SAM文件进行性能测试
+    std::ofstream file("idinvlid_pre_analysis.sam");
+    if (!file.is_open()) {
+        return;
+    }
+
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:248956422\n";
+    file << "@SQ\tSN:chr2\tLN:242193529\n";
+    file << "@SQ\tSN:chr3\tLN:198295559\n";
+    file << "@SQ\tSN:chr4\tLN:190214555\n";
+    file << "@SQ\tSN:chr5\tLN:181538259\n";
+    file << "read1_11.SRR001.1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
+    file << "read3_11.SRR001.2\t0\tchr1\t153\t60\t76M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCCGCAAG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!T!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:3\tMD:Z:37C37C0\tAS:i:72\tXS:i:0\n";
+    file << "read4_11.SRR001.3\t0\tchr2\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGACAATCGCCGGAAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!F!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
+    file << "read5_11.SRR001.4\t0\tchr2\t77\t60\t76M\t*\t0\t0\tATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAACGCAATCGATCGA\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!K!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
+    file << "read6_11.5\t16\tchr3\t1\t60\t76M\t*\t0\t0\tCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCACAATCGGCGGCCGAATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
+    
+    file.close();
+
+    loadSamData("idinvlid_pre_analysis.sam");
+    SamActuator actuator(pInBlock, pOutBlock);
+    int32_t result = actuator.preAnalysis();
+    std::remove("idinvlid_pre_analysis.sam");
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(actuator.idPosLength, UINT32_MAX);
+}
+
 TEST_F(SamActuatorTest, testCompressQuality) {
     loadSamData(SamTestData::testSamFile);
     SamActuator actuator(pInBlock, pOutBlock);
