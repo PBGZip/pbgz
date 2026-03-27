@@ -154,8 +154,10 @@ bool Reference::initSquashByNiFile() {
 
     int64_t metaLen = niReader.getFileSize() - buffOffset;
     uint8_t* metaBuf = buffer;
+    uint8_t* allocatedMetaBuf = nullptr;
     if (metaLen > 4096) {
         metaBuf = MemoryUtil::safeAlloc<uint8_t>(metaLen);
+        allocatedMetaBuf = metaBuf;
         if (metaBuf == nullptr) {
             return false;
         }
@@ -436,7 +438,6 @@ std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName)
 bool Reference::processFastaFile(const std::string& refGeneFile,  const std::string& niFile) {
     /* Serial processing is sufficient, basically just file reading time, base_squash time can be ignored */
     size_t squashBufferlen = 1024 >> 2;
-    uint8_t* squashBuffer = MemoryUtil::safeAlloc<uint8_t>(1024);
 
     // Calculate reference genome MD5 in parallel
     std::string refGeneMd5;
@@ -485,6 +486,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
     uint32_t l4Align;
     std::string actgChr = "";
     
+    uint8_t* squashBuffer = MemoryUtil::safeAlloc<uint8_t>(1024);
     // Use IOReader::readLine instead of std::getline
     while (reader->readLine(line) > 0) {
         if (line.empty()) {
@@ -523,6 +525,7 @@ bool Reference::processFastaFile(const std::string& refGeneFile,  const std::str
                     } else {
                         LOG_ERROR("Memory realloc failed");
                         reader->closeIO();
+                        MemoryUtil::safeFree(squashBuffer);
                         return false;
                     }
                 }
@@ -752,6 +755,7 @@ bool Reference::makeIndex() {
     hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
     if (!initSquashByNiFile()) {
         LOG_ERROR("initialize reference failed");
+        MemoryUtil::safeFree(hashBucketCurpos);
         return false;
     }
     if ((refGeneSquashlen << 2) >= supportMax) {

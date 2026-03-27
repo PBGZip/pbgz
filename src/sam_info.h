@@ -14,7 +14,7 @@ struct ChromosomeInfo {
     uint32_t length;    // 染色体长度
     uint64_t position;  // 染色体相对于起始位置的偏移
     
-    ChromosomeInfo() : id(0), length(0) {}
+    ChromosomeInfo() : id(0), length(0), position(0) {}
     ChromosomeInfo(uint16_t id, const std::string& name, uint32_t length) 
         : id(id), name(name), length(length), position(0) {}
 };

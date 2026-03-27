@@ -72,6 +72,17 @@ public:
         temp[2048] = 0;
         LOG_DEBUG("%s", temp);
     }
+
+    void printBufferContentInHex(uint8_t* buffer, uint32_t bufferLen) {
+        char temp[2048 + 1] = {0};
+        bufferLen = std::min<uint32_t>(bufferLen, 2048);
+        memcpy(temp, (char*)buffer, bufferLen);
+        temp[2048] = 0;
+        for (int i = 0; i < bufferLen; ++i) {
+            fprintf(stderr, "%02X", temp[i]);
+        }
+        fprintf(stderr, "\n");
+    }
 private:
     void updateDataInfo();
 

@@ -720,6 +720,12 @@ int32_t SamActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcL
 
         uint32_t contentIdx = lineIdx - headEndLine;
         // Middle fields: between tabs
+        if (fieldIdx > contentPos[contentIdx].size()) {
+            uint8_t ch = '\n';
+            fieldCoder->encode_line(&ch, 1);
+            fieldSrcLen += 1;
+            continue;
+        }
         uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
         uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
         uint8_t* fieldStart = line + prevTabPos + 1;
@@ -855,11 +861,6 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
         }
         
         uint32_t contentIdx = lineIdx - headEndLine;
-        // Extract SEQ field (field 9)
-        if (fieldIdx >= contentPos[contentIdx].size() + 1) {
-            continue;
-        }
-        
         uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
         uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
         uint8_t* seqStart = line + prevTabPos + 1;
@@ -879,11 +880,6 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
         // Extract FLAG field to determine strand
         uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
         
-        // Skip if chromosome ID is invalid
-        if (chrId == 0xFFFF) {
-            continue;
-        }
-        
         // Process sequence: remove N's and record positions
         uint32_t outLen = 0;
         for (uint32_t n = 0; n < seqLength; n++) {
@@ -895,50 +891,55 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
         }
 
         totalBaseLength += seqLength;
-        if (chrId != 0xFFFF && chrId != 0xFFFE && startPos > 0) {
+        if (chrId != 0xFFFF && chrId != 0xFFFE && !(flag & 0x04)) {
             // Get chromosome start position from SamInfo
-            uint64_t chrStartPos = 0;
-            try {
-                const ChromosomeInfo& chrInfo = SamInfo::getInstance().getChromosomeInfo(chrId);
-                chrStartPos = chrInfo.position;
-            } catch (const std::exception& e) {
-                LOG_ERROR("Failed to get chromosome info for chrId %u: %s", chrId, e.what());
-                continue;
-            }
-            // Calculate actual reference position
-            uint64_t refPos = chrStartPos + startPos - 1; // SAM is 1-based
-            // Determine strand direction from FLAG bit 4
-            uint32_t squashBufferLength = 0;
-
-            bool isReverse = (flag & 0x10) != 0;
-            if (isReverse) {
-                actgPair(basePairBuffer.get(), seqStart, seqLength);
-                squashBufferLength = actgSquash(basePairBuffer.get(), seqLength, baseSquashBuffer);
+            int64_t chrStartPos =  SamInfo::getInstance().getPosistionByIndex(chrId);
+            if (chrStartPos == -1) {
+                // No valid mapping, encode directly
+                actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
+                outLen = seqLength;
             } else {
-                squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
+                // Calculate actual reference position
+                int64_t refPos = chrStartPos + startPos - 1; // SAM is 1-based
+                // Determine strand direction from FLAG bit 4
+                uint32_t squashBufferLength = 0;
+
+                bool isReverse = (flag & 0x10) != 0;
+                if (isReverse) {
+                    actgPair(basePairBuffer.get(), seqStart, seqLength);
+                    squashBufferLength = actgSquash(basePairBuffer.get(), seqLength, baseSquashBuffer);
+                } else {
+                    squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
+                }
+                
+                uint8_t shiftBitLength = refPos % 4;
+                int64_t refSquashPos = refPos / 4;
+                uint32_t baseSquashLength = seqLength >> 2 + !!(seqLength & 0x3);
+                if (refSquashPos + baseSquashLength > pRefeGene->getSquashLength()) {
+                    actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
+                    outLen = seqLength;
+                } else {
+                    const uint8_t* beginRefPos = pRefeGene->getSquash() + refSquashPos;
+                    uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);;
+                    if (shiftBitLength == 0) {
+                        memcpy(refeMappedPos, beginRefPos, squashBufferLength);
+                    } else if (shiftBitLength == 1) {
+                        for (uint32_t i = 0; i < squashBufferLength; ++i) {
+                            refeMappedPos[i] = ((beginRefPos[i] << 2) & 0xFC) + ((beginRefPos[i + 1] >> 6) & 0x03);
+                        }
+                    } else if (shiftBitLength == 2) {
+                        for (uint32_t i = 0; i < squashBufferLength; ++i) {
+                            refeMappedPos[i] = ((beginRefPos[i] << 4) & 0xF0) + ((beginRefPos[i + 1] >> 4) & 0x0F);
+                        }
+                    } else if (shiftBitLength == 3) {
+                        for (uint32_t i = 0; i < squashBufferLength; ++i) {
+                            refeMappedPos[i] = ((beginRefPos[i] << 6) & 0xC0) + ((beginRefPos[i + 1] >> 2) & 0x3F);
+                        }
+                    }
+                    outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer.get());
+                    MemoryUtil::safeFree(refeMappedPos);
+                }
             }
-            
-            uint8_t shiftBitLength = refPos % 4;
-            uint64_t refSquashPos = refPos / 4;
-            const uint8_t* beginRefPos = pRefeGene->getSquash() + refSquashPos;
-            uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);;
-            if (shiftBitLength == 0) {
-                memcpy(refeMappedPos, beginRefPos, squashBufferLength);
-            } else if (shiftBitLength == 1) {
-                for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                    refeMappedPos[i] = ((beginRefPos[i] << 2) & 0xFC) + ((beginRefPos[i + 1] >> 6) & 0x03);
-                }
-            } else if (shiftBitLength == 2) {
-                for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                    refeMappedPos[i] = ((beginRefPos[i] << 4) & 0xF0) + ((beginRefPos[i + 1] >> 4) & 0x0F);
-                }
-            } else if (shiftBitLength == 3) {
-                for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                    refeMappedPos[i] = ((beginRefPos[i] << 6) & 0xC0) + ((beginRefPos[i + 1] >> 2) & 0x3F);
-                }
-            }
-            outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer.get());
-            MemoryUtil::safeFree(refeMappedPos);
         } else {
             // No valid mapping, encode directly
             actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
@@ -1195,17 +1196,29 @@ int32_t SamActuator::decompressSamByFields() {
                 decompressNumber<int32_t>(fieldIdx, lineNo);
             } else if (fieldIdx == 9) {
                 basePtr = outBlockPtr->getCurrent();
-                actualBaseLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen, basePtr);
+                actualBaseLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen);
             } else if (fieldIdx == 10 ) {
-                LOG_DEBUG("Line No: %d, actualBaseLen = %d", lineNo, actualBaseLen);
                 decompressQuality(basePtr, actualBaseLen);
+                // 无附加字段场景,追加的\t换成\n
+                if (fieldIdx + 1 == fieldCount) {
+                    uint8_t* pEnd = outBlockPtr->getCurrent();
+                    *(pEnd - 1) = '\n';
+                }
             } else {
                 // Decode field until tab or end
+                int32_t result;
                 if (fieldIdx + 1 == fieldCount) {
-                    decompressRegularField(fieldIdx, '\n');
+                    result = decompressRegularField(fieldIdx, '\n');
+                    // 只有一个换行符，则为追加的，需要将质量值后面的\t换成\n，并去掉追加的\n
+                    if (result == 1) {
+                        uint8_t* pEnd = outBlockPtr->getCurrent();
+                        *(pEnd - 2) = '\n';
+                        outBlockPtr->setDataLen(outBlockPtr->getDataLen() - 1);
+                    }
                 } else {
-                    decompressRegularField(fieldIdx, '\t');
+                    result = decompressRegularField(fieldIdx, '\t');
                 }
+               
             }
         }
     }
@@ -1226,7 +1239,7 @@ int32_t SamActuator::decompressHeader() {
         LOG_ERROR("Invalid parameter for SAM header decompression");
         return -1;
     }
-    LOG_DEBUG("Begin to decompress SAM header.");
+
     Json::Value& headerMeta = meta["header"];
     if (!headerMeta.isMember("srclen") || !headerMeta.isMember("dstlen") || 
         !headerMeta.isMember("lines") || !headerMeta.isMember("coder")) {
@@ -1238,7 +1251,6 @@ int32_t SamActuator::decompressHeader() {
     }
     
     headEndLine = headerMeta["lines"].asInt64();
-    uint32_t srcLen = headerMeta["srclen"].asUInt();
     uint32_t dstLen = headerMeta["dstlen"].asUInt();
 
     // 创建SAM文件头解压器
@@ -1467,8 +1479,6 @@ int32_t SamActuator::initDecoder(RoughIOBlock* outputBlock) {
         }
     }
 
-    LOG_DEBUG("Init decoder finish.");
-    
     return 0;
 }
 
@@ -1479,6 +1489,9 @@ int32_t SamActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag
 }
 
 int32_t SamActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta) {
+    if (fieldIdx != 0) {
+        return -1;
+    }
     // Handle ID field with split compression
     Json::Value& idStreams = fieldMeta["streams"];
     uint32_t idLength = 0;
@@ -1528,7 +1541,7 @@ int32_t SamActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo) {
 }
 
 int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
-                                    uint32_t& nposOffset, uint32_t& totalBaseLen, uint8_t* basePtr) {
+                                    uint32_t& nposOffset, uint32_t& totalBaseLen) {
     uint8_t* pBaseEnd = outBlockPtr->getBuffer() + outBlockPtr->getBufferSize();
     bool isUserReference = pRefeGene != nullptr && fieldMeta.isMember("streams");
     uint32_t actualBaseLen = 0;
@@ -1582,33 +1595,56 @@ int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, u
             if (mapFlag & 0x04) {
                 decoderLen = fieldDecoders[fieldIdx]->decode_line(baseSquashBuffer, actualBaseLen, UINT8_MAX, false);
                 if (decoderLen != actualBaseLen) {
-                    LOG_ERROR("base decode failed in block %llu, expect len %d, actural len %d", inBlockPtr->getBlockId(), actualBaseLen, decoderLen);
+                    LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                     return -1;
                 }
                 for (uint32_t o = 0; o < decoderLen; ++o) {
                     outBlockPtr->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
                 }
             } else {
-                decoderLen = fieldDecoders[fieldIdx]->decode_line(baseDiffSquashBuffer, actualBaseLen, UINT8_MAX, false);
-                if (decoderLen != actualBaseLen) {
-                    LOG_ERROR("base decode failed in block %llu, expect len %d, actural len %d", inBlockPtr->getBlockId(), actualBaseLen, decoderLen);
-                    return -1;
-                }
                 // 获取在参考基因的位置
-                int64_t refeChrPos = SamInfo::getInstance().getPosistionByIndex(mappedChr[lineNo]);
-                if (refeChrPos == -1) {
-                    LOG_ERROR("Get reference posistion failed(%ld)", refeChrPos);
-                    return -1;
-                }
-                int64_t refeMappedPos = refeChrPos + mappedPos[lineNo] - 1;
+                bool findMappedPos = false;
+                int64_t refeMappedPos = 0;
+                do {
+                    uint16_t chrIdx = mappedChr.find(lineNo) == mappedChr.end() ? 0xFFFF : mappedChr[lineNo];
+                    if (chrIdx ==  0xFFFF) {
+                        break;
+                    }
+                    int64_t refeChrPos = SamInfo::getInstance().getPosistionByIndex(chrIdx);
+                    if (refeChrPos == -1) {
+                        break;
+                    }
+                    refeMappedPos = refeChrPos + mappedPos[lineNo] - 1;
+                    uint32_t baseSquashLength = actualBaseLen / 4 + !!(actualBaseLen & 0x3);
+                    if ((refeMappedPos / 4) + baseSquashLength > pRefeGene->getSquashLength()) {
+                        break;
+                    }
+                    findMappedPos = true;
+                } while(0);
 
-                pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, actualBaseLen, refeMappedPos);
-                actgXor(refeStrecchBuffer, baseDiffSquashBuffer, baseSquashBuffer,actualBaseLen);
-                if (mappedFlag[lineNo] & 0x10) {
-                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, baseSquashBuffer);
-                    actgPair(outBlockPtr->getCurrent(), baseSquashBuffer, actualBaseLen);
+                if (!findMappedPos) {
+                    decoderLen = fieldDecoders[fieldIdx]->decode_line(baseSquashBuffer, actualBaseLen, UINT8_MAX, false);
+                    if (decoderLen != actualBaseLen) {
+                        LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
+                        return -1;
+                    }
+                    for (uint32_t o = 0; o < decoderLen; ++o) {
+                        outBlockPtr->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
+                    }
                 } else {
-                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outBlockPtr->getCurrent());
+                    decoderLen = fieldDecoders[fieldIdx]->decode_line(baseDiffSquashBuffer, actualBaseLen, UINT8_MAX, false);
+                    if (decoderLen != actualBaseLen) {
+                        LOG_ERROR("base decode failed in block %llu, line %d,expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
+                        return -1;
+                    }
+                    pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, actualBaseLen, refeMappedPos);
+                    actgXor(refeStrecchBuffer, baseDiffSquashBuffer, baseSquashBuffer, actualBaseLen);
+                    if (mappedFlag[lineNo] & 0x10) {
+                        pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, baseSquashBuffer);
+                        actgPair(outBlockPtr->getCurrent(), baseSquashBuffer, actualBaseLen);
+                    } else {
+                        pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outBlockPtr->getCurrent());
+                    }
                 }
             }
             
