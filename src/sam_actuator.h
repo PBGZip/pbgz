@@ -48,6 +48,10 @@ private:
     // Regular field compression
     int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
 
+    int32_t compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+
+    uint32_t parseCigar(uint8_t* cigarString, uint32_t cigarLength);
+
     template<typename T>
     int32_t compressNumber(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
         std::vector<uint32_t>& npos = inBlockPtr->getNpos();
@@ -103,6 +107,9 @@ private:
         fieldMeta["dstlen"] = numberIo->data_len;
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
+
+        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+            fieldIdx, fieldSrcLen, numberIo->data_len, (double)(numberIo->data_len * 100)/(double)fieldSrcLen);
         
         return numberIo->data_len;
     }
