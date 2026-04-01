@@ -268,7 +268,7 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
     }
 
     if (0 != pbgzDataBlock.verifyCheckSum()) {
-        LOG_ERROR("Verify pbgz block checksum failed");
+        LOG_ERROR("Verify pbgz block checksum failed, block id = %ld", pbgzDataBlock.getMetaData("blockid").asInt64());
         return -1;
     }
     

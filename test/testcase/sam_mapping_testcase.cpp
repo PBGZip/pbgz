@@ -793,6 +793,21 @@ public:
         delete(pIoReader);
     }
 
+    void printBufferBinary(uint8_t* buffer, uint32_t bufferLen) {
+        for (int j = 0; j < bufferLen; j++) {
+            // 以二进制方式输出src[i]
+            for (int n = 7; n >= 0; n--) {
+                fprintf(stderr, "%d", (buffer[j] >> n) & 1);
+            }
+            fprintf(stderr, "\t");
+
+            if ((j+1) % 4 == 0) {
+                fprintf(stderr, "\n");
+            }
+        }
+        fprintf(stderr, "\n");
+    }
+
 protected:
     RoughIOBlock* pInBlock;
     RoughIOBlock* pOutBlock;
@@ -801,7 +816,7 @@ protected:
 // 添加实际的测试方法
 TEST_F(SamMappingTest, testMapingData) {
     loadSamData(SamMappingData::testSamFile);
-    Reference refGene("../../../../data/GCA_000001405.29_GRCh38.p14_genomic.fna", 1);
+    Reference refGene("../../data/GCA_000001405.29_GRCh38.p14_genomic.fna", 1);
     refGene.makeIndex();
     SamActuator actuator(pInBlock, pOutBlock, &refGene);
     
@@ -831,6 +846,7 @@ TEST_F(SamMappingTest, testMapingData) {
     const uint32_t lsquash = (baseMaxLength >> 2) + !!(baseMaxLength & 0x3);
     
     uint32_t baseMappedLength = (baseMaxLength << 1);
+    LOG_DEBUG("baseMappedLength = %d", baseMappedLength);
     uint8_t* basePairBuffer = MemoryUtil::safeAlloc<uint8_t>(baseMaxLength);
     uint8_t* baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(lsquash);
     uint8_t* baseMappedBuffer = MemoryUtil::safeAlloc<uint8_t>(baseMappedLength);
@@ -895,37 +911,49 @@ TEST_F(SamMappingTest, testMapingData) {
             uint32_t squashBufferLength = 0;
             bool isReverse = (flag & 0x10) != 0;
             if (isReverse) {
-                actgPair(basePairBuffer, seqStart, seqLength);
-                squashBufferLength = actgSquash(basePairBuffer, seqLength, baseSquashBuffer);
+                LOG_DEBUG("Revese: flag = %d", flag);
+                // actgPair(basePairBuffer, seqStart, seqLength);
+                squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
             } else {
                 squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
             }
 
             if (refGene.getSquashLength() < refSquashPos + squashBufferLength) {
+                LOG_DEBUG("%ld, %ld", refGene.getSquashLength(), refSquashPos + squashBufferLength);
                 continue;
             }
 
             uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);
+            const uint8_t* beginRefPos = actuator.pRefeGene->getSquash() + refSquashPos;
             if (shiftBitLength == 0) {
-                memcpy(refeMappedPos, actuator.pRefeGene->getSquash() + refSquashPos, squashBufferLength);
+                memcpy(refeMappedPos, beginRefPos, squashBufferLength);
             } else if (shiftBitLength == 1) {
-                const uint8_t* beginRefPos = actuator.pRefeGene->getSquash() + refSquashPos;
                 for (uint32_t i = 0; i < squashBufferLength; ++i) {
                     refeMappedPos[i] = ((beginRefPos[i] << 2) & 0xFC) + ((beginRefPos[i + 1] >> 6) & 0x03);
                 }
             } else if (shiftBitLength == 2) {
-                const uint8_t* beginRefPos = actuator.pRefeGene->getSquash() + refSquashPos;
                 for (uint32_t i = 0; i < squashBufferLength; ++i) {
                     refeMappedPos[i] = ((beginRefPos[i] << 4) & 0xF0) + ((beginRefPos[i + 1] >> 4) & 0x0F);
                 }
             } else if (shiftBitLength == 3) {
-                const uint8_t* beginRefPos = actuator.pRefeGene->getSquash() + refSquashPos;
                 for (uint32_t i = 0; i < squashBufferLength; ++i) {
                     refeMappedPos[i] = ((beginRefPos[i] << 6) & 0xC0) + ((beginRefPos[i + 1] >> 2) & 0x3F);
                 }
             }
+
             outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer);
-            outLen = outLen;
+            
+            LOG_DEBUG("outlen = %d, squashBufferLength= %d, sequenLen = %d", outLen, squashBufferLength, seqLength);
+
+            LOG_DEBUG("baseSquashBuffer:");
+            printBufferBinary(baseSquashBuffer, squashBufferLength);
+
+            LOG_DEBUG("refeMappedPos:");
+            printBufferBinary(refeMappedPos, squashBufferLength);
+            
+            LOG_DEBUG("baseMappedBuffer:");
+            printBufferBinary(baseMappedBuffer, seqLength);
+            
             MemoryUtil::safeFree(refeMappedPos);
         } 
         offset++;

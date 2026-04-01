@@ -154,10 +154,8 @@ bool Reference::initSquashByNiFile() {
 
     int64_t metaLen = niReader.getFileSize() - buffOffset;
     uint8_t* metaBuf = buffer;
-    uint8_t* allocatedMetaBuf = nullptr;
     if (metaLen > 4096) {
         metaBuf = MemoryUtil::safeAlloc<uint8_t>(metaLen);
-        allocatedMetaBuf = metaBuf;
         if (metaBuf == nullptr) {
             return false;
         }

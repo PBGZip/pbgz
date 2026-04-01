@@ -60,13 +60,21 @@ void PbgzDataBlock::calcChecksum() {
 }
 
 int32_t PbgzDataBlock::verifyCheckSum() {
-    if (dataBlockChecksum == util::Hash64((char*)pBlockData, (size_t)blockDataLength)) {
+    if (blockDataLength > 0 && dataBlockChecksum != 0) {
+        if (dataBlockChecksum != util::Hash64((char*)pBlockData, (size_t)blockDataLength)) {
+            LOG_ERROR("Meta checksum verify failed.");
+            return -1;
+        }
+    }
+
+    if (metaChecksum != 0) {
         Json::StreamWriterBuilder writer;
         std::string jsonStr = Json::writeString(writer, dataMetaInfo);
-        if (metaChecksum == util::Hash64(jsonStr)) {
-            return 0;
+        if (metaChecksum != util::Hash64(jsonStr)) {
+            LOG_ERROR("Data checksum verify failed.");
+            return -1;
         }
-        return -1;
     }
-    return -1;
+
+    return 0;
 }

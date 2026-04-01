@@ -73,13 +73,25 @@ public:
         LOG_DEBUG("%s", temp);
     }
 
-    void printBufferContentInHex(uint8_t* buffer, uint32_t bufferLen) {
-        char temp[2048 + 1] = {0};
+    void printBufferContentHex(uint8_t* buffer, uint32_t bufferLen) {
         bufferLen = std::min<uint32_t>(bufferLen, 2048);
-        memcpy(temp, (char*)buffer, bufferLen);
-        temp[2048] = 0;
-        for (int i = 0; i < bufferLen; ++i) {
-            fprintf(stderr, "%02X", temp[i]);
+        for (uint32_t i = 0; i < bufferLen; ++i) {
+            fprintf(stderr, "%02X", buffer[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+
+    void printBufferContentBinary(uint8_t* buffer, uint32_t bufferLen) {
+        for (int j = 0; j < bufferLen; j++) {
+            // 以二进制方式输出src[i]
+            for (int n = 7; n >= 0; n--) {
+                fprintf(stderr, "%d", (buffer[j] >> n) & 1);
+            }
+            fprintf(stderr, "\t");
+
+            if ((j+1) % 8 == 0) {
+                fprintf(stderr, "\n");
+            }
         }
         fprintf(stderr, "\n");
     }
