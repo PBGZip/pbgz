@@ -12,6 +12,7 @@
 #include "sam_info.h"
 #include "actg.h"
 #include "pbgz_manager.h"
+#include "utils/path_util.h"
 
 SamActuator::SamActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pReferene): Actuator(inPtr, outPtr) {
     pRefeGene = pReferene;
@@ -27,6 +28,7 @@ SamActuator::SamActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* p
     baseSquashBuffer = nullptr;
     baseDiffSquashBuffer = nullptr;
     refeStrecchBuffer = nullptr;
+    notifyFlag = false;
 }
 
 SamActuator::~SamActuator() {
@@ -176,6 +178,12 @@ int32_t SamActuator::preAnalysis() {
                     }
                     refFilePath = line.substr(pos, endPos - pos);
                     LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
+                    if (pRefeGene != nullptr) {
+                        std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
+                        if (refFilePath != inputFastq) {
+                            fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s. \n", refFilePath.c_str(), inputFastq.c_str());
+                        }
+                    }
                 }
                 continue;
             } else {
@@ -185,6 +193,7 @@ int32_t SamActuator::preAnalysis() {
         } else {
             std::vector<int64_t> linePos;
             uint32_t baseLen = 0;
+            bool lineCigarMatchFlag = false;
             for (uint32_t i = 0; i < line.length(); ++i) {
                 if (line.at(i) == '\t' || line.at(i) == '\n') {
                     // 第一个tab之前是ID列，需要对ID列进行分割分析
@@ -196,6 +205,15 @@ int32_t SamActuator::preAnalysis() {
                             // 传递ID列的内容（从行开始到第一个tab位置）
                             preAnalysisIdLine((uint8_t*)line.data(), i + 1);
                         }
+                    } 
+                    // CIGAR是第6个字段
+                    if (linePos.size() == 5) {
+                        uint32_t cigarLen = baseLen = i - linePos.at(4) - 1;
+                        if (cigarLen > 1) {
+                            lineCigarMatchFlag = true;
+                        } else {
+                            lineCigarMatchFlag = false;
+                        }
                     }
                     // Base是第10个字段
                     if (linePos.size() == 9) {
@@ -203,8 +221,10 @@ int32_t SamActuator::preAnalysis() {
                         if (baseLen > maxBaseLength) {
                             maxBaseLength = baseLen;
                         } 
-                        if (baseLen < minBaseLength) {
-                            minBaseLength =  baseLen;
+                        if (!lineCigarMatchFlag) {
+                            if (baseLen < minBaseLength) {
+                                minBaseLength =  baseLen;
+                            }
                         }
                     }
                     // 质量值是第11个字段
@@ -246,7 +266,12 @@ int32_t SamActuator::preAnalysis() {
         }
     }
 
-    LOG_INFO("minBaseLength = %u, maxBaseLength = %u", minBaseLength, maxBaseLength);
+    // 全部匹配场景
+    if (minBaseLength == UINT32_MAX) {
+        minBaseLength = maxBaseLength;
+    }
+
+    LOG_DEBUG("minBaseLength = %u, maxBaseLength = %u", minBaseLength, maxBaseLength);
 
     inBlockPtr->setMaxLineLen(maxBaseLength);
 
@@ -297,6 +322,8 @@ int32_t SamActuator::compress() {
         LOG_DEBUG("SAM head only");
         return 0;
     }
+
+    notifyFlag = true;
 
     // Check if preAnalysis was successful
     if (contentPos.empty()) {
@@ -352,7 +379,7 @@ int32_t SamActuator::compressSamHeader() {
     headerMeta["coder"] = headerIo->meta;
     meta["header"] = headerMeta;
     
-    LOG_INFO("SAM header compression completed: %u lines, %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM header compression completed: %u lines, %u bytes -> %u bytes, compress ratio = %.2f%%", 
              headEndLine, headerSrcLen, headerDstLen, (double)(headerDstLen* 100)/(double)headerSrcLen);
     
     return 0;
@@ -446,7 +473,7 @@ int32_t SamActuator::compressSamByFields() {
                 fieldDstLen = compressNumber<uint8_t>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 5: // CIGAR 
-                fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressCigar(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 6: // RNEXT
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
@@ -585,7 +612,7 @@ int32_t SamActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fi
     
     fieldSrcLen = totalSrcLength;
 
-    LOG_INFO("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
 
     return totalDstLength;
@@ -640,7 +667,7 @@ int32_t SamActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fi
     fieldMeta["splitsym"] = "\t";
     fieldMeta["field"] = 0;
 
-    LOG_INFO("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
     
     return fieldIo->data_len;
@@ -707,7 +734,7 @@ int32_t SamActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcLen, J
     fieldMeta["coder"] = chrIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldIdx, fieldSrcLen, chrIo->data_len, (double)(chrIo->data_len * 100)/(double)fieldSrcLen);
 
     return chrIo->data_len;
@@ -767,7 +794,7 @@ int32_t SamActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcL
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
@@ -783,6 +810,9 @@ int32_t SamActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Jso
     std::shared_ptr<coder_bwt_cm> fieldCoder = std::make_shared<coder_bwt_cm>(fieldIo.get());
     
     fieldSrcLen = 0;
+
+    uint32_t lineCount = lineNum - headEndLine;
+    baseLengthBuffer =  MemoryUtil::safeAlloc<uint32_t>(lineCount);
     
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
@@ -802,7 +832,12 @@ int32_t SamActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Jso
         uint32_t  fieldLength = currTabPos - prevTabPos;
 
         // 解析CIGAR字段, 剔除掉硬剪切的序列长度
-        uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
+        if (fieldLength == 2 && *fieldStart == '*' ) {
+            baseLengthBuffer[lineIdx - headEndLine] = 0;
+        } else {
+            uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
+            baseLengthBuffer[lineIdx - headEndLine] = sequeceLength;
+        }
         
         // Encode the field data
         if (fieldLength > 0) {
@@ -823,7 +858,7 @@ int32_t SamActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Jso
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
@@ -833,11 +868,8 @@ int32_t SamActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSr
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-
     fieldSrcLen = 0;
-
     std::unique_ptr<uint8_t[]> tmpBuffer = std::make_unique<uint8_t[]>(outBlockPtr->getBlockSize());
-
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -856,8 +888,12 @@ int32_t SamActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSr
         uint8_t* fieldStart = line + prevTabPos + 1;
         uint32_t fieldLength = currTabPos - prevTabPos;
 
-        // Encode the field data
-        if (fieldLength > 0) {
+        if (minBaseLength == maxBaseLength) {
+            // 去掉结尾的\t
+            memcpy(tmpBuffer.get() + fieldSrcLen, fieldStart, fieldLength - 1);
+            fieldSrcLen += fieldLength - 1; 
+        } else {
+            // Encode the field data
             memcpy(tmpBuffer.get() + fieldSrcLen, fieldStart, fieldLength);
             fieldSrcLen += fieldLength;
         }
@@ -882,7 +918,7 @@ int32_t SamActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSr
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
     
     return fieldIo->data_len;
@@ -912,12 +948,6 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
     std::unique_ptr<uint8_t[]> baseMappedBuffer = std::make_unique<uint8_t[]>(baseMappedLength);
     baseNPosBuffer = MemoryUtil::safeAlloc<uint32_t>(baseNCount);
 
-    bool isPackBaseLength = (minBaseLength != maxBaseLength);
-    uint32_t lineCount = lineNum - headEndLine;
-    if (isPackBaseLength) {
-        baseLengthBuffer =  MemoryUtil::safeAlloc<uint32_t>(lineCount);
-    }
-   
     // Create metadata structure
     Json::Value metaSubs;
     Json::Value metaStreams;
@@ -946,12 +976,17 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
         uint8_t* seqStart = line + prevTabPos + 1;
         uint32_t seqLength = currTabPos - prevTabPos - 1;
 
-        if (isPackBaseLength) {
-            baseLengthBuffer[contentIdx] =seqLength;
-        }
-        
         if (seqLength == 0)  {
             continue;
+        }
+
+        if (baseLengthBuffer && baseLengthBuffer[contentIdx] == 0) {
+            baseLengthBuffer[contentIdx] = seqLength;
+            unmapedReadLength.push_back(std::make_pair(contentIdx, seqLength));
+        }
+
+        if (baseLengthBuffer && baseLengthBuffer[contentIdx] != seqLength) {
+            LOG_WARNING("Warnning: sequece length(%u) not match cigar(%u)", seqLength, baseLengthBuffer[contentIdx]);
         }
         
         // Get mapping information from SAM fields
@@ -976,7 +1011,7 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
             int64_t chrStartPos =  SamInfo::getInstance().getPosistionByIndex(chrId);
             if (chrStartPos == -1) {
                 // No valid mapping, encode directly
-                LOG_DEBUG("chrStartPos not found, line = %d", contentIdx);
+                // LOG_DEBUG("chrStartPos not found, line = %d", contentIdx);
                 actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
                 outLen = seqLength;
             } else {
@@ -985,19 +1020,19 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
                 // Determine strand direction from FLAG bit 4
                 uint32_t squashBufferLength = 0;
 
-                bool isReverse = (flag & 0x10) != 0;
+                bool isReverse = (flag & 0x10);
                 if (isReverse) {
-                    actgPair(basePairBuffer.get(), seqStart, seqLength);
-                    squashBufferLength = actgSquash(basePairBuffer.get(), seqLength, baseSquashBuffer);
+                    // actgPair(basePairBuffer.get(), seqStart, seqLength);
+                    squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
                 } else {
                     squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
                 }
                 
                 uint8_t shiftBitLength = refPos % 4;
                 int64_t refSquashPos = refPos / 4;
-                uint32_t baseSquashLength = seqLength >> 2 + !!(seqLength & 0x3);
+                uint32_t baseSquashLength = (seqLength >> 2) + !!(seqLength & 0x3);
                 if (refSquashPos + baseSquashLength > pRefeGene->getSquashLength()) {
-                    LOG_DEBUG("Mapped pos is out of bound. line = %d", contentIdx);
+                    // LOG_DEBUG("Mapped pos is out of bound. line = %d", contentIdx);
                     actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
                     outLen = seqLength;
                 } else {
@@ -1024,7 +1059,7 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
             }
         } else {
             // No valid mapping, encode directly
-            LOG_DEBUG("Not mapping, line = %d", contentIdx);
+            // LOG_DEBUG("Not mapping, line = %d", contentIdx);
             actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
             outLen = seqLength;
         }
@@ -1067,20 +1102,30 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
         totalDstLen += nposIo->data_len;
     }
 
-    if (isPackBaseLength) {
+    if (minBaseLength != maxBaseLength) {
         std::shared_ptr<coder_io> lenIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-        uint32_t baseLensrcLen = lineCount << 2;
+        uint32_t baseLenSrcLen = unmapedReadLength.size() << 1;
+        uint32_t* baseLenBuffer = MemoryUtil::safeAlloc<uint32_t>(baseLenSrcLen);
+        if (baseLenBuffer == nullptr) {
+            return -1;
+        }
+        for (uint32_t i = 0; i < unmapedReadLength.size(); i += 2) {
+            std::pair baseLenPos = unmapedReadLength[i];
+            baseLenBuffer[i] = baseLenPos.first;
+            baseLenBuffer[i + 1] = baseLenPos.second;
+        }
         std::shared_ptr<coder_bwt_cm> lenCoder = std::make_shared<coder_bwt_cm>(lenIo.get());
-        lenCoder->encode_line((uint8_t*)baseLengthBuffer, baseLensrcLen);
+        lenCoder->decode_line((uint8_t*)baseLenBuffer, baseLenSrcLen<<2);
         lenCoder->encode_flush();
-        metaSubs.clear();
-        metaSubs["srclen"] = baseLensrcLen;
+
+         metaSubs.clear();
+        metaSubs["srclen"] = baseLenSrcLen<<2;
         metaSubs["dstlen"] = lenIo->data_len;
         metaSubs["coder"] = lenIo->meta;
         metaSubs["sname"] = "baselen";
         metaStreams.append(metaSubs);
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + lenIo->data_len);
-        totalSrcLen += baseLensrcLen;
+        totalSrcLen += baseLenSrcLen<<2;
         totalDstLen += lenIo->data_len;
     }
     
@@ -1094,7 +1139,7 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
     fieldMeta["field"] = fieldIdx;
     fieldSrcLen = totalSrcLen;
 
-    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         totalSrcLen, totalDstLen, (double)(totalDstLen * 100)/(double)totalSrcLen);
     
     return totalDstLen;
@@ -1197,7 +1242,7 @@ int32_t SamActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, J
     
     fieldSrcLen = totalSrcLength;
 
-    LOG_INFO("SAM quality field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM quality field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
     
     return totalDstLength;
@@ -1213,13 +1258,28 @@ int32_t SamActuator::decompress() {
     metaCoder.decoder(inBlockPtr->getMetaBuffer(), inBlockPtr->getMetaLen(), meta);
     if (meta.isMember("header")) {
         if (0 != decompressHeader()) {
+            LOG_ERROR("Decompress header failed. block id = %d", inBlockPtr->getBlockId());
             return -1;
         }
     } else {
-        LOG_DEBUG("No header info");
+        LOG_DEBUG("No header info for block: %d", inBlockPtr->getBlockId());
+        notifyFlag = true;
     }
 
-    return decompressSamByFields();
+    if (0 != decompressSamByFields()) {
+        LOG_ERROR("Decompress fields failed. block id = %d", inBlockPtr->getBlockId());
+        return -1;
+    }
+
+     // Verify checksum of decompressed content
+    std::string md5;
+    calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
+    if (md5 != meta["md5"].asString()) {
+        LOG_ERROR("MD5 check failed for SAM data, blockid = %d", outBlockPtr->getBlockId());
+        return -1;
+    }
+
+    return 0;
 }
 
 int32_t SamActuator::decompressSamByFields() {
@@ -1264,35 +1324,35 @@ int32_t SamActuator::decompressSamByFields() {
         uint32_t actualBaseLen = 0;
         // Decode each field for this line
         for (uint32_t fieldIdx = 0; fieldIdx < fieldCount; ++fieldIdx) {
-            if (fieldIdx == 0) {
+            if (fieldIdx == 0) {    /// ID 
                 decompressIdField(fieldIdx, streams[fieldIdx]);
-            } else if (fieldIdx == 1) {
+            } else if (fieldIdx == 1) {  /// FLAG
                 decompressNumber<uint16_t>(fieldIdx, lineNo);
-            } else if (fieldIdx == 2) {
+            } else if (fieldIdx == 2) {  /// RNAME
                 decompressChrName(fieldIdx, lineNo);
-            } else if (fieldIdx == 3) {
+            } else if (fieldIdx == 3) {  /// POS
                 decompressNumber<uint32_t>(fieldIdx, lineNo);
-            } else if (fieldIdx == 4) {
+            } else if (fieldIdx == 4) {  /// MAPQ
                 decompressNumber<uint8_t>(fieldIdx, lineNo);
-            } else if (fieldIdx == 5) {
-                decompressRegularField(fieldIdx, '\t');
-            } else if (fieldIdx == 6) {
+            } else if (fieldIdx == 5) {  /// CIGAR
+                decompressCigar(fieldIdx, '\t', lineNo);
+            } else if (fieldIdx == 6) {  /// RNEXT
                 decompressChrName(fieldIdx, lineNo);
-            } else if (fieldIdx == 7) {
+            } else if (fieldIdx == 7) {  /// PNEXT
                 decompressNumber<uint32_t>(fieldIdx, lineNo);
-            } else if (fieldIdx == 8) {
+            } else if (fieldIdx == 8) {  /// TLEN
                 decompressNumber<int32_t>(fieldIdx, lineNo);
-            } else if (fieldIdx == 9) {
+            } else if (fieldIdx == 9) {  /// SEQ
                 basePtr = outBlockPtr->getCurrent();
                 actualBaseLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen);
-            } else if (fieldIdx == 10 ) {
+            } else if (fieldIdx == 10 ) {  /// QUAL   
                 decompressQuality(basePtr, actualBaseLen);
                 // 无附加字段场景,追加的\t换成\n
                 if (fieldIdx + 1 == fieldCount) {
                     uint8_t* pEnd = outBlockPtr->getCurrent();
                     *(pEnd - 1) = '\n';
                 }
-            } else {
+            } else {   /// 可选字段
                 // Decode field until tab or end
                 int32_t result;
                 if (fieldIdx + 1 == fieldCount) {
@@ -1309,14 +1369,6 @@ int32_t SamActuator::decompressSamByFields() {
                
             }
         }
-    }
-    
-    // Verify checksum of decompressed content
-    std::string md5;
-    calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
-    if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("MD5 check failed for SAM data, blockid = %d", outBlockPtr->getBlockId());
-        return -1;
     }
 
     return 0;
@@ -1384,6 +1436,8 @@ int32_t SamActuator::initDecoder(RoughIOBlock* outputBlock) {
 
     uint32_t lineNumber = meta["sam"]["lines"].asUInt();
     LOG_DEBUG("Line number = %d", lineNumber);
+    baseLengthBuffer = MemoryUtil::safeAlloc<uint32_t>(lineNumber);
+
     for (uint32_t idx = 0; idx < streamMeta.size(); ++idx) {
         if (idx == 0) {
             Json::Value& idMeta = streamMeta[idx];
@@ -1482,35 +1536,35 @@ int32_t SamActuator::initDecoder(RoughIOBlock* outputBlock) {
                         return -1;
                     }
                     readOffset += dstlen;
-
-                    for (uint32_t i = 0; i < baseNCount; ++i) {
-                        LOG_DEBUG("npos = %d", baseNPosBuffer[i]);
-                    }
                 }
 
-                if (baseMeta["minlen"].asUInt() != baseMeta["maxlen"].asUInt()) {
+                if (minBaseLength != maxBaseLength) {
                     id++;
                     if (baseMetaStreams[id]["sname"].asString() != "baselen") {
                         LOG_ERROR("check sub stream failed. sname not match");
                         return -1;
                     }
-                    if (baseLengthBuffer != nullptr) {
-                        MemoryUtil::safeFree(baseLengthBuffer);
-                    }
-                    baseLengthBuffer = MemoryUtil::safeAlloc<uint32_t>(lineNumber);
+
                     uint32_t dstlen = baseMetaStreams[id]["dstlen"].asUInt();
                     uint32_t srclen = baseMetaStreams[id]["srclen"].asUInt();
+                    uint8_t* baseLenBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
+
                     if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
                         coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen);
                         coder_bwt_cm baseLenCoder(&baseLenIo);
-                        baseLenCoder.decode_line((uint8_t*)baseLengthBuffer, srclen, UINT8_MAX, false);
+                        baseLenCoder.decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false);
                     } else {
-                        LOG_ERROR("check sub stream failed: coder name not match");
+                        LOG_ERROR("check sub stream failed. coder not match. coder = %s.", 
+                            baseMetaStreams[id]["coder"]["magic"].asString().c_str());
                         return -1;
                     }
+                    uint32_t* baseLenPtr = (uint32_t*)baseLenBuffer;
+                    uint32_t baseLenCount = srclen >> 2;
+                    for (uint32_t i = 0; i < baseLenCount; i += 2) {
+                        unmapedReadLength.push_back(std::make_pair(baseLenPtr[i], baseLenPtr[i+1]));
+                    }
                     readOffset += dstlen;
-                } 
-
+                }
             }
         } else if (idx == 10) {
             Json::Value& qualMeta = streamMeta[idx];
@@ -1635,7 +1689,8 @@ int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, u
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
         if (minBaseLength == maxBaseLength) {
-            actualBaseLen = maxBaseLength;
+            actualBaseLen = baseLengthBuffer[lineNo] == 0 ? maxBaseLength : baseLengthBuffer[lineNo];
+            LOG_DEBUG("actualBaseLen = %d", actualBaseLen);
             if (fieldMeta["coder"]["magic"].asString() == "coder_fc") {
                 memcpy(outBlockPtr->getCurrent(), pBaseOut, actualBaseLen);
                 pBaseOut += actualBaseLen;
@@ -1674,7 +1729,18 @@ int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, u
             }
         }
     } else {
-        actualBaseLen = (baseLengthBuffer) ? baseLengthBuffer[lineNo] : maxBaseLength;
+        actualBaseLen =  baseLengthBuffer[lineNo];
+        if (actualBaseLen == 0) {
+            for (auto pairIter = unmapedReadLength.begin(); pairIter < unmapedReadLength.end(); ++pairIter) {
+                if (pairIter->first == lineNo) {
+                    actualBaseLen = pairIter->second;
+                    break;
+                }
+            }
+            if (actualBaseLen == 0) {
+                actualBaseLen = maxBaseLength;
+            }
+        }
         Json::Value& baseStream = fieldMeta["streams"];
         if (baseStream[0]["coder"]["magic"].asString() == "coder_bwt_cm") {
             uint32_t decoderLen = 0;
@@ -1728,8 +1794,8 @@ int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, u
                     pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, actualBaseLen, refeMappedPos);
                     actgXor(refeStrecchBuffer, baseDiffSquashBuffer, baseSquashBuffer, actualBaseLen);
                     if (mappedFlag[lineNo] & 0x10) {
-                        pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, baseSquashBuffer);
-                        actgPair(outBlockPtr->getCurrent(), baseSquashBuffer, actualBaseLen);
+                        pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outBlockPtr->getCurrent());
+                        // actgPair(outBlockPtr->getCurrent(), baseSquashBuffer, actualBaseLen);
                     } else {
                         pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outBlockPtr->getCurrent());
                     }
@@ -1765,8 +1831,68 @@ int32_t SamActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen)
     return actualBaseLen;
 }
 
-uint32_t SamActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength) {
-    // CIGAR的格式如下6H30M114H, M/I/S/=/X：消耗SEQ, D/N/H/P不消耗SEQ, 因此实际SEQ的长度就是消耗SEQ的操作符的长度
+int32_t SamActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx) {
+    uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), splitFlag, false);
+    if (fieldLen > 1) {
+        uint32_t seqLength = parseCigar(outBlockPtr->getCurrent(), fieldLen);
+        baseLengthBuffer[lineIdx] = seqLength;
+    } else {
+        baseLengthBuffer[lineIdx] = 0;
+    }
     
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldLen);
+    return fieldLen;
+}
 
+uint32_t SamActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength) {
+    // CIGAR的格式如下6S30M1I114S, M/I/S/=/X：消耗SEQ, D/N/H/P不消耗SEQ, 因此实际SEQ的长度就是消耗SEQ的操作符的长度
+    if (cigarString == nullptr || cigarLength == 0) {
+        return 0;
+    }
+    
+    uint32_t seqLength = 0;
+    uint32_t currentNumber = 0;
+    
+    for (uint32_t i = 0; i < cigarLength; ++i) {
+        char ch = cigarString[i];
+        
+        if (ch >= '0' && ch <= '9') {
+            // 累加数字
+            currentNumber = currentNumber * 10 + (ch - '0');
+        } else {
+            // 遇到操作符，判断是否消耗SEQ
+            if (currentNumber > 0) {
+                switch (ch) {
+                    case 'M':  // 匹配或不匹配
+                    case 'I':  // 插入到参考序列
+                    case 'S':  // 序列起始区域的软剪切
+                    case '=':  // 匹配
+                    case 'X':  // 不匹配
+                    case 'm':  // 小写版本
+                    case 'i':  // 小写版本
+                    case 's':  // 小写版本
+                    case 'x':  // 小写版本
+                        // 这些操作消耗SEQ长度
+                        seqLength += currentNumber;
+                        break;
+                    case 'D':  // 从参考序列删除
+                    case 'N':  // 从参考序列跳过
+                    case 'H':  // 序列起始区域的硬剪切
+                    case 'P':  // 填充（沉默删除）
+                    case 'd':  // 小写版本
+                    case 'n':  // 小写版本
+                    case 'h':  // 小写版本
+                    case 'p':  // 小写版本
+                        // 这些操作不消耗SEQ长度
+                        break;
+                    default:
+                        // 未知操作符，忽略
+                        break;
+                }
+                currentNumber = 0;
+            }
+        }
+    }
+    
+    return seqLength;
 }

@@ -124,15 +124,15 @@ public:
 
         // 所有记录都是 76M，序列长度和质量值都是76
         file << "read1_11.1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
-        file << "read3_11.2\t0\tchr1\t153\t60\t76M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCCGCAAG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!T!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:3\tMD:Z:37C37C0\tAS:i:72\tXS:i:0\n";
+        file << "read3_11.2\t0\tchr1\t153\t60\t74M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCCGCAAG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!T!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:3\tMD:Z:37C37C0\tAS:i:72\tXS:i:0\n";
         file << "read4_11.3\t0\tchr2\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGACAATCGCCGGAAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!F!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
         file << "read5_11.4\t0\tchr2\t77\t60\t76M\t*\t0\t0\tATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAACGCAATCGATCGA\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!K!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
         file << "read6_11.5\t16\tchr3\t1\t60\t76M\t*\t0\t0\tCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCACAATCGGCGGCCGAATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
         file << "read7_11.6\t0\tchr3\t77\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATACGCAATCGGCGGCCGAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:74A0\tAS:i:75\tXS:i:0\n";
         file << "read8_11.7\t16\tchr4\t1\t60\t76M\t*\t0\t0\tTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGGCAACAATCGGCGGCC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
         file << "read9_11.8\t0\tchrX\t1\t60\t76M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGACGCAATCGCCGGCCTAAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
-        file << "read10_11.9\t16\tchrY\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
-        file << "read10_11.10\t16\tchrY\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
+        file << "read10_11.9\t16\tchrY\t1\t60\t75M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
+        file << "read10_11.10\t16\tchrY\t1\t60\t75M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
 
         file.close();
     }
@@ -260,7 +260,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     file << "@SQ\tSN:chr4\tLN:190214555\n";
     file << "@SQ\tSN:chr5\tLN:181538259\n";
     file << "read1_11.SRR001.1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
-    file << "read3_11.SRR001.2\t0\tchr1\t153\t60\t76M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCCGCAAG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!T!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:3\tMD:Z:37C37C0\tAS:i:72\tXS:i:0\n";
+    file << "read3_11.SRR001.2\t0\tchr1\t153\t60\t74M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCCGCAAG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!T!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:3\tMD:Z:37C37C0\tAS:i:72\tXS:i:0\n";
     file << "read4_11.SRR001.3\t0\tchr2\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGACAATCGCCGGAAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!F!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
     file << "read5_11.SRR001.4\t0\tchr2\t77\t60\t76M\t*\t0\t0\tATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAACGCAATCGATCGA\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!K!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
     file << "read6_11.5\t16\tchr3\t1\t60\t76M\t*\t0\t0\tCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCACAATCGGCGGCCGAATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
@@ -436,6 +436,8 @@ TEST_F(SamActuatorTest, testSetReference) {
 
 TEST_F(SamActuatorTest, testDecompress) {
     loadSamData(SamTestData::testSamFile);
+
+    fprintf(stderr, "%s \n", pInBlock->getBuffer());
     
     // 创建一个用于压缩的SamActuator对象
     SamActuator compressor(pInBlock, pOutBlock);
@@ -464,6 +466,7 @@ TEST_F(SamActuatorTest, testDecompress) {
     
     // 解压缩不需要preAnalysis，直接调用decompress
     result = decompressor.decompress();
+    fprintf(stderr, "%s\n", pOutBlock->getBuffer());
     EXPECT_EQ(result, 0);
     
     // 基本检查：确保解压缩产生了数据
@@ -506,4 +509,78 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     
     // 基本检查：确保解压缩产生了数据
     EXPECT_GT(pOutBlock->getDataLen(), 0);
+}
+
+
+TEST_F(SamActuatorTest, testCigarParse) {
+    SamActuator actuator(pInBlock, pOutBlock);
+    
+    // 辅助函数：将字符串转换为uint8_t*以便传递给parseCigar
+    auto testParse = [](SamActuator& a, const std::string& cigar) -> uint32_t {
+        return a.parseCigar(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(cigar.c_str())), cigar.length());
+    };
+    
+    // 测试基本的M操作
+    EXPECT_EQ(testParse(actuator, "100M"), 100);
+    EXPECT_EQ(testParse(actuator, "76M"), 76);
+    EXPECT_EQ(testParse(actuator, "1M"), 1);
+    
+    // 测试I操作
+    EXPECT_EQ(testParse(actuator, "10I"), 10);
+    EXPECT_EQ(testParse(actuator, "5I"), 5);
+    
+    // 测试S操作
+    EXPECT_EQ(testParse(actuator, "15S"), 15);
+    EXPECT_EQ(testParse(actuator, "3S"), 3);
+    
+    // 测试=操作
+    EXPECT_EQ(testParse(actuator, "50="), 50);
+    EXPECT_EQ(testParse(actuator, "25="), 25);
+    
+    // 测试X操作
+    EXPECT_EQ(testParse(actuator, "30X"), 30);
+    EXPECT_EQ(testParse(actuator, "12X"), 12);
+    
+    // 测试复合操作 - 只累加M、I、S、=、X
+    EXPECT_EQ(testParse(actuator, "10M5I3S2="), 20);  // 10+5+3+2 = 20
+    EXPECT_EQ(testParse(actuator, "5M10I15S5X10="), 45);  // 5+10+15+5+10 = 45
+    EXPECT_EQ(testParse(actuator, "1M1I1S1=1X"), 5);  // 1+1+1+1+1 = 5
+    
+    // 测试包含其他操作的复合CIGAR - 其他操作应该被忽略
+    EXPECT_EQ(testParse(actuator, "10M5D3I2H10N"), 13);  // 只计算10M+3I = 13，忽略5D、2H、10N
+    EXPECT_EQ(testParse(actuator, "5M10D5I10P5N5S"), 15);  // 只计算5M+5I+5S = 15
+    EXPECT_EQ(testParse(actuator, "100M50D50N"), 100);  // 只计算100M，忽略50D和50N
+    
+    // 测试真实场景的CIGAR字符串
+    EXPECT_EQ(testParse(actuator, "76M"), 76);  // 完全匹配
+    EXPECT_EQ(testParse(actuator, "3S73M"), 76);  // 3个软剪裁 + 73个匹配
+    EXPECT_EQ(testParse(actuator, "10M5I60M5D"), 75);  // 10+5+60 = 75，忽略5D
+    EXPECT_EQ(testParse(actuator, "1S20M1I30M1D10M1S"), 63);  // 1+20+1+30+10+1 = 62，忽略1D
+    
+    // 测试边界情况
+    EXPECT_EQ(testParse(actuator, ""), 0);  // 空字符串
+    
+    // 测试只包含不计算操作的CIGAR
+    EXPECT_EQ(testParse(actuator, "100D"), 0);  // 只有删除，不应该累加
+    EXPECT_EQ(testParse(actuator, "50N"), 0);   // 只有参考序列跳过，不应该累加
+    EXPECT_EQ(testParse(actuator, "10H5P"), 0);  // 只有硬剪裁和填充，不应该累加
+    
+    // 测试复杂的真实CIGAR场景
+    EXPECT_EQ(testParse(actuator, "1S10M1I10M1D10M1I10M1D10M1D10M1I10M1S1H"), 75);  // 复杂的比对场景
+    EXPECT_EQ(testParse(actuator, "35M1I39M"), 75);  // 中间有插入的比对
+    EXPECT_EQ(testParse(actuator, "2S50M2I20M1D5M3S"), 82);  // 两端都有软剪裁
+    
+    // 测试大数字
+    EXPECT_EQ(testParse(actuator, "1000M"), 1000);
+    EXPECT_EQ(testParse(actuator, "10000M500I200S100="), 10800);
+    
+    // 测试混合大小写（虽然SAM规范通常使用大写）
+    EXPECT_EQ(testParse(actuator, "10m5i3s2="), 20);  // 小写应该也能工作
+    EXPECT_EQ(testParse(actuator, "10M5i3S2x"), 20);  // 混合大小写
+    
+    // 测试错误的CIGAR格式
+    EXPECT_EQ(testParse(actuator, "M"), 0);  // 缺少数字
+    EXPECT_EQ(testParse(actuator, "invalid"), 0);  // 完全无效
+    EXPECT_EQ(testParse(actuator, "10M5"), 10);  // 结尾缺少操作符
+    EXPECT_EQ(testParse(actuator, "M10I"), 10);  // 开头缺少数字
 }

@@ -22,7 +22,7 @@ public:
     int32_t decompress() override;
 
     virtual bool getNotifyFlag() override {
-        return inBlockPtr->getNpos().size() > (size_t)headEndLine;
+        return notifyFlag;
     }
 
 private:
@@ -108,7 +108,7 @@ private:
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
 
-        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+        LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldIdx, fieldSrcLen, numberIo->data_len, (double)(numberIo->data_len * 100)/(double)fieldSrcLen);
         
         return numberIo->data_len;
@@ -168,6 +168,8 @@ private:
         return strVal.length() + 1;
     }
 
+    int32_t decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx);
+
 private:
     int64_t headEndLine;
     std::vector<std::vector<int64_t>> contentPos;
@@ -188,6 +190,7 @@ private:
     std::map<uint32_t, int64_t> nextMappedPos;
     std::map<uint32_t, uint16_t> nextMappedChr;
     std::map<uint32_t, uint16_t> mappedFlag;
+    std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
     uint32_t baseNCount;
     uint32_t* baseNPosBuffer; 
@@ -214,4 +217,6 @@ private:
     uint8_t* refeStrecchBuffer;
 
     const uint8_t atcg4[4] = {'A', 'C', 'T', 'G'}; 
+
+    bool notifyFlag;
 };
