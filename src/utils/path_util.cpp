@@ -24,6 +24,7 @@
 #include <cstring>
 #include <filesystem>
 #include <system_error>
+#include <fstream>
 #include <pwd.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -31,6 +32,7 @@
 
 #include "path_util.h"
 #include "log/logger.h"
+#include <vector>
 
 
 namespace PathUtil {
@@ -174,6 +176,97 @@ namespace PathUtil {
         }
         fclose(fp);
         return false;
+    }
+
+    std::string getFileNameFromGz(const std::string& gzFileName) {
+        std::string originalName;
+        do {
+            std::ifstream file(gzFileName, std::ios::binary);
+            if (!file.is_open()) {
+                LOG_ERROR("Cannot open file:%s", gzFileName.c_str());
+                break;
+            }
+            
+            // 读取gzip头部
+            unsigned char header[10];
+            file.read(reinterpret_cast<char*>(header), 10);
+            if (file.gcount() != 10) {
+                LOG_ERROR("Not a valid gz file: %s", gzFileName.c_str());
+                break;
+            }
+            
+            // 检查gzip魔术字节
+            if (header[0] != 0x1F || header[1] != 0x8B) {
+                LOG_ERROR("Not a valid gz file: %s", gzFileName.c_str());
+                break;
+            }
+            
+            // 检查压缩方法（必须是8 = DEFLATE）
+            if (header[2] != 8) {
+                LOG_ERROR("Not supported compress format for gz file: %s", gzFileName.c_str());
+                break;
+            }
+            
+            // 获取标志位
+            uint8_t flags = header[3];
+            
+            // 跳过修改时间(4字节)、额外标志(1字节)、操作系统(1字节)
+            // 文件指针已经在第10字节之后
+            
+            // 如果存在额外字段
+            if (flags & 0x04) {
+                uint8_t xlen[2];
+                file.read(reinterpret_cast<char*>(xlen), 2);
+                if (file.gcount() != 2) {
+                    LOG_ERROR("Get extend info failed for gz file: %s", gzFileName.c_str());
+                    break;
+                }
+                uint16_t extra_len = xlen[0] | (xlen[1] << 8);
+                // 跳过额外字段
+                file.seekg(extra_len, std::ios::cur);
+            }
+            
+            // 读取原始文件名（如果存在）
+            if (flags & 0x08) {
+                std::vector<char> name;
+                char ch;
+                while (file.get(ch)) {
+                    if (ch == '\0') {
+                        break;
+                    }
+                    name.push_back(ch);
+                }
+                
+                if (file.eof()) {
+                    LOG_ERROR("Not a valid gz file: %s", gzFileName.c_str());
+                    break;
+                }
+                
+                originalName.assign(name.begin(), name.end());
+                break;
+            } else {
+                LOG_ERROR("Cannot find file name in gz file: %s", gzFileName.c_str());
+                break;
+            }
+        } while(0);
+
+        
+        if (originalName.empty()) {
+            std::string gzName = getFileName(gzFileName);
+            // 移除.gz扩展名
+            if (gzName.length() > 3 && gzName.substr(gzName.length() - 3) == ".gz") {
+                originalName = gzName.substr(0, gzName.length() - 3);
+            } 
+            // 移除.tgz扩展名并添加.tar
+            else if (gzName.length() > 4 && gzName.substr(gzName.length() - 4) == ".tgz") {
+                originalName = gzName.substr(0, gzName.length() - 4) + ".tar";
+            } 
+            else {
+                originalName = gzName;
+            }
+        }
+
+        return originalName;
     }
 }
 

@@ -135,7 +135,6 @@ int32_t SamActuator::preAnalysis() {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    std::string refFilePath;
     
     // Initialize quality frequency analysis similar to FastqActuator
     std::pair<uint8_t, uint32_t> qualityFrequnce[256];
@@ -157,8 +156,7 @@ int32_t SamActuator::preAnalysis() {
                 return -1;
             }
             headEndLine++;
-            if (line.substr(0, 3) == "@HD" || line.substr(0, 3) == "@PG" || 
-                line.substr(0, 3) == "@RG" || line.substr(0, 3) == "@CO") {
+            if (line.substr(0, 3) == "@HD" || line.substr(0, 3) == "@RG" || line.substr(0, 3) == "@CO") {
                 continue;
             } else if (line.substr(0, 3) == "@SQ") {
                 // Parse chromosome information from @SQ line
@@ -176,7 +174,7 @@ int32_t SamActuator::preAnalysis() {
                     if (endPos == std::string::npos) {
                         endPos = line.length();
                     }
-                    refFilePath = line.substr(pos, endPos - pos);
+                    std::string refFilePath = line.substr(pos, endPos - pos);
                     LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
                     if (pRefeGene != nullptr) {
                         std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
@@ -186,6 +184,41 @@ int32_t SamActuator::preAnalysis() {
                     }
                 }
                 continue;
+            } else if (line.substr(0, 3) == "@PG") {
+                size_t pos = line.find("CL:");
+                if (pos != std::string::npos) {
+                    pos += 3;
+                    size_t endPos = line.find("\t", pos);
+                    if (endPos == std::string::npos) {
+                        endPos = line.length();
+                    }
+
+                    std::string command = line.substr(pos, endPos - pos);
+                    // command 按照空格分割，去第三个作为参考基因的名称
+                    std::stringstream ss(command);
+                    std::string item;
+                    std::vector<std::string> tokens;
+                    while (std::getline(ss, item, ' ')) {
+                        if (!item.empty()) {
+                            tokens.push_back(item);
+                        }
+                    }
+                    if (tokens.size() >= 3) {
+                        std::string refGeneName = tokens[2];
+                        LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
+                        // 这里可以根据需要保存或使用 refGeneName
+                        if (pRefeGene != nullptr) {
+                            std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
+                            if (PathUtil::isGzFile(pRefeGene->getFastaFileName())) {
+                                inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
+                            }
+                            if (refGeneName != inputFastq) {
+                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s \n", refGeneName.c_str(), inputFastq.c_str());
+                            }
+                        }
+                    }
+
+                }
             } else {
                 LOG_ERROR("Unexpected header %s", line.c_str());
                 return -1;
@@ -293,14 +326,6 @@ int32_t SamActuator::preAnalysis() {
             }
         }
     }
-    
-    // Initialize reference genome if reference file path is found
-    if (!refFilePath.empty() && pRefeGene!= nullptr) {
-        if (refFilePath != pRefeGene->getFastaFileName()) {
-            LOG_ERROR("Reference fasta (%s) file name not match, expect:%s", pRefeGene->getFastaFileName().c_str(), refFilePath.c_str());
-            return -1;
-        }
-    } 
     
     return 0;
 }
