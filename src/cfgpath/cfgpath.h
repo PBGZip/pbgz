@@ -355,7 +355,8 @@ static inline void get_user_data_folder(char *out, unsigned int maxlen, const ch
 		// Modified: 2026-02-02 to fix issue where .local directory doesn't exist
 		char temp_path[MAX_PATH];
 		strcpy(temp_path, out_orig);
-		char *last_slash = strrchr(temp_path, '/');
+		temp_path[strlen(temp_path) - 1] = '\0';
+		char* last_slash = strrchr(temp_path, '/');
 		if (last_slash) {
 			*last_slash = '\0';
 			mkdir(temp_path, 0755);  // Create .local
