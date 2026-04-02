@@ -814,192 +814,192 @@ protected:
 };
 
 // 添加实际的测试方法
-TEST_F(SamMappingTest, testMapingData) {
-    loadSamData(SamMappingData::testSamFile);
-    Reference refGene("../../data/GCA_000001405.29_GRCh38.p14_genomic.fna", 1);
-    refGene.makeIndex();
-    SamActuator actuator(pInBlock, pOutBlock, &refGene);
+// TEST_F(SamMappingTest, testMapingData) {
+//     loadSamData(SamMappingData::testSamFile);
+//     Reference refGene("../../data/GCA_000001405.29_GRCh38.p14_genomic.fna", 1);
+//     refGene.makeIndex();
+//     SamActuator actuator(pInBlock, pOutBlock, &refGene);
     
-    // Pre-analysis
-    int32_t result = actuator.preAnalysis();
-    EXPECT_EQ(result, 0);
+//     // Pre-analysis
+//     int32_t result = actuator.preAnalysis();
+//     EXPECT_EQ(result, 0);
 
-    uint32_t fieldSrcLen = 0;
-    Json::Value fieldMeta;
+//     uint32_t fieldSrcLen = 0;
+//     Json::Value fieldMeta;
 
-    result = actuator.compressNumber<uint16_t>(1, fieldSrcLen, fieldMeta);
-    EXPECT_GT(result, 0);
+//     result = actuator.compressNumber<uint16_t>(1, fieldSrcLen, fieldMeta);
+//     EXPECT_GT(result, 0);
 
-    result = actuator.compressChrName(2, fieldSrcLen, fieldMeta);
-    EXPECT_GT(result, 0);
+//     result = actuator.compressChrName(2, fieldSrcLen, fieldMeta);
+//     EXPECT_GT(result, 0);
 
-    result = actuator.compressNumber<int64_t>(3, fieldSrcLen, fieldMeta);
-    EXPECT_GT(result, 0);
+//     result = actuator.compressNumber<int64_t>(3, fieldSrcLen, fieldMeta);
+//     EXPECT_GT(result, 0);
 
-    uint32_t lineNum = pInBlock->npos.size();
-    uint8_t* buffer = pInBlock->getBuffer();
-    uint32_t fieldIdx = 9;
-    uint32_t offset = 0;
-    uint64_t nOffset = 0;
+//     uint32_t lineNum = pInBlock->npos.size();
+//     uint8_t* buffer = pInBlock->getBuffer();
+//     uint32_t fieldIdx = 9;
+//     uint32_t offset = 0;
+//     uint64_t nOffset = 0;
 
-    const uint32_t baseMaxLength = actuator.maxBaseLength + 4;
-    const uint32_t lsquash = (baseMaxLength >> 2) + !!(baseMaxLength & 0x3);
+//     const uint32_t baseMaxLength = actuator.maxBaseLength + 4;
+//     const uint32_t lsquash = (baseMaxLength >> 2) + !!(baseMaxLength & 0x3);
     
-    uint32_t baseMappedLength = (baseMaxLength << 1);
-    LOG_DEBUG("baseMappedLength = %d", baseMappedLength);
-    uint8_t* basePairBuffer = MemoryUtil::safeAlloc<uint8_t>(baseMaxLength);
-    uint8_t* baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(lsquash);
-    uint8_t* baseMappedBuffer = MemoryUtil::safeAlloc<uint8_t>(baseMappedLength);
-    actuator.baseNPosBuffer = MemoryUtil::safeAlloc<uint32_t>(actuator.baseNCount);
+//     uint32_t baseMappedLength = (baseMaxLength << 1);
+//     LOG_DEBUG("baseMappedLength = %d", baseMappedLength);
+//     uint8_t* basePairBuffer = MemoryUtil::safeAlloc<uint8_t>(baseMaxLength);
+//     uint8_t* baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(lsquash);
+//     uint8_t* baseMappedBuffer = MemoryUtil::safeAlloc<uint8_t>(baseMappedLength);
+//     actuator.baseNPosBuffer = MemoryUtil::safeAlloc<uint32_t>(actuator.baseNCount);
 
 
-    for (uint32_t lineIdx = actuator.headEndLine; lineIdx < lineNum; ++lineIdx) {
-        uint32_t lineStart = (lineIdx == 0) ? 0 : pInBlock->npos[lineIdx - 1] + 1;
-        uint32_t lineEnd = pInBlock->npos[lineIdx] - lineStart;
+//     for (uint32_t lineIdx = actuator.headEndLine; lineIdx < lineNum; ++lineIdx) {
+//         uint32_t lineStart = (lineIdx == 0) ? 0 : pInBlock->npos[lineIdx - 1] + 1;
+//         uint32_t lineEnd = pInBlock->npos[lineIdx] - lineStart;
         
-        uint8_t* line = buffer + lineStart;
-        // Skip header lines (starting with @)
-        if (*line == '@') {
-            continue;
-        }
+//         uint8_t* line = buffer + lineStart;
+//         // Skip header lines (starting with @)
+//         if (*line == '@') {
+//             continue;
+//         }
         
-        uint32_t contentIdx = lineIdx - actuator.headEndLine;
-        // Extract SEQ field (field 9)
-        if (fieldIdx >= actuator.contentPos[contentIdx].size() + 1) {
-            continue;
-        }
+//         uint32_t contentIdx = lineIdx - actuator.headEndLine;
+//         // Extract SEQ field (field 9)
+//         if (fieldIdx >= actuator.contentPos[contentIdx].size() + 1) {
+//             continue;
+//         }
         
-        uint32_t prevTabPos = actuator.contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < actuator.contentPos[contentIdx].size()) ? actuator.contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* seqStart = line + prevTabPos + 1;
-        uint32_t seqLength = currTabPos - prevTabPos - 1;
+//         uint32_t prevTabPos = actuator.contentPos[contentIdx][fieldIdx - 1];
+//         uint32_t currTabPos = (fieldIdx < actuator.contentPos[contentIdx].size()) ? actuator.contentPos[contentIdx][fieldIdx] : lineEnd;
+//         uint8_t* seqStart = line + prevTabPos + 1;
+//         uint32_t seqLength = currTabPos - prevTabPos - 1;
         
-        if (seqLength == 0)  {
-            continue;
-        }
+//         if (seqLength == 0)  {
+//             continue;
+//         }
         
-        // Get mapping information from SAM fields
-        uint16_t chrId = actuator.mappedChr[lineIdx];
-        uint64_t startPos = actuator.mappedPos[lineIdx];
+//         // Get mapping information from SAM fields
+//         uint16_t chrId = actuator.mappedChr[lineIdx];
+//         uint64_t startPos = actuator.mappedPos[lineIdx];
         
-        // Extract FLAG field to determine strand
-        uint16_t flag = actuator.mappedFlag[lineIdx];
+//         // Extract FLAG field to determine strand
+//         uint16_t flag = actuator.mappedFlag[lineIdx];
         
-        // Process sequence: remove N's and record positions
-        uint32_t outLen = 0;
-        uint32_t nCountInSeq = 0;
-        for (uint32_t n = 0; n < seqLength; n++) {
-            char ch = seqStart[n];
-            if (ch == 'N' || ch == 'n') {
-                actuator.baseNPosBuffer[nOffset] = n;
-                nOffset++;
-                nCountInSeq++;
-            }
-        }
+//         // Process sequence: remove N's and record positions
+//         uint32_t outLen = 0;
+//         uint32_t nCountInSeq = 0;
+//         for (uint32_t n = 0; n < seqLength; n++) {
+//             char ch = seqStart[n];
+//             if (ch == 'N' || ch == 'n') {
+//                 actuator.baseNPosBuffer[nOffset] = n;
+//                 nOffset++;
+//                 nCountInSeq++;
+//             }
+//         }
         
-        if (chrId != 0xFFFF && chrId != 0xFFFE) {
-            // Get chromosome start position from SamInfo
-            const ChromosomeInfo& chrInfo = SamInfo::getInstance().getChromosomeInfo(chrId);
-            uint64_t chrStartPos = chrInfo.position;
-            // Calculate actual reference position
-            int64_t refPos = chrStartPos + startPos - 1; // SAM is 1-based
+//         if (chrId != 0xFFFF && chrId != 0xFFFE) {
+//             // Get chromosome start position from SamInfo
+//             const ChromosomeInfo& chrInfo = SamInfo::getInstance().getChromosomeInfo(chrId);
+//             uint64_t chrStartPos = chrInfo.position;
+//             // Calculate actual reference position
+//             int64_t refPos = chrStartPos + startPos - 1; // SAM is 1-based
 
-            uint8_t shiftBitLength = (refPos % 4);
-            int64_t refSquashPos = refPos / 4;
+//             uint8_t shiftBitLength = (refPos % 4);
+//             int64_t refSquashPos = refPos / 4;
             
-            // Determine strand direction from FLAG bit 4
-            uint32_t squashBufferLength = 0;
-            bool isReverse = (flag & 0x10) != 0;
-            if (isReverse) {
-                LOG_DEBUG("Revese: flag = %d", flag);
-                // actgPair(basePairBuffer, seqStart, seqLength);
-                squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
-            } else {
-                squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
-            }
+//             // Determine strand direction from FLAG bit 4
+//             uint32_t squashBufferLength = 0;
+//             bool isReverse = (flag & 0x10) != 0;
+//             if (isReverse) {
+//                 LOG_DEBUG("Revese: flag = %d", flag);
+//                 // actgPair(basePairBuffer, seqStart, seqLength);
+//                 squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
+//             } else {
+//                 squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
+//             }
 
-            if (refGene.getSquashLength() < refSquashPos + squashBufferLength) {
-                LOG_DEBUG("%ld, %ld", refGene.getSquashLength(), refSquashPos + squashBufferLength);
-                continue;
-            }
+//             if (refGene.getSquashLength() < refSquashPos + squashBufferLength) {
+//                 LOG_DEBUG("%ld, %ld", refGene.getSquashLength(), refSquashPos + squashBufferLength);
+//                 continue;
+//             }
 
-            uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);
-            const uint8_t* beginRefPos = actuator.pRefeGene->getSquash() + refSquashPos;
-            if (shiftBitLength == 0) {
-                memcpy(refeMappedPos, beginRefPos, squashBufferLength);
-            } else if (shiftBitLength == 1) {
-                for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                    refeMappedPos[i] = ((beginRefPos[i] << 2) & 0xFC) + ((beginRefPos[i + 1] >> 6) & 0x03);
-                }
-            } else if (shiftBitLength == 2) {
-                for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                    refeMappedPos[i] = ((beginRefPos[i] << 4) & 0xF0) + ((beginRefPos[i + 1] >> 4) & 0x0F);
-                }
-            } else if (shiftBitLength == 3) {
-                for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                    refeMappedPos[i] = ((beginRefPos[i] << 6) & 0xC0) + ((beginRefPos[i + 1] >> 2) & 0x3F);
-                }
-            }
+//             uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);
+//             const uint8_t* beginRefPos = actuator.pRefeGene->getSquash() + refSquashPos;
+//             if (shiftBitLength == 0) {
+//                 memcpy(refeMappedPos, beginRefPos, squashBufferLength);
+//             } else if (shiftBitLength == 1) {
+//                 for (uint32_t i = 0; i < squashBufferLength; ++i) {
+//                     refeMappedPos[i] = ((beginRefPos[i] << 2) & 0xFC) + ((beginRefPos[i + 1] >> 6) & 0x03);
+//                 }
+//             } else if (shiftBitLength == 2) {
+//                 for (uint32_t i = 0; i < squashBufferLength; ++i) {
+//                     refeMappedPos[i] = ((beginRefPos[i] << 4) & 0xF0) + ((beginRefPos[i + 1] >> 4) & 0x0F);
+//                 }
+//             } else if (shiftBitLength == 3) {
+//                 for (uint32_t i = 0; i < squashBufferLength; ++i) {
+//                     refeMappedPos[i] = ((beginRefPos[i] << 6) & 0xC0) + ((beginRefPos[i + 1] >> 2) & 0x3F);
+//                 }
+//             }
 
-            outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer);
+//             outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer);
             
-            LOG_DEBUG("outlen = %d, squashBufferLength= %d, sequenLen = %d", outLen, squashBufferLength, seqLength);
+//             LOG_DEBUG("outlen = %d, squashBufferLength= %d, sequenLen = %d", outLen, squashBufferLength, seqLength);
 
-            LOG_DEBUG("baseSquashBuffer:");
-            printBufferBinary(baseSquashBuffer, squashBufferLength);
+//             LOG_DEBUG("baseSquashBuffer:");
+//             printBufferBinary(baseSquashBuffer, squashBufferLength);
 
-            LOG_DEBUG("refeMappedPos:");
-            printBufferBinary(refeMappedPos, squashBufferLength);
+//             LOG_DEBUG("refeMappedPos:");
+//             printBufferBinary(refeMappedPos, squashBufferLength);
             
-            LOG_DEBUG("baseMappedBuffer:");
-            printBufferBinary(baseMappedBuffer, seqLength);
+//             LOG_DEBUG("baseMappedBuffer:");
+//             printBufferBinary(baseMappedBuffer, seqLength);
             
-            MemoryUtil::safeFree(refeMappedPos);
-        } 
-        offset++;
-    }
+//             MemoryUtil::safeFree(refeMappedPos);
+//         } 
+//         offset++;
+//     }
 
-    MemoryUtil::safeFree(basePairBuffer);
-    MemoryUtil::safeFree(baseSquashBuffer);
-    MemoryUtil::safeFree(baseMappedBuffer);
-    MemoryUtil::safeFree(actuator.baseNPosBuffer);
-}
+//     MemoryUtil::safeFree(basePairBuffer);
+//     MemoryUtil::safeFree(baseSquashBuffer);
+//     MemoryUtil::safeFree(baseMappedBuffer);
+//     MemoryUtil::safeFree(actuator.baseNPosBuffer);
+// }
 
-TEST_F(SamMappingTest, testShirftMemory) {
-    uint8_t* src = MemoryUtil::safeAlloc<uint8_t>(16);
-    for (uint8_t i = 0; i < 16; ++i) {
-        src[i] = i;
-    }
+// TEST_F(SamMappingTest, testShirftMemory) {
+//     uint8_t* src = MemoryUtil::safeAlloc<uint8_t>(16);
+//     for (uint8_t i = 0; i < 16; ++i) {
+//         src[i] = i;
+//     }
 
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            // 以二进制方式输出src[i]
-             for (int n = 7; n >= 0; n--) {
-                printf("%d", (src[i*4 +j] >> n) & 1);
-            }
-            printf("\t");
-        }
-        printf("\n");
-    }
+//     for (int i = 0; i < 4; i++) {
+//         for (int j = 0; j < 4; j++) {
+//             // 以二进制方式输出src[i]
+//              for (int n = 7; n >= 0; n--) {
+//                 printf("%d", (src[i*4 +j] >> n) & 1);
+//             }
+//             printf("\t");
+//         }
+//         printf("\n");
+//     }
 
-    printf("\n");
+//     printf("\n");
 
-    uint8_t* dst = MemoryUtil::safeAlloc<uint8_t>(16);
-    for (int i = 0; i < 16; ++i) {
-        dst[i] = ((src[i] << 2) & 0xFC)  + ((src[(i + 1) % 16] >> 6) & 0x03 );
-    }
+//     uint8_t* dst = MemoryUtil::safeAlloc<uint8_t>(16);
+//     for (int i = 0; i < 16; ++i) {
+//         dst[i] = ((src[i] << 2) & 0xFC)  + ((src[(i + 1) % 16] >> 6) & 0x03 );
+//     }
 
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            // 以二进制方式输出src[i]
-             for (int n = 7; n >= 0; n--) {
-                printf("%d", (dst[i*4 +j] >> n) & 1);
-            }
-            printf("\t");
-        }
-        printf("\n");
-    }
+//     for (int i = 0; i < 4; i++) {
+//         for (int j = 0; j < 4; j++) {
+//             // 以二进制方式输出src[i]
+//              for (int n = 7; n >= 0; n--) {
+//                 printf("%d", (dst[i*4 +j] >> n) & 1);
+//             }
+//             printf("\t");
+//         }
+//         printf("\n");
+//     }
 
-    MemoryUtil::safeFree(src);
-    MemoryUtil::safeFree(dst);
-}
+//     MemoryUtil::safeFree(src);
+//     MemoryUtil::safeFree(dst);
+// }

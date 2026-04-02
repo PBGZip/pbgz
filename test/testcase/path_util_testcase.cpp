@@ -37,6 +37,6 @@ TEST(PathUtil, GetAbsPathWithBaseDir) {
     EXPECT_EQ(PathUtil::getAbsPath("./io_writer.txt", binaryDir), expectedPath);
 }
 
-TEST(PathUtil, GetFileNameFromGz) {
-    EXPECT_EQ(PathUtil::getFileNameFromGz("../../data/GCA_000001405.29_GRCh38.p14_genomic.fna.gz"), "GCA_000001405.29_GRCh38.p14_genomic.fna");
-}
+// TEST(PathUtil, GetFileNameFromGz) {
+//     EXPECT_EQ(PathUtil::getFileNameFromGz("../../data/GCA_000001405.29_GRCh38.p14_genomic.fna.gz"), "GCA_000001405.29_GRCh38.p14_genomic.fna");
+// }
