@@ -102,4 +102,6 @@ namespace PathUtil {
     int64_t getFileSize(const std::string& fileName);
 
     bool isGzFile(const std::string& fileName);
+
+    std::string getFileNameFromGz(const std::string& fileName);
 }
