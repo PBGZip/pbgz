@@ -22,6 +22,7 @@ file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/testcase/*.cpp)
 file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp
                        ${CMAKE_SOURCE_DIR}/src/log/*.cpp
                        ${CMAKE_SOURCE_DIR}/src/utils/*.cpp
+                       ${CMAKE_SOURCE_DIR}/src/farmhash/src/farmhash.cc
 )
 
 list(REMOVE_ITEM PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)

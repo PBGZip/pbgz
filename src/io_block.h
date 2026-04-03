@@ -47,6 +47,7 @@ typedef enum
     BAM = (1 << 4),                 // BAM format block (16)
     REFERENCE = (1 << 5),           // 
     REFERENCE_INDEX = 1 << 6,       //
+    SAM = 1 << 7, 
     PBGZFILE = UINT32_MAX           // Special value for PBGZ file type (4294967295)
 } BlockType;
 

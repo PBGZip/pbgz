@@ -37,6 +37,7 @@
 #include "hardware.h"
 #endif
 #include <set>
+#include "sam_actuator.h"
 
 int32_t PbgzEngine::init() {
     // Register allocation functions required by coder
@@ -258,7 +259,9 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
 
     PbgzManager::getInstance().updateReadDataLen(blockPtr);
     inputDataPool.push(blockPtr);
-    blockCount++;
+    if (ret > 0) {
+        blockCount++;
+    }
     return ret;
 }
 
@@ -291,9 +294,19 @@ int32_t PbgzEngine::startReadTask() {
 int32_t PbgzEngine::startCoderTask() {
     auto coderTask = [this](int32_t id) {
         pthread_setname_np(pthread_self(), std::string("codertask_").append(std::to_string(id)).c_str());
+        if (id > 0 ) {
+            std::unique_lock<std::mutex> lock(mutex);
+            conditionVar.wait(lock);
+        }
+
+        LOG_INFO("Coder task (%d) begin to running!", id);
+
         while (true) {
             RoughIOBlock* inBlockPtr = inputDataPool.get();
             if (inBlockPtr == nullptr) {  // Got null pointer, indicating end marker
+                if (isNeedNotify(true)) {
+                    conditionVar.notify_all();
+                }
                 break;
             }
             RoughIOBlock* outBlockPtr = freeOutputPool.get();
@@ -307,12 +320,16 @@ int32_t PbgzEngine::startCoderTask() {
             outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
             Actuator* pActuator = nullptr;
-            if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
+            if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType()) || BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
                 if (parameter.isMakeIndex) {
                     fprintf(stderr, "Fastq file will not make index.");
                     parameter.isMakeIndex = false;
                 }
-                pActuator = MemoryUtil::safeNewClass<FastqActuator>(inBlockPtr, outBlockPtr, pRefGene);
+                if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
+                    pActuator = MemoryUtil::safeNewClass<FastqActuator>(inBlockPtr, outBlockPtr, pRefGene);
+                } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+                    pActuator = MemoryUtil::safeNewClass<SamActuator>(inBlockPtr, outBlockPtr, pRefGene);
+                }
                 pActuator = actuatorPreProc(pActuator, inBlockPtr, outBlockPtr);
             } else if (inBlockPtr->getBlockType() == BINARY) {
                 if (parameter.isMakeIndex) {
@@ -340,7 +357,7 @@ int32_t PbgzEngine::startCoderTask() {
 
             int32_t ret = actuatorProc(pActuator, inBlockPtr, outBlockPtr);
             if (ret != 0) {
-                LOG_ERROR("Coder task failed for blcock(%d)", inBlockPtr->getBlockId());
+                LOG_ERROR("Coder task failed for block(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
                 freeInputPool.push(inBlockPtr);
                 outBlockPtr->reset();
@@ -350,6 +367,10 @@ int32_t PbgzEngine::startCoderTask() {
                 MemoryUtil::safeDeleteClass(pActuator);
                 continue;
             }
+            if (isNeedNotify(pActuator->getNotifyFlag())) {
+                conditionVar.notify_all();
+            }
+    
             MemoryUtil::safeDeleteClass(pActuator);
             freeInputPool.push(inBlockPtr);
             outputDataPool.push(outBlockPtr);
@@ -384,7 +405,7 @@ int32_t PbgzEngine::startWriteTask() {
 
                 // Update extended header and write dynamic file meta after all data is written
                 PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
-                if (pbgzWriter != nullptr) {
+                if (pbgzWriter != nullptr && !dynamicFileMeta.getMetaData().empty()) {
                     pbgzWriter->updateHeadExt();
                     pbgzWriter->setDynamicFileMeta(dynamicFileMeta);
                     pbgzWriter->writeDynamicFileMeta();
@@ -441,3 +462,13 @@ void PbgzEngine::updateReferenceOffset(int64_t offset) {
 void PbgzEngine::resetReferenceOffset() {
     refeOffsetFLag = false;
 }
+
+
+ bool PbgzEngine::isNeedNotify(bool flag) {
+   if (flag && !syncFlag) {
+        syncFlag = flag;
+        return true;
+    }
+
+    return false;
+ }

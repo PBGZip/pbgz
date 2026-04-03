@@ -62,7 +62,7 @@ const std::string STDIN = "/dev/stdin";
 const std::string STDOUT = "/dev/stdout";
 
 const uint8_t PBGZ_VERSION_MAJOR = 2; // Major version of PBGZ file format
-const uint8_t PBGZ_VERSION_MINOR = 1; // Minor version of PBGZ file format
+const uint8_t PBGZ_VERSION_MINOR = 2; // Minor version of PBGZ file format
 const uint8_t PBGZ_VERSION_PATCH = 0; // Patch version
 
 const int32_t GENE3_MAX_BASE = 1048760; // Maximum bases per FASTQ generation 3 record
