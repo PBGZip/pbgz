@@ -1,3 +1,27 @@
+
+/*
+ * sam_actuator_testcase.cpp - Test cases for SAM actuator functionality
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
@@ -6,6 +30,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include <random>
 
 #define private public
 #include "sam_actuator.h"
@@ -13,7 +38,6 @@
 #include <block_wrapper.h>
 #include "config_manager.h"
 #undef private
-#include <random>
 
 namespace SamTestData {
     const std::string testSamFile = "test.sam";
@@ -48,7 +72,7 @@ public:
             delete pOutBlock;
             pOutBlock = nullptr;
         }
-        // 清理所有可能生成的测试文件
+        // Clean up all potentially generated test files
         std::remove(SamTestData::testSamFile.c_str());
         std::remove("./test/test.sam");
         std::remove("../test/test.sam");
@@ -61,11 +85,11 @@ public:
         pInBlock->reset();
         pOutBlock->reset();
 
-        // 尝试多个可能的路径，首先尝试当前目录和测试目录
+        // Try multiple possible paths, starting with current directory and test directory
         std::vector<std::string> paths = { 
-            filename,           // 当前目录
-            "./test/" + filename, // 测试目录
-            "../test/" + filename // 构建目录的上一级测试目录
+            filename,           // current directory
+            "./test/" + filename, // test directory
+            "../test/" + filename // test directory above build directory
         };
         
         IOReader* pIoReader = nullptr;
@@ -79,11 +103,11 @@ public:
         }
         
         if (pIoReader == nullptr) {
-            // 如果所有路径都失败，直接使用test_data/test.sam作为最后的fallback
+            // If all paths fail, use test_data/test.sam as final fallback
             pIoReader = new FileReader("test_data/test.sam");
             if (pIoReader->openIO() != 0) {
                 delete pIoReader;
-                return; // 无法打开文件
+                return; // Cannot open file
             }
         }
         
@@ -95,24 +119,24 @@ public:
     }
     
     void generateSamFile(const std::string& filename) {
-        // 直接写入 test_data 中的真实 SAM 数据，不从文件读取
+        // Directly write real SAM data from test_data, not reading from file
         std::ofstream file(filename);
         if (!file.is_open()) {
-            // 如果无法在当前目录打开，尝试在测试目录中创建
+            // If cannot open in current directory, try to create in test directory
             std::string testPath = "./test/" + filename;
             file.open(testPath);
             if (!file.is_open()) {
-                // 如果还是失败，尝试在构建目录中创建
+                // If still fails, try to create in build directory
                 testPath = "../test/" + filename;
                 file.open(testPath);
             }
         }
 
         if (!file.is_open()) {
-            return; // 无法创建文件
+            return; // Cannot create file
         }
 
-        // 生成标准的 SAM 文件内容，所有记录都是 76bp 长度
+        // Generate standard SAM file content, all records are 76bp length
         file << "@HD\tVN:1.6\tSO:coordinate\n";
         file << "@SQ\tSN:chr1\tLN:340\n";
         file << "@SQ\tSN:chr2\tLN:338\n";
@@ -122,7 +146,7 @@ public:
         file << "@SQ\tSN:chrY\tLN:339\n";
         file << "@PG\tID:bwa\tPN:bwa\tVN:0.7.17-r1188\tCL:bwa mem test_data/reference.fa test_data/test_reads.fastq\n";
 
-        // 所有记录都是 76M，序列长度和质量值都是76
+        // All records are 76M, sequence length and quality values are both 76
         file << "read1_11.1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
         file << "read3_11.2\t0\tchr1\t153\t60\t74M\t*\t0\t0\tGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCCGCAAG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!T!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:3\tMD:Z:37C37C0\tAS:i:72\tXS:i:0\n";
         file << "read4_11.3\t0\tchr2\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGACAATCGCCGGAAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!F!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
@@ -140,7 +164,7 @@ public:
     void generateFasta(const std::string& filename) {
         std::ifstream srcFile("test_data/reference.fa");
         if (!srcFile.is_open()) {
-            // 如果无法打开test_data/reference.fa，生成包含真实ATCG序列的参考基因组
+            // If cannot open test_data/reference.fa, generate reference genome with real ATCG sequences
             std::ofstream file(filename);
             if (!file.is_open()) {
                 std::string testPath = "./test/" + filename;
@@ -152,15 +176,15 @@ public:
             }
             
             if (!file.is_open()) {
-                return; // 无法创建文件
+                return; // Cannot create file
             }
 
-            // 生成包含真实ATCG序列的参考基因组
+            // Generate reference genome with real ATCG sequences
             file << ">chr1\n";
             for (int i = 0; i < 17; i++) {
                 file << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";
             }
-            file << "ATCGATCGATCGATCGATCG\n";  // 填充到合适的长度
+            file << "ATCGATCGATCGATCGATCG\n";  // Pad to appropriate length
             
             file << ">chr2\n";
             for (int i = 0; i < 16; i++) {
@@ -196,7 +220,7 @@ public:
             return;
         }
         
-        // 如果能打开test_data/reference.fa，则复制其内容
+            // If can open test_data/reference.fa, copy its content
         std::string content((std::istreambuf_iterator<char>(srcFile)),
                            std::istreambuf_iterator<char>());
         srcFile.close();
@@ -212,14 +236,14 @@ public:
         }
         
         if (!file.is_open()) {
-            return; // 无法创建文件
+            return; // Cannot create file
         }
         
         file << content;
         file.close();
     }
 
-    // 创建测试用的Reference对象
+    // Create Reference object for testing
     Reference createTestReference() {
         std::string tempFastaFile = "test_reference.fa";
         generateFasta(tempFastaFile);
@@ -232,7 +256,7 @@ protected:
     RoughIOBlock* pInBlock;
     RoughIOBlock* pOutBlock;
     
-    // 映射数据，用于测试
+    // Mapping data for testing
     std::map<uint32_t, uint16_t> mappedFlag;
     std::map<uint32_t, uint64_t> mappedPos;
 };
@@ -242,12 +266,12 @@ TEST_F(SamActuatorTest, testPreAnalysis) {
     SamActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    EXPECT_EQ(actuator.headEndLine, 8);  // 头部有8行 (@HD, 6个@SQ, 1个@PG, 可能还有其他头部行)
-    EXPECT_EQ(actuator.contentPos.size(), 10);  // 有10条比对记录
+    EXPECT_EQ(actuator.headEndLine, 8);  // Header has 8 lines (@HD, 6@SQ, 1@PG, may have other header lines)
+    EXPECT_EQ(actuator.contentPos.size(), 10);  // Has 10 alignment records
 }
 
 TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
-    // 生成大型SAM文件进行性能测试
+    // Generate large SAM file for performance testing
     std::ofstream file("idinvlid_pre_analysis.sam");
     if (!file.is_open()) {
         return;
@@ -439,7 +463,7 @@ TEST_F(SamActuatorTest, testDecompress) {
 
     fprintf(stderr, "%s \n", pInBlock->getBuffer());
     
-    // 创建一个用于压缩的SamActuator对象
+    // Create SamActuator object for compression
     SamActuator compressor(pInBlock, pOutBlock);
     
     // Pre-analysis for compression
@@ -452,24 +476,24 @@ TEST_F(SamActuatorTest, testDecompress) {
 
     pInBlock->reset();
     
-    // 将压缩后的输出Block内容拷贝到新的input Block
+    // Copy compressed output Block content to new input Block
     memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
     pInBlock->setDataLen(pOutBlock->getDataLen());
     pInBlock->setMetaLen(pOutBlock->getMetaLen());
     pInBlock->setBlockType(pOutBlock->getBlockType());
     
-    // 重置输出Block
+    // Reset output Block
     pOutBlock->reset();
     
-    // 创建用于解压缩的SamActuator对象
+    // Create SamActuator object for decompression
     SamActuator decompressor(pInBlock, pOutBlock);
     
-    // 解压缩不需要preAnalysis，直接调用decompress
+    // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
     fprintf(stderr, "%s\n", pOutBlock->getBuffer());
     EXPECT_EQ(result, 0);
     
-    // 基本检查：确保解压缩产生了数据
+    // Basic check: ensure decompression produced data
     EXPECT_GT(pOutBlock->getDataLen(), 0);
 }
 
@@ -478,7 +502,7 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     
     Reference reference = createTestReference();
     
-    // 创建一个用于压缩的SamActuator对象
+    // Create SamActuator object for compression
     SamActuator compressor(pInBlock, pOutBlock, &reference);
     
     // Pre-analysis for compression
@@ -491,23 +515,23 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
 
     pInBlock->reset();
     
-    // 将压缩后的输出Block内容拷贝到新的input Block
+    // Copy compressed output Block content to new input Block
     memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
     pInBlock->setDataLen(pOutBlock->getDataLen());
     pInBlock->setMetaLen(pOutBlock->getMetaLen());
     pInBlock->setBlockType(pOutBlock->getBlockType());
     
-    // 重置输出Block
+    // Reset output Block
     pOutBlock->reset();
     
-    // 创建用于解压缩的SamActuator对象
+    // Create SamActuator object for decompression
     SamActuator decompressor(pInBlock, pOutBlock, &reference);
     
-    // 解压缩不需要preAnalysis，直接调用decompress
+    // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
     EXPECT_EQ(result, 0);
     
-    // 基本检查：确保解压缩产生了数据
+    // Basic check: ensure decompression produced data
     EXPECT_GT(pOutBlock->getDataLen(), 0);
 }
 
@@ -515,72 +539,72 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
 TEST_F(SamActuatorTest, testCigarParse) {
     SamActuator actuator(pInBlock, pOutBlock);
     
-    // 辅助函数：将字符串转换为uint8_t*以便传递给parseCigar
+    // Helper function: convert string to uint8_t* to pass to parseCigar
     auto testParse = [](SamActuator& a, const std::string& cigar) -> uint32_t {
         return a.parseCigar(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(cigar.c_str())), cigar.length());
     };
     
-    // 测试基本的M操作
+    // Test basic M operations
     EXPECT_EQ(testParse(actuator, "100M"), 100);
     EXPECT_EQ(testParse(actuator, "76M"), 76);
     EXPECT_EQ(testParse(actuator, "1M"), 1);
     
-    // 测试I操作
+    // Test I operations
     EXPECT_EQ(testParse(actuator, "10I"), 10);
     EXPECT_EQ(testParse(actuator, "5I"), 5);
     
-    // 测试S操作
+    // Test S operations
     EXPECT_EQ(testParse(actuator, "15S"), 15);
     EXPECT_EQ(testParse(actuator, "3S"), 3);
     
-    // 测试=操作
+    // Test = operations
     EXPECT_EQ(testParse(actuator, "50="), 50);
     EXPECT_EQ(testParse(actuator, "25="), 25);
     
-    // 测试X操作
+    // Test X operations
     EXPECT_EQ(testParse(actuator, "30X"), 30);
     EXPECT_EQ(testParse(actuator, "12X"), 12);
     
-    // 测试复合操作 - 只累加M、I、S、=、X
+    // Test composite operations - only accumulate M、I、S、=、X
     EXPECT_EQ(testParse(actuator, "10M5I3S2="), 20);  // 10+5+3+2 = 20
     EXPECT_EQ(testParse(actuator, "5M10I15S5X10="), 45);  // 5+10+15+5+10 = 45
     EXPECT_EQ(testParse(actuator, "1M1I1S1=1X"), 5);  // 1+1+1+1+1 = 5
     
-    // 测试包含其他操作的复合CIGAR - 其他操作应该被忽略
-    EXPECT_EQ(testParse(actuator, "10M5D3I2H10N"), 13);  // 只计算10M+3I = 13，忽略5D、2H、10N
-    EXPECT_EQ(testParse(actuator, "5M10D5I10P5N5S"), 15);  // 只计算5M+5I+5S = 15
-    EXPECT_EQ(testParse(actuator, "100M50D50N"), 100);  // 只计算100M，忽略50D和50N
+    // Test composite CIGAR with other operations - other operations should be ignored
+    EXPECT_EQ(testParse(actuator, "10M5D3I2H10N"), 13);  // Only count 10M+3I = 13, ignore 5D, 2H, 10N
+    EXPECT_EQ(testParse(actuator, "5M10D5I10P5N5S"), 15);  // Only count 5M+5I+5S = 15
+    EXPECT_EQ(testParse(actuator, "100M50D50N"), 100);  // Only count 100M, ignore 50D and 50N
     
-    // 测试真实场景的CIGAR字符串
-    EXPECT_EQ(testParse(actuator, "76M"), 76);  // 完全匹配
-    EXPECT_EQ(testParse(actuator, "3S73M"), 76);  // 3个软剪裁 + 73个匹配
-    EXPECT_EQ(testParse(actuator, "10M5I60M5D"), 75);  // 10+5+60 = 75，忽略5D
-    EXPECT_EQ(testParse(actuator, "1S20M1I30M1D10M1S"), 63);  // 1+20+1+30+10+1 = 62，忽略1D
+    // Test real-world CIGAR strings
+    EXPECT_EQ(testParse(actuator, "76M"), 76);  // Complete match
+    EXPECT_EQ(testParse(actuator, "3S73M"), 76);  // 3 soft clipping + 73 matches
+    EXPECT_EQ(testParse(actuator, "10M5I60M5D"), 75);  // 10+5+60 = 75, ignore 5D
+    EXPECT_EQ(testParse(actuator, "1S20M1I30M1D10M1S"), 62);  // 1+20+1+30+10+1 = 62, ignore 1D
     
-    // 测试边界情况
-    EXPECT_EQ(testParse(actuator, ""), 0);  // 空字符串
+    // Test edge cases
+    EXPECT_EQ(testParse(actuator, ""), 0);  // Empty string
     
-    // 测试只包含不计算操作的CIGAR
-    EXPECT_EQ(testParse(actuator, "100D"), 0);  // 只有删除，不应该累加
-    EXPECT_EQ(testParse(actuator, "50N"), 0);   // 只有参考序列跳过，不应该累加
-    EXPECT_EQ(testParse(actuator, "10H5P"), 0);  // 只有硬剪裁和填充，不应该累加
+    // Test CIGAR with only non-counting operations
+    EXPECT_EQ(testParse(actuator, "100D"), 0);  // Only deletions, should not accumulate
+    EXPECT_EQ(testParse(actuator, "50N"), 0);   // Only reference skips, should not accumulate
+    EXPECT_EQ(testParse(actuator, "10H5P"), 0);  // Only hard clipping and padding, should not accumulate
     
-    // 测试复杂的真实CIGAR场景
-    EXPECT_EQ(testParse(actuator, "1S10M1I10M1D10M1I10M1D10M1D10M1I10M1S1H"), 75);  // 复杂的比对场景
-    EXPECT_EQ(testParse(actuator, "35M1I39M"), 75);  // 中间有插入的比对
-    EXPECT_EQ(testParse(actuator, "2S50M2I20M1D5M3S"), 82);  // 两端都有软剪裁
+    // Test complex real-world CIGAR scenarios
+    EXPECT_EQ(testParse(actuator, "1S10M1I10M1D10M1I10M1D10M1D10M1I10M1S1H"), 75);  // Complex alignment scenario
+    EXPECT_EQ(testParse(actuator, "35M1I39M"), 75);  // Alignment with insertion in middle
+    EXPECT_EQ(testParse(actuator, "2S50M2I20M1D5M3S"), 82);  // Soft clipping on both ends
     
-    // 测试大数字
+    // Test large numbers
     EXPECT_EQ(testParse(actuator, "1000M"), 1000);
     EXPECT_EQ(testParse(actuator, "10000M500I200S100="), 10800);
     
-    // 测试混合大小写（虽然SAM规范通常使用大写）
-    EXPECT_EQ(testParse(actuator, "10m5i3s2="), 20);  // 小写应该也能工作
-    EXPECT_EQ(testParse(actuator, "10M5i3S2x"), 20);  // 混合大小写
+    // Test mixed case (although SAM specification usually uses uppercase)
+    EXPECT_EQ(testParse(actuator, "10m5i3s2="), 20);  // Lowercase should also work
+    EXPECT_EQ(testParse(actuator, "10M5i3S2x"), 20);  // Mixed case
     
-    // 测试错误的CIGAR格式
-    EXPECT_EQ(testParse(actuator, "M"), 0);  // 缺少数字
-    EXPECT_EQ(testParse(actuator, "invalid"), 0);  // 完全无效
-    EXPECT_EQ(testParse(actuator, "10M5"), 10);  // 结尾缺少操作符
-    EXPECT_EQ(testParse(actuator, "M10I"), 10);  // 开头缺少数字
+    // Test invalid CIGAR formats
+    EXPECT_EQ(testParse(actuator, "M"), 0);  // Missing number
+    EXPECT_EQ(testParse(actuator, "invalid"), 0);  // Completely invalid
+    EXPECT_EQ(testParse(actuator, "10M5"), 10);  // Missing operator at end
+    EXPECT_EQ(testParse(actuator, "M10I"), 10);  // Missing number at start
 }

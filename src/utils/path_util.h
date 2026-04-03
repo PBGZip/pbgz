@@ -101,7 +101,13 @@ namespace PathUtil {
     /// @return File size
     int64_t getFileSize(const std::string& fileName);
 
+    /// @brief Check if file is a gzip file by reading magic bytes
+    /// @param fileName File name to check
+    /// @return bool true if file is gzip format, false otherwise
     bool isGzFile(const std::string& fileName);
 
+    /// @brief Extract original filename from gzip file header
+    /// @param fileName Gzip file name
+    /// @return Original filename extracted from gz header or derived from gz filename
     std::string getFileNameFromGz(const std::string& fileName);
 }

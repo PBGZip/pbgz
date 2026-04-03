@@ -1,15 +1,38 @@
+/*
+ * sam_reader_testcase.cpp - Test cases for SAM reader functionality
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
-#include <stdexcept>
-#include <string>
-#include <vector>
-#include <cstdint>
+#include <stdio.h>
+#include <stdlib.h>
 
 #define private public
-#include "../src/io_wrapper.h"
-#include "../src/block_wrapper.h"
-#include "../src/io_block.h"
+#include "sam_actuator.h"
+#include <io_wrapper.h>
+#include <block_wrapper.h>
+#include "config_manager.h"
+#include <actg.h>
 #undef private
 
 namespace SamReaderTestData {
@@ -21,9 +44,9 @@ namespace SamReaderTestData {
 class SamReaderTest : public ::testing::Test {
 public:
     void SetUp() override {
-        // 生成小SAM文件
+        // Generate small SAM file
         generateSmallSamFile(SamReaderTestData::smallSamFile);
-        // 生成大SAM文件
+        // Generate large SAM file
         generateLargeSamFile(SamReaderTestData::largeSamFile);
     }
 
@@ -47,13 +70,13 @@ public:
             return;
         }
         
-        // 写入SAM头部
+        // Write SAM header
         file << "@HD    VN:1.6  SO:coordinate\n";
         file << "@SQ	SN:chr1	LN:248956422\n";
         file << "@SQ	SN:chr2	LN:242193529\n";
         file << "@PG	ID:bwa	PN:bwa	VN:0.7.17-r1188	CL:bwa mem hg38.p14.fa ERR016060_1.fastq\n";
         
-        // 写入几条SAM记录
+        // Write several SAM records
         file << "ERR016060.1	4	*	0	0	*	*	0	0	NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	AS:i:0	XS:i:0\n";
         file << "ERR016060.2	4	*	0	0	*	*	0	0	NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	AS:i:0	XS:i:0\n";
         file << "ERR016060.3	4	*	0	0	*	*	0	0	NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	AS:i:0	XS:i:0\n";
@@ -76,7 +99,7 @@ public:
             return;
         }
         
-        // 写入SAM头部
+        // Write SAM header
         file << "@HD    VN:1.6  SO:coordinate\n";
         file << "@SQ	SN:chr1	LN:248956422\n";
         file << "@SQ	SN:chr2	LN:242193529\n";
@@ -105,7 +128,7 @@ public:
         file << "@SQ	SN:chrM	LN:16569\n";
         file << "@PG	ID:bwa	PN:bwa	VN:0.7.17-r1188	CL:bwa mem hg38.p14.fa ERR016060_1.fastq\n";
         
-        // 写入大量SAM记录（100条）
+        // Write many SAM records (100 records)
         for (int i = 1; i <= 100; i++) {
             file << "ERR016060." << i << "\t4\t*\t0\t0\t*\t*\t0\t0\t";
             file << "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN\t";
@@ -136,19 +159,19 @@ public:
 };
 
 TEST_F(SamReaderTest, TestSmallSamFile) {
-    // 测试小SAM文件
+    // Test small SAM file
     bool isSam = isSamFile(SamReaderTestData::smallSamFile);
-    EXPECT_TRUE(isSam) << "小SAM文件应该被识别为SAM格式";
+    EXPECT_TRUE(isSam) << "Small SAM file should be recognized as SAM format";
 }
 
 TEST_F(SamReaderTest, TestLargeSamFile) {
-    // 测试大SAM文件
+    // Test large SAM file
     bool isSam = isSamFile(SamReaderTestData::largeSamFile);
-    EXPECT_TRUE(isSam) << "大SAM文件应该被识别为SAM格式";
+    EXPECT_TRUE(isSam) << "Large SAM file should be recognized as SAM format";
 }
 
 TEST_F(SamReaderTest, TestSamFileReading) {
-    // 测试读取SAM文件并验证block类型
+    // Test reading SAM file and verify block type
     RoughIOBlock* pBlock = new RoughIOBlock(SamReaderTestData::MAX_BLOCK_SIZE);
     
     IOReader* pIoReader = new FileReader(SamReaderTestData::smallSamFile);
@@ -157,14 +180,14 @@ TEST_F(SamReaderTest, TestSamFileReading) {
     
     int32_t result = pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
     
-    // 验证读取成功
-    EXPECT_GT(result, 0) << "读取SAM文件应该成功";
+    // Verify successful reading
+    EXPECT_GT(result, 0) << "Reading SAM file should succeed";
     
-    // 验证block类型为SAM
-    EXPECT_EQ(pBlock->getBlockType(), SAM) << "读取的block类型应该是SAM";
+    // Verify block type is SAM
+    EXPECT_EQ(pBlock->getBlockType(), SAM) << "Read block type should be SAM";
     
-    // 验证block中有数据
-    EXPECT_GT(pBlock->getDataLen(), 0) << "block中应该有数据";
+    // Verify block has data
+    EXPECT_GT(pBlock->getDataLen(), 0) << "Block should have data";
     
     delete pBlockReader;
     delete pIoReader;
@@ -172,7 +195,7 @@ TEST_F(SamReaderTest, TestSamFileReading) {
 }
 
 TEST_F(SamReaderTest, TestLargeSamFileReading) {
-    // 测试读取大SAM文件并验证block类型
+    // Test reading large SAM file and verify block type
     RoughIOBlock* pBlock = new RoughIOBlock(SamReaderTestData::MAX_BLOCK_SIZE);
     
     IOReader* pIoReader = new FileReader(SamReaderTestData::largeSamFile);
@@ -181,17 +204,17 @@ TEST_F(SamReaderTest, TestLargeSamFileReading) {
     
     int32_t result = pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
     
-    // 验证读取成功
-    EXPECT_GT(result, 0) << "读取大SAM文件应该成功";
+    // Verify successful reading
+    EXPECT_GT(result, 0) << "Reading large SAM file should succeed";
     
-    // 验证block类型为SAM
-    EXPECT_EQ(pBlock->getBlockType(), SAM) << "读取的block类型应该是SAM";
+    // Verify block type is SAM
+    EXPECT_EQ(pBlock->getBlockType(), SAM) << "Read block type should be SAM";
     
-    // 验证block中有数据
-    EXPECT_GT(pBlock->getDataLen(), 0) << "block中应该有数据";
+    // Verify block has data
+    EXPECT_GT(pBlock->getDataLen(), 0) << "Block should have data";
     
-    // 大文件应该有更多数据
-    EXPECT_GT(pBlock->getDataLen(), 1000) << "大SAM文件应该包含更多数据";
+    // Large file should have more data
+    EXPECT_GT(pBlock->getDataLen(), 1000) << "Large SAM file should contain more data";
     
     delete pBlockReader;
     delete pIoReader;

@@ -82,8 +82,8 @@ public:
     }
 
     void printBufferContentBinary(uint8_t* buffer, uint32_t bufferLen) {
-        for (int j = 0; j < bufferLen; j++) {
-            // 以二进制方式输出src[i]
+        for (uint32_t j = 0; j < bufferLen; j++) {
+            // Output src[i] in binary format
             for (int n = 7; n >= 0; n--) {
                 fprintf(stderr, "%d", (buffer[j] >> n) & 1);
             }

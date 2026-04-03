@@ -357,7 +357,7 @@ int32_t PbgzEngine::startCoderTask() {
 
             int32_t ret = actuatorProc(pActuator, inBlockPtr, outBlockPtr);
             if (ret != 0) {
-                LOG_ERROR("Coder task failed for blcock(%d)", inBlockPtr->getBlockId());
+                LOG_ERROR("Coder task failed for block(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
                 freeInputPool.push(inBlockPtr);
                 outBlockPtr->reset();

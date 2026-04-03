@@ -1,3 +1,26 @@
+/*
+ * sam_info.cpp - Implementation of sam_info
+ * Copyright (C) 2025 PBGZip
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include "sam_info.h"
 
 void SamInfo::addChrNameIndex(const std::string& chrName) {
@@ -11,7 +34,7 @@ uint16_t SamInfo::getChrNameIndex(const std::string& chrName) const {
     if (it != chrNameIndex.end()) {
         return it->second;
     }
-    // 返回一个表示未找到的值，这里使用65535（uint16_t的最大值）
+    // Return a value indicating not found, using 65535 (maximum value of uint16_t)
     return 65535;
 }
 
@@ -30,7 +53,7 @@ void SamInfo::addChromosomeInfo(const std::string& name, uint32_t length) {
         for (auto& chrInfo : chromosomeInfoList) {
             if (chrInfo.name == name) {
                 chrInfo.length = length; // Update length if different
-                // 重新计算所有染色体的position偏移量
+                // Recalculate position offsets for all chromosomes
                 calculateChromosomePositions();
                 return;
             }
@@ -47,14 +70,14 @@ void SamInfo::addChromosomeInfo(const std::string& name, uint32_t length) {
         // Also add to name-to-id map for quick lookup
         chrNameIndex[name] = newId;
         
-        // 计算所有染色体的position偏移量
+        // Calculate position offsets for all chromosomes
         calculateChromosomePositions();
     }
 }
 
 const ChromosomeInfo& SamInfo::getChromosomeInfo(uint16_t id) const {
     std::lock_guard<std::mutex> lock(chrNameMutex);
-    static ChromosomeInfo emptyInfo; // 返回空信息的默认对象
+    static ChromosomeInfo emptyInfo; // Default object returning empty information
     if (id < chromosomeInfoList.size()) {
         return chromosomeInfoList[id];
     }
@@ -83,27 +106,25 @@ void SamInfo::resetChrIdCounter() {
 }
 
 void SamInfo::calculateChromosomePositions() {
-    // 按照ID从小到大排序染色体信息列表
+    // Sort chromosome information list by ID in ascending order
     std::sort(chromosomeInfoList.begin(), chromosomeInfoList.end(), 
               [](const ChromosomeInfo& a, const ChromosomeInfo& b) {
                   return a.id < b.id;
               });
     
-    // 计算每个染色体的position偏移量
+    // Calculate position offset for each chromosome
     uint64_t accumulatedPosition = 0;
     for (auto& chrInfo : chromosomeInfoList) {
         chrInfo.position = accumulatedPosition;
         accumulatedPosition += chrInfo.length;
     }
-
     return;
 }
 
-int64_t SamInfo::getPosistionByIndex(uint32_t index) {
+int64_t SamInfo::getPositionByIndex(uint32_t index) {
     if (chromosomeInfoList.size() < index) {
         return -1;
     }
-
     return chromosomeInfoList[index].position;
 }
 

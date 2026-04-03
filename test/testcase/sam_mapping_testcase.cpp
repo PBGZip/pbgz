@@ -1,3 +1,27 @@
+/*
+ * sam_mapping_testcase.cpp - Test cases for SAM mapping functionality
+ * Copyright (c) 2021, Baidu.com, Inc.
+ * All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
@@ -47,18 +71,18 @@ public:
     void generateSamFile(const std::string& filename) {
         std::ofstream file(filename);
         if (!file.is_open()) {
-            // 如果无法在当前目录打开，尝试在测试目录中创建
+            // If unable to open in current directory, try to create in test directory
             std::string testPath = "./test/" + filename;
             file.open(testPath);
             if (!file.is_open()) {
-                // 如果还是失败，尝试在构建目录中创建
+                // If still fails, try to create in build directory
                 testPath = "../test/" + filename;
                 file.open(testPath);
             }
         }
         
         if (!file.is_open()) {
-            return; // 无法创建文件
+            return; // Unable to create file
         }
 
         file << "@SQ\tSN:CM000663.2\tLN:248956422\n"
@@ -795,7 +819,7 @@ public:
 
     void printBufferBinary(uint8_t* buffer, uint32_t bufferLen) {
         for (int j = 0; j < bufferLen; j++) {
-            // 以二进制方式输出src[i]
+            // Output src[i] in binary format
             for (int n = 7; n >= 0; n--) {
                 fprintf(stderr, "%d", (buffer[j] >> n) & 1);
             }
@@ -813,7 +837,7 @@ protected:
     RoughIOBlock* pOutBlock;
 };
 
-// 添加实际的测试方法
+// Add actual test methods
 // TEST_F(SamMappingTest, testMapingData) {
 //     loadSamData(SamMappingData::testSamFile);
 //     Reference refGene("../../data/GCA_000001405.29_GRCh38.p14_genomic.fna", 1);
@@ -973,7 +997,7 @@ protected:
 
 //     for (int i = 0; i < 4; i++) {
 //         for (int j = 0; j < 4; j++) {
-//             // 以二进制方式输出src[i]
+//             // Output src[i] in binary format
 //              for (int n = 7; n >= 0; n--) {
 //                 printf("%d", (src[i*4 +j] >> n) & 1);
 //             }
@@ -991,7 +1015,7 @@ protected:
 
 //     for (int i = 0; i < 4; i++) {
 //         for (int j = 0; j < 4; j++) {
-//             // 以二进制方式输出src[i]
+//             // Output src[i] in binary format
 //              for (int n = 7; n >= 0; n--) {
 //                 printf("%d", (dst[i*4 +j] >> n) & 1);
 //             }
