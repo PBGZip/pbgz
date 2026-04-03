@@ -161,8 +161,6 @@ release-release-profile/
 # Test data directories
 test-data/
 
-
-
 # File
 pbgz
 
@@ -171,4 +169,8 @@ pbgz
 
 #memory-bank
 memory-bank/
+memory-bank/*
+
+#clinerule
+.clinerules
 

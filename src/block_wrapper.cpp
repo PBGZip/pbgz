@@ -40,9 +40,9 @@ BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
         return BAM;
     }
 
-    // 以@HD，@SQ，@RG,@PG,@CO开头，检测是否是SAM文件
+    // Check if it's a SAM file by detecting headers starting with @HD, @SQ, @RG, @PG, @CO
     bool isNeedCheckSam = false;
-    // 第一个块检查文件头，后续块根据第一个块的结果处理
+    // First block checks file header, subsequent blocks are processed based on first block's result
     if (blockPtr->getBlockId() == 0 && blockPtr->getDataLen() >= 4 && buffer[0] == '@') {
         std::string head((char*)buffer, 3);
         if (head == "@HD" || head == "@SQ" || head == "@RG" || head == "@PG" || head == "@CO") {
@@ -263,7 +263,7 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
     PbgzDataBlock pbgzDataBlock;
     pbgzDataBlock.setDataPtr(blockPtr->getBuffer());
     if (0 != pbgzFileReader->readDataBlock(pbgzDataBlock)) {
-        LOG_ERROR("Read Pbgz data block faild.");
+        LOG_ERROR("Read Pbgz data block failed.");
         return -1;
     }
 
@@ -303,7 +303,7 @@ int32_t PbgzBlockReader::init() {
         return -1;
     }
     if (pbgzFileReader == nullptr) {
-        LOG_ERROR("Creat PbgzFileReader failed");
+        LOG_ERROR("Create PbgzFileReader failed");
         return -1;
     }
     return pbgzFileReader->open();

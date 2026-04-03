@@ -157,21 +157,27 @@ namespace PathUtil {
     }
 
     bool isGzFile(const std::string& fileName) {
+        // Open file in binary mode for reading
         FILE* fp = fopen64(fileName.c_str(), "rb");
         if (fp == nullptr) {
             LOG_ERROR("File %s open failed.", fileName.c_str());
             return false;
         }
+        
+        // Get file status to check file size
         struct stat st;
         if (0 != stat(fileName.c_str(), &st)) {
             fclose(fp);
             return false;
         }
+        
         int64_t fileSize = st.st_size;
+        // Check if file has at least 3 bytes for gzip header magic number
         if (fileSize > 3) {
             uint8_t tmpBuf[3] = {0};
             fread(tmpBuf, 3, 1, fp);
             fclose(fp);
+            // Check for gzip magic bytes: 0x1F 0x8B
             return (tmpBuf[0] == 0x1F && tmpBuf[1] == 0x8B);
         }
         fclose(fp);
@@ -187,7 +193,7 @@ namespace PathUtil {
                 break;
             }
             
-            // 读取gzip头部
+            // Read gzip header
             unsigned char header[10];
             file.read(reinterpret_cast<char*>(header), 10);
             if (file.gcount() != 10) {
@@ -195,25 +201,25 @@ namespace PathUtil {
                 break;
             }
             
-            // 检查gzip魔术字节
+            // Check gzip magic bytes
             if (header[0] != 0x1F || header[1] != 0x8B) {
                 LOG_ERROR("Not a valid gz file: %s", gzFileName.c_str());
                 break;
             }
             
-            // 检查压缩方法（必须是8 = DEFLATE）
+            // Check compression method (must be 8 = DEFLATE)
             if (header[2] != 8) {
                 LOG_ERROR("Not supported compress format for gz file: %s", gzFileName.c_str());
                 break;
             }
             
-            // 获取标志位
+            // Get flags
             uint8_t flags = header[3];
             
-            // 跳过修改时间(4字节)、额外标志(1字节)、操作系统(1字节)
-            // 文件指针已经在第10字节之后
+            // Skip modification time (4 bytes), extra flags (1 byte), operating system (1 byte)
+            // File pointer is already after the 10th byte
             
-            // 如果存在额外字段
+            // If extra field exists
             if (flags & 0x04) {
                 uint8_t xlen[2];
                 file.read(reinterpret_cast<char*>(xlen), 2);
@@ -222,11 +228,11 @@ namespace PathUtil {
                     break;
                 }
                 uint16_t extra_len = xlen[0] | (xlen[1] << 8);
-                // 跳过额外字段
+                // Skip extra field
                 file.seekg(extra_len, std::ios::cur);
             }
             
-            // 读取原始文件名（如果存在）
+            // Read original filename (if exists)
             if (flags & 0x08) {
                 std::vector<char> name;
                 char ch;
@@ -253,11 +259,11 @@ namespace PathUtil {
         
         if (originalName.empty()) {
             std::string gzName = getFileName(gzFileName);
-            // 移除.gz扩展名
+            // Remove .gz extension
             if (gzName.length() > 3 && gzName.substr(gzName.length() - 3) == ".gz") {
                 originalName = gzName.substr(0, gzName.length() - 3);
             } 
-            // 移除.tgz扩展名并添加.tar
+            // Remove .tgz extension and add .tar
             else if (gzName.length() > 4 && gzName.substr(gzName.length() - 4) == ".tgz") {
                 originalName = gzName.substr(0, gzName.length() - 4) + ".tar";
             } 

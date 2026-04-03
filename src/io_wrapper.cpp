@@ -33,7 +33,7 @@
 
 int FileOperator::openIO() {
     if (fileName.empty()) {
-        LOG_ERROR("IO Open failed, No file name gived");
+        LOG_ERROR("IO Open failed, No file name given");
         return -1;
     }
 
@@ -50,7 +50,7 @@ int FileOperator::openIO() {
 
     struct stat fileStat;
     if (fstat(fd, &fileStat) == -1) {
-        LOG_ERROR("Faile to get file stat");
+        LOG_ERROR("Failed to get file stat");
         close(fd);
     }
 
