@@ -288,7 +288,7 @@ TEST_F(BwtCoderTest, LargeData)
     
     // Decode
     std::vector<uint8_t> output(large_data.size());
-    int32_t decoded_len = 0;
+    uint32_t decoded_len = 0;
     
     // Decode in chunks if needed
     int32_t chunk_size = 1024;
