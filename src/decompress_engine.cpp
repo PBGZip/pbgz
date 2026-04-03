@@ -103,10 +103,18 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     /* check whether fasta is matched */
     if (PathUtil::getFileName(fastaNameInput) != fastaName) {
         fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
+        fprintf(stderr, "need to specify the following FASTA file:\n\n");
+        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
+        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
+        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
         LOG_ERROR("initialize reference failed: used fasta %s, should be %s", fastaNameInput.c_str(), fastaName.c_str());
         return false;
     }
     if (fastaLength != fastqFileLenInput) {
+        fprintf(stderr, "need to specify the following FASTA file:\n\n");
+        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
+        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
+        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
         LOG_ERROR("initialize reference failed: used fasta file len %ld, should be %ld", fastqFileLenInput, fastaLength);
         return false;
     }
@@ -241,8 +249,7 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
                     inputBlock.push(currBlock);
                 }
             }));
-        }
-        else {
+        } else {
             RoughIOBlock* current = inputBlock.get(); 
             blockReader->readBlock(current);
             inputPool.push(current);

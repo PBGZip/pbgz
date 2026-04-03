@@ -1,3 +1,26 @@
+/*
+ * fastq_ref_compress_testcase.cpp - Test cases for FASTQ reference compression
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include <gtest/gtest.h>
 #include <fstream>
 #include <string>
@@ -120,7 +143,7 @@ TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
         // Prepare test data - a simple DNA sequence
         const uint8_t* base = (const uint8_t*)"ATCGATCGATCGATCGATCG";
         baseLength = strlen((char*)base);
-        const uint8_t expOut[] = {0x27, 0x27, 0x27, 0x27, 0x27};
+        // const uint8_t expOut[] = {0x27, 0x27, 0x27, 0x27, 0x27};
         // Call mappingFastqGen2 function
         actuator.mappingFastqGen2(base, 20, out, outLength, mappingPos, mappingDir);
         

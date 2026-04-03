@@ -72,6 +72,29 @@ public:
         temp[2048] = 0;
         LOG_DEBUG("%s", temp);
     }
+
+    void printBufferContentHex(uint8_t* buffer, uint32_t bufferLen) {
+        bufferLen = std::min<uint32_t>(bufferLen, 2048);
+        for (uint32_t i = 0; i < bufferLen; ++i) {
+            fprintf(stderr, "%02X", buffer[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+
+    void printBufferContentBinary(uint8_t* buffer, uint32_t bufferLen) {
+        for (uint32_t j = 0; j < bufferLen; j++) {
+            // Output src[i] in binary format
+            for (int n = 7; n >= 0; n--) {
+                fprintf(stderr, "%d", (buffer[j] >> n) & 1);
+            }
+            fprintf(stderr, "\t");
+
+            if ((j+1) % 8 == 0) {
+                fprintf(stderr, "\n");
+            }
+        }
+        fprintf(stderr, "\n");
+    }
 private:
     void updateDataInfo();
 

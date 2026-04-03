@@ -158,7 +158,7 @@ void check_exit(bool condition, int16_t exit_code, const char* exit_msg_format, 
             return exit_proc(exit_code, exit_message);
         }
 
-        fprintf(stderr, "%s\n", exit_message);
+        fprintf(stderr, "%d %s\n", exit_code, exit_message);
         return exit(exit_code);
     }
 

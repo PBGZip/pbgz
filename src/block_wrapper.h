@@ -32,6 +32,7 @@
 
 namespace BlockUtil {
     bool isFastqBlock(BlockType type);
+    bool isSAMBlock(BlockType type);
 
     std::string getBlockTypeName(BlockType type);
 }

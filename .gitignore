@@ -161,7 +161,16 @@ release-release-profile/
 # Test data directories
 test-data/
 
-
-
 # File
 pbgz
+
+#MCP config
+*mcprules*
+
+#memory-bank
+memory-bank/
+memory-bank/*
+
+#clinerule
+.clinerules
+

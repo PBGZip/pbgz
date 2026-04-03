@@ -1,5 +1,5 @@
 /*
- * bwt_coder_testcase.cpp - Test cases for BWT context model encoder
+ * bwt_coder_testcase.cpp - Test cases for BWT coder
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -288,7 +288,7 @@ TEST_F(BwtCoderTest, LargeData)
     
     // Decode
     std::vector<uint8_t> output(large_data.size());
-    int32_t decoded_len = 0;
+    uint32_t decoded_len = 0;
     
     // Decode in chunks if needed
     int32_t chunk_size = 1024;
