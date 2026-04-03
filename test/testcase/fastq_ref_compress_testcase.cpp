@@ -143,7 +143,7 @@ TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
         // Prepare test data - a simple DNA sequence
         const uint8_t* base = (const uint8_t*)"ATCGATCGATCGATCGATCG";
         baseLength = strlen((char*)base);
-        const uint8_t expOut[] = {0x27, 0x27, 0x27, 0x27, 0x27};
+        // const uint8_t expOut[] = {0x27, 0x27, 0x27, 0x27, 0x27};
         // Call mappingFastqGen2 function
         actuator.mappingFastqGen2(base, 20, out, outLength, mappingPos, mappingDir);
         
