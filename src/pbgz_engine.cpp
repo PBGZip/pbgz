@@ -1,43 +1,65 @@
-/*
- * pbgz_engine.cpp - Cpp file for pbgz project
- * Copyright (C) 2025 PBGZip
- * 
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- * 
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- * 
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
 
 #include "pbgz_engine.h"
+#include "utils/timer.h"
 #include "log/logger.h"
-#include "coder/coder.h"
-#include "utils/memory_util.h"
-#include "pbgz_manager.h"
-#include "block_wrapper.h"
-#include "fastq_actuator.h"
-#include "binary_actuator.h"
 #include "utils/path_util.h"
-#include "coder_ppmd.h"
-#include "coder_json.h"
-#include "config_manager.h"
-#ifdef __SSE4_2__ 
 #include "hardware.h"
-#endif
-#include <set>
-#include "sam_actuator.h"
+#include "coder.h"
+#include "pbgz_manager.h"
+#include "config_manager.h"
+#include "block_wrapper.h"
+#include "actuator.h"
+
+PbgzEngine::PbgzEngine(const PbgzParameter&  para) {
+    parameter = para;
+    ioReader = nullptr;
+    ioWriter = nullptr;
+    syncFlag = false;
+    blockId2Write = 0;
+}
+
+PbgzEngine::~PbgzEngine() {
+    for (auto& th : codecThreads) {
+        if (th.joinable()) {
+            th.join();
+        }
+    }
+    
+    if (writeThread.joinable()) {
+        writeThread.join();
+    }
+
+    // Release resources
+    if (ioReader) {
+        ioReader->closeIO();
+        MemoryUtil::safeDeleteClass(ioReader);
+    }
+
+    if (ioWriter) {
+        ioWriter->closeIO();
+        MemoryUtil::safeDeleteClass(ioWriter);
+    }
+
+    while(!freeInputPool.empty()) {
+        RoughIOBlock* inPtr = freeInputPool.get();
+        MemoryUtil::safeDeleteClass(inPtr);
+    }
+
+    while(!inputDataPool.empty()) {
+        RoughIOBlock* inPtr = inputDataPool.get();
+        MemoryUtil::safeDeleteClass(inPtr);
+    }
+
+    while(!freeOutputPool.empty()) {
+        RoughIOBlock* outPtr = freeOutputPool.get();
+        MemoryUtil::safeDeleteClass(outPtr);
+    }
+
+    while(!outputDataPool.empty()) {
+        RoughIOBlock* outPtr = outputDataPool.get();
+        MemoryUtil::safeDeleteClass(outPtr);
+    }
+}
 
 int32_t PbgzEngine::init() {
     // Register allocation functions required by coder
@@ -128,107 +150,70 @@ int32_t PbgzEngine::init() {
     return 0;
 }
 
-PbgzEngine::~PbgzEngine() {
-    for (auto& th : coderThreads) {
-        if (th.joinable()) {
-            th.join();
-        }
-    }
-    
-    if (writeThread.joinable()) {
-        writeThread.join();
-    }
-
-    // Release resources
-    if (ioReader) {
-        ioReader->closeIO();
-        MemoryUtil::safeDeleteClass(ioReader);
-    }
-
-    if (ioWriter) {
-        ioWriter->closeIO();
-        MemoryUtil::safeDeleteClass(ioWriter);
-    }
-
-    while(!freeInputPool.empty()) {
-        RoughIOBlock* inPtr = freeInputPool.get();
-        MemoryUtil::safeDeleteClass(inPtr);
-    }
-
-    while(!inputDataPool.empty()) {
-        RoughIOBlock* inPtr = inputDataPool.get();
-        MemoryUtil::safeDeleteClass(inPtr);
-    }
-
-    while(!freeOutputPool.empty()) {
-        RoughIOBlock* outPtr = freeOutputPool.get();
-        MemoryUtil::safeDeleteClass(outPtr);
-    }
-
-    while(!outputDataPool.empty()) {
-        RoughIOBlock* outPtr = outputDataPool.get();
-        MemoryUtil::safeDeleteClass(outPtr);
-    }
-
-    MemoryUtil::safeDeleteClass(pRefGene);
-}
-
 int32_t PbgzEngine::start() {
-    PbgzManager::getInstance().printHeadInfo(parameter);
+    printHeadInfo();
     Timer costTimer(true);
 
-    int32_t ret = engineStartPreProc();
+    int32_t ret = startEnginePreProc();
     if (ret != 0) {
-        LOG_ERROR("engine pre proc failed.");
-        return -1;
+        LOG_ERROR("call startEnginePreProc failed, ret = %d", ret);
+        return ret;
     }
 
     ret = startWriteTask();
     if (ret != 0) {
-        LOG_ERROR("Start write task failed.");
-        return -1;
+        LOG_ERROR("call startWriteTask failed, ret = %d", ret);
+        return ret;
     }
 
-    ret = beforeCoderProc();
+    ret = startWorkPreProc(); 
     if (ret != 0) {
-        LOG_ERROR("Start write task failed.");
-        return -1;
+        LOG_ERROR("call startWorkPreProc failed, ret = %d", ret);
+        return ret;
     }
 
-    ret = startCoderTask();
+    ret =startWorkTask();
     if (ret != 0) {
-        LOG_ERROR("Start coder task failed.");  
-        return -1;
+        LOG_ERROR("call startWorkTask failed, ret = %d", ret);
+        return ret;
     }
 
-    ret = startReadTask();
+    ret =startReadPreProc();
     if (ret != 0) {
-        LOG_ERROR("Start read task failed.");
+        LOG_ERROR("call startReadPreProc failed, ret = %d", ret);
+        return ret;
+    }
+
+    ret =startReadTask();
+    if (ret != 0) {
+        LOG_ERROR("call startReadTask failed, ret = %d", ret);
+
         // Termination symbol for encoding
         for (uint32_t i = 0; i < parameter.threadNum; ++i) {
             inputDataPool.push(nullptr);
         }
         // Output termination symbol
         outputDataPool.push(nullptr);
-        return -1;
+        return ret;
     }
 
-    for (auto& th : coderThreads) {
+    for (auto& th : codecThreads) {
         if (th.joinable()) {
             th.join();
         }
     }
 
-    ret = engineStartAfterProc();
+    ret = startEnginePostProc();
     if (ret != 0) {
-        LOG_ERROR("engine after proc failed.");
+        LOG_ERROR("call startEnginePostProc failed.");
         return -1;
     }
 
     // Write end marker
     outputDataPool.push(nullptr);
     writeThread.join();
-    PbgzManager::getInstance().printTailInfo(costTimer, isPrintRatio());
+    
+    printTailInfo(costTimer);
 
     return 0;
 }
@@ -246,22 +231,13 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
         freeInputPool.push(blockPtr);
         return ret;
     }
-
-    if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
-        freeInputPool.push(blockPtr);
-        return -2;
-    }
-
+    
     if (blockPtr->getBlockId() == 0 && blockPtr->getTotalDataLen() > 0){ 
         fileType = blockPtr->getBlockType();
-        PbgzManager::getInstance().printFileType(fileType);
     }
 
-    PbgzManager::getInstance().updateReadDataLen(blockPtr);
+    updateInputStatics(blockPtr);
     inputDataPool.push(blockPtr);
-    if (ret > 0) {
-        blockCount++;
-    }
     return ret;
 }
 
@@ -282,16 +258,67 @@ int32_t PbgzEngine::startReadTask() {
         return -1;
     }
     readBlocks(blockReader);
-    // Reached end of file or error, insert empty block as end marker to data queue
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
         inputDataPool.push(nullptr);
     }
-
-    MemoryUtil::safeDeleteClass(blockReader);
+    releaseBlockReader(blockReader);
     return 0;
 }
 
-int32_t PbgzEngine::startCoderTask() {
+int32_t PbgzEngine::startWriteTask() {
+    auto writerTask = [this]() -> int32_t {
+        pthread_setname_np(pthread_self(), "writetask");
+        BlockWriter* blockWriter = createBlockWriter();
+        if (blockWriter == nullptr) {
+            PbgzManager::getInstance().exitProc(-1, "Inner error");
+            return -1;
+        }
+
+        while (true) {
+            RoughIOBlock* outBlockPtr = outputDataPool.get();
+            if (outBlockPtr == nullptr) {     // Got end marker
+                while (!outputSortedCache.empty()) {
+                    RoughIOBlock* outBlockTmp = outputSortedCache.front();
+                    if (outBlockTmp != nullptr) {
+                        writeOneBlock(blockWriter, outBlockTmp);
+                    }
+                }
+                writeFilePostProc(blockWriter);
+                break;
+            } else {
+                writeBlockPreProc(blockWriter, outBlockPtr);
+                outputSortedCache.push_back(outBlockPtr);
+                outputSortedCache.sort([](const RoughIOBlock* p1, RoughIOBlock* p2) {
+                    return p1->getBlockId() <= p2->getBlockId();
+                });
+                while (!outputSortedCache.empty()) {
+                    RoughIOBlock* outblockPtr = outputSortedCache.front();
+                    if (outblockPtr->getBlockId() == blockId2Write) {
+                        writeOneBlock(blockWriter, outblockPtr);
+                    } else {
+                        break;
+                    }
+                } 
+            }
+        }
+        releaseBlockWriter(blockWriter);
+        return 0;
+    };
+
+    writeThread = std::thread(writerTask);
+    return 0;
+}
+
+void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockPtr) {
+    blockWriter->writeBlock(outblockPtr);
+    blockId2Write++;
+    updateOutputStatics(outblockPtr);
+    freeOutputPool.push(outblockPtr);
+    outputSortedCache.pop_front();
+    return;
+}
+
+int32_t PbgzEngine::startWorkTask() {
     auto coderTask = [this](int32_t id) {
         pthread_setname_np(pthread_self(), std::string("codertask_").append(std::to_string(id)).c_str());
         if (id > 0 ) {
@@ -319,35 +346,7 @@ int32_t PbgzEngine::startCoderTask() {
             outBlockPtr->setBlockId(inBlockPtr->getBlockId());
             outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
-            Actuator* pActuator = nullptr;
-            if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType()) || BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
-                if (parameter.isMakeIndex) {
-                    fprintf(stderr, "Fastq file will not make index.");
-                    parameter.isMakeIndex = false;
-                }
-                if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
-                    pActuator = MemoryUtil::safeNewClass<FastqActuator>(inBlockPtr, outBlockPtr, pRefGene);
-                } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
-                    pActuator = MemoryUtil::safeNewClass<SamActuator>(inBlockPtr, outBlockPtr, pRefGene);
-                }
-                pActuator = actuatorPreProc(pActuator, inBlockPtr, outBlockPtr);
-            } else if (inBlockPtr->getBlockType() == BINARY) {
-                if (parameter.isMakeIndex) {
-                    fprintf(stderr, "Binary file will not make index.");
-                    parameter.isMakeIndex = false;
-                }
-                pActuator = MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
-            } else {
-                LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
-
-                freeInputPool.push(inBlockPtr);
-                outBlockPtr->reset();
-                outBlockPtr->setBlockId(inBlockPtr->getBlockId());
-                // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
-                outputDataPool.push(outBlockPtr);
-                continue;
-            }
-
+            Actuator* pActuator = createActuator(inBlockPtr, outBlockPtr);
             if (pActuator == nullptr) {
                 LOG_ERROR("Create actuator failed.");
                 freeInputPool.push(inBlockPtr);
@@ -377,98 +376,17 @@ int32_t PbgzEngine::startCoderTask() {
         }
     };
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
-        coderThreads.emplace_back(std::thread(coderTask, i));
+        codecThreads.emplace_back(std::thread(coderTask, i));
     }
     return 0;
-}   
-
-int32_t PbgzEngine::startWriteTask() {
-    auto writerTask = [this]() -> int32_t {
-        pthread_setname_np(pthread_self(), "writetask");
-        BlockWriter* blockWriter = createBlockWriter();
-        if (blockWriter == nullptr) {
-            PbgzManager::getInstance().exitProc(-1, "Inner error");
-            return -1;
-        }
-        int64_t blockId2Write = 0; 
-        while (true) {
-            RoughIOBlock* outBlockPtr = outputDataPool.get();
-            if (outBlockPtr == nullptr) {     // Got end marker
-                while (!outputSortedCache.empty()) {
-                    RoughIOBlock* outblockPtr = outputSortedCache.front();
-                    setDataBlockPosition(outblockPtr->getBlockId());
-                    blockWriter->writeBlock(outblockPtr);
-                    PbgzManager::getInstance().updateWriteDataLen(outblockPtr);
-                    freeOutputPool.push(outblockPtr);
-                    outputSortedCache.pop_front();
-                }
-
-                // Update extended header and write dynamic file meta after all data is written
-                PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
-                if (pbgzWriter != nullptr && !dynamicFileMeta.getMetaData().empty()) {
-                    pbgzWriter->updateHeadExt();
-                    pbgzWriter->setDynamicFileMeta(dynamicFileMeta);
-                    pbgzWriter->writeDynamicFileMeta();
-                    resetReferenceOffset();
-                }
-                break;
-            } else {
-                if (outBlockPtr->getBlockType() == REFERENCE) {
-                    /// Writing reference blocks is one-time, release after writing
-                    FileWriter* fileWriter =  dynamic_cast<FileWriter*>(ioWriter);
-                    if (fileWriter != nullptr) {
-                        updateReferenceOffset(fileWriter->getCurrentPos());
-                    }
-                }
-
-                outputSortedCache.push_back(outBlockPtr);
-                outputSortedCache.sort([](const RoughIOBlock* p1, RoughIOBlock* p2) {
-                    return p1->getBlockId() <= p2->getBlockId();
-                });
-                while (!outputSortedCache.empty()) {
-                    RoughIOBlock* outblockPtr = outputSortedCache.front();
-                    if (outblockPtr->getBlockId() == blockId2Write) {
-                        setDataBlockPosition(outblockPtr->getBlockId());
-                        blockWriter->writeBlock(outblockPtr);
-                        blockId2Write++;
-                        PbgzManager::getInstance().updateWriteDataLen(outblockPtr);
-                        freeOutputPool.push(outblockPtr);
-                        outputSortedCache.pop_front();
-                    } else {
-                        break;
-                    }
-                } 
-            }
-        }
-        MemoryUtil::safeDeleteClass(blockWriter);
-        return 0;
-    };
-
-    writeThread = std::thread(writerTask);
-    return 0;
 }
 
-
-void PbgzEngine::updateReferenceOffset(int64_t offset) {
-    if (refeOffsetFLag) {
-        return;
-    }
-    LOG_DEBUG("Reference offset is %ld", offset);
-    refeOffsetFLag = true;
-    dynamicFileMeta.getMetaData("refe")["offset"] = offset;
-    return;
-}
-
-void PbgzEngine::resetReferenceOffset() {
-    refeOffsetFLag = false;
-}
-
-
- bool PbgzEngine::isNeedNotify(bool flag) {
-   if (flag && !syncFlag) {
+bool PbgzEngine::isNeedNotify(bool flag) {
+    if (flag && !syncFlag) {
         syncFlag = flag;
         return true;
     }
 
     return false;
- }
+}
+

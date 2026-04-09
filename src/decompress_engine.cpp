@@ -61,6 +61,14 @@ BlockWriter* DecompressEngine::createBlockWriter() {
     return blockWriter;
 }
 
+void DecompressEngine::releaseBlockReader(BlockReader* &blockReader) {
+    MemoryUtil::safeDeleteClass(blockReader);
+}
+
+void DecompressEngine::releaseBlockWriter(BlockWriter* &BlockWriter) {
+    MemoryUtil::safeDeleteClass(BlockWriter);
+}
+
 bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     if (blockReader == nullptr) {
         return false;
@@ -90,10 +98,7 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
 
     std::string fastaNameInput = parameter.referenceGenic;
     if (fastaNameInput.empty()) { /* No reference file specified */
-        fprintf(stderr, "need to specify the following FASTA file:\n\n");
-        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
-        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+        printFastqFileNotMatchInfo(metaRefe);
         LOG_ERROR("reference file needs to be specified to complete decompression");
         return false;
     }
@@ -103,18 +108,12 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     /* check whether fasta is matched */
     if (PathUtil::getFileName(fastaNameInput) != fastaName) {
         fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
-        fprintf(stderr, "need to specify the following FASTA file:\n\n");
-        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
-        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+        printFastqFileNotMatchInfo(metaRefe);
         LOG_ERROR("initialize reference failed: used fasta %s, should be %s", fastaNameInput.c_str(), fastaName.c_str());
         return false;
     }
     if (fastaLength != fastqFileLenInput) {
-        fprintf(stderr, "need to specify the following FASTA file:\n\n");
-        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
-        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+        printFastqFileNotMatchInfo(metaRefe);
         LOG_ERROR("initialize reference failed: used fasta file len %ld, should be %ld", fastqFileLenInput, fastaLength);
         return false;
     }
@@ -140,6 +139,13 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     return true;
 }
 
+void DecompressEngine::printFastqFileNotMatchInfo(const Json::Value& metaRefe) {
+    fprintf(stderr, "need to specify the following FASTA file:\n\n");
+    fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
+    fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
+    fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+}
+
 bool DecompressEngine::initRefeIndex() {
     if (pbgzIndex.initIndex() != 0) {
         return false;
@@ -151,7 +157,7 @@ void DecompressEngine::readBlocks(BlockReader* blockReader)  {
     if (!parameter.refeGenePos.empty() && pRefGene) {
         return readBlockByPostition(blockReader);
     } else {
-        return PbgzEngine::readBlocks(blockReader);
+        return CodecEngine::readBlocks(blockReader);
     }
 }
 
@@ -159,12 +165,7 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
     if (blockReader == nullptr) {
         return;
     }
-
-    return PbgzEngine::readBlocks(blockReader);
-}
-
-Actuator* DecompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
-    return actuator;
+    return CodecEngine::readBlocks(blockReader);
 }
 
 int32_t DecompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {

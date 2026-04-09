@@ -234,7 +234,7 @@ public:
         }
 
         int32_t len2add = bsize - curr_incache;
-        if (in_len < len2add)
+        if ((int32_t)in_len < len2add)
         { /* Cache when not enough for one block */
             memcpy(coder_buff + curr_incache, in, in_len);
             curr_incache += in_len;
@@ -316,7 +316,7 @@ public:
                         curr_out_offset = ++n;
                         return len;
                     }
-                    if (len >= out_len) {
+                    if (len >= (int32_t)out_len) {
                         curr_out_offset = ++n;
                         return len;
                     }
@@ -333,7 +333,7 @@ public:
                 }
                 for (n = curr_out_offset; n < bsize; n++) {
                     *(out + len++) = coder_buff[n];
-                    if (len >= out_len) {
+                    if (len >= (int32_t)out_len) {
                         curr_out_offset = ++n;
                         return len;
                     }

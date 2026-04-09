@@ -23,3 +23,30 @@
 
 #include "index_engine.h"
 
+IndexEngine::~IndexEngine() {
+
+}
+
+BlockReader* IndexEngine::createBlockReader() {
+    return nullptr;
+}
+
+BlockWriter* IndexEngine::createBlockWriter() {
+    return nullptr;
+}
+
+void IndexEngine::releaseBlockReader(BlockReader* &blockReader) {
+    
+}
+
+void IndexEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
+
+}
+
+Actuator* IndexEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
+    return nullptr;
+}
+
+int32_t IndexEngine::actuatorProc(Actuator*, RoughIOBlock*, RoughIOBlock*) {
+    return 0;
+}
