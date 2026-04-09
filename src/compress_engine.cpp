@@ -31,7 +31,7 @@
 #include "sam_actuator.h"
 
 int32_t CompressEngine::init() {
-    if (0 != PbgzEngine::init()) {
+    if (0 != CodecEngine::init()) {
         return -1;
     }
 
@@ -88,6 +88,14 @@ BlockWriter* CompressEngine::createBlockWriter() {
     return blockWriter;
 }
 
+void CompressEngine::releaseBlockReader(BlockReader* &blockReader) {
+    MemoryUtil::safeDeleteClass(blockReader);
+}
+
+void CompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
+    MemoryUtil::safeDeleteClass(blockWriter);
+}
+
 Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
     FastqActuator* fastqActuator = dynamic_cast<FastqActuator*>(actuator);
     if (fastqActuator != nullptr) {
@@ -115,7 +123,7 @@ int32_t CompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOB
     return ret;
 }
 
-int32_t CompressEngine::engineStartPreProc() {
+int32_t CompressEngine::startEnginePreProc() {
     if (!initReference()) {
         LOG_ERROR("Engine init reference failed.");
         return -1;
@@ -245,7 +253,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
     return block;
 }
 
-int32_t CompressEngine::engineStartAfterProc() {
+int32_t CompressEngine::startEnginePostProc() {
     bool isPackRefeInTail = pRefGene && !parameter.isUnpackRef && parameter.outputFile != STDOUT;
     if (isPackRefeInTail) {
         int64_t maxRefLen = 0;
@@ -266,7 +274,7 @@ int32_t CompressEngine::engineStartAfterProc() {
         }
     }
     
-    return PbgzEngine::engineStartAfterProc();
+    return CodecEngine::engineStartAfterProc();
 }
 
 void CompressEngine::setDataBlockPosition(uint32_t blockId) {
@@ -289,7 +297,7 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     return;
  }
 
- int32_t CompressEngine::beforeCoderProc() {
+ int32_t CompressEngine::startWorkPreProc() {
     // Refresh file meta
     if (pRefGene) {
         Json::Value refeMeta;

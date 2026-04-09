@@ -24,16 +24,25 @@
 #pragma once
 
 #include "pbgz_types.h"
-#include "decompress_engine.h"
+#include "pbgz_engine.h"
 
-class IndexEngine : public DecompressEngine {
+class IndexEngine : public PbgzEngine {
 public:
-    IndexEngine(PbgzParameter& para) : DecompressEngine(para) {
+    IndexEngine(PbgzParameter& para) : PbgzEngine(para) {
     }
 
-    ~IndexEngine() {
-    }
+    virtual ~IndexEngine();
 
-private:
-    
+protected:
+    virtual BlockReader* createBlockReader() override;
+
+    virtual BlockWriter* createBlockWriter() override;
+
+    virtual void releaseBlockReader(BlockReader* &blockReader) override;
+
+    virtual void releaseBlockWriter(BlockWriter* &blockWriter) override;
+
+    virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
+
+    virtual int32_t actuatorProc(Actuator*, RoughIOBlock*, RoughIOBlock*) override;
 };

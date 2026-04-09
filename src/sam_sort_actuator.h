@@ -1,17 +1,17 @@
 /*
- * decompress_engine.h - Header file for pbgz project
+ * sam_sort_actuator.h - SAM file sorting actuator header file
  * Copyright (C) 2025 PBGZip
- *
+ * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
+ * 
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- *
+ * 
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -23,41 +23,20 @@
 
 #pragma once
 
-#include "codec_engine.h"
-#include "actuator.h"
+#include <vector>
+#include <string>
+#include "sam_actuator.h"
 
-
-class DecompressEngine : public CodecEngine {
+class SAMSortActuator {
 public:
-    DecompressEngine(PbgzParameter& para) : CodecEngine(para) { }
-
-    virtual ~DecompressEngine() { }
-
-protected:
-    BlockReader* createBlockReader() override;
-
-    BlockWriter* createBlockWriter() override;
-
-    void releaseBlockReader(BlockReader* &blockReader) override;
-
-    void releaseBlockWriter(BlockWriter* &BlockWriter) override;
-
-    virtual void readBlocks(BlockReader* blockReader);
-
-    virtual int32_t actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*);
-
-    virtual void printTailInfo(Timer& costTimer) override { 
-        PbgzManager::getInstance().printTailInfo(costTimer, false);
-    }
+    SAMSortActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr);
+    ~SAMSortActuator();
+    
+    bool initialize();
+    bool process();
+    void cleanup();
 
 private:
-    bool initRefGene(PbgzBlockReader* blockReader);
-
-    bool initRefeIndex();
-
-    void readBlockByPostition(BlockReader* blockReader);
-
-    bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
-
-    void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
+   RoughIOBlock* inBlockPtr;
+   RoughIOBlock* outBlockPtr;
 };

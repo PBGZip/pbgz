@@ -240,7 +240,6 @@ int32_t SamActuator::preAnalysis() {
                             }
                         }
                     }
-
                 }
             } else {
                 LOG_ERROR("Unexpected header %s", line.c_str());
@@ -1069,7 +1068,7 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
                 uint32_t squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
                 uint8_t shiftBitLength = refPos % 4;
                 int64_t refSquashPos = refPos / 4;
-                uint32_t baseSquashLength = (seqLength >> 2) + !!(seqLength & 0x3);
+                uint32_t baseSquashLength = (seqLength >> 2) + !!(seqLength & 0x3) + 1;
                 if (refSquashPos + baseSquashLength > pRefeGene->getSquashLength()) {
                     // LOG_DEBUG("Mapped pos is out of bound. line = %d", contentIdx);
                     actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
@@ -1094,6 +1093,7 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
                     }
                     outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer.get());
                     MemoryUtil::safeFree(refeMappedPos);
+                    pRefeGene->updateMatchedGene(refPos, baseSquashLength << 2);
                 }
             }
         } else {
@@ -1386,7 +1386,12 @@ int32_t SamActuator::decompressSamByFields() {
                 basePtr = outBlockPtr->getCurrent();
                 decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen);
                 actualBaseLen = decoderLen;
-            } else if (fieldIdx == 10 ) {  /// QUAL   
+            } else if (fieldIdx == 10 ) {  /// QUAL  
+
+                // LOG_DEBUG("lineNo = %d, actualBaseLen = %d", lineNo, actualBaseLen); 
+
+                // PbgzManager::getInstance().printBufferContent(basePtr, actualBaseLen);
+                
                 decompressQuality(basePtr, actualBaseLen);
                 // No optional fields scenario, replace appended \t with \n
                 if (fieldIdx + 1 == fieldCount) {
@@ -1813,7 +1818,7 @@ int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, u
                         break;
                     }
                     refeMappedPos = refeChrPos + mappedPos[lineNo] - 1;
-                    uint32_t baseSquashLength = actualBaseLen / 4 + !!(actualBaseLen & 0x3);
+                    uint32_t baseSquashLength = actualBaseLen / 4 + !!(actualBaseLen & 0x3) + 1;
                     if ((refeMappedPos / 4) + baseSquashLength > pRefeGene->getSquashLength()) {
                         break;
                     }
