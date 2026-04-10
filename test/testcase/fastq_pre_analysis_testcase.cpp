@@ -173,7 +173,7 @@ protected:
 // Test preAnalysisIdFirstLine method
 TEST_F(FastqPreAnalysisTest, testPreAnalysisIdFirstLine) {
     loadFastQData(FastqPreAnalysisTestData::testFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     
     // Test analysis of first line ID
     int32_t result = actuator.preAnalysisIdFirstLine(pInBlock->getBuffer(), pInBlock->getNpos()[0] + 1);
@@ -211,7 +211,7 @@ TEST_F(FastqPreAnalysisTest, testPreAnalysisIdFirstLine) {
 // Test preAnalysisId method - handle multiple ID records
 TEST_F(FastqPreAnalysisTest, testPreAnalysisIdMultipleRecords) {
     loadFastQData(FastqPreAnalysisTestData::testFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     
     // Analyze first line first
     actuator.preAnalysisIdFirstLine(pInBlock->getBuffer(), pInBlock->getNpos()[0] + 1);
@@ -240,7 +240,7 @@ TEST_F(FastqPreAnalysisTest, testPreAnalysisIdMultipleRecords) {
 // Test ID format min and max length
 TEST_F(FastqPreAnalysisTest, testPreAnalysisIdLengthAnalysis) {
     loadFastQData(FastqPreAnalysisTestData::testFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     
     // Analyze all records
     int32_t result = actuator.preAnalysis();
@@ -262,7 +262,7 @@ TEST_F(FastqPreAnalysisTest, testPreAnalysisIdLengthAnalysis) {
 // Test complete preAnalysis method
 TEST_F(FastqPreAnalysisTest, testPreAnalysisComplete) {
     loadFastQData(FastqPreAnalysisTestData::testFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);

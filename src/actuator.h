@@ -29,8 +29,11 @@
 
 class Actuator {
 public:
-    virtual int32_t decompress() = 0;
-    virtual int32_t compress() = 0;
+    virtual int32_t process() = 0;
+
+    virtual int32_t initial() { return 0; }
+
+    virtual int32_t cleanup() { return 0; }
 
     Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr): inBlockPtr(inPtr), outBlockPtr(outPtr) {};
     
@@ -46,5 +49,5 @@ public:
 protected: 
     RoughIOBlock* inBlockPtr;
     RoughIOBlock* outBlockPtr;  
-    Json::Value meta;
 };
+

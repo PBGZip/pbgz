@@ -460,7 +460,7 @@ public:
 
         // Create compressor
         Reference ref = createTestReference();
-        SamActuator compressor(pInBlock, pOutBlock, &ref);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &ref);
         ASSERT_EQ(compressor.preAnalysis(), 0);
         ASSERT_EQ(compressor.compress(), 0);
 
@@ -474,7 +474,7 @@ public:
         pOutBlock->reset();
 
         // Use these two blocks for decompression, only need to verify decompression return code
-        SamActuator decompressor(pInBlock, pOutBlock, &ref);
+        SamCodecActuator decompressor(pInBlock, pOutBlock, &ref);
 
         int32_t ret = decompressor.decompress();
         std::remove(inputFile.c_str());
@@ -502,7 +502,7 @@ TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
 
         // Create compressor
         Reference ref = createTestReference();
-        SamActuator compressor(pInBlock, pOutBlock, &ref);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &ref);
         ASSERT_EQ(compressor.preAnalysis(), -1);
 }
 
@@ -575,7 +575,7 @@ TEST_F(SamDecompressTest, TestMixedScenarios) {
 
     // Create compressor
     Reference ref = createTestReference();
-    SamActuator compressor(pInBlock, pOutBlock, &ref);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &ref);
     ASSERT_EQ(compressor.preAnalysis(), -1);
 }
 

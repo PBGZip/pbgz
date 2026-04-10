@@ -263,7 +263,7 @@ protected:
 
 TEST_F(SamActuatorTest, testPreAnalysis) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
     EXPECT_EQ(actuator.headEndLine, 8);  // Header has 8 lines (@HD, 6@SQ, 1@PG, may have other header lines)
@@ -292,7 +292,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     file.close();
 
     loadSamData("idinvlid_pre_analysis.sam");
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.preAnalysis();
     std::remove("idinvlid_pre_analysis.sam");
     EXPECT_EQ(result, 0);
@@ -301,7 +301,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
 
 TEST_F(SamActuatorTest, testCompressQuality) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -316,7 +316,7 @@ TEST_F(SamActuatorTest, testCompressQuality) {
 
 TEST_F(SamActuatorTest, testCompressChrName) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -331,7 +331,7 @@ TEST_F(SamActuatorTest, testCompressChrName) {
 
 TEST_F(SamActuatorTest, testCompressWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -345,7 +345,7 @@ TEST_F(SamActuatorTest, testCompressWithoutRef) {
 TEST_F(SamActuatorTest, testCompressWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamActuator actuator(pInBlock, pOutBlock, &refGene);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -358,7 +358,7 @@ TEST_F(SamActuatorTest, testCompressWithRef) {
 
 TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -374,7 +374,7 @@ TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
 TEST_F(SamActuatorTest, testCompressBaseWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamActuator actuator(pInBlock, pOutBlock, &refGene);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -389,7 +389,7 @@ TEST_F(SamActuatorTest, testCompressBaseWithRef) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -404,7 +404,7 @@ TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -419,7 +419,7 @@ TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
 
 TEST_F(SamActuatorTest, testCompressRegularField) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -434,7 +434,7 @@ TEST_F(SamActuatorTest, testCompressRegularField) {
 
 TEST_F(SamActuatorTest, testNotifyFlag) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Test getNotifyFlag
     bool hasData = actuator.getNotifyFlag();
@@ -443,7 +443,7 @@ TEST_F(SamActuatorTest, testNotifyFlag) {
 
 TEST_F(SamActuatorTest, testSetReference) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     Reference refGene = createTestReference();
     
@@ -464,7 +464,7 @@ TEST_F(SamActuatorTest, testDecompress) {
     fprintf(stderr, "%s \n", pInBlock->getBuffer());
     
     // Create SamActuator object for compression
-    SamActuator compressor(pInBlock, pOutBlock);
+    SamCodecActuator compressor(pInBlock, pOutBlock);
     
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
@@ -486,7 +486,7 @@ TEST_F(SamActuatorTest, testDecompress) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamActuator decompressor(pInBlock, pOutBlock);
+    SamCodecActuator decompressor(pInBlock, pOutBlock);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
@@ -503,7 +503,7 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     Reference reference = createTestReference();
     
     // Create SamActuator object for compression
-    SamActuator compressor(pInBlock, pOutBlock, &reference);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &reference);
     
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
@@ -525,7 +525,7 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamActuator decompressor(pInBlock, pOutBlock, &reference);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &reference);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
@@ -537,10 +537,10 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
 
 
 TEST_F(SamActuatorTest, testCigarParse) {
-    SamActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock);
     
     // Helper function: convert string to uint8_t* to pass to parseCigar
-    auto testParse = [](SamActuator& a, const std::string& cigar) -> uint32_t {
+    auto testParse = [](SamCodecActuator& a, const std::string& cigar) -> uint32_t {
         return a.parseCigar(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(cigar.c_str())), cigar.length());
     };
     

@@ -43,7 +43,7 @@
 
 const uint32_t MAPPED_THRESHOLD_GEN2 = 2;
 
-int32_t FastqActuator::compress() {
+int32_t FastqCodecActuator::compress() {
     if (0 != initEncoder()) {
         LOG_ERROR("Init encoder failed");
         return -1;
@@ -92,7 +92,7 @@ int32_t FastqActuator::compress() {
 /// @param bufLen     // Length of ID line
 /// @param idSplitSymbols    // List of separators
 /// @return 0 for success, -1 for failure
-int32_t FastqActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
+int32_t FastqCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
     if (pBuffer == nullptr || bufLen == 0) {
         return -1;
     }
@@ -130,7 +130,7 @@ int32_t FastqActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen)
     return 0;
 }
 
-int32_t FastqActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) {
+int32_t FastqCodecActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) {
     uint32_t lastPos = 0;
     uint32_t lastFindPos = 0;
     for (uint32_t idx = 0; idx < idSplitSymbols.size(); ++idx) {
@@ -163,7 +163,7 @@ int32_t FastqActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) {
     return 0;
 }
 
-int32_t FastqActuator::preAnalysisBase(uint8_t* pBuffer, uint32_t bufLen) {
+int32_t FastqCodecActuator::preAnalysisBase(uint8_t* pBuffer, uint32_t bufLen) {
     uint32_t baseLength = bufLen - 1;    // Remove newline character
     if (baseLength > maxBaseLength) {
         maxBaseLength = baseLength;
@@ -198,7 +198,7 @@ int32_t FastqActuator::preAnalysisBase(uint8_t* pBuffer, uint32_t bufLen) {
     return 0;
 }
    
-int32_t FastqActuator::preAnalysisComment(uint8_t* pBuffer, uint32_t bufLen, uint32_t lineNo) {
+int32_t FastqCodecActuator::preAnalysisComment(uint8_t* pBuffer, uint32_t bufLen, uint32_t lineNo) {
     if (commentType != CommentType::OTHER) {
         if (commentType == CommentType::UNKNOWN) {  // First line
             if (*pBuffer == '+' && bufLen == 2) {
@@ -244,7 +244,7 @@ int32_t FastqActuator::preAnalysisComment(uint8_t* pBuffer, uint32_t bufLen, uin
     return 0;
 }
 
-int32_t FastqActuator::preAnalysis() {
+int32_t FastqCodecActuator::preAnalysis() {
     uint64_t lineNum = inBlockPtr->getNpos().size();
     if (lineNum == 0) {
         LOG_ERROR("line number is zero");
@@ -312,7 +312,7 @@ int32_t FastqActuator::preAnalysis() {
     return 0;
 }
 
-int32_t FastqActuator::initEncoder() {
+int32_t FastqCodecActuator::initEncoder() {
     const uint32_t line4 = (inBlockPtr->getNpos().size() >> 2);
     const uint32_t lmax = inBlockPtr->getMaxLineLen() + 4; /* 4 reserved for base key not 4-aligned */
     const uint32_t lsquash = (lmax >> 2) + !!(lmax & 0x3); /* squash length */
@@ -361,13 +361,13 @@ int32_t FastqActuator::initEncoder() {
             }
             p += baselenLen;
         }
-        mapping = (isGen2) ? (&FastqActuator::mappingFastqGen2) : (&FastqActuator::mappingFastQGen3);
+        mapping = (isGen2) ? (&FastqCodecActuator::mappingFastqGen2) : (&FastqCodecActuator::mappingFastQGen3);
     }
 
     return 0;
 }
 
-void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir) {
+void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir) {
     Mapping mt[4];
     uint32_t n, m, o, l, squashLen[2], loffset;
     uint32_t align4_curr;
@@ -606,13 +606,13 @@ void FastqActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, u
     return;
 }
 
-void FastqActuator::mappingFastQGen3(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&) {
+void FastqCodecActuator::mappingFastQGen3(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&) {
     LOG_ERROR("Not support FASTQ Gen3");
     return;
 }
 
 template <typename TCoder>
-int32_t FastqActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Json::Value& streamMeta, uint32_t& srcDataLen, int32_t splitSymIdx) {
+int32_t FastqCodecActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Json::Value& streamMeta, uint32_t& srcDataLen, int32_t splitSymIdx) {
     int32_t currLineOffset = 0;    // Line offset, start of each line
     uint8_t * data = nullptr;
     int32_t currLen = 0;
@@ -643,7 +643,7 @@ int32_t FastqActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Json::V
     return 0;
 }
 
-int32_t FastqActuator::compressIdInAll() {
+int32_t FastqCodecActuator::compressIdInAll() {
     Json::Value idMeta;
     Json::Value streamMeta;
     std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
@@ -673,7 +673,7 @@ int32_t FastqActuator::compressIdInAll() {
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
-int32_t FastqActuator::compressIdInSplit() {
+int32_t FastqCodecActuator::compressIdInSplit() {
     Json::Value idMeta;
     Json::Value streamMeta;
     uint32_t totalSrcLength = 0;
@@ -742,7 +742,7 @@ int32_t FastqActuator::compressIdInSplit() {
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
-int32_t FastqActuator::compressId() {
+int32_t FastqCodecActuator::compressId() {
     if (idPosLength != UINT32_MAX) {
         for (uint32_t idx = 0; idx < idSplitSymbols.size(); ++idx) {
             if (idSplitMinLen[idx] == 0) {
@@ -761,7 +761,7 @@ int32_t FastqActuator::compressId() {
     }
 }
 
-int32_t FastqActuator::compressBase() {
+int32_t FastqCodecActuator::compressBase() {
     if (pReference != nullptr && isGen2) {
         return compressBaseWithRef();
     } else {
@@ -774,7 +774,7 @@ int32_t FastqActuator::compressBase() {
     }
 }
 
-int32_t FastqActuator::compressBaseWithRef() {
+int32_t FastqCodecActuator::compressBaseWithRef() {
     bool encBaseLen = (minBaseLength != maxBaseLength);
     uint32_t line = inBlockPtr->getNpos().size();
     uint8_t* ptr = inBlockPtr->getBuffer();
@@ -929,7 +929,7 @@ int32_t FastqActuator::compressBaseWithRef() {
     return 0;
 }
 
-int32_t FastqActuator::compressBaseWithoutRef() {
+int32_t FastqCodecActuator::compressBaseWithoutRef() {
     int32_t addLength = !!(minBaseLength != maxBaseLength);
     uint32_t baseSrcLength = 0;
     for (uint32_t idx = 1; idx < inBlockPtr->getNpos().size(); idx +=4) {
@@ -979,7 +979,7 @@ int32_t FastqActuator::compressBaseWithoutRef() {
     return 0;
 }
 
-int32_t FastqActuator::compressComment() {
+int32_t FastqCodecActuator::compressComment() {
     std::shared_ptr<coder_io> commentIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder_bwt_cm> commentCoder = std::make_shared<coder_bwt_cm>(commentIo.get());
     
@@ -1017,7 +1017,7 @@ int32_t FastqActuator::compressComment() {
     return 0;
 }
 
-int32_t FastqActuator::compressQuality() {
+int32_t FastqCodecActuator::compressQuality() {
     std::shared_ptr<coder_io> qualityIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder_qual> qualityCoder = std::make_shared<coder_qual>(qualityIo.get(), true, qualityFreqTable);
 
@@ -1083,7 +1083,7 @@ int32_t FastqActuator::compressQuality() {
     return 0;
 }
 
-int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
+int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     Json::Value& idStreamMeta = meta["id"]["streams"];
     if (idStreamMeta.size() != idSplitSymbols.size()) {
         LOG_ERROR("id stream meta size not match id split symbols size(%d, %d)", idStreamMeta.size(), idSplitSymbols.size());
@@ -1357,7 +1357,7 @@ int32_t FastqActuator::initDecoder(RoughIOBlock* outputBlock) {
     return 0;
 }
 
-int32_t FastqActuator::decompress() {
+int32_t FastqCodecActuator::decompress() {
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
     outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 

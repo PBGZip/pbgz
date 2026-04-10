@@ -1,5 +1,5 @@
 /*
- * decompress_engine.h - Header file for pbgz project
+ * codec_actuator.h - Head file for pbgz project
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -23,41 +23,32 @@
 
 #pragma once
 
-#include "codec_engine.h"
-#include "actuator.h"
+#include <stdint.h>
 
+#include "io_block.h"
+#include <json/json.h>
 
-class DecompressEngine : public CodecEngine {
+class CodecActuator {
+
 public:
-    DecompressEngine(PbgzParameter& para) : CodecEngine(para) { }
+    virtual int32_t decompress() = 0;
+    virtual int32_t compress() = 0;
 
-    virtual ~DecompressEngine() { }
-
-protected:
-    BlockReader* createBlockReader() override;
-
-    BlockWriter* createBlockWriter() override;
-
-    void releaseBlockReader(BlockReader* &blockReader) override;
-
-    void releaseBlockWriter(BlockWriter* &BlockWriter) override;
-
-    virtual void readBlocks(BlockReader* blockReader);
-
-    virtual void printTailInfo(Timer& costTimer) override { 
-        PbgzManager::getInstance().printTailInfo(costTimer, false);
+    CodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr): inBlockPtr(inPtr), outBlockPtr(outPtr) {};
+    
+    virtual ~CodecActuator() {
+        inBlockPtr = nullptr;
+        outBlockPtr = nullptr;
     }
 
-    virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
+    virtual bool getNotifyFlag() {
+        return true;
+    } 
 
-private:
-    bool initRefGene(PbgzBlockReader* blockReader);
-
-    bool initRefeIndex();
-
-    void readBlockByPostition(BlockReader* blockReader);
-
-    bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
-
-    void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
+protected: 
+    RoughIOBlock* inBlockPtr;
+    RoughIOBlock* outBlockPtr;  
+    Json::Value meta;
 };
+
+

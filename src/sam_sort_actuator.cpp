@@ -21,13 +21,12 @@
  * SOFTWARE.
  */
 
- #include "sam_sort_actuator.h"
-
-SAMSortActuator::SAMSortActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr) {
-    inBlockPtr = inPtr;
-    outBlockPtr = outPtr;
-}
+#include "sam_sort_actuator.h"
 
 SAMSortActuator::~SAMSortActuator() {
     
+}
+
+int32_t SAMSortActuator::process() {
+    return 0;
 }

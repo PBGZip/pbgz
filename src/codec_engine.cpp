@@ -76,37 +76,6 @@ int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
     return ret;
 }
 
-Actuator* CodecEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    Actuator* pActuator = nullptr;
-    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType()) || BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
-        if (parameter.isMakeIndex) {
-            fprintf(stderr, "Fastq file will not make index.");
-            parameter.isMakeIndex = false;
-        }
-        if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
-            pActuator = MemoryUtil::safeNewClass<FastqActuator>(inBlockPtr, outBlockPtr, pRefGene);
-        } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
-            pActuator = MemoryUtil::safeNewClass<SamActuator>(inBlockPtr, outBlockPtr, pRefGene);
-        }
-        pActuator = actuatorPreProc(pActuator, inBlockPtr, outBlockPtr);
-    } else if (inBlockPtr->getBlockType() == BINARY) {
-        if (parameter.isMakeIndex) {
-            fprintf(stderr, "Binary file will not make index.");
-            parameter.isMakeIndex = false;
-        }
-        pActuator = MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
-    } else {
-        LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
-        freeInputPool.push(inBlockPtr);
-        outBlockPtr->reset();
-        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
-        // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
-        outputDataPool.push(outBlockPtr);
-        return nullptr;
-    }
-
-    return pActuator;
-}
 
 void CodecEngine::writeFilePostProc(BlockWriter* blockWriter) {
     // Update extended header and write dynamic file meta after all data is written

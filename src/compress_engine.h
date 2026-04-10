@@ -49,9 +49,9 @@ protected:
 
     virtual int32_t startEnginePostProc() override;
 
-    virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
+    virtual  Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
-    virtual int32_t actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock* outBlockPtr);
+    virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
 
     virtual void printTailInfo(Timer& costTimer) override { 
         PbgzManager::getInstance().printTailInfo(costTimer, true);

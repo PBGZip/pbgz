@@ -43,6 +43,4 @@ protected:
     virtual void releaseBlockWriter(BlockWriter* &blockWriter) override;
 
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
-
-    virtual int32_t actuatorProc(Actuator*, RoughIOBlock*, RoughIOBlock*) override;
 };

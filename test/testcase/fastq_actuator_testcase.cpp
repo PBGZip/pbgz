@@ -144,14 +144,14 @@ protected:
 
 
 TEST_F(FastQActuatorTest, testInitialize) {
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initEncoder();
     EXPECT_EQ(result, 0);
 }
 
 TEST_F(FastQActuatorTest, testPreAnalysisFirstLine) {
     loadFastQData(FastqTestData::bigFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     actuator.preAnalysisIdFirstLine(pInBlock->getBuffer(), pInBlock->getNpos()[0] + 1);
     EXPECT_EQ(actuator.idSplitSymbols.size(), 4); // 
 
@@ -179,7 +179,7 @@ TEST_F(FastQActuatorTest, testPreAnalysisFirstLine) {
 
 TEST_F(FastQActuatorTest, testPreAnalysisSecondLine) {
     loadFastQData(FastqTestData::bigFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     actuator.preAnalysisIdFirstLine(pInBlock->getBuffer(), pInBlock->getNpos()[0] + 1);
     actuator.preAnalysisId(pInBlock->getBuffer() + pInBlock->getNpos()[3] + 1 , pInBlock->getNpos()[4] + 1);
 
@@ -201,7 +201,7 @@ TEST_F(FastQActuatorTest, testPreAnalysisSecondLine) {
 
 TEST_F(FastQActuatorTest, testPreAnalysisBase) {
     loadFastQData(FastqTestData::bigFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.preAnalysisBase(pInBlock->getBuffer() + pInBlock->getNpos()[0] + 1 , pInBlock->getNpos()[1] - pInBlock->getNpos()[0]);
     EXPECT_EQ(result, 0);
     EXPECT_EQ(actuator.maxBaseLength, 150);
@@ -211,7 +211,7 @@ TEST_F(FastQActuatorTest, testPreAnalysisBase) {
 
 TEST_F(FastQActuatorTest, testPreAnalysisComment) {
     loadFastQData(FastqTestData::bigFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.preAnalysisComment(pInBlock->getBuffer() + pInBlock->getNpos()[1] + 1,
                                                     pInBlock->getNpos()[2] - pInBlock->getNpos()[1], 2);
     EXPECT_EQ(result, 0);
@@ -220,7 +220,7 @@ TEST_F(FastQActuatorTest, testPreAnalysisComment) {
 
 TEST_F(FastQActuatorTest, testPreAnalysis) {
     loadFastQData(FastqTestData::bigFastQFile);
-    FastqActuator actuator(pInBlock, pOutBlock);
+    FastqCodecActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.preAnalysis();
 
     EXPECT_EQ(result, 0);

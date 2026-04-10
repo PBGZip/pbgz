@@ -30,7 +30,7 @@
 #include "log/logger.h"
 
 
-int32_t BinaryActuator::compress() {
+int32_t BinaryCodecActuator::compress() {
     coder_io io (outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     uint32_t srcLength = inBlockPtr->getDataLen();
     if (srcLength <= FC_MIN_LEN || srcLength > FC_MAX_LEN) {
@@ -67,7 +67,7 @@ int32_t BinaryActuator::compress() {
     return 0;
 }
 
-int32_t BinaryActuator::decompress() {
+int32_t BinaryCodecActuator::decompress() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter , inBlockPtr or outBlockPtr is nullptr");
         return -1;

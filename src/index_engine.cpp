@@ -47,6 +47,3 @@ Actuator* IndexEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* ou
     return nullptr;
 }
 
-int32_t IndexEngine::actuatorProc(Actuator*, RoughIOBlock*, RoughIOBlock*) {
-    return 0;
-}
