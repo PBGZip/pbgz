@@ -26,7 +26,7 @@
 #include <map>
 #include <vector>
 
-#include "actuator.h"
+#include "codec_actuator.h"
 #include "coder.h"
 #include "coder_io.h"
 #include "coder_qual.h"
@@ -34,10 +34,10 @@
 #include "sam_info.h"
 #include "coder_bwt_cm.h"
 
-class SamActuator : public Actuator {
+class SamCodecActuator : public CodecActuator {
 public:
-    SamActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRefeGene = nullptr);
-    virtual ~SamActuator() override;
+    SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRefeGene = nullptr);
+    virtual ~SamCodecActuator() override;
 
     int32_t preAnalysis();
     

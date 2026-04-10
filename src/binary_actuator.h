@@ -21,12 +21,12 @@
  * SOFTWARE.
  */
 
-#include "actuator.h"
+#include "codec_actuator.h"
 
-class BinaryActuator : public Actuator {
+class BinaryCodecActuator : public CodecActuator {
 public:
-    BinaryActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr): Actuator(inPtr, outPtr) {}
-    virtual ~BinaryActuator() {}
+    BinaryCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr): CodecActuator(inPtr, outPtr) {}
+    virtual ~BinaryCodecActuator() {}
     int32_t decompress() override ;
     int32_t compress() override ;
 };

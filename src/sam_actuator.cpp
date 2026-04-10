@@ -37,7 +37,7 @@
 #include "pbgz_manager.h"
 #include "utils/path_util.h"
 
-SamActuator::SamActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pReferene): Actuator(inPtr, outPtr) {
+SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pReferene): CodecActuator(inPtr, outPtr) {
     pRefeGene = pReferene;
     headEndLine = 0;
     idPosLength = 0;
@@ -54,7 +54,7 @@ SamActuator::SamActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* p
     notifyFlag = false;
 }
 
-SamActuator::~SamActuator() {
+SamCodecActuator::~SamCodecActuator() {
     MemoryUtil::safeFree(baseNPosBuffer);
     MemoryUtil::safeFree(baseLengthBuffer);
     MemoryUtil::safeFree(baseSquashBuffer);
@@ -73,7 +73,7 @@ SamActuator::~SamActuator() {
     ioVector.clear();
 }
 
-int32_t SamActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
+int32_t SamCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
     if (pBuffer == nullptr || bufLen == 0) {
         return -1;
     }
@@ -113,7 +113,7 @@ int32_t SamActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
     return 0;
 }
 
-int32_t SamActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen) {
+int32_t SamCodecActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen) {
     std::vector<int32_t> currentLinePos;
     uint32_t lastPos = 0;
     uint32_t lastFindPos = 0;
@@ -149,7 +149,7 @@ int32_t SamActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen) {
     return 0;
 }
 
-int32_t SamActuator::preAnalysis() {
+int32_t SamCodecActuator::preAnalysis() {
     if (inBlockPtr == nullptr) {
         LOG_ERROR("Input block pointer is null");
         return -1;
@@ -352,7 +352,7 @@ int32_t SamActuator::preAnalysis() {
     return 0;
 }
 
-int32_t SamActuator::compress() {
+int32_t SamCodecActuator::compress() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter, inBlockPtr or outBlockPtr is nullptr for SAM compression");
         return -1;
@@ -381,7 +381,7 @@ int32_t SamActuator::compress() {
     return compressSamByFields();
 }
 
-int32_t SamActuator::compressSamHeader() {
+int32_t SamCodecActuator::compressSamHeader() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter for SAM header compression");
         return -1;
@@ -432,7 +432,7 @@ int32_t SamActuator::compressSamHeader() {
     return 0;
 }
 
-int32_t SamActuator::parseChromosomeInfo(const std::string& sqLine) {
+int32_t SamCodecActuator::parseChromosomeInfo(const std::string& sqLine) {
     // Parse @SQ line, format: @SQ SN:chr_name LN:length [other optional fields]
     std::string chrName;
     uint32_t chrLength = 0;
@@ -477,7 +477,7 @@ int32_t SamActuator::parseChromosomeInfo(const std::string& sqLine) {
     return 0;
 }
 
-int32_t SamActuator::compressSamByFields() {
+int32_t SamCodecActuator::compressSamByFields() {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size() - headEndLine;
     
@@ -585,7 +585,7 @@ int32_t SamActuator::compressSamByFields() {
     return 0;
 }
 
-int32_t SamActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     // Similar to FastqActuator::compressIdInSplit, create multiple streams for each split symbol
     Json::Value streamMeta;
     uint32_t totalSrcLength = 0;
@@ -665,7 +665,7 @@ int32_t SamActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fi
     return totalDstLength;
 }
 
-int32_t SamActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -720,7 +720,7 @@ int32_t SamActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fi
     return fieldIo->data_len;
 }
 
-int32_t SamActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -787,7 +787,7 @@ int32_t SamActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcLen, J
     return chrIo->data_len;
  }
 
-int32_t SamActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -847,7 +847,7 @@ int32_t SamActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcL
     return fieldIo->data_len;
 }
 
-int32_t SamActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -911,7 +911,7 @@ int32_t SamActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Jso
     return fieldIo->data_len;
 }
 
-int32_t SamActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -971,7 +971,7 @@ int32_t SamActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSr
     return fieldIo->data_len;
 }
 
-int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     if (pRefeGene == nullptr) {
         LOG_ERROR("Reference genome is not available for base compression with reference");
         return -1;
@@ -1184,7 +1184,7 @@ int32_t SamActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLe
     return totalDstLen;
 }
 
-int32_t SamActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -1287,7 +1287,7 @@ int32_t SamActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, J
     return totalDstLength;
 }
 
-int32_t SamActuator::decompress() {
+int32_t SamCodecActuator::decompress() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter, inBlockPtr or outBlockPtr is nullptr for SAM decompression");
         return -1;
@@ -1321,7 +1321,7 @@ int32_t SamActuator::decompress() {
     return 0;
 }
 
-int32_t SamActuator::decompressSamByFields() {
+int32_t SamCodecActuator::decompressSamByFields() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter, inBlockPtr or outBlockPtr is nullptr for SAM field-by-field decompression");
         return -1;
@@ -1423,7 +1423,7 @@ int32_t SamActuator::decompressSamByFields() {
     return 0;
 }
 
-int32_t SamActuator::decompressHeader() {
+int32_t SamCodecActuator::decompressHeader() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter for SAM header decompression");
         return -1;
@@ -1475,7 +1475,7 @@ int32_t SamActuator::decompressHeader() {
     return 0;
 }
 
-int32_t SamActuator::initDecoder(RoughIOBlock* outputBlock) {
+int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     if (outputBlock == nullptr) {
         return -1;
     }
@@ -1674,13 +1674,13 @@ int32_t SamActuator::initDecoder(RoughIOBlock* outputBlock) {
     return 0;
 }
 
-int32_t SamActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag) {
+int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag) {
     uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), splitFlag, false);
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldLen);
     return fieldLen;
 }
 
-int32_t SamActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta) {
     if (fieldIdx != 0) {
         return -1;
     }
@@ -1703,7 +1703,7 @@ int32_t SamActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta
     return idLength;
 }
 
-int32_t SamActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo) {
+int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo) {
     uint16_t chrIndex = 0;
     fieldDecoders[fieldIdx]->decode_line((uint8_t*)&chrIndex, sizeof(chrIndex), UINT8_MAX, false);
     if (chrIndex == 0xFFFF) {
@@ -1731,7 +1731,7 @@ int32_t SamActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo) {
     }
 }
 
-int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
+int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& nposOffset, uint32_t& totalBaseLen) {
     uint8_t* pBaseEnd = outBlockPtr->getBuffer() + outBlockPtr->getBufferSize();
     bool isUserReference = pRefeGene != nullptr && fieldMeta.isMember("streams");
@@ -1866,7 +1866,7 @@ int32_t SamActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, u
     return actualBaseLen;
 }
 
-int32_t SamActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen) {
+int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen) {
     qualCoder->decode_qual_gen2(basePtr, outBlockPtr->getCurrent(), actualBaseLen);
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
     *(outBlockPtr->getCurrent()) = '\t';
@@ -1874,7 +1874,7 @@ int32_t SamActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen)
     return actualBaseLen;
 }
 
-int32_t SamActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx) {
+int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx) {
     uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), splitFlag, false);
     if (fieldLen > 1) {
         uint32_t seqLength = parseCigar(outBlockPtr->getCurrent(), fieldLen);
@@ -1887,7 +1887,7 @@ int32_t SamActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint3
     return fieldLen;
 }
 
-uint32_t SamActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength) {
+uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength) {
     // CIGAR format like 6S30M1I114S, M/I/S/=/X: consume SEQ, D/N/H/P don't consume SEQ, so actual SEQ length is the sum of operations that consume SEQ
     if (cigarString == nullptr || cigarLength == 0) {
         return 0;

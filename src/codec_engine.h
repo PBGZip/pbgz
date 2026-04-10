@@ -53,8 +53,6 @@ public:
 
 protected:
 
-    virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
-
     void updateReferenceOffset(int64_t offset);
 
     void resetReferenceOffset();

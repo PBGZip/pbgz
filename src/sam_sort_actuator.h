@@ -25,18 +25,18 @@
 
 #include <vector>
 #include <string>
-#include "sam_actuator.h"
+#include "actuator.h"
 
-class SAMSortActuator {
+class SAMSortActuator : public Actuator {
 public:
-    SAMSortActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr);
-    ~SAMSortActuator();
+    SAMSortActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr) : Actuator(inPtr, outPtr) {
+        
+    }
+
+    virtual ~SAMSortActuator();
     
-    bool initialize();
-    bool process();
-    void cleanup();
+    int32_t process();
 
 private:
-   RoughIOBlock* inBlockPtr;
-   RoughIOBlock* outBlockPtr;
+  
 };

@@ -23,12 +23,10 @@
 
 
 #include "compress_engine.h"
-#include "fastq_actuator.h"
-#include "binary_actuator.h"
 #include "utils/path_util.h"
 #include "coder_ppmd.h"
 #include "coder_json.h"
-#include "sam_actuator.h"
+#include "codec_actuator_adapter.h"
 
 int32_t CompressEngine::init() {
     if (0 != CodecEngine::init()) {
@@ -97,31 +95,30 @@ void CompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    FastqActuator* fastqActuator = dynamic_cast<FastqActuator*>(actuator);
+    FastqCompressActuator* fastqActuator = dynamic_cast<FastqCompressActuator*>(actuator);
     if (fastqActuator != nullptr) {
-        if (0 != fastqActuator->preAnalysis()) {
+        FastqCodecActuator* fastqCodecActuator = fastqActuator->getCodecActuator();
+        if (0 != fastqCodecActuator->preAnalysis()) {
             LOG_INFO("Fastq preAnalysis failed");
             MemoryUtil::safeDeleteClass(fastqActuator);
-            return MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
+            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr);
         }
     }
 
-    SamActuator* samActuator = dynamic_cast<SamActuator*>(actuator);
+    SamCompressActuator* samActuator = dynamic_cast<SamCompressActuator*>(actuator);
     if (samActuator != nullptr) {
-        if (0 != samActuator->preAnalysis()) {
+        SamCodecActuator* samCodecActuator = samActuator->getCodecActuator();
+        if (0 != samCodecActuator->preAnalysis()) {
             LOG_INFO("sam preAnalysis failed");
             MemoryUtil::safeDeleteClass(samActuator);
-            return MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
+            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr);
         }
     }
     
     return actuator;
 }
 
-int32_t CompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
-    int32_t ret = actuator->compress();
-    return ret;
-}
+
 
 int32_t CompressEngine::startEnginePreProc() {
     if (!initReference()) {
@@ -322,3 +319,41 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
 
     return 0;
  }
+
+ Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
+    if (parameter.isMakeIndex) {
+        fprintf(stderr, "Fastq file will not make index.");
+        parameter.isMakeIndex = false;
+    }
+
+    Actuator* pActuator = nullptr;
+    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
+        pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+        pActuator = MemoryUtil::safeNewClass<SamCompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+    } else if (inBlockPtr->getBlockType() == BINARY) {
+        pActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr);
+    } 
+    
+    if (pActuator == nullptr) {
+        LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
+        freeInputPool.push(inBlockPtr);
+        outBlockPtr->reset();
+        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+        // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
+        outputDataPool.push(outBlockPtr);
+        return nullptr;
+    }
+
+    if (pActuator->initial() != 0) {
+        LOG_ERROR("actuator initial failed");
+        MemoryUtil::safeDeleteClass(pActuator);
+        return nullptr;
+    }  
+    
+    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType()) || BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+        pActuator = actuatorPreProc(pActuator, inBlockPtr, outBlockPtr);
+    }
+
+    return pActuator;
+}

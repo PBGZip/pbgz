@@ -21,15 +21,15 @@
  * SOFTWARE.
  */
 
+#include <set>
 
 #include "decompress_engine.h"
 #include "utils/path_util.h"
 #include "coder.h"
 #include "coder_json.h"
 #include "coder_ppmd.h"
-#include <set>
-#include "fastq_actuator.h"
 #include "pbgz_types.h"
+#include "codec_actuator_adapter.h"
 
 BlockReader* DecompressEngine::createBlockReader() {
     PbgzBlockReader* pbgzReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
@@ -168,10 +168,6 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
     return CodecEngine::readBlocks(blockReader);
 }
 
-int32_t DecompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
-    return actuator->decompress();
-}
-
 bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta) {
     int64_t refeSquashLen = refeMeta["squash_len"].asInt64();
     std::string fastaName = refeMeta["fasta_name"].asString();
@@ -277,4 +273,38 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
         MemoryUtil::safeDeleteClass(block[n]);
     }
     return true;
+}
+
+Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
+     if (parameter.isMakeIndex) {
+        fprintf(stderr, "Binary file will not make index.");
+        parameter.isMakeIndex = false;
+    }
+
+    Actuator* pActuator = nullptr;
+    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
+        pActuator = MemoryUtil::safeNewClass<FastqDecompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+        pActuator = MemoryUtil::safeNewClass<SamDecompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+    } else if (inBlockPtr->getBlockType() == BINARY) {
+        pActuator = MemoryUtil::safeNewClass<BinaryDecompressActuator>(inBlockPtr, outBlockPtr);
+    }
+    
+    if (pActuator == nullptr) {
+        LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
+        freeInputPool.push(inBlockPtr);
+        outBlockPtr->reset();
+        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+        // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
+        outputDataPool.push(outBlockPtr);
+        return nullptr;
+    }
+
+    if (pActuator->initial() != 0) {
+        LOG_ERROR("actuator initial failed");
+        MemoryUtil::safeDeleteClass(pActuator);
+        return nullptr;
+    }
+
+    return pActuator;
 }
