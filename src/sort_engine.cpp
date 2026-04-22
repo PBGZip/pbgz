@@ -30,13 +30,17 @@
 #include "sam_sort_actuator.h"
 #include "utils/path_util.h"
 #include "sam_sort.h"
+#include "config_manager.h"
 
 SortEngine::~SortEngine() {
 
 }
 
 uint32_t SortEngine::getBlockSize() {
-    return 256 << 20; /// 512M 
+    if (parameter.compressLevel > 6) {
+        return ConfigManager::getInstance().getBlockSizeByCompressLevel(parameter.compressLevel);
+    }
+    return 128 << 20; /// 128M 
 }
 
 void SortEngine::printHeadInfo() {
