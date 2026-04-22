@@ -92,3 +92,7 @@ private:
     std::vector<ChromosomeInfo> chromosomeInfoList; // Chromosome information list
     uint16_t chrIdCounter; // Global chromosome ID counter
 };
+
+namespace SamUtil {
+    int32_t parseChromosomeInfo(const std::string& sqLine);
+}

@@ -44,7 +44,7 @@ CodecEngine::~CodecEngine() {
 }
 
 int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
-    RoughIOBlock* blockPtr = freeInputPool.get();
+    RoughIOBlock* blockPtr = freeInputPool->get();
     if (blockPtr == nullptr) {
         LOG_ERROR("Get free block failed.");
         return -1;
@@ -53,12 +53,12 @@ int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
 
     int64_t ret = blockReader->readBlock(blockPtr, fileType);
     if (ret <= 0) {
-        freeInputPool.push(blockPtr);
+        freeInputPool->push(blockPtr);
         return ret;
     }
 
     if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
-        freeInputPool.push(blockPtr);
+        freeInputPool->push(blockPtr);
         return -2;
     }
 
@@ -69,7 +69,7 @@ int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
 
     updateInputStatics(blockPtr);
 
-    inputDataPool.push(blockPtr);
+    inputDataPool->push(blockPtr);
     if (ret > 0) {
         blockCount++;
     }

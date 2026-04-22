@@ -30,6 +30,8 @@
 class CompressEngine : public CodecEngine {
 public:
     CompressEngine(PbgzParameter& para) : CodecEngine(para) {
+        indexBlockQueue = std::make_unique<BlockingQueueType>();
+        freeIndexBlockQueue = std::make_unique<BlockingQueueType>();
     }
 
     virtual ~CompressEngine();
@@ -73,6 +75,6 @@ private:
 private:
     std::map<uint32_t, std::vector<int64_t>> blockRefePos;
     std::map<int64_t, uint32_t> blockRefeIndex;
-    BlockingQueue<RoughIOBlock*> indexBlockQueue;
-    BlockingQueue<RoughIOBlock*> freeIndexBlockQueue;  
+    std::unique_ptr<BlockingQueueType> indexBlockQueue;
+    std::unique_ptr<BlockingQueueType> freeIndexBlockQueue;  
 };

@@ -31,7 +31,6 @@
 
 template<typename T>
 class BlockingQueue {
-
 public:
     BlockingQueue(const BlockingQueue&) = delete;
     BlockingQueue& operator=(const BlockingQueue&) = delete;
@@ -40,10 +39,12 @@ public:
 
     BlockingQueue(uint32_t maxSize) : maxQueueSize(maxSize) { }
 
+    virtual ~BlockingQueue() { }
+
     /*
      * Push element to queue, block if queue is full
      **/
-    void push(const T &item) {
+    virtual void push(const T &item) {
         std::unique_lock<std::mutex> lock(mutex);
         notFullCondVar.wait(lock, [this]{return (0 == maxQueueSize) ? true : (dataQueue.size() < maxQueueSize);});
         dataQueue.push(std::move(item));
@@ -53,7 +54,7 @@ public:
     /*
      * Push element to queue without blocking
      **/
-    void pushForce(const T &item) {
+    virtual void pushForce(const T &item) {
         std::unique_lock<std::mutex> lock(mutex);
         dataQueue.push(std::move(item));
         notEmptyCondVar.notify_one();
@@ -62,7 +63,7 @@ public:
     /*
      * Pop element from queue, block if queue is empty
      **/
-    T get() {
+    virtual T get() {
         std::unique_lock<std::mutex> lock(mutex);
         notEmptyCondVar.wait(lock, [this]{return !this->dataQueue.empty();});
         T value = std::move(dataQueue.front());

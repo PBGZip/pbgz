@@ -292,11 +292,11 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
     
     if (pActuator == nullptr) {
         LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
-        freeInputPool.push(inBlockPtr);
+        freeInputPool->push(inBlockPtr);
         outBlockPtr->reset();
         outBlockPtr->setBlockId(inBlockPtr->getBlockId());
         // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
-        outputDataPool.push(outBlockPtr);
+        outputDataPool->push(outBlockPtr);
         return nullptr;
     }
 

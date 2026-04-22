@@ -32,16 +32,23 @@
 #include "block_wrapper.h"
 #include "actuator.h"
 
+
 PbgzEngine::PbgzEngine(const PbgzParameter&  para) {
     parameter = para;
     ioReader = nullptr;
     ioWriter = nullptr;
     syncFlag = false;
     blockId2Write = 0;
+    blockCount = 0;
+
+    freeInputPool = std::make_unique<BlockingQueueType>();
+    inputDataPool = std::make_unique<BlockingQueueType>();
+    freeOutputPool = std::make_unique<BlockingQueueType>();
+    outputDataPool = std::make_unique<BlockingQueueType>();
 }
 
 PbgzEngine::~PbgzEngine() {
-    for (auto& th : codecThreads) {
+    for (auto& th : workThreads) {
         if (th.joinable()) {
             th.join();
         }
@@ -62,23 +69,23 @@ PbgzEngine::~PbgzEngine() {
         MemoryUtil::safeDeleteClass(ioWriter);
     }
 
-    while(!freeInputPool.empty()) {
-        RoughIOBlock* inPtr = freeInputPool.get();
+    while(!freeInputPool->empty()) {
+        RoughIOBlock* inPtr = freeInputPool->get();
         MemoryUtil::safeDeleteClass(inPtr);
     }
 
-    while(!inputDataPool.empty()) {
-        RoughIOBlock* inPtr = inputDataPool.get();
+    while(!inputDataPool->empty()) {
+        RoughIOBlock* inPtr = inputDataPool->get();
         MemoryUtil::safeDeleteClass(inPtr);
     }
 
-    while(!freeOutputPool.empty()) {
-        RoughIOBlock* outPtr = freeOutputPool.get();
+    while(!freeOutputPool->empty()) {
+        RoughIOBlock* outPtr = freeOutputPool->get();
         MemoryUtil::safeDeleteClass(outPtr);
     }
 
-    while(!outputDataPool.empty()) {
-        RoughIOBlock* outPtr = outputDataPool.get();
+    while(!outputDataPool->empty()) {
+        RoughIOBlock* outPtr = outputDataPool->get();
         MemoryUtil::safeDeleteClass(outPtr);
     }
 }
@@ -93,29 +100,29 @@ int32_t PbgzEngine::init() {
     coder_ns::initFcCoder();
 
     // Create queues
-    freeInputPool.setCapility(parameter.threadNum);
-    inputDataPool.setCapility(parameter.threadNum);
-    freeOutputPool.setCapility(parameter.threadNum << 1);
-    outputDataPool.setCapility(parameter.threadNum << 1);
+    freeInputPool->setCapility(parameter.threadNum);
+    inputDataPool->setCapility(parameter.threadNum);
+    freeOutputPool->setCapility(parameter.threadNum << 1);
+    outputDataPool->setCapility(parameter.threadNum << 1);
 
     uint32_t blockBufferSize = ConfigManager::getInstance().getBlockSizeByCompressLevel(parameter.compressLevel);
     // First push empty blocks to free queue
-    for (uint32_t i = 0; i < freeInputPool.getCapility(); ++i) {
+    for (uint32_t i = 0; i < freeInputPool->getCapility(); ++i) {
         RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
         if (inPtr == nullptr) {
             LOG_ERROR("PbgzEngine init failed.");
             return -1;
         }
-        freeInputPool.push(inPtr);
+        freeInputPool->push(inPtr);
     }
 
-    for (uint32_t j = 0; j < freeOutputPool.getCapility(); ++j) {
+    for (uint32_t j = 0; j < freeOutputPool->getCapility(); ++j) {
         RoughIOBlock* outPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
         if (outPtr == nullptr) {
             LOG_ERROR("PbgzEngine init failed.");
             return -1;
         }
-        freeOutputPool.push(outPtr);
+        freeOutputPool->push(outPtr);
     }
 
     if (parameter.inputFile == STDIN) {
@@ -212,14 +219,14 @@ int32_t PbgzEngine::start() {
 
         // Termination symbol for encoding
         for (uint32_t i = 0; i < parameter.threadNum; ++i) {
-            inputDataPool.push(nullptr);
+            inputDataPool->push(nullptr);
         }
         // Output termination symbol
-        outputDataPool.push(nullptr);
+        outputDataPool->push(nullptr);
         return ret;
     }
 
-    for (auto& th : codecThreads) {
+    for (auto& th : workThreads) {
         if (th.joinable()) {
             th.join();
         }
@@ -232,7 +239,7 @@ int32_t PbgzEngine::start() {
     }
 
     // Write end marker
-    outputDataPool.push(nullptr);
+    outputDataPool->push(nullptr);
     writeThread.join();
     
     printTailInfo(costTimer);
@@ -241,7 +248,7 @@ int32_t PbgzEngine::start() {
 }
 
 int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
-    RoughIOBlock* blockPtr = freeInputPool.get();
+    RoughIOBlock* blockPtr = freeInputPool->get();
     if (blockPtr == nullptr) {
         LOG_ERROR("Get free block failed.");
         return -1;
@@ -250,7 +257,7 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
 
     int64_t ret = blockReader->readBlock(blockPtr, fileType);
     if (ret <= 0) {
-        freeInputPool.push(blockPtr);
+        freeInputPool->push(blockPtr);
         return ret;
     }
     
@@ -259,7 +266,11 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     }
 
     updateInputStatics(blockPtr);
-    inputDataPool.push(blockPtr);
+    inputDataPool->push(blockPtr);
+    if (ret > 0) {
+        blockCount++;
+    }
+
     return ret;
 }
 
@@ -281,7 +292,7 @@ int32_t PbgzEngine::startReadTask() {
     }
     readBlocks(blockReader);
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
-        inputDataPool.push(nullptr);
+        inputDataPool->push(nullptr);
     }
     releaseBlockReader(blockReader);
     return 0;
@@ -297,7 +308,7 @@ int32_t PbgzEngine::startWriteTask() {
         }
 
         while (true) {
-            RoughIOBlock* outBlockPtr = outputDataPool.get();
+            RoughIOBlock* outBlockPtr = outputDataPool->get();
             if (outBlockPtr == nullptr) {     // Got end marker
                 while (!outputSortedCache.empty()) {
                     RoughIOBlock* outBlockTmp = outputSortedCache.front();
@@ -335,7 +346,7 @@ void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockP
     blockWriter->writeBlock(outblockPtr);
     blockId2Write++;
     updateOutputStatics(outblockPtr);
-    freeOutputPool.push(outblockPtr);
+    freeOutputPool->push(outblockPtr);
     outputSortedCache.pop_front();
     return;
 }
@@ -351,17 +362,17 @@ int32_t PbgzEngine::startWorkTask() {
         LOG_INFO("Coder task (%d) begin to running!", id);
 
         while (true) {
-            RoughIOBlock* inBlockPtr = inputDataPool.get();
+            RoughIOBlock* inBlockPtr = inputDataPool->get();
             if (inBlockPtr == nullptr) {  // Got null pointer, indicating end marker
                 if (isNeedNotify(true)) {
                     conditionVar.notify_all();
                 }
                 break;
             }
-            RoughIOBlock* outBlockPtr = freeOutputPool.get();
+            RoughIOBlock* outBlockPtr = freeOutputPool->get();
             if (outBlockPtr == nullptr) {
                 LOG_ERROR("Get free output block failed.");
-                freeInputPool.push(inBlockPtr);
+                freeInputPool->push(inBlockPtr);
                 break;
             }
             outBlockPtr->reset();
@@ -371,8 +382,8 @@ int32_t PbgzEngine::startWorkTask() {
             Actuator* pActuator = createActuator(inBlockPtr, outBlockPtr);
             if (pActuator == nullptr) {
                 LOG_ERROR("Create actuator failed.");
-                freeInputPool.push(inBlockPtr);
-                freeOutputPool.push(outBlockPtr);
+                freeInputPool->push(inBlockPtr);
+                freeOutputPool->push(outBlockPtr);
                 break;
             }
 
@@ -380,11 +391,11 @@ int32_t PbgzEngine::startWorkTask() {
             if (ret != 0) {
                 LOG_ERROR("Coder task failed for block(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
-                freeInputPool.push(inBlockPtr);
+                freeInputPool->push(inBlockPtr);
                 outBlockPtr->reset();
                 outBlockPtr->setBlockId(inBlockPtr->getBlockId());
                 // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
-                outputDataPool.push(outBlockPtr);
+                outputDataPool->push(outBlockPtr);
                 MemoryUtil::safeDeleteClass(pActuator);
                 continue;
             }
@@ -393,12 +404,12 @@ int32_t PbgzEngine::startWorkTask() {
             }
     
             MemoryUtil::safeDeleteClass(pActuator);
-            freeInputPool.push(inBlockPtr);
-            outputDataPool.push(outBlockPtr);
+            freeInputPool->push(inBlockPtr);
+            outputDataPool->push(outBlockPtr);
         }
     };
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
-        codecThreads.emplace_back(std::thread(coderTask, i));
+        workThreads.emplace_back(std::thread(coderTask, i));
     }
     return 0;
 }

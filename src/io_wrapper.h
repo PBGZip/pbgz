@@ -40,6 +40,9 @@ enum class IOWhence {
 
 class IOReader {
 public:
+    IOReader() {
+        eofFlag = false;
+    }
     virtual int32_t openIO() = 0;
 
     virtual void closeIO() = 0;
@@ -49,6 +52,11 @@ public:
     virtual ~IOReader() {};
 
     virtual size_t readLine(std::string& line) = 0;
+
+    virtual bool isEOF() { return eofFlag; } 
+
+protected:
+    bool eofFlag;
 };
 
 class IOWriter {
@@ -146,9 +154,13 @@ public:
     }
 
     int32_t seekIO(size_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
-        return fo.seekIO( seekOffset, whence);
+        return fo.seekIO(seekOffset, whence);
     }
 
+    int32_t seekToEnd() {
+        return fo.seekIO(fo.fileSize, IOWhence::IO_WHENCE_SET);
+    }
+ 
     int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen);
 
     void flushIO() {
