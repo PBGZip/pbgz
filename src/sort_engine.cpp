@@ -35,6 +35,10 @@ SortEngine::~SortEngine() {
 
 }
 
+uint32_t SortEngine::getBlockSize() {
+    return 256 << 20; /// 512M 
+}
+
 void SortEngine::printHeadInfo() {
     PbgzManager::getInstance().printHeadInfo(parameter);
 }

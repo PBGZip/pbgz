@@ -51,6 +51,8 @@ protected:
 
     virtual void printTailInfo(Timer&) { }
 
+    virtual uint32_t getBlockSize();
+
     virtual int32_t startEnginePreProc() { return 0; }
 
     virtual int32_t startWriteTask();

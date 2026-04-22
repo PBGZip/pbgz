@@ -90,6 +90,10 @@ PbgzEngine::~PbgzEngine() {
     }
 }
 
+uint32_t PbgzEngine::getBlockSize() {
+    return ConfigManager::getInstance().getBlockSizeByCompressLevel(parameter.compressLevel);
+}
+
 int32_t PbgzEngine::init() {
     // Register allocation functions required by coder
     coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
@@ -105,7 +109,7 @@ int32_t PbgzEngine::init() {
     freeOutputPool->setCapility(parameter.threadNum << 1);
     outputDataPool->setCapility(parameter.threadNum << 1);
 
-    uint32_t blockBufferSize = ConfigManager::getInstance().getBlockSizeByCompressLevel(parameter.compressLevel);
+    uint32_t blockBufferSize = getBlockSize();
     // First push empty blocks to free queue
     for (uint32_t i = 0; i < freeInputPool->getCapility(); ++i) {
         RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
