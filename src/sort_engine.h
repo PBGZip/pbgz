@@ -60,4 +60,6 @@ protected:
         PbgzManager::getInstance().updateWriteDataLen(outBlockPtr);
     }
 
+    virtual uint32_t getBlockSize() override;
+
 };
