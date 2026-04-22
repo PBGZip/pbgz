@@ -98,6 +98,5 @@ protected:
     PbgzFileMeta baseFileMeta;
     PbgzFileMeta dynamicFileMeta;
     bool refeOffsetFLag;
-    uint32_t blockCount;
     PbgzIndex pbgzIndex;
 };

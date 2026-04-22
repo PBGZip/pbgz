@@ -60,6 +60,10 @@ int FileOperator::openIO() {
 }
 
 int32_t FileOperator::mmapFile(size_t mapFileSize) {
+    if (mapFileSize == 0) {
+        return 0;
+    }
+    
     mappedAddress = static_cast<uint8_t*>(mmap(nullptr, mapFileSize, mapMode, MAP_SHARED, fd, 0));
     if (mappedAddress == MAP_FAILED) {
         LOG_ERROR("file mmaped failed.file name = %s, errno = %d", fileName.c_str(), errno);
@@ -143,6 +147,9 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
     memcpy(pBuffer, fo.mappedAddress + fo.position, realRead);
     
     fo.position += realRead;
+    if (fo.position >= fo.fileSize) {
+        eofFlag = true;
+    }
     return realRead;
 }
 
@@ -154,6 +161,7 @@ size_t FileReader::readLine(std::string& line) {
     line.clear();
     
     if (fo.mappedAddress == nullptr || fo.position >= fo.fileSize) {
+        eofFlag = true;
         return 0;
     }
     
@@ -312,6 +320,7 @@ size_t PipeReader::readIO(void* pBuffer, size_t readSize) {
                 return -1; // Other errors
             }
         } else if (bytesRead == 0) {
+            eofFlag = true;
             break; // EOF, write end closed
         }
         
@@ -338,8 +347,17 @@ size_t PipeReader::readLine(std::string& line) {
         // If buffer data has been processed, read new data
         if (bufferPos >= static_cast<size_t>(bytesRead)) {
             bytesRead = read(STDIN_FILENO, lineBuffer, bufferSize);
-            if (bytesRead <= 0) {
+            if (bytesRead < 0) {
+                if (errno == EINTR) {
+                continue; // Interrupted by signal, retry
+                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break; // No data available in non-blocking mode
+                } else {
+                    return -1; // Other errors
+                }
+            } else if (bytesRead == 0) {
                 // EOF or error, return number of characters read
+                eofFlag = true;
                 return totalRead;
             }
             bufferPos = 0;
@@ -402,6 +420,9 @@ size_t GzFileReader::readIO(void* pBuffer, size_t readSize) {
     ssize_t readLen = bgzf_read(fpGz, pBuffer, readSize);
     if (readLen < 0) {
         LOG_ERROR("Read file from %s failed", gzFileName.c_str());
+        return -1;
+    } else if (readLen == 0) {
+        eofFlag = true;
         return 0;
     }
 
@@ -444,6 +465,9 @@ size_t GzFileReader::readLine(std::string& line) {
             bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
             if (bytesRead <= 0) {
                 // EOF or error, return number of characters read
+                if (bytesRead == 0) {
+                    eofFlag = true;
+                }
                 return totalRead;
             }
             bufferPos = 0;
@@ -733,9 +757,15 @@ int GzPipeReader::openIO() {
 }
 
 size_t GzPipeReader::readIO(void* pBuffer, size_t readSize) {
+    if (readSize == 0 || pBuffer == nullptr) {
+        return 0;
+    }
     ssize_t readLen = bgzf_read(fpGz, pBuffer, readSize);
     if (readLen < 0) {
         LOG_ERROR("Read file from pipe failed");
+        return -1;
+    } else if (readLen == 0) {
+        eofFlag = true;
         return 0;
     }
 
@@ -778,6 +808,9 @@ size_t GzPipeReader::readLine(std::string& line) {
             bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
             if (bytesRead <= 0) {
                 // EOF or error, return number of characters read
+                if (bytesRead == 0) {
+                    eofFlag = true;
+                }
                 return totalRead;
             }
             bufferPos = 0;
@@ -1012,6 +1045,7 @@ size_t FastGzPipeReader::readLine(std::string& line) {
             bytesRead = readIO(buffer, BUFFER_SIZE);
             if (bytesRead == 0) {
                 // EOF, return number of characters read
+                eofFlag = true;
                 return totalRead;
             }
             bufferPos = 0;

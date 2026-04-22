@@ -25,16 +25,20 @@
 
 #include "pbgz_engine.h"
 #include "utils/timer.h"
+#include "pbgz_manager.h"
 
 class SortEngine : public PbgzEngine {
 
 public:
-    using PbgzEngine::PbgzEngine;
+    SortEngine(const PbgzParameter& para) : PbgzEngine(para) { 
+    }
 
     virtual ~SortEngine();
 
 protected:
     virtual void printHeadInfo() override;
+
+    virtual void printTailInfo(Timer& costTimer) override;
 
     virtual BlockReader* createBlockReader() override;
 
@@ -45,4 +49,15 @@ protected:
     virtual void releaseBlockWriter(BlockWriter* &blockWriter) override;
 
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
+
+    virtual int32_t startEnginePostProc() override;
+
+    virtual void updateInputStatics(RoughIOBlock* inBlockPtr) { 
+        PbgzManager::getInstance().updateReadDataLen(inBlockPtr);
+    }
+
+    virtual void updateOutputStatics(RoughIOBlock* outBlockPtr) {
+        PbgzManager::getInstance().updateWriteDataLen(outBlockPtr);
+    }
+
 };

@@ -33,28 +33,28 @@ int32_t CompressEngine::init() {
         return -1;
     }
 
-    indexBlockQueue.setCapility(2);
-    freeIndexBlockQueue.setCapility(2);
-    for (uint32_t i = 0; i < freeIndexBlockQueue.getCapility(); ++i) {
+    indexBlockQueue->setCapility(2);
+    freeIndexBlockQueue->setCapility(2);
+    for (uint32_t i = 0; i < freeIndexBlockQueue->getCapility(); ++i) {
         RoughIOBlock* ptr = MemoryUtil::safeNewClass<RoughIOBlock>();
         if (ptr == nullptr) {
             LOG_ERROR("Failed to create RoughIOBlock for freeIndexBlockQueue");
             return -1;
         }
-        freeIndexBlockQueue.push(ptr);
+        freeIndexBlockQueue->push(ptr);
     }
     
     return 0;
 }
 
 CompressEngine::~CompressEngine() {
-    while(!freeIndexBlockQueue.empty()) {
-        RoughIOBlock* ptr = freeIndexBlockQueue.get();
+    while(!freeIndexBlockQueue->empty()) {
+        RoughIOBlock* ptr = freeIndexBlockQueue->get();
         MemoryUtil::safeDeleteClass(ptr);
     }
 
-    while(!indexBlockQueue.empty()) {
-        RoughIOBlock* ptr = indexBlockQueue.get();
+    while(!indexBlockQueue->empty()) {
+        RoughIOBlock* ptr = indexBlockQueue->get();
         MemoryUtil::safeDeleteClass(ptr);
     }
 }
@@ -169,8 +169,8 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
     Reference* refe = pRefGene;
     int64_t current;
     std::mutex m;
-    BlockingQueue<RoughIOBlock*>& freeOutput = freeOutputPool;
-    BlockingQueue<RoughIOBlock*>& outputPool = outputDataPool;
+    BlockingQueueType* freeOutput = freeOutputPool.get();
+    BlockingQueueType* outputPool = outputDataPool.get();
     uint32_t count = blockCount;
 
     // Start threads
@@ -204,7 +204,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 cmeta.encoder(meta, metaString); /*  Compress block meta */
             
                 /* Write compressed stream of current block's meta */
-                RoughIOBlock* outBlock = freeOutput.get();
+                RoughIOBlock* outBlock = freeOutput->get();
                 outBlock->reset();
                  int64_t currBlockLen = metaString.length() + refeIo.data_len;
                 if (currBlockLen >= outBlock->getRemain()) {
@@ -217,7 +217,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 outBlock->setMetaLen(metaString.length());
                 outBlock->setBlockType(REFERENCE);
                 outBlock->setBlockId(count + refe2do.first.first);
-                outputPool.push(outBlock);
+                outputPool->push(outBlock);
 
                 m.lock();
                 maxBlockLen = (currBlockLen > maxBlockLen) ? currBlockLen : maxBlockLen;
@@ -337,11 +337,11 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     
     if (pActuator == nullptr) {
         LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
-        freeInputPool.push(inBlockPtr);
+        freeInputPool->push(inBlockPtr);
         outBlockPtr->reset();
         outBlockPtr->setBlockId(inBlockPtr->getBlockId());
         // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
-        outputDataPool.push(outBlockPtr);
+        outputDataPool->push(outBlockPtr);
         return nullptr;
     }
 

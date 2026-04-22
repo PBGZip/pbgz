@@ -36,11 +36,11 @@ BlockWriter* IndexEngine::createBlockWriter() {
 }
 
 void IndexEngine::releaseBlockReader(BlockReader* &blockReader) {
-    
+    MemoryUtil::safeDeleteClass(blockReader);
 }
 
 void IndexEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
-
+    MemoryUtil::safeDeleteClass(blockWriter);
 }
 
 Actuator* IndexEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {

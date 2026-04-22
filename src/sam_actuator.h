@@ -148,9 +148,6 @@ private:
     
     int32_t compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    // Parse chromosome information from @SQ line
-    int32_t parseChromosomeInfo(const std::string& sqLine);
-
     int32_t decompressHeader();
 
     int32_t initDecoder(RoughIOBlock* outputBlock);

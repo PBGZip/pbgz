@@ -183,7 +183,7 @@ int32_t SamCodecActuator::preAnalysis() {
                 continue;
             } else if (line.substr(0, 3) == "@SQ") {
                 // Parse chromosome information from @SQ line
-                if (parseChromosomeInfo(line) != 0) {
+                if (SamUtil::parseChromosomeInfo(line) != 0) {
                     LOG_ERROR("Failed to parse chromosome info from line: %s", line.c_str());
                     return -1;
                 }
@@ -429,51 +429,6 @@ int32_t SamCodecActuator::compressSamHeader() {
     LOG_DEBUG("SAM header compression completed: %u lines, %u bytes -> %u bytes, compress ratio = %.2f%%", 
              headEndLine, headerSrcLen, headerDstLen, (double)(headerDstLen* 100)/(double)headerSrcLen);
     
-    return 0;
-}
-
-int32_t SamCodecActuator::parseChromosomeInfo(const std::string& sqLine) {
-    // Parse @SQ line, format: @SQ SN:chr_name LN:length [other optional fields]
-    std::string chrName;
-    uint32_t chrLength = 0;
-    
-    // Parse SN field (chromosome name)
-    size_t snPos = sqLine.find("SN:");
-    if (snPos != std::string::npos) {
-        snPos += 3;
-        size_t snEnd = sqLine.find("\t", snPos);
-        if (snEnd == std::string::npos) {
-            snEnd = sqLine.length();
-        }
-        chrName = sqLine.substr(snPos, snEnd - snPos);
-    } else {
-        LOG_ERROR("Cannot find SN field in @SQ line: %s", sqLine.c_str());
-        return -1;
-    }
-    
-    // Parse LN field (chromosome length)
-    size_t lnPos = sqLine.find("LN:");
-    if (lnPos != std::string::npos) {
-        lnPos += 3;
-        size_t lnEnd = sqLine.find("\t", lnPos);
-        if (lnEnd == std::string::npos) {
-            lnEnd = sqLine.length();
-        }
-        std::string lengthStr = sqLine.substr(lnPos, lnEnd - lnPos);
-        try {
-            chrLength = std::stoul(lengthStr);
-        } catch (const std::exception& e) {
-            LOG_ERROR("Invalid chromosome length in @SQ line: %s", sqLine.c_str());
-            return -1;
-        }
-    } else {
-        LOG_ERROR("Cannot find LN field in @SQ line: %s", sqLine.c_str());
-        return -1;
-    }
-    
-    // Add chromosome information to SamInfo (automatically gets ID internally)
-    SamInfo::getInstance().addChromosomeInfo(chrName, chrLength);
-    LOG_INFO("Parsed chromosome info: Name=%s, Length=%u", chrName.c_str(), chrLength);
     return 0;
 }
 
@@ -1463,7 +1418,7 @@ int32_t SamCodecActuator::decompressHeader() {
         }
         std::string headStr = std::string((char*)outBlockPtr->getCurrent(), decodedLen);
         if (headStr.substr(0, 3) == "@SQ") {
-            parseChromosomeInfo(headStr);
+            SamUtil::parseChromosomeInfo(headStr);
         }
 
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + decodedLen);

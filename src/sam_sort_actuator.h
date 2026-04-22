@@ -27,16 +27,46 @@
 #include <string>
 #include "actuator.h"
 
+class SamSortItem {
+public:
+    int64_t referencePos;
+    uint32_t lineId;
+
+    SamSortItem() {
+        referencePos = -1;
+        lineId = 0;
+    }
+
+    bool operator<(const SamSortItem& item) const {
+        return referencePos < item.referencePos;
+    }
+};
+
+std::string getSortedHeadFileName();
+
+std::string getSortedSamFileName(uint32_t blockId);
+
+
 class SAMSortActuator : public Actuator {
 public:
     SAMSortActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr) : Actuator(inPtr, outPtr) {
-        
+        headLineNum = 0;
+        notifyFlag = false;
     }
 
     virtual ~SAMSortActuator();
+
+    virtual int32_t initial() override;
     
-    int32_t process();
+    virtual int32_t process() override;
+
+    virtual bool getNotifyFlag() {
+        return notifyFlag;
+    } 
 
 private:
-  
+    uint32_t headLineNum;
+    std::vector<SamSortItem> mappedSamItem;
+    std::vector<SamSortItem> unmappedSamItem;
+    bool notifyFlag;
 };

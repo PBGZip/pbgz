@@ -22,6 +22,7 @@
  */
 
 #include "sam_info.h"
+#include "log/logger.h"
 
 void SamInfo::addChrNameIndex(const std::string& chrName) {
     std::lock_guard<std::mutex> lock(chrNameMutex);
@@ -128,3 +129,48 @@ int64_t SamInfo::getPositionByIndex(uint32_t index) {
     return chromosomeInfoList[index].position;
 }
 
+
+int32_t SamUtil::parseChromosomeInfo(const std::string& sqLine) {
+    // Parse @SQ line, format: @SQ SN:chr_name LN:length [other optional fields]
+    std::string chrName;
+    uint32_t chrLength = 0;
+    
+    // Parse SN field (chromosome name)
+    size_t snPos = sqLine.find("SN:");
+    if (snPos != std::string::npos) {
+        snPos += 3;
+        size_t snEnd = sqLine.find("\t", snPos);
+        if (snEnd == std::string::npos) {
+            snEnd = sqLine.length();
+        }
+        chrName = sqLine.substr(snPos, snEnd - snPos);
+    } else {
+        LOG_ERROR("Cannot find SN field in @SQ line: %s", sqLine.c_str());
+        return -1;
+    }
+    
+    // Parse LN field (chromosome length)
+    size_t lnPos = sqLine.find("LN:");
+    if (lnPos != std::string::npos) {
+        lnPos += 3;
+        size_t lnEnd = sqLine.find("\t", lnPos);
+        if (lnEnd == std::string::npos) {
+            lnEnd = sqLine.length();
+        }
+        std::string lengthStr = sqLine.substr(lnPos, lnEnd - lnPos);
+        try {
+            chrLength = std::stoul(lengthStr);
+        } catch (const std::exception& e) {
+            LOG_ERROR("Invalid chromosome length in @SQ line: %s", sqLine.c_str());
+            return -1;
+        }
+    } else {
+        LOG_ERROR("Cannot find LN field in @SQ line: %s", sqLine.c_str());
+        return -1;
+    }
+    
+    // Add chromosome information to SamInfo (automatically gets ID internally)
+    SamInfo::getInstance().addChromosomeInfo(chrName, chrLength);
+    LOG_INFO("Parsed chromosome info: Name=%s, Length=%u", chrName.c_str(), chrLength);
+    return 0;
+}
