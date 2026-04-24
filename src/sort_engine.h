@@ -27,10 +27,61 @@
 #include "utils/timer.h"
 #include "pbgz_manager.h"
 
-class SortEngine : public PbgzEngine {
 
+class SamCombineOutputWriter {
 public:
-    SortEngine(const PbgzParameter& para) : PbgzEngine(para) { 
+    virtual int32_t writerSam(int64_t samSortPos, std::string& samFileLine) = 0;
+
+    virtual void flush() { return; }
+
+    virtual void close() { return; }
+};
+
+class SamCombineOutputFileWriter : public SamCombineOutputWriter {
+public:
+    SamCombineOutputFileWriter(std::string& outputFile) : fileWriter(outputFile) {
+        fileWriter.openIO();
+    }
+
+    virtual ~SamCombineOutputFileWriter() {
+        fileWriter.closeIO();
+    }
+
+    virtual int32_t writerSam(int64_t samSortPos, std::string& samFileLine) override;
+
+    virtual void close() { fileWriter.closeIO(); }
+
+private:
+    FileWriter fileWriter;
+};
+
+class SamCombineOutputBlockWriter : public SamCombineOutputWriter {
+public:
+    SamCombineOutputBlockWriter(BlockingQueueType* freeOutputPool, BlockingQueueType* outputDataPool) 
+      : freePool(freeOutputPool), outputPool(outputDataPool) {
+        writeBlockId = 0;
+    }
+
+    int32_t initial(uint32_t beginBlockId);
+
+    virtual ~SamCombineOutputBlockWriter() {
+    }
+
+    virtual void flush() override;
+
+    virtual int32_t writerSam(int64_t, std::string& samFileLine) override;
+
+private:
+    RoughIOBlock* outBlock;
+    uint32_t writeBlockId;
+    BlockingQueueType* freePool;
+    BlockingQueueType* outputPool;
+};
+
+class SortEngine : public PbgzEngine {
+public:
+   
+    SortEngine(const PbgzParameter& para) : PbgzEngine(para) {
     }
 
     virtual ~SortEngine();
@@ -61,5 +112,9 @@ protected:
     }
 
     virtual uint32_t getBlockSize() override;
+
+    int32_t combineAllSamFile(uint16_t inputLevel, uint32_t fileNumber, std::vector<std::string>& outputFiles);
+
+    int32_t combineSamFile(std::vector<std::string> fileList, SamCombineOutputWriter* outputWriter);
 
 };

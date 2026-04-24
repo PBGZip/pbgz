@@ -8,11 +8,11 @@
 
 
 struct SortedSamItem {
-    uint32_t blockId;
+    uint32_t fileIndex;
     std::string samLine;
 
     SortedSamItem() {
-        blockId = 0;
+        fileIndex = 0;
     }
 
     int64_t parseData(std::string& readLine) {

@@ -32,6 +32,62 @@
 #include "sam_sort.h"
 #include "config_manager.h"
 
+int32_t SamCombineOutputFileWriter::writerSam(int64_t samSortPos, std::string& samFileLine) {
+    fileWriter.seekToEnd();
+    std::string writeBuff = std::to_string(samSortPos) + ":";
+    fileWriter.writeIO(writeBuff.c_str(), writeBuff.length());
+    fileWriter.writeIO(samFileLine.c_str(), samFileLine.length());
+    fileWriter.writeIO("\n", 1);
+    return 0;
+}
+
+int32_t SamCombineOutputBlockWriter::writerSam(int64_t, std::string& samFileLine) {
+    if (samFileLine.length() == 0) {
+        return 0;
+    }
+    if (outBlock->getDataLen() + samFileLine.length() + 1 > outBlock->getBlockSize()) {
+        outputPool->push(outBlock);
+        outBlock = freePool->get();
+        outBlock->reset();
+        outBlock->setBlockId(writeBlockId++);
+    }
+    memcpy(outBlock->getCurrent(), samFileLine.c_str(), samFileLine.length());
+    outBlock->setDataLen(outBlock->getDataLen() + samFileLine.length());
+    *outBlock->getCurrent() = '\n';
+    outBlock->setDataLen(outBlock->getDataLen() + 1);
+    return 0;
+}
+
+int32_t SamCombineOutputBlockWriter::initial(uint32_t beginBlockId) {
+    writeBlockId = beginBlockId;
+    if (freePool == nullptr) {
+        LOG_ERROR("freePool is null");
+        return -1;
+    }
+    outBlock = freePool->get();
+    outBlock->reset();
+    outBlock->setBlockId(writeBlockId++);
+    return 0;
+}
+
+void SamCombineOutputBlockWriter::flush() {
+    if (outBlock == nullptr) {
+        LOG_ERROR("outBlock is null");
+        return;
+    }
+    if (freePool == nullptr) {
+        LOG_ERROR("freePool is null");
+        return;
+    }
+    if (outBlock->getDataLen() > 0) {
+        outputPool->push(outBlock);
+        outBlock = freePool->get();
+        outBlock->reset();
+        outBlock->setBlockId(writeBlockId++);
+    }
+    return;
+}
+
 SortEngine::~SortEngine() {
 
 }
@@ -100,63 +156,114 @@ Actuator* SortEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* out
     return sortActutor;
 }
 
-
 int32_t SortEngine::startEnginePostProc() {
+    std::vector<std::string> outputFiles;
+    combineAllSamFile(0, blockCount, outputFiles);
+
     /// 将生成的排序好的文件进行归并
     /// 先将头部写入文件
     uint32_t writeBlockId = blockCount;
     std::string headFileName = getSortedHeadFileName();
-    RoughIOBlock* outBlock = freeOutputPool->get();
-    outBlock->reset();
-    outBlock->setBlockId(writeBlockId++);
+    SamCombineOutputBlockWriter blockWriter (freeOutputPool.get(), outputDataPool.get());
+    blockWriter.initial(writeBlockId);
     if (PathUtil::fileExists(headFileName)) {
         FileReader headReader(headFileName);
         headReader.openIO();
         std::string readLine;
-        
         while (size_t readed = headReader.readLine(readLine)) {
             if (readed == 0) {
                 break;
             }
-            if (outBlock->getDataLen() + readed + 1 > outBlock->getBlockSize()) {
-                outputDataPool->push(outBlock);
-                outBlock = freeOutputPool->get();
-                outBlock->reset();
-                outBlock->setBlockId(writeBlockId++);
-            }
-            memcpy(outBlock->getCurrent(), readLine.c_str(), readed);
-            outBlock->setDataLen(outBlock->getDataLen() + readed);
-            *outBlock->getCurrent() = '\n';
-            outBlock->setDataLen(outBlock->getDataLen() + 1);
+            blockWriter.writerSam(-1, readLine);
         }
-
-        if (outBlock->getDataLen() > 0) {
-            outputDataPool->push(outBlock);
-            outBlock = freeOutputPool->get();
-            outBlock->reset();
-            outBlock->setBlockId(writeBlockId++);
-        }
+        blockWriter.flush();
         headReader.closeIO();
         PathUtil::removeFile(headFileName);
     }
 
     LOG_DEBUG("Block count: %d", blockCount);
 
+    int32_t ret = combineSamFile(outputFiles, &blockWriter);
+    if (0 != ret ) {
+        LOG_ERROR("Combine sam file failed.");
+    }
+    for (std::string& outfile : outputFiles) {
+        PathUtil::removeFile(outfile);
+    }
+
+    return ret;
+}
+
+int32_t SortEngine::combineAllSamFile(uint16_t inputLevel, uint32_t fileNumber, std::vector<std::string>& outputFiles) {
+    if (fileNumber <= 128) {
+        for (uint32_t fileIdx = 0; fileIdx < fileNumber; ++fileIdx) {
+            outputFiles.push_back(getSortedSamFileName(inputLevel, fileIdx));
+        }
+        return 0;
+    }
+
+    std::vector<std::string> inputiles;
+    std::vector<std::string> outFiles;
+    uint16_t outFileIdx = 0;
+    for (uint32_t fileIdx = 0; fileIdx < fileNumber; ++fileIdx) {
+        inputiles.push_back(getSortedSamFileName(inputLevel, fileIdx));
+        if ((inputiles.size()) % 128 == 0) {
+            std::string outputFile = getSortedSamFileName(inputLevel + 1, outFileIdx++);
+            SamCombineOutputFileWriter fileWriter(outputFile);
+            combineSamFile(inputiles, &fileWriter);
+            fileWriter.close();
+            outFiles.push_back(outputFile);
+            for (std::string fileName : inputiles) {
+                std::remove(fileName.c_str());
+            }
+            inputiles.clear();
+        }
+    }
+
+    if (!inputiles.empty()) {
+        std::string outputFile = getSortedSamFileName(inputLevel + 1, outFileIdx++);
+        SamCombineOutputFileWriter fileWriter(outputFile);
+        combineSamFile(inputiles, &fileWriter);
+        fileWriter.close();
+        outFiles.push_back(outputFile);
+        for (std::string fileName : inputiles) {
+            std::remove(fileName.c_str());
+        }
+        inputiles.clear();
+    }
+
+    if (outFiles.size() < 128) {
+        outputFiles.insert(outputFiles.end(), outFiles.begin(), outFiles.end());
+    } else {
+       return combineAllSamFile(inputLevel + 1, outFiles.size(), outputFiles);
+    }
+    
+    return 0;
+}
+
+int32_t SortEngine::combineSamFile(std::vector<std::string> fileList, SamCombineOutputWriter* outputWriter) {
+    if (outputWriter == nullptr) {
+        return -1;
+    }
+    if (fileList.empty()) {
+        return 0;
+    }
+
+    uint32_t combineFileSize = fileList.size();
     std::map<uint32_t, FileReader*> sortedFileReader;
-    for (uint32_t fileIdx = 0; fileIdx < blockCount; ++fileIdx) {
-        std::string fileName = getSortedSamFileName(fileIdx);
-        sortedFileReader[fileIdx] = MemoryUtil::safeNewClass<FileReader>(fileName);
+    for (uint32_t fileIdx =0; fileIdx < combineFileSize; ++fileIdx) {
+        sortedFileReader[fileIdx] = MemoryUtil::safeNewClass<FileReader>(fileList[fileIdx]);
         sortedFileReader[fileIdx]->openIO();
-        LOG_DEBUG("Open file : %s", fileName.c_str());
+        LOG_DEBUG("Open file : %s", fileList[fileIdx].c_str());
     }
 
     SamFileSort<SortedSamItem> samSorter;
     std::map<uint32_t, SortedSamItem> fisrtUnMapSamLines;
     std::map<uint32_t, std::pair<int64_t, SortedSamItem>> samLineCache;
     uint32_t index = 0;
-    for (uint32_t fileIdx = 0; fileIdx < blockCount; ++fileIdx) {
+    for (uint32_t fileIdx = 0; fileIdx < combineFileSize; ++fileIdx) {
         SortedSamItem oneItem;
-        oneItem.blockId = fileIdx;
+        oneItem.fileIndex = fileIdx;
         std::string readLine;
         int64_t lastSortPos = -1;
         while (true) {
@@ -197,18 +304,8 @@ int32_t SortEngine::startEnginePostProc() {
             }
             lastSortPos = samSorter.topSortPos();
             SortedSamItem& fisrtItem = samSorter.top();
-            if (outBlock->getDataLen() + fisrtItem.samLine.length() > outBlock->getBlockSize()) {
-                outputDataPool->push(outBlock);
-                outBlock = freeOutputPool->get();
-                outBlock->reset();
-                outBlock->setBlockId(writeBlockId++);
-            }
-
-            memcpy(outBlock->getCurrent(), fisrtItem.samLine.c_str(), fisrtItem.samLine.length());
-            outBlock->setDataLen(outBlock->getDataLen() + fisrtItem.samLine.length());
-            *outBlock->getCurrent() = '\n';
-            outBlock->setDataLen(outBlock->getDataLen() + 1);
-            fileIdxSet.insert(fisrtItem.blockId);
+            outputWriter->writerSam(lastSortPos, fisrtItem.samLine);
+            fileIdxSet.insert(fisrtItem.fileIndex);
             samSorter.pop();
         }
 
@@ -231,7 +328,7 @@ int32_t SortEngine::startEnginePostProc() {
                     if (readedLine == 0) {
                         break;
                     }
-                    nextItem.blockId = nextFileIdx;
+                    nextItem.fileIndex = nextFileIdx;
                     nextRefPos = nextItem.parseData(nextLine);
                 }
                 if (nextRefPos >= 0) {
@@ -255,21 +352,13 @@ int32_t SortEngine::startEnginePostProc() {
         fileIdxSet.clear();
     }
 
-    if (outBlock->getDataLen() > 0) {
-        outputDataPool->push(outBlock);
-        outBlock = freeOutputPool->get();
-        outBlock->reset();
-        outBlock->setBlockId(writeBlockId++);
-    }
+   outputWriter->flush();
 
     /// 按照blockid顺序，将未匹配的数据写入sam
-    for (uint32_t fileIdx = 0; fileIdx < blockCount; ++fileIdx) {
+    for (uint32_t fileIdx = 0; fileIdx < combineFileSize; ++fileIdx) {
         if (fisrtUnMapSamLines.find(fileIdx) != fisrtUnMapSamLines.end()) {
             SortedSamItem& unmapItem = fisrtUnMapSamLines[fileIdx];
-            memcpy(outBlock->getCurrent(), unmapItem.samLine.c_str(), unmapItem.samLine.length());
-            outBlock->setDataLen(outBlock->getDataLen() + unmapItem.samLine.length());
-            *outBlock->getCurrent() = '\n';
-            outBlock->setDataLen(outBlock->getDataLen() + 1);
+            outputWriter->writerSam(-1, unmapItem.samLine);
         }
 
         std::string line;
@@ -279,33 +368,11 @@ int32_t SortEngine::startEnginePostProc() {
             }
             SortedSamItem item;
             item.parseData(line);
-            if (outBlock->getDataLen() + item.samLine.length() > outBlock->getBlockSize()) {
-                outputDataPool->push(outBlock);
-                outBlock = freeOutputPool->get();
-                outBlock->reset();
-                outBlock->setBlockId(writeBlockId++);
-            }
-
-            memcpy(outBlock->getCurrent(), item.samLine.c_str() , item.samLine.length());
-            outBlock->setDataLen(outBlock->getDataLen() + item.samLine.length());
-            *outBlock->getCurrent() = '\n';
-            outBlock->setDataLen(outBlock->getDataLen() + 1);
+            outputWriter->writerSam(-1, item.samLine);
         }
         sortedFileReader[fileIdx]->closeIO();
     }
-
-    if (outBlock->getDataLen() > 0) {
-        outputDataPool->push(outBlock);
-    }
-
-    for (auto rederItem : sortedFileReader) {
-        MemoryUtil::safeDeleteClass(rederItem.second);
-    }
-
-    for (uint32_t fileIdx = 0; fileIdx < blockCount; ++fileIdx) {
-        PathUtil::removeFile(getSortedSamFileName(fileIdx));
-    }
+    outputWriter->flush();
 
     return 0;
-}
-
+ }
