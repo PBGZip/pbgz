@@ -126,7 +126,7 @@ int32_t SAMSortActuator::process() {
     }
 
     /// 已经排序的写入临时文件
-    std::string sortSamName = getSortedSamFileName(inBlockPtr->getBlockId());
+    std::string sortSamName = getSortedSamFileName(0, inBlockPtr->getBlockId());
     std::remove(sortSamName.c_str());
     FileWriter fileWrite(sortSamName);
     fileWrite.openIO();
@@ -158,8 +158,8 @@ std::string getSortedHeadFileName() {
     return "sorted_head.sam";
 }
 
-std::string getSortedSamFileName(uint32_t blockId) {
+std::string getSortedSamFileName(uint16_t level, uint32_t blockId) {
     std::string fileName = "sorted_sam_";
-    fileName += std::to_string(blockId) + ".sam";
+    fileName += std::to_string(level) +"_" + std::to_string(blockId) + ".sam";
     return fileName;
 }

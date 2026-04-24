@@ -83,9 +83,9 @@ public:
         std::remove(SamSortTestData::testInvalidSamFile.c_str());
         std::remove(SamSortTestData::testMixedSamFile.c_str());
         std::remove("sorted_head.sam");
-        std::remove("sorted_sam_0.sam");
-        std::remove("sorted_sam_1.sam");
-        std::remove("sorted_sam_2.sam");
+        std::remove("sorted_sam_0_0.sam");
+        std::remove("sorted_sam_0_1.sam");
+        std::remove("sorted_sam_0_2.sam");
     }
 
     void loadSamData(const std::string& filename) {
@@ -235,14 +235,14 @@ TEST(SamSortUtilTest, TestGetSortedHeadFileName) {
 }
 
 TEST(SamSortUtilTest, TestGetSortedSamFileName) {
-    std::string filename1 = getSortedSamFileName(0);
-    EXPECT_EQ(filename1, "sorted_sam_0.sam");
+    std::string filename1 = getSortedSamFileName(0, 0);
+    EXPECT_EQ(filename1, "sorted_sam_0_0.sam");
 
-    std::string filename2 = getSortedSamFileName(1);
-    EXPECT_EQ(filename2, "sorted_sam_1.sam");
+    std::string filename2 = getSortedSamFileName(0, 1);
+    EXPECT_EQ(filename2, "sorted_sam_0_1.sam");
 
-    std::string filename3 = getSortedSamFileName(100);
-    EXPECT_EQ(filename3, "sorted_sam_100.sam");
+    std::string filename3 = getSortedSamFileName(2, 100);
+    EXPECT_EQ(filename3, "sorted_sam_2_100.sam");
 }
 
 // Test SAMSortActuator constructor and destructor
@@ -348,7 +348,7 @@ TEST_F(SamSortTest, TestProcessWithSortedItems) {
 
     // Check if files were created
     std::ifstream headFile("sorted_head.sam");
-    std::ifstream samFile("sorted_sam_0.sam");
+    std::ifstream samFile("sorted_sam_0_0.sam");
 
     EXPECT_TRUE(headFile.good());
     EXPECT_TRUE(samFile.good());
@@ -414,7 +414,7 @@ TEST_F(SamSortTest, TestProcessWithMultipleBlockIds) {
     EXPECT_EQ(processResult, 0);
 
     // Check file was created with correct name
-    std::ifstream samFile("sorted_sam_1.sam");
+    std::ifstream samFile("sorted_sam_0_1.sam");
     EXPECT_TRUE(samFile.good());
     if (samFile.is_open()) {
         samFile.close();
@@ -441,7 +441,7 @@ TEST_F(SamSortTest, TestSortingCorrectness) {
     }
 
     // Verify output file contains records in sorted order
-    std::ifstream samFile("sorted_sam_0.sam");
+    std::ifstream samFile("sorted_sam_0_0.sam");
     if (samFile.is_open()) {
         std::string line;
         std::string prevLine;
@@ -644,8 +644,8 @@ TEST_F(SamSortTest, TestSequentialSortOperations) {
     EXPECT_EQ(processResult2, 0);
 
     // Both files should exist
-    std::ifstream file0("sorted_sam_0.sam");
-    std::ifstream file1("sorted_sam_1.sam");
+    std::ifstream file0("sorted_sam_0_0.sam");
+    std::ifstream file1("sorted_sam_0_1.sam");
 
     EXPECT_TRUE(file0.good());
     EXPECT_TRUE(file1.good());
@@ -695,7 +695,7 @@ TEST_F(SamSortTest, TestUnmappedItemsNotProcessed) {
     EXPECT_EQ(processResult, 0);
 
     // Check that sorted SAM file should be empty or minimal since all records are unmapped
-    std::ifstream samFile("sorted_sam_0.sam");
+    std::ifstream samFile("sorted_sam_0_0.sam");
     if (samFile.is_open()) {
         std::string line;
         int contentCount = 0;
@@ -754,7 +754,7 @@ TEST_F(SamSortTest, TestFullWorkflowIntegration) {
 
     // Verify output files exist and have correct content
     std::ifstream headFile("sorted_head.sam");
-    std::ifstream samFile("sorted_sam_0.sam");
+    std::ifstream samFile("sorted_sam_0_0.sam");
 
     EXPECT_TRUE(headFile.good());
     EXPECT_TRUE(samFile.good());

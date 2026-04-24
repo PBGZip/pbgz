@@ -100,7 +100,7 @@ protected:
 private:
     bool isNeedNotify(bool flag);
 
-protected:
+public:
     std::unique_ptr<BlockingQueueType> freeInputPool;   // Free queue, file reading tasks get blocks from here to read data
     std::unique_ptr<BlockingQueueType> inputDataPool;   // Data reading tasks write completed data to this queue, compression/decompression tasks get data from this queue
     std::unique_ptr<BlockingQueueType> freeOutputPool;  // Compression/decompression tasks get blocks from this queue to write processed data, output tasks write free blocks to this queue after processing

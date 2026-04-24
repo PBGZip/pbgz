@@ -22,9 +22,9 @@
 
 namespace SamSortTestData {
     const std::string sortedHeadFile = "sorted_head.sam";
-    const std::string sortedSamFile0 = "sorted_sam_0.sam";
-    const std::string sortedSamFile1 = "sorted_sam_1.sam";
-    const std::string sortedSamFile2 = "sorted_sam_2.sam";
+    const std::string sortedSamFile0 = "sorted_sam_0_0.sam";
+    const std::string sortedSamFile1 = "sorted_sam_0_1.sam";
+    const std::string sortedSamFile2 = "sorted_sam_0_2.sam";
     const std::string mergedOutputFile = "merged_output.sam";
     const uint32_t MAX_BLOCK_SIZE = 8 << 20;
 };
@@ -132,9 +132,9 @@ public:
         std::remove("merge_output.sam");
         std::remove("final_output.bam");
         std::remove("sorted_head.sam");
-        std::remove("sorted_sam_0.sam");
-        std::remove("sorted_sam_1.sam");
-        std::remove("sorted_sam_2.sam");
+        std::remove("sorted_sam_0_0.sam");
+        std::remove("sorted_sam_0_1.sam");
+        std::remove("sorted_sam_0_2.sam");
         std::remove("merged_output.sam");
     }
 
@@ -717,4 +717,139 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInMultipleFiles) {
     }
 
     MemoryUtil::safeDeleteClass(engine);
+}
+
+TEST_F(SamSortCombineTest, CombineSamFileWithFileWriter) {
+    setupSortedSamFiles();
+
+    std::string outputFile = "test_merged.sam";
+
+    std::remove(outputFile.c_str());
+
+    PbgzParameter para;
+    MockSortEngine* engine = MemoryUtil::safeNewClass<MockSortEngine>(para);
+   
+    std::vector<std::string> fileList = {
+        SamSortTestData::sortedSamFile0,
+        SamSortTestData::sortedSamFile1,
+        SamSortTestData::sortedSamFile2
+    };
+
+    SamCombineOutputFileWriter fileWriter(outputFile);
+    int32_t result = engine->combineSamFile(fileList, &fileWriter);
+    fileWriter.close();
+
+    EXPECT_EQ(result, 0);
+    verifyOutputContent(outputFile, 0, 6);
+
+    // 验证合并后的顺序是否正确
+    std::ifstream file(outputFile);
+    std::string line;
+    std::vector<std::string> sortedLines;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line[0] != '@' && line[0] != '\n') {
+            sortedLines.push_back(line);
+            LOG_DEBUG("%s, %d", line.c_str(), line.length());
+        }
+    }
+    file.close();
+
+    std::vector<std::string> expectedOrder = {
+        "100:read1", "200:read3", "300:read2",
+        "248956472:read4", "248956622:read5", "248956822:read6"
+    };
+    ASSERT_EQ(sortedLines.size(), expectedOrder.size());
+    for (size_t i = 0; i < sortedLines.size(); ++i) {
+        EXPECT_TRUE(sortedLines[i].find(expectedOrder[i]) == 0)
+            << "Expected line " << i << " to start with " << expectedOrder[i];
+    }
+    MemoryUtil::safeDeleteClass(engine);
+}
+
+TEST_F(SamSortCombineTest, CombineSamFileWithBlockWriter) {
+    setupSortedSamFiles();
+
+    PbgzParameter para;
+    MockSortEngine* engine = MemoryUtil::safeNewClass<MockSortEngine>(para);
+    engine->init(SamSortTestData::mergedOutputFile);
+
+    SamCombineOutputBlockWriter blockWriter(engine->freeOutputPool.get(), engine->outputDataPool.get());
+    blockWriter.initial(0);
+
+    std::vector<std::string> fileList = {
+        SamSortTestData::sortedSamFile0,
+        SamSortTestData::sortedSamFile1,
+        SamSortTestData::sortedSamFile2
+    };
+    int32_t result = engine->combineSamFile(fileList, &blockWriter);
+    EXPECT_EQ(result, 0);
+    engine->finish();
+
+    MemoryUtil::safeDeleteClass(engine);
+}
+
+TEST_F(SamSortCombineTest, CombineAllSamFileExceeds128Files) {
+    createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
+
+    const uint32_t fileCount = 130;
+
+    for (uint32_t i = 0; i < fileCount; ++i) {
+        std::string filename = "sorted_sam_0_" + std::to_string(i) + ".sam";
+        std::vector<std::string> lines;
+        lines.push_back(std::to_string(i * 100) + ":read_" + std::to_string(i) + "\t0\tchr1\t" + std::to_string(i * 100) + "\t60\t76M\t*\t0\t0\tSEQUENCE" + std::to_string(i) + "\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        createTestSortedSamFile(filename, lines);
+    }
+
+    SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
+    SamInfo::getInstance().calculateChromosomePositions();
+
+    PbgzParameter para;
+    MockSortEngine* engine = MemoryUtil::safeNewClass<MockSortEngine>(para);
+
+    std::vector<std::string> outputFiles;
+    int32_t result = engine->combineAllSamFile(0, fileCount, outputFiles);
+
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(outputFiles.size(), 2);
+
+    PbgzParameter para2;
+    MockSortEngine* engine2 = MemoryUtil::safeNewClass<MockSortEngine>(para2);
+    engine2->init(SamSortTestData::mergedOutputFile);
+
+    SamCombineOutputBlockWriter blockWriter(engine2->freeOutputPool.get(), engine2->outputDataPool.get());
+    blockWriter.initial(outputFiles.size());
+    result = engine2->combineSamFile(outputFiles, &blockWriter);
+    EXPECT_EQ(result, 0);
+    engine2->finish();
+
+    int recordCount = 0;
+    std::vector<std::string> foundPositions;
+     std::string line;
+    std::ifstream mergeFile(SamSortTestData::mergedOutputFile);
+    while (std::getline(mergeFile, line)) {
+        if (!line.empty() && line[0] != '@' && line[0] != '\n') {
+            recordCount++;
+            size_t pos = line.find('\t');
+            if (pos != std::string::npos) {
+                foundPositions.push_back(line.substr(0, pos));
+            }
+        }
+    }
+    mergeFile.close();
+
+    EXPECT_EQ(recordCount, fileCount) << "Should have all " << fileCount << " records in merged output";
+
+    std::vector<std::string> expectedPositions;
+    for (uint32_t i = 0; i < fileCount; ++i) {
+        expectedPositions.push_back("read_" + std::to_string(i));
+    }
+
+    EXPECT_EQ(foundPositions, expectedPositions) << "Should have all positions in correct order";
+
+    for (const auto& file : outputFiles) {
+        std::remove(file.c_str());
+    }
+
+    MemoryUtil::safeDeleteClass(engine);
+    MemoryUtil::safeDeleteClass(engine2);
 }

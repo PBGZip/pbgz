@@ -44,7 +44,7 @@ public:
 
 std::string getSortedHeadFileName();
 
-std::string getSortedSamFileName(uint32_t blockId);
+std::string getSortedSamFileName(uint16_t level, uint32_t blockId);
 
 
 class SAMSortActuator : public Actuator {
