@@ -28,7 +28,7 @@
 
 class IndexEngine : public PbgzEngine {
 public:
-    IndexEngine(PbgzParameter& para) : PbgzEngine(para) {
+    IndexEngine(const PbgzParameter& para) : PbgzEngine(para) {
     }
 
     virtual ~IndexEngine();
@@ -43,4 +43,8 @@ protected:
     virtual void releaseBlockWriter(BlockWriter* &blockWriter) override;
 
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
+
+    virtual int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType) override;
+
+    virtual int32_t startEnginePostProc() override;
 };

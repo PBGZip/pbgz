@@ -387,6 +387,32 @@ public:
         if (0 != CommandProc::reconstructPorc()) {
             return -1;
         }
+
+        if (!parameter.outputFile.empty()) {
+            return 0;
+        }
+
+        std::string inputFile = PathUtil::getFileName(parameter.inputFile);
+        if (inputFile.length() <= 5) {
+            fprintf(stderr, "input file %s invalid.", inputFile.c_str());
+            return -1;
+        }
+        if (!PathUtil::suffixCheck(inputFile, ".pbgz")) {
+            fprintf(stdout, "Decompress file must be pbgz format.\n");
+            return -1;
+        }
+   
+        inputFile = inputFile + ".pbgzi";
+        if (parameter.isDecToGZ) {
+            inputFile = inputFile + ".gz";
+        }
+
+        if (parameter.outputFile.empty() && parameter.outputDir.empty()) {
+            parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + inputFile;
+        } else if (!parameter.outputDir.empty() && parameter.outputFile.empty()) {
+            parameter.outputFile = PathUtil::getFilePath(parameter.outputDir) + inputFile;
+        }
+
         return 0;
     }
     
@@ -395,7 +421,19 @@ public:
             return -1;
         }
 
-        return -1;
+        if (STDIN != parameter.inputFile) {
+            if (PathUtil::isDir(parameter.inputFile)) {
+                fprintf(stdout, "Decompress file cannot be directory.\n");
+                return -1;
+            }
+            
+            if (!PathUtil::suffixCheck(parameter.inputFile, "pbgz")) {
+                fprintf(stdout, "Decompress file must be pbgz format.\n");
+                return -1;
+            }
+        }
+
+        return 0;
     }
     
     int32_t startEngine() override {
@@ -532,7 +570,7 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "\nExamples:\n");
         fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
         fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
-        fprintf(fp, "  pbgz index human.fq.gz.pbgz\n\n");
+        fprintf(fp, "  pbgz index human.sam.gz.pbgz\n\n");
     } else {
         // Display specific subcommand help information
         SubCommand* targetCmd = nullptr;
@@ -582,7 +620,7 @@ void printUsage(const std::string& subCommandName = "") {
             fprintf(fp, "  pbgz decompress input.pbgz -O /output \n\n");
         } else if (subCommandName == "index") {
             fprintf(fp, "\nExample:\n");
-            fprintf(fp, "  pbgz index human.fq.gz.pbgz\n");
+            fprintf(fp, "  pbgz index human.sam.gz.pbgz\n");
             fprintf(fp, "  pbgz index input.pbgz -O /output\n\n");
         } else if (subCommandName == "sort") {
             fprintf(fp, "\nExample:\n");
