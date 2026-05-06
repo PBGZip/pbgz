@@ -36,7 +36,7 @@
 
 class SamCodecActuator : public CodecActuator {
 public:
-    SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRefeGene = nullptr);
+    SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pRefeGene = nullptr);
     virtual ~SamCodecActuator() override;
 
     int32_t preAnalysis();
@@ -189,6 +189,8 @@ private:
     }
 
     int32_t decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx);
+
+    int32_t buildSamIndex();
 
 private:
     int64_t headEndLine;

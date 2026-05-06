@@ -26,6 +26,7 @@
 #include <json/json.h>
 
 #include "io_block.h"
+#include "pbgz_types.h"
 
 class Actuator {
 public:
@@ -35,7 +36,7 @@ public:
 
     virtual int32_t cleanup() { return 0; }
 
-    Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr): inBlockPtr(inPtr), outBlockPtr(outPtr) {};
+    Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzPara(para) {};
     
     virtual ~Actuator() {
         inBlockPtr = nullptr;
@@ -48,6 +49,7 @@ public:
 
 protected: 
     RoughIOBlock* inBlockPtr;
-    RoughIOBlock* outBlockPtr;  
+    RoughIOBlock* outBlockPtr; 
+    PbgzParameter& pbgzPara;
 };
 

@@ -61,8 +61,6 @@ protected:
 
     virtual void setDataBlockPosition(uint32_t blockId);
 
-    void startWriteIndexTask();
-
     virtual int32_t startWorkPreProc() override;
 
 private:

@@ -21,3 +21,101 @@
  * SOFTWARE.
  */
 
+
+#include "pbgz_index.h"
+#include "io_wrapper.h"
+
+
+void BlockPosition::setBlockPosition(uint32_t blockId, int64_t position) {
+    blockPositions[blockId] = position;
+}
+
+BlockPosition& BlockPosition::getInstance() {
+    static BlockPosition instance;
+    return instance;
+}
+
+
+SamIndex& SamIndex::getInstance() {
+    static SamIndex instance;
+    return instance;
+}
+
+void SamIndex::addSamIndex(uint16_t chrIndex, int64_t refPos, uint32_t readNumber, uint32_t blockId) {
+    SamIndexItem item;
+    item.referenceMapPos = refPos;
+    item.readNumber = readNumber;
+    item.blockId = blockId;
+    samIndexList[chrIndex].push_back(item);
+}
+
+int32_t SamIndex::getSamBlockByRef(uint16_t chrIndex, int64_t beginRefPos, int64_t endRefPos,
+                                   std::vector<uint32_t>& outBlockList) {
+    outBlockList.clear();
+    if (samIndexList.find(chrIndex) == samIndexList.end()) {
+        return 0;
+    }
+
+    auto& items = samIndexList[chrIndex];
+    SamIndexItem lowerBound, upperBound;
+    lowerBound.referenceMapPos = beginRefPos;
+    upperBound.referenceMapPos = endRefPos;
+
+    auto itLow = std::lower_bound(items.begin(), items.end(), lowerBound);
+    auto itHigh = std::upper_bound(items.begin(), items.end(), upperBound);
+
+    for (auto it = itLow; it != itHigh; ++it) {
+        outBlockList.push_back(it->blockId);
+    }
+
+    return outBlockList.size();
+}
+
+void SamIndex::dumpToFile(std::string& fileName) {
+    FileWriter fileWriter(fileName);
+    fileWriter.openIO();
+
+    char buffer[256];
+    for (const auto& samIndex : samIndexList) {
+        uint16_t chrIndex = samIndex.first;
+        for (const auto& samItem : samIndex.second) {
+            int len = snprintf(buffer, sizeof(buffer), "%hu\t%ld\t%u\t%u\n",
+                              chrIndex, samItem.referenceMapPos, samItem.readNumber,
+                              samItem.blockId);
+            fileWriter.writeIO(buffer, len);
+        }
+    }
+    fileWriter.closeIO();
+}
+
+void SamIndex::loadFromFile(std::string& fileName) {
+    FileReader fileReader(fileName);
+    fileReader.openIO();
+
+    samIndexList.clear();
+
+    while(!fileReader.isEOF()) {
+        std::string line;
+        uint32_t readLen = fileReader.readLine(line);
+        if (readLen == 0 || line.empty()) {
+            continue;
+        }
+
+        std::istringstream iss(line);
+        std::string token;
+        std::vector<std::string> tokens;
+        while (std::getline(iss, token, '\t')) {
+            tokens.push_back(token);
+        }
+
+        if (tokens.size() == 4) {
+            uint16_t chrIndex = static_cast<uint16_t>(std::stoul(tokens[0]));
+            int64_t referenceMapPos = std::stoll(tokens[1]);
+            uint32_t readNumber = static_cast<uint32_t>(std::stoul(tokens[2]));
+            uint32_t blockId = static_cast<uint32_t>(std::stoul(tokens[3]));
+            addSamIndex(chrIndex, referenceMapPos, readNumber, blockId);
+        }
+    }
+    fileReader.closeIO();
+}
+

@@ -38,8 +38,8 @@
 #include "coder/coder_affix_match.h"
 #include "utils/memory_util.h"
 
-IndexActuator::IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr)
-    : Actuator(inPtr, outPtr), flagDecoder(nullptr), chrDecoder(nullptr), posDecoder(nullptr) {
+IndexActuator::IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para)
+    : Actuator(inPtr, outPtr, para), flagDecoder(nullptr), chrDecoder(nullptr), posDecoder(nullptr) {
     headEndLine = 0;
     notifyFlag = false;
 }

@@ -36,8 +36,9 @@
 #include "actg.h"
 #include "pbgz_manager.h"
 #include "utils/path_util.h"
+#include "pbgz_index.h"
 
-SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pReferene): CodecActuator(inPtr, outPtr) {
+SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pReferene): CodecActuator(inPtr, outPtr, para) {
     pRefeGene = pReferene;
     headEndLine = 0;
     idPosLength = 0;
@@ -378,7 +379,16 @@ int32_t SamCodecActuator::compress() {
         return -1;
     }
 
-    return compressSamByFields();
+    if (0 != compressSamByFields()) {
+        LOG_ERROR("Compress Sam Fields failed.");
+        return -1;
+    }
+
+    if (buildSamIndex() != 0) {
+        LOG_ERROR("Build Sam index failed.");
+    }
+
+    return 0;
 }
 
 int32_t SamCodecActuator::compressSamHeader() {
@@ -1892,3 +1902,87 @@ uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength
     return seqLength;
 }
 
+int32_t SamCodecActuator::buildSamIndex() {
+    if (!pbgzPara.isMakeIndex) {
+        return 0;
+    }
+
+    uint32_t totalLineNum = inBlockPtr->getNpos().size();
+    struct SortKey {
+        SortKey(uint16_t c = 0, int64_t p = 0) : chrIndex(c), mapPos(p) {}
+        uint16_t chrIndex;
+        int64_t mapPos;
+        bool operator<(const SortKey& other) const {
+            if (chrIndex != other.chrIndex) {
+                return chrIndex < other.chrIndex;
+            }
+            return mapPos < other.mapPos;
+        }
+    };
+
+    SortKey lastKey = {0, 0};
+    std::map<uint16_t, std::vector<std::tuple<uint32_t, uint32_t, uint32_t>>> chrBlockStats;
+    const uint32_t MAX_SPLITS_PER_CHR = 1000;
+
+    for (uint32_t lineNo = headEndLine; lineNo < totalLineNum; ++lineNo) {
+        if (mappedFlag.find(lineNo) == mappedFlag.end()) {
+            continue;
+        }
+        if (mappedChr.find(lineNo) == mappedChr.end()) {
+            continue;
+        }
+        if (mappedPos.find(lineNo) == mappedPos.end()) {
+            continue;
+        }
+
+        uint16_t flag = mappedFlag[lineNo];
+        uint16_t chrIndex = mappedChr[lineNo];
+        int64_t mapPos = mappedPos[lineNo];
+
+        if ((flag & 0x04) == 0 && chrIndex != 0xFFFF && chrIndex != 0xFFFE) {
+            SortKey currentKey = {chrIndex, mapPos};
+
+            if (currentKey < lastKey) {
+                LOG_ERROR("SAM block %d is not sorted by chrIndex and mapPos: line %d (chr=%u,pos=%ld) < line %d-1 (chr=%u,pos=%ld)",
+                    inBlockPtr->getBlockId(), lineNo, chrIndex, mapPos, lineNo,
+                    lastKey.chrIndex, lastKey.mapPos);
+                return -1;
+            }
+
+            lastKey = currentKey;
+
+            auto& items = chrBlockStats[chrIndex];
+            if (items.empty()) {
+                items.emplace_back(mapPos, mapPos, 1);
+            } else {
+                uint32_t& lastPos = std::get<1>(items.back());
+                uint32_t& count = std::get<2>(items.back());
+
+                if (count >= MAX_SPLITS_PER_CHR && mapPos != lastPos) {
+                    items.emplace_back(mapPos, mapPos, 1);
+                } else {
+                    lastPos = mapPos;
+                    count++;
+                }
+            }
+        }
+    }
+
+    for (const auto& chrPair : chrBlockStats) {
+        uint16_t chrIndex = chrPair.first;
+        const auto& items = chrPair.second;
+
+        int64_t refPos = SamInfo::getInstance().getPositionByIndex(chrIndex);
+        if (refPos == -1) {
+            continue;
+        }
+
+        for (const auto& item : items) {
+            uint32_t firstPos = std::get<0>(item);
+            uint32_t count = std::get<2>(item);
+            SamIndex::getInstance().addSamIndex(chrIndex, firstPos, count, inBlockPtr->getBlockId());
+        }
+    }
+
+    return 0;
+}
