@@ -147,9 +147,7 @@ void DecompressEngine::printFastqFileNotMatchInfo(const Json::Value& metaRefe) {
 }
 
 bool DecompressEngine::initRefeIndex() {
-    if (pbgzIndex.initIndex() != 0) {
-        return false;
-    }
+    
     return true;
 }
 
@@ -283,11 +281,11 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
 
     Actuator* pActuator = nullptr;
     if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
-        pActuator = MemoryUtil::safeNewClass<FastqDecompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+        pActuator = MemoryUtil::safeNewClass<FastqDecompressActuator>(inBlockPtr, outBlockPtr, parameter, pRefGene);
     } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
-        pActuator = MemoryUtil::safeNewClass<SamDecompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+        pActuator = MemoryUtil::safeNewClass<SamDecompressActuator>(inBlockPtr, outBlockPtr, parameter, pRefGene);
     } else if (inBlockPtr->getBlockType() == BINARY) {
-        pActuator = MemoryUtil::safeNewClass<BinaryDecompressActuator>(inBlockPtr, outBlockPtr);
+        pActuator = MemoryUtil::safeNewClass<BinaryDecompressActuator>(inBlockPtr, outBlockPtr, parameter);
     }
     
     if (pActuator == nullptr) {

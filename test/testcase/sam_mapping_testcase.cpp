@@ -818,7 +818,7 @@ public:
     }
 
     void printBufferBinary(uint8_t* buffer, uint32_t bufferLen) {
-        for (int j = 0; j < bufferLen; j++) {
+        for (uint32_t j = 0; j < bufferLen; j++) {
             // Output src[i] in binary format
             for (int n = 7; n >= 0; n--) {
                 fprintf(stderr, "%d", (buffer[j] >> n) & 1);

@@ -1,6 +1,6 @@
 
 
-#include "sam_index.h"
+#include "pbgz_index.h"
 #include "pbgz_testcase_util.h"
 #include "sam_info.h"
 

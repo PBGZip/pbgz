@@ -24,9 +24,10 @@
 #pragma once
 
 #include <stdint.h>
+#include <json/json.h>
 
 #include "io_block.h"
-#include <json/json.h>
+#include "pbgz_types.h"
 
 class CodecActuator {
 
@@ -34,7 +35,7 @@ public:
     virtual int32_t decompress() = 0;
     virtual int32_t compress() = 0;
 
-    CodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr): inBlockPtr(inPtr), outBlockPtr(outPtr) {};
+    CodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzPara(para) {};
     
     virtual ~CodecActuator() {
         inBlockPtr = nullptr;
@@ -49,6 +50,7 @@ protected:
     RoughIOBlock* inBlockPtr;
     RoughIOBlock* outBlockPtr;  
     Json::Value meta;
+    PbgzParameter& pbgzPara;
 };
 
 

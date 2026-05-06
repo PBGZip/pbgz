@@ -460,7 +460,7 @@ public:
 
         // Create compressor
         Reference ref = createTestReference();
-        SamCodecActuator compressor(pInBlock, pOutBlock, &ref);
+        SamCodecActuator compressor(pInBlock, pOutBlock, para, &ref);
         ASSERT_EQ(compressor.preAnalysis(), 0);
         ASSERT_EQ(compressor.compress(), 0);
 
@@ -474,7 +474,7 @@ public:
         pOutBlock->reset();
 
         // Use these two blocks for decompression, only need to verify decompression return code
-        SamCodecActuator decompressor(pInBlock, pOutBlock, &ref);
+        SamCodecActuator decompressor(pInBlock, pOutBlock, para, &ref);
 
         int32_t ret = decompressor.decompress();
         std::remove(inputFile.c_str());
@@ -484,6 +484,8 @@ public:
 protected:
     RoughIOBlock* pInBlock = nullptr;
     RoughIOBlock* pOutBlock = nullptr;
+
+    PbgzParameter para;
 };
 
 // Test 1: ID field covering all separator characters
@@ -502,7 +504,7 @@ TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
 
         // Create compressor
         Reference ref = createTestReference();
-        SamCodecActuator compressor(pInBlock, pOutBlock, &ref);
+        SamCodecActuator compressor(pInBlock, pOutBlock, para, &ref);
         ASSERT_EQ(compressor.preAnalysis(), -1);
 }
 
@@ -575,7 +577,7 @@ TEST_F(SamDecompressTest, TestMixedScenarios) {
 
     // Create compressor
     Reference ref = createTestReference();
-    SamCodecActuator compressor(pInBlock, pOutBlock, &ref);
+    SamCodecActuator compressor(pInBlock, pOutBlock, para, &ref);
     ASSERT_EQ(compressor.preAnalysis(), -1);
 }
 

@@ -101,7 +101,7 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
         if (0 != fastqCodecActuator->preAnalysis()) {
             LOG_INFO("Fastq preAnalysis failed");
             MemoryUtil::safeDeleteClass(fastqActuator);
-            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr);
+            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, parameter);
         }
     }
 
@@ -111,7 +111,7 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
         if (0 != samCodecActuator->preAnalysis()) {
             LOG_INFO("sam preAnalysis failed");
             MemoryUtil::safeDeleteClass(samActuator);
-            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr);
+            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, parameter);
         }
     }
     
@@ -270,27 +270,22 @@ int32_t CompressEngine::startEnginePostProc() {
             dynamicFileMeta.getMetaData("refe")["blocks"] = refBlockCount;
         }
     }
+
+    // 
+    if (parameter.isMakeIndex) {
+        std::string indexFileName = parameter.outputFile + ".pbgzi";
+        SamIndex::getInstance().dumpToFile(indexFileName);
+    }
     
     return CodecEngine::engineStartAfterProc();
 }
 
 void CompressEngine::setDataBlockPosition(uint32_t blockId) {
-    if (!parameter.isMakeIndex) {
-        return;
-    }
     FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
     if (fileWriter == nullptr) {
         return;
     }
-    pbgzIndex.setBlockPosition(blockId, fileWriter->getCurrentPos());
-    return;
- }
-
- void CompressEngine::startWriteIndexTask() {
-    if (!parameter.isMakeIndex) {
-        return;
-    }
-
+    BlockPosition::getInstance().setBlockPosition(blockId, fileWriter->getCurrentPos());
     return;
  }
 
@@ -328,11 +323,11 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
 
     Actuator* pActuator = nullptr;
     if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
-        pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+        pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, parameter,  pRefGene);
     } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
-        pActuator = MemoryUtil::safeNewClass<SamCompressActuator>(inBlockPtr, outBlockPtr, pRefGene);
+        pActuator = MemoryUtil::safeNewClass<SamCompressActuator>(inBlockPtr, outBlockPtr, parameter, pRefGene);
     } else if (inBlockPtr->getBlockType() == BINARY) {
-        pActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr);
+        pActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, parameter);
     } 
     
     if (pActuator == nullptr) {

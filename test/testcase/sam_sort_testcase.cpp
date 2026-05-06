@@ -198,6 +198,8 @@ public:
 protected:
     RoughIOBlock* pInBlock;
     RoughIOBlock* pOutBlock;
+
+    PbgzParameter para;
 };
 
 // Test SamSortItem comparison operator
@@ -247,7 +249,7 @@ TEST(SamSortUtilTest, TestGetSortedSamFileName) {
 
 // Test SAMSortActuator constructor and destructor
 TEST_F(SamSortTest, TestConstructorAndDestructor) {
-    SAMSortActuator* actuator = new SAMSortActuator(pInBlock, pOutBlock);
+    SAMSortActuator* actuator = new SAMSortActuator(pInBlock, pOutBlock, para);
     EXPECT_NE(actuator, nullptr);
     delete actuator;
 }
@@ -257,7 +259,7 @@ TEST_F(SamSortTest, TestInitialWithValidSam) {
     generateSortTestSamFile(SamSortTestData::testSamFile);
     loadSamData(SamSortTestData::testSamFile);
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t result = actuator.initial();
 
     EXPECT_EQ(result, 0);
@@ -281,7 +283,7 @@ TEST_F(SamSortTest, TestInitialWithValidSam) {
 
 // Test initial() with null input block
 TEST_F(SamSortTest, TestInitialWithNullBlock) {
-    SAMSortActuator actuator(nullptr, pOutBlock);
+    SAMSortActuator actuator(nullptr, pOutBlock, para);
     int32_t result = actuator.initial();
 
     EXPECT_EQ(result, -1);
@@ -292,7 +294,7 @@ TEST_F(SamSortTest, TestInitialWithUnmappedRecords) {
     generateUnmappedSamFile(SamSortTestData::testUnmappedSamFile);
     loadSamData(SamSortTestData::testUnmappedSamFile);
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t result = actuator.initial();
 
     EXPECT_EQ(result, 0);
@@ -306,7 +308,7 @@ TEST_F(SamSortTest, TestInitialWithMixedRecords) {
     generateMixedSamFile(SamSortTestData::testMixedSamFile);
     loadSamData(SamSortTestData::testMixedSamFile);
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t result = actuator.initial();
 
     EXPECT_EQ(result, 0);
@@ -325,7 +327,7 @@ TEST_F(SamSortTest, TestInitialWithInvalidSam) {
     generateInvalidSamFile(SamSortTestData::testInvalidSamFile);
     loadSamData(SamSortTestData::testInvalidSamFile);
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t result = actuator.initial();
 
     EXPECT_EQ(result, -1);
@@ -336,7 +338,7 @@ TEST_F(SamSortTest, TestProcessWithSortedItems) {
     generateSortTestSamFile(SamSortTestData::testSamFile);
     loadSamData(SamSortTestData::testSamFile);
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -387,7 +389,7 @@ TEST_F(SamSortTest, TestProcessWithNoHeader) {
 
     loadSamData("no_header.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     pInBlock->setBlockId(0);
 
     int32_t initResult = actuator.initial();
@@ -405,7 +407,7 @@ TEST_F(SamSortTest, TestProcessWithMultipleBlockIds) {
     generateSortTestSamFile(SamSortTestData::testSamFile);
     loadSamData(SamSortTestData::testSamFile);
 
-    SAMSortActuator actuator1(pInBlock, pOutBlock);
+    SAMSortActuator actuator1(pInBlock, pOutBlock, para);
     int32_t initResult = actuator1.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -426,7 +428,7 @@ TEST_F(SamSortTest, TestSortingCorrectness) {
     generateSortTestSamFile(SamSortTestData::testSamFile);
     loadSamData(SamSortTestData::testSamFile);
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -471,7 +473,7 @@ TEST_F(SamSortTest, TestWithLargeChromosomePositions) {
 
     loadSamData("large_pos.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -498,7 +500,7 @@ TEST_F(SamSortTest, TestWithEmptySam) {
 
     loadSamData("empty.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -527,7 +529,7 @@ TEST_F(SamSortTest, TestWithMultipleHeaderTypes) {
 
     loadSamData("multi_header.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -575,7 +577,7 @@ TEST_F(SamSortTest, TestWithVariousFlags) {
 
     loadSamData("flags.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -602,7 +604,7 @@ TEST_F(SamSortTest, TestWithStarChromosome) {
 
     loadSamData("star_chr.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -623,7 +625,7 @@ TEST_F(SamSortTest, TestSequentialSortOperations) {
     loadSamData(SamSortTestData::testSamFile);
 
     // First sort operation
-    SAMSortActuator actuator1(pInBlock, pOutBlock);
+    SAMSortActuator actuator1(pInBlock, pOutBlock, para);
     int32_t initResult1 = actuator1.initial();
     EXPECT_EQ(initResult1, 0);
 
@@ -635,7 +637,7 @@ TEST_F(SamSortTest, TestSequentialSortOperations) {
     generateSortTestSamFile(SamSortTestData::testSamFile);
     loadSamData(SamSortTestData::testSamFile);
 
-    SAMSortActuator actuator2(pInBlock, pOutBlock);
+    SAMSortActuator actuator2(pInBlock, pOutBlock, para);
     int32_t initResult2 = actuator2.initial();
     EXPECT_EQ(initResult2, 0);
 
@@ -665,7 +667,7 @@ TEST_F(SamSortTest, TestWithMinimalSamRecord) {
 
     loadSamData("minimal.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -683,7 +685,7 @@ TEST_F(SamSortTest, TestUnmappedItemsNotProcessed) {
     generateUnmappedSamFile(SamSortTestData::testUnmappedSamFile);
     loadSamData(SamSortTestData::testUnmappedSamFile);
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     int32_t initResult = actuator.initial();
     EXPECT_EQ(initResult, 0);
 
@@ -729,7 +731,7 @@ TEST_F(SamSortTest, TestFullWorkflowIntegration) {
 
     loadSamData("integration.sam");
 
-    SAMSortActuator actuator(pInBlock, pOutBlock);
+    SAMSortActuator actuator(pInBlock, pOutBlock, para);
     pInBlock->setBlockId(0);
 
     // Initialize

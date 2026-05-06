@@ -29,7 +29,7 @@
 
 class BinaryCompressActuator : public Actuator {
 public:
-    BinaryCompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr) : Actuator(inPtr, outPtr) {
+    BinaryCompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para) : Actuator(inPtr, outPtr ,para) {
 
     }
 
@@ -46,7 +46,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr);
+        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzPara);
         if (codecActuator == nullptr) {
             return -1;
         }
@@ -64,7 +64,7 @@ protected:
 
 class BinaryDecompressActuator : public Actuator {
 public:
-    BinaryDecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr) : Actuator(inPtr, outPtr) {
+    BinaryDecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para) : Actuator(inPtr, outPtr, para) {
 
     }
 
@@ -81,7 +81,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr);
+        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzPara);
         if (codecActuator == nullptr) {
             return -1;
         }
@@ -99,7 +99,7 @@ protected:
 template <typename T>
 class CompressActuator : public Actuator {
 public:
-    CompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRef) : Actuator(inPtr, outPtr) {
+    CompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pRef) : Actuator(inPtr, outPtr, para) {
         pReference = pRef;
     }
 
@@ -116,7 +116,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pReference);
+        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzPara, pReference);
         if (codecActuator == nullptr) {
             return -1;
         }
@@ -137,7 +137,7 @@ protected:
 template <typename T>
 class DecompressActuator : public Actuator {
 public:
-    DecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRef) : Actuator(inPtr, outPtr) {
+    DecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pRef) : Actuator(inPtr, outPtr, para) {
         pReference = pRef;
     }
 
@@ -154,7 +154,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pReference);
+        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzPara,pReference);
         if (codecActuator == nullptr) {
             return -1;
         }

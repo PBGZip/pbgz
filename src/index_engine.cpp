@@ -26,7 +26,7 @@
 
 #include "index_engine.h"
 #include "index_actuator.h"
-#include "sam_index.h"
+#include "pbgz_index.h"
 #include "utils/memory_util.h"
 #include "log/logger.h"
 
@@ -70,7 +70,7 @@ void IndexEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 Actuator* IndexEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    IndexActuator* indexActuator = MemoryUtil::safeNewClass<IndexActuator>(inBlockPtr, outBlockPtr);
+    IndexActuator* indexActuator = MemoryUtil::safeNewClass<IndexActuator>(inBlockPtr, outBlockPtr, parameter);
     if (indexActuator == nullptr) {
         LOG_ERROR("Failed to create IndexActuator.");
         return nullptr;

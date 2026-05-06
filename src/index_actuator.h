@@ -30,11 +30,11 @@
 #include "actuator.h"
 #include "coder/coder_io.h"
 #include "coder/coder_bwt_cm.h"
-#include "sam_index.h"
+#include "pbgz_index.h"
 
 class IndexActuator : public Actuator {
 public:
-    IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr);
+    IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para);
 
     virtual ~IndexActuator();
 

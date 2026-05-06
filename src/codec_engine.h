@@ -98,5 +98,4 @@ protected:
     PbgzFileMeta baseFileMeta;
     PbgzFileMeta dynamicFileMeta;
     bool refeOffsetFLag;
-    PbgzIndex pbgzIndex;
 };

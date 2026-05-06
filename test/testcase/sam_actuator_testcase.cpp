@@ -259,11 +259,13 @@ protected:
     // Mapping data for testing
     std::map<uint32_t, uint16_t> mappedFlag;
     std::map<uint32_t, uint64_t> mappedPos;
+
+    PbgzParameter para;
 };
 
 TEST_F(SamActuatorTest, testPreAnalysis) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
     EXPECT_EQ(actuator.headEndLine, 8);  // Header has 8 lines (@HD, 6@SQ, 1@PG, may have other header lines)
@@ -292,7 +294,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     file.close();
 
     loadSamData("idinvlid_pre_analysis.sam");
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     int32_t result = actuator.preAnalysis();
     std::remove("idinvlid_pre_analysis.sam");
     EXPECT_EQ(result, 0);
@@ -301,7 +303,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
 
 TEST_F(SamActuatorTest, testCompressQuality) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -316,7 +318,7 @@ TEST_F(SamActuatorTest, testCompressQuality) {
 
 TEST_F(SamActuatorTest, testCompressChrName) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -331,7 +333,7 @@ TEST_F(SamActuatorTest, testCompressChrName) {
 
 TEST_F(SamActuatorTest, testCompressWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -345,7 +347,7 @@ TEST_F(SamActuatorTest, testCompressWithoutRef) {
 TEST_F(SamActuatorTest, testCompressWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamCodecActuator actuator(pInBlock, pOutBlock, &refGene);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -358,7 +360,7 @@ TEST_F(SamActuatorTest, testCompressWithRef) {
 
 TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -374,7 +376,7 @@ TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
 TEST_F(SamActuatorTest, testCompressBaseWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamCodecActuator actuator(pInBlock, pOutBlock, &refGene);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -389,7 +391,7 @@ TEST_F(SamActuatorTest, testCompressBaseWithRef) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -404,7 +406,7 @@ TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -419,7 +421,7 @@ TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
 
 TEST_F(SamActuatorTest, testCompressRegularField) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -434,7 +436,7 @@ TEST_F(SamActuatorTest, testCompressRegularField) {
 
 TEST_F(SamActuatorTest, testNotifyFlag) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     // Test getNotifyFlag
     bool hasData = actuator.getNotifyFlag();
@@ -443,7 +445,7 @@ TEST_F(SamActuatorTest, testNotifyFlag) {
 
 TEST_F(SamActuatorTest, testSetReference) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock);
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
     
     Reference refGene = createTestReference();
     
@@ -464,7 +466,7 @@ TEST_F(SamActuatorTest, testDecompress) {
     fprintf(stderr, "%s \n", pInBlock->getBuffer());
     
     // Create SamActuator object for compression
-    SamCodecActuator compressor(pInBlock, pOutBlock);
+    SamCodecActuator compressor(pInBlock, pOutBlock, para);
     
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
@@ -486,7 +488,7 @@ TEST_F(SamActuatorTest, testDecompress) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamCodecActuator decompressor(pInBlock, pOutBlock);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, para);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
@@ -503,7 +505,7 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     Reference reference = createTestReference();
     
     // Create SamActuator object for compression
-    SamCodecActuator compressor(pInBlock, pOutBlock, &reference);
+    SamCodecActuator compressor(pInBlock, pOutBlock, para, &reference);
     
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
@@ -525,7 +527,7 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamCodecActuator decompressor(pInBlock, pOutBlock, &reference);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, para, &reference);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
@@ -537,74 +539,169 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
 
 
 TEST_F(SamActuatorTest, testCigarParse) {
-    SamCodecActuator actuator(pInBlock, pOutBlock);
-    
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+
     // Helper function: convert string to uint8_t* to pass to parseCigar
     auto testParse = [](SamCodecActuator& a, const std::string& cigar) -> uint32_t {
         return a.parseCigar(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(cigar.c_str())), cigar.length());
     };
-    
+
     // Test basic M operations
     EXPECT_EQ(testParse(actuator, "100M"), 100);
     EXPECT_EQ(testParse(actuator, "76M"), 76);
     EXPECT_EQ(testParse(actuator, "1M"), 1);
-    
+
     // Test I operations
     EXPECT_EQ(testParse(actuator, "10I"), 10);
     EXPECT_EQ(testParse(actuator, "5I"), 5);
-    
+
     // Test S operations
     EXPECT_EQ(testParse(actuator, "15S"), 15);
     EXPECT_EQ(testParse(actuator, "3S"), 3);
-    
+
     // Test = operations
     EXPECT_EQ(testParse(actuator, "50="), 50);
     EXPECT_EQ(testParse(actuator, "25="), 25);
-    
+
     // Test X operations
     EXPECT_EQ(testParse(actuator, "30X"), 30);
     EXPECT_EQ(testParse(actuator, "12X"), 12);
-    
+
     // Test composite operations - only accumulate M、I、S、=、X
     EXPECT_EQ(testParse(actuator, "10M5I3S2="), 20);  // 10+5+3+2 = 20
     EXPECT_EQ(testParse(actuator, "5M10I15S5X10="), 45);  // 5+10+15+5+10 = 45
     EXPECT_EQ(testParse(actuator, "1M1I1S1=1X"), 5);  // 1+1+1+1+1 = 5
-    
+
     // Test composite CIGAR with other operations - other operations should be ignored
     EXPECT_EQ(testParse(actuator, "10M5D3I2H10N"), 13);  // Only count 10M+3I = 13, ignore 5D, 2H, 10N
     EXPECT_EQ(testParse(actuator, "5M10D5I10P5N5S"), 15);  // Only count 5M+5I+5S = 15
     EXPECT_EQ(testParse(actuator, "100M50D50N"), 100);  // Only count 100M, ignore 50D and 50N
-    
+
     // Test real-world CIGAR strings
     EXPECT_EQ(testParse(actuator, "76M"), 76);  // Complete match
     EXPECT_EQ(testParse(actuator, "3S73M"), 76);  // 3 soft clipping + 73 matches
     EXPECT_EQ(testParse(actuator, "10M5I60M5D"), 75);  // 10+5+60 = 75, ignore 5D
     EXPECT_EQ(testParse(actuator, "1S20M1I30M1D10M1S"), 63);  // 1+20+1+30+10+1 = 63, ignore 1D
-    
+
     // Test edge cases
     EXPECT_EQ(testParse(actuator, ""), 0);  // Empty string
-    
+
     // Test CIGAR with only non-counting operations
     EXPECT_EQ(testParse(actuator, "100D"), 0);  // Only deletions, should not accumulate
     EXPECT_EQ(testParse(actuator, "50N"), 0);   // Only reference skips, should not accumulate
     EXPECT_EQ(testParse(actuator, "10H5P"), 0);  // Only hard clipping and padding, should not accumulate
-    
+
     // Test complex real-world CIGAR scenarios
     EXPECT_EQ(testParse(actuator, "1S10M1I10M1D10M1I10M1D10M1D10M1I10M1S1H"), 75);  // Complex alignment scenario
     EXPECT_EQ(testParse(actuator, "35M1I39M"), 75);  // Alignment with insertion in middle
     EXPECT_EQ(testParse(actuator, "2S50M2I20M1D5M3S"), 82);  // Soft clipping on both ends
-    
+
     // Test large numbers
     EXPECT_EQ(testParse(actuator, "1000M"), 1000);
     EXPECT_EQ(testParse(actuator, "10000M500I200S100="), 10800);
-    
+
     // Test mixed case (although SAM specification usually uses uppercase)
     EXPECT_EQ(testParse(actuator, "10m5i3s2="), 20);  // Lowercase should also work
     EXPECT_EQ(testParse(actuator, "10M5i3S2x"), 20);  // Mixed case
-    
+
     // Test invalid CIGAR formats
     EXPECT_EQ(testParse(actuator, "M"), 0);  // Missing number
     EXPECT_EQ(testParse(actuator, "invalid"), 0);  // Completely invalid
     EXPECT_EQ(testParse(actuator, "10M5"), 10);  // Missing operator at end
     EXPECT_EQ(testParse(actuator, "M10I"), 10);  // Missing number at start
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexDisabled) {
+    loadSamData(SamTestData::testSamFile);
+    para.isMakeIndex = false;
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Test buildSamIndex when disabled
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexSuccess) {
+    loadSamData(SamTestData::testSamFile);
+    para.isMakeIndex = true;
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Test buildSamIndex with valid sorted SAM data
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexUnsorted) {
+    loadSamData(SamTestData::testSamFile);
+    para.isMakeIndex = true;
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Manually set up mapping data to simulate unsorted order
+    // First read maps to chr2 position 100
+    actuator.mappedFlag[8] = 0;
+    actuator.mappedChr[8] = 1;  // chr2
+    actuator.mappedPos[8] = 100;
+    actuator.mappedFlag[9] = 0;
+    actuator.mappedChr[9] = 0;  // chr1
+    actuator.mappedPos[9] = 1;
+
+    // Test buildSamIndex with unsorted data should fail
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, -1);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexSkipUnmapped) {
+    loadSamData(SamTestData::testSamFile);
+    para.isMakeIndex = true;
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Set up mapping data - some reads are unmapped (flag & 0x04)
+    actuator.mappedFlag[8] = 0x04;  // Unmapped
+    actuator.mappedChr[8] = 0;
+    actuator.mappedPos[8] = 0;
+    actuator.mappedFlag[9] = 0;
+    actuator.mappedChr[9] = 1;  // chr2
+    actuator.mappedPos[9] = 100;
+
+    // Test buildSamIndex should skip unmapped reads
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexSkipInvalidChr) {
+    loadSamData(SamTestData::testSamFile);
+    para.isMakeIndex = true;
+    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Set up mapping data with invalid chromosome indices
+    actuator.mappedFlag[8] = 0;
+    actuator.mappedChr[8] = 0xFFFF;  // Unmapped
+    actuator.mappedPos[8] = 0;
+    actuator.mappedFlag[9] = 0;
+    actuator.mappedChr[9] = 0xFFFE;  // '=' marker
+    actuator.mappedPos[9] = 100;
+
+    // Test buildSamIndex should skip reads with invalid chr indices
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
 }
