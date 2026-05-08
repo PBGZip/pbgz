@@ -147,7 +147,7 @@ void SortEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 Actuator* SortEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    SAMSortActuator* sortActutor = MemoryUtil::safeNewClass<SAMSortActuator>(inBlockPtr, outBlockPtr, parameter);
+    SAMSortActuator* sortActutor = MemoryUtil::safeNewClass<SAMSortActuator>(inBlockPtr, outBlockPtr, this);
     if (sortActutor->initial() != 0) {
         LOG_ERROR("SortActutor initial failed.");
         MemoryUtil::safeDeleteClass(sortActutor);

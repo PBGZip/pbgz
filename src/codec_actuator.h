@@ -28,6 +28,7 @@
 
 #include "io_block.h"
 #include "pbgz_types.h"
+#include "pbgz_engine.h"
 
 class CodecActuator {
 
@@ -35,8 +36,8 @@ public:
     virtual int32_t decompress() = 0;
     virtual int32_t compress() = 0;
 
-    CodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzPara(para) {};
-    
+    CodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzEngine(engine) {};
+
     virtual ~CodecActuator() {
         inBlockPtr = nullptr;
         outBlockPtr = nullptr;
@@ -44,13 +45,18 @@ public:
 
     virtual bool getNotifyFlag() {
         return true;
-    } 
+    }
 
-protected: 
+#if defined(TEST_MODE) || defined(GTEST_ENABLED)
+    // Test-only constructor: creates a dummy engine wrapper
+    static PbgzEngine* createTestEngine(const PbgzParameter& para);
+#endif
+
+protected:
     RoughIOBlock* inBlockPtr;
-    RoughIOBlock* outBlockPtr;  
+    RoughIOBlock* outBlockPtr;
     Json::Value meta;
-    PbgzParameter& pbgzPara;
+    PbgzEngine* pbgzEngine;
 };
 
 

@@ -38,6 +38,8 @@
 #include "utils/memory_util.h"
 #undef private
 #include <random>
+#include <compress_engine.h>
+#include <decompress_engine.h>
 
 namespace SamDecompressData {
     const std::string testSamFile = "test.sam";
@@ -460,7 +462,9 @@ public:
 
         // Create compressor
         Reference ref = createTestReference();
-        SamCodecActuator compressor(pInBlock, pOutBlock, para, &ref);
+        PbgzParameter para;
+        DecompressEngine engine(para);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
         ASSERT_EQ(compressor.preAnalysis(), 0);
         ASSERT_EQ(compressor.compress(), 0);
 
@@ -474,7 +478,7 @@ public:
         pOutBlock->reset();
 
         // Use these two blocks for decompression, only need to verify decompression return code
-        SamCodecActuator decompressor(pInBlock, pOutBlock, para, &ref);
+        SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
 
         int32_t ret = decompressor.decompress();
         std::remove(inputFile.c_str());
@@ -504,7 +508,9 @@ TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
 
         // Create compressor
         Reference ref = createTestReference();
-        SamCodecActuator compressor(pInBlock, pOutBlock, para, &ref);
+        PbgzParameter para;
+        CompressEngine engine(para);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
         ASSERT_EQ(compressor.preAnalysis(), -1);
 }
 
@@ -577,7 +583,10 @@ TEST_F(SamDecompressTest, TestMixedScenarios) {
 
     // Create compressor
     Reference ref = createTestReference();
-    SamCodecActuator compressor(pInBlock, pOutBlock, para, &ref);
+    PbgzParameter para;
+    CompressEngine engine(para);
+
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
     ASSERT_EQ(compressor.preAnalysis(), -1);
 }
 

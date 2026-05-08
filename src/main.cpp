@@ -294,10 +294,6 @@ public:
                 return -1;
             }
         }
-        if (!parameter.refeGenePos.empty()) {
-            fprintf(stdout, "Reference position is not support in compress scenario.\n");
-            return -1;
-        }
         return 0;
     }
     

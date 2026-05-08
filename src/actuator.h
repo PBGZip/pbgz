@@ -28,6 +28,8 @@
 #include "io_block.h"
 #include "pbgz_types.h"
 
+class PbgzEngine;
+
 class Actuator {
 public:
     virtual int32_t process() = 0;
@@ -36,8 +38,8 @@ public:
 
     virtual int32_t cleanup() { return 0; }
 
-    Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzPara(para) {};
-    
+    Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzEngine(engine) {};
+
     virtual ~Actuator() {
         inBlockPtr = nullptr;
         outBlockPtr = nullptr;
@@ -45,11 +47,11 @@ public:
 
     virtual bool getNotifyFlag() {
         return true;
-    } 
+    }
 
-protected: 
+protected:
     RoughIOBlock* inBlockPtr;
-    RoughIOBlock* outBlockPtr; 
-    PbgzParameter& pbgzPara;
+    RoughIOBlock* outBlockPtr;
+    PbgzEngine* pbgzEngine;
 };
 

@@ -33,6 +33,7 @@
 #include "block_wrapper.h"
 #include "actuator.h"
 #include "utils/timer.h"
+#include "reference.h"
 
 using BlockingQueueType = BlockingQueue<RoughIOBlock*>;
 
@@ -109,6 +110,8 @@ public:
     IOReader* ioReader;
     IOWriter* ioWriter;
     std::list<RoughIOBlock*> outputSortedCache;
+    const PbgzParameter& getParameter() const { return parameter; }
+    virtual Reference* getReference() { return nullptr; }
 
     std::vector<std::thread> workThreads;
     std::thread writeThread;

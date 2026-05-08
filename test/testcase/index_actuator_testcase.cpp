@@ -134,11 +134,10 @@ public:
 protected:
     RoughIOBlock* pInBlock;
     RoughIOBlock* pOutBlock;
-    PbgzParameter para;
 };
 
 TEST_F(IndexActuatorTest, Constructor_ValidPointers_Success) {
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     EXPECT_EQ(pInBlock, actuator.inBlockPtr);
     EXPECT_EQ(pOutBlock, actuator.outBlockPtr);
     EXPECT_EQ(nullptr, actuator.flagDecoder);
@@ -149,13 +148,13 @@ TEST_F(IndexActuatorTest, Constructor_ValidPointers_Success) {
 }
 
 TEST_F(IndexActuatorTest, Constructor_NullInBlock_Created) {
-    IndexActuator actuator(nullptr, pOutBlock, para);
+    IndexActuator actuator(nullptr, pOutBlock);
     EXPECT_EQ(nullptr, actuator.inBlockPtr);
     EXPECT_EQ(pOutBlock, actuator.outBlockPtr);
 }
 
 TEST_F(IndexActuatorTest, Constructor_NullOutBlock_Created) {
-    IndexActuator actuator(pInBlock, nullptr, para);
+    IndexActuator actuator(pInBlock, nullptr);
     EXPECT_EQ(pInBlock, actuator.inBlockPtr);
     EXPECT_EQ(nullptr, actuator.outBlockPtr);
 }
@@ -168,7 +167,7 @@ TEST_F(IndexActuatorTest, Destructor_CleansUpDecoders) {
     std::shared_ptr<coder_io> chrIo = std::make_shared<coder_io>(pInBlock->getBuffer() + 100, 100);
     std::shared_ptr<coder_io> posIo = std::make_shared<coder_io>(pInBlock->getBuffer() + 200, 100);
 
-    IndexActuator* actuator = new IndexActuator(pInBlock, pOutBlock, para);
+    IndexActuator* actuator = new IndexActuator(pInBlock, pOutBlock);
     actuator->flagIo = flagIo;
     actuator->chrIo = chrIo;
     actuator->posIo = posIo;
@@ -182,7 +181,7 @@ TEST_F(IndexActuatorTest, Destructor_CleansUpDecoders) {
 }
 
 TEST_F(IndexActuatorTest, Initial_NullInputBlock_ReturnsError) {
-    IndexActuator actuator(nullptr, pOutBlock, para);
+    IndexActuator actuator(nullptr, pOutBlock);
     int32_t result = actuator.initial();
     EXPECT_EQ(-1, result);
 }
@@ -191,7 +190,7 @@ TEST_F(IndexActuatorTest, Initial_NonSAMBlockType_ReturnsError) {
     createValidSamFile();
     pInBlock->setBlockType(BINARY);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
     EXPECT_EQ(-1, result);
 }
@@ -200,7 +199,7 @@ TEST_F(IndexActuatorTest, Initial_InvalidBlockType_ReturnsError) {
     createValidSamFile();
     pInBlock->setBlockType(TYPE_UNKNOW);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
     EXPECT_EQ(-1, result);
 }
@@ -209,7 +208,7 @@ TEST_F(IndexActuatorTest, Initial_BAMBlockType_ReturnsError) {
     createValidSamFile();
     pInBlock->setBlockType(BAM);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
     EXPECT_EQ(-1, result);
 }
@@ -218,7 +217,7 @@ TEST_F(IndexActuatorTest, Initial_GZIPBlockType_ReturnsError) {
     createValidSamFile();
     pInBlock->setBlockType(GZIP);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
     EXPECT_EQ(-1, result);
 }
@@ -227,7 +226,7 @@ TEST_F(IndexActuatorTest, Initial_SAMBlockType_Allowed) {
     createValidSamFile();
     pInBlock->setBlockType(SAM);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
     // SAM block type passes validation. If no "sam" meta member exists,
     // the function returns 0 (success) after checking header
@@ -240,7 +239,7 @@ TEST_F(IndexActuatorTest, Initial_ZeroMetaLen_HandlesGracefully) {
     pInBlock->setBlockType(SAM);
     pInBlock->setMetaLen(0);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
     // With zero meta length and no meta data, the function returns 0 (success)
     // after passing block type check, as it assumes header-only or empty data block
@@ -254,7 +253,7 @@ TEST_F(IndexActuatorTest, Initial_ValidMetaData_CheckSuccess) {
     pInBlock->setBlockId(1);
 
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     // Simulate having valid meta data structure
     actuator.notifyFlag = true; // Would be set by successful initial
 
@@ -269,7 +268,7 @@ TEST_F(IndexActuatorTest, Initial_SamIndexSingletonCanBeAccessed) {
     pInBlock->setMetaLen(100);
     pInBlock->setBlockId(0);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     // SamIndex singleton can be accessed for index storage
     const auto& indexList = SamIndex::getInstance().getSamIndexList();
@@ -282,7 +281,7 @@ TEST_F(IndexActuatorTest, Initial_DecodersInitialized_AfterCall) {
     pInBlock->setMetaLen(0);
     pInBlock->setBlockId(0);
 
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     // Before successful initialization, decoders are nullptr
     EXPECT_EQ(nullptr, actuator.flagDecoder);
@@ -301,20 +300,20 @@ TEST_F(IndexActuatorTest, Initial_MultiBlockHandling_DifferentBlockIds) {
         pInBlock->setMetaLen(0);
         pInBlock->setBlockId(blockId);
 
-        IndexActuator actuator(pInBlock, pOutBlock, para);
+        IndexActuator actuator(pInBlock, pOutBlock);
         // Each actuator should have its own state
         EXPECT_EQ(blockId, pInBlock->getBlockId());
     }
 }
 
 TEST_F(IndexActuatorTest, GetNotifyFlag_FalseAfterConstruction) {
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
     EXPECT_FALSE(actuator.getNotifyFlag());
 }
 
 TEST_F(IndexActuatorTest, GetNotifyFlag_TrueAfterProcessing) {
     createValidSamFile();
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     Json::Value meta = createBasicMeta();
     pInBlock->setMetaLen(0);
@@ -327,13 +326,13 @@ TEST_F(IndexActuatorTest, GetNotifyFlag_TrueAfterProcessing) {
 }
 
 TEST_F(IndexActuatorTest, Process_NullOutBlock_ReturnsError) {
-    IndexActuator actuator(pInBlock, nullptr, para);
+    IndexActuator actuator(pInBlock, nullptr);
     int32_t result = actuator.process();
     EXPECT_EQ(-1, result);
 }
 
 TEST_F(IndexActuatorTest, Process_ClearsSortKeys_ReturnsZero) {
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     // Add items to sortKeys to verify they get cleared
     IndexActuator::SortKey key1;
@@ -352,7 +351,7 @@ TEST_F(IndexActuatorTest, Process_ClearsSortKeys_ReturnsZero) {
 
 TEST_F(IndexActuatorTest, Process_ClearsSortKeys_Success) {
     createValidSamFile();
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     // Add items to sortKeys for testing
     IndexActuator::SortKey key1;
@@ -375,11 +374,11 @@ TEST_F(IndexActuatorTest, Process_ClearsSortKeys_Success) {
 
 TEST_F(IndexActuatorTest, Process_WithNullOutBlock_ReturnsError) {
     createValidSamFile();
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     // Ensure outBlock is null for this test
     RoughIOBlock* nullBlock = nullptr;
-    IndexActuator actuator2(pInBlock, nullBlock, para);
+    IndexActuator actuator2(pInBlock, nullBlock);
     int32_t result = actuator2.process();
     EXPECT_EQ(-1, result);
 }
@@ -431,13 +430,13 @@ TEST_F(IndexActuatorTest, SamIndexSingleton_InitializesAsEmpty) {
 }
 
 TEST_F(IndexActuatorTest, HeadEndLine_InitializesToZero) {
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     EXPECT_EQ(0, actuator.headEndLine);
 }
 
 TEST_F(IndexActuatorTest, DecoderIo_SharedPtr_InitializesAsNull) {
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     EXPECT_EQ(nullptr, actuator.flagIo);
     EXPECT_EQ(nullptr, actuator.chrIo);
@@ -446,7 +445,7 @@ TEST_F(IndexActuatorTest, DecoderIo_SharedPtr_InitializesAsNull) {
 
 TEST_F(IndexActuatorTest, SortKeys_ReservesSpaceForTwoItems) {
     createValidSamFile();
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     uint32_t lineNum = 5;
     uint32_t expectedCapacity = 2;
@@ -529,7 +528,7 @@ TEST_F(IndexActuatorTest, IndexActuator_StreamParsing_InvalidFieldOrder) {
 }
 
 TEST_F(IndexActuatorTest, MetaJson_NoSamInfo_HandlesGracefully) {
-    IndexActuator actuator(pInBlock, pOutBlock, para);
+    IndexActuator actuator(pInBlock, pOutBlock);
 
     Json::Value meta;
     meta["header"] = createHeaderMeta()["header"];

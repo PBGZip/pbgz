@@ -36,7 +36,7 @@
 
 class SamCodecActuator : public CodecActuator {
 public:
-    SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pRefeGene = nullptr);
+    SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr, Reference* pRefeGene = nullptr);
     virtual ~SamCodecActuator() override;
 
     int32_t preAnalysis();

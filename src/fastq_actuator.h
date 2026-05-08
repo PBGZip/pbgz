@@ -68,7 +68,7 @@ typedef struct {
 
 class FastqCodecActuator : public CodecActuator {
 public:
-    FastqCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pRef = nullptr): CodecActuator(inPtr, outPtr, para) {
+    FastqCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr, Reference* pRef = nullptr): CodecActuator(inPtr, outPtr, engine) {
         idPosLength = 0;
         minBaseLength = INT32_MAX;
         maxBaseLength = 0;
