@@ -21,6 +21,8 @@
  * SOFTWARE.
  */
 
+class PbgzEngine;
+
 #include "actuator.h"
 #include "binary_actuator.h"
 #include "fastq_actuator.h"
@@ -29,7 +31,7 @@
 
 class BinaryCompressActuator : public Actuator {
 public:
-    BinaryCompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para) : Actuator(inPtr, outPtr ,para) {
+    BinaryCompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr) : Actuator(inPtr, outPtr, engine) {
 
     }
 
@@ -46,7 +48,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzPara);
+        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzEngine);
         if (codecActuator == nullptr) {
             return -1;
         }
@@ -64,7 +66,7 @@ protected:
 
 class BinaryDecompressActuator : public Actuator {
 public:
-    BinaryDecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para) : Actuator(inPtr, outPtr, para) {
+    BinaryDecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr) : Actuator(inPtr, outPtr, engine) {
 
     }
 
@@ -81,7 +83,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzPara);
+        codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzEngine);
         if (codecActuator == nullptr) {
             return -1;
         }
@@ -91,7 +93,7 @@ public:
     BinaryCodecActuator* getCodecActuator() {
         return codecActuator;
     }
-    
+
 protected:
     BinaryCodecActuator* codecActuator;
 };
@@ -99,7 +101,7 @@ protected:
 template <typename T>
 class CompressActuator : public Actuator {
 public:
-    CompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pRef) : Actuator(inPtr, outPtr, para) {
+    CompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pRef) : Actuator(inPtr, outPtr, engine) {
         pReference = pRef;
     }
 
@@ -116,11 +118,11 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzPara, pReference);
+        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzEngine, pReference);
         if (codecActuator == nullptr) {
             return -1;
         }
-        
+
         return 0;
     }
 
@@ -137,7 +139,7 @@ protected:
 template <typename T>
 class DecompressActuator : public Actuator {
 public:
-    DecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pRef) : Actuator(inPtr, outPtr, para) {
+    DecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pRef) : Actuator(inPtr, outPtr, engine) {
         pReference = pRef;
     }
 
@@ -154,7 +156,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzPara,pReference);
+        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzEngine,pReference);
         if (codecActuator == nullptr) {
             return -1;
         }
@@ -164,7 +166,7 @@ public:
     T* getCodecActuator() {
         return codecActuator;
     }
-    
+
 protected:
     T* codecActuator;
     Reference* pReference;

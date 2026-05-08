@@ -29,7 +29,9 @@
 
 class DecompressEngine : public CodecEngine {
 public:
-    DecompressEngine(PbgzParameter& para) : CodecEngine(para) { }
+    DecompressEngine(PbgzParameter& para) : CodecEngine(para) {
+        readHeadBlockFlag = true;
+     }
 
     virtual ~DecompressEngine() { }
 
@@ -60,4 +62,13 @@ private:
     bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
 
     void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
+
+    void setReadHeafFlag(bool flag) {
+        readHeadBlockFlag = flag;
+    }
+
+private:
+    bool readHeadBlockFlag;
+
+    virtual Reference* getReference() override { return pRefGene; }
 };

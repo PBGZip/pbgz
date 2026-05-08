@@ -25,7 +25,7 @@
 
 class BinaryCodecActuator : public CodecActuator {
 public:
-    BinaryCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para): CodecActuator(inPtr, outPtr, para) {}
+    BinaryCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr): CodecActuator(inPtr, outPtr, engine) {}
     virtual ~BinaryCodecActuator() {}
     int32_t decompress() override ;
     int32_t compress() override ;

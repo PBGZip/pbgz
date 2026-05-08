@@ -125,8 +125,7 @@ protected:
 // Test basic functionality of mappingFastqGen2 function
 TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
     // Create FastqActuator instance
-    PbgzParameter para;
-    FastqCodecActuator actuator(pInBlock, pOutBlock, para, pReference);
+    FastqCodecActuator actuator(pInBlock, pOutBlock, nullptr, pReference);
     
     // Initialize encoder
     int32_t result = actuator.initEncoder();

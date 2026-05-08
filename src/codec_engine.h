@@ -98,4 +98,6 @@ protected:
     PbgzFileMeta baseFileMeta;
     PbgzFileMeta dynamicFileMeta;
     bool refeOffsetFLag;
+
+    virtual Reference* getReference() { return pRefGene; }
 };

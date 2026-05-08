@@ -70,7 +70,7 @@ void IndexEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 Actuator* IndexEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    IndexActuator* indexActuator = MemoryUtil::safeNewClass<IndexActuator>(inBlockPtr, outBlockPtr, parameter);
+    IndexActuator* indexActuator = MemoryUtil::safeNewClass<IndexActuator>(inBlockPtr, outBlockPtr, this);
     if (indexActuator == nullptr) {
         LOG_ERROR("Failed to create IndexActuator.");
         return nullptr;

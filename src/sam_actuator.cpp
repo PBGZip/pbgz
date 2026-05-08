@@ -38,7 +38,7 @@
 #include "utils/path_util.h"
 #include "pbgz_index.h"
 
-SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para, Reference* pReferene): CodecActuator(inPtr, outPtr, para) {
+SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pReferene): CodecActuator(inPtr, outPtr, engine) {
     pRefeGene = pReferene;
     headEndLine = 0;
     idPosLength = 0;
@@ -1262,7 +1262,7 @@ int32_t SamCodecActuator::decompress() {
     metaCoder.decoder(inBlockPtr->getMetaBuffer(), inBlockPtr->getMetaLen(), meta);
     if (meta.isMember("header")) {
         if (0 != decompressHeader()) {
-            LOG_ERROR("Decompress header failed. block id = %d", inBlockPtr->getBlockId());
+            LOG_ERROR("Decompress header failed. block id = %d.", inBlockPtr->getBlockId());
             return -1;
         }
     } else {
@@ -1279,7 +1279,8 @@ int32_t SamCodecActuator::decompress() {
     std::string md5;
     calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
     if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("MD5 check failed for SAM data, blockid = %d", outBlockPtr->getBlockId());
+        LOG_ERROR("MD5 check failed for SAM data, blockid = %d, expected: %s, got: %s", outBlockPtr->getBlockId(), 
+            meta["md5"].asString().c_str(), md5.c_str());
         return -1;
     }
 
@@ -1903,7 +1904,7 @@ uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength
 }
 
 int32_t SamCodecActuator::buildSamIndex() {
-    if (!pbgzPara.isMakeIndex) {
+    if (!pbgzEngine->getParameter().isMakeIndex) {
         return 0;
     }
 

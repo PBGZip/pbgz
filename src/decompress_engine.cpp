@@ -147,7 +147,8 @@ void DecompressEngine::printFastqFileNotMatchInfo(const Json::Value& metaRefe) {
 }
 
 bool DecompressEngine::initRefeIndex() {
-    
+    std::string indexFileName = parameter.inputFile + ".pbgzi";
+    SamIndex::getInstance().loadFromFile(indexFileName);
     return true;
 }
 
@@ -163,8 +164,17 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
     if (blockReader == nullptr) {
         return;
     }
+
+    BlockType fileType = TYPE_UNKNOW;
+    int64_t ret = 0;
+    do {
+        ret = readOneBlock(blockReader, fileType);
+    } while ((ret > 0 || ret == -2) && readHeadBlockFlag);
+
+    
     return CodecEngine::readBlocks(blockReader);
 }
+
 
 bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta) {
     int64_t refeSquashLen = refeMeta["squash_len"].asInt64();
@@ -281,13 +291,13 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
 
     Actuator* pActuator = nullptr;
     if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
-        pActuator = MemoryUtil::safeNewClass<FastqDecompressActuator>(inBlockPtr, outBlockPtr, parameter, pRefGene);
+        pActuator = MemoryUtil::safeNewClass<FastqDecompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
-        pActuator = MemoryUtil::safeNewClass<SamDecompressActuator>(inBlockPtr, outBlockPtr, parameter, pRefGene);
+        pActuator = MemoryUtil::safeNewClass<SamDecompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (inBlockPtr->getBlockType() == BINARY) {
-        pActuator = MemoryUtil::safeNewClass<BinaryDecompressActuator>(inBlockPtr, outBlockPtr, parameter);
+        pActuator = MemoryUtil::safeNewClass<BinaryDecompressActuator>(inBlockPtr, outBlockPtr, this);
     }
-    
+
     if (pActuator == nullptr) {
         LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
         freeInputPool->push(inBlockPtr);

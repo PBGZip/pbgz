@@ -37,6 +37,7 @@
 #include <io_wrapper.h>
 #include <block_wrapper.h>
 #include "config_manager.h"
+#include <compress_engine.h>
 #undef private
 
 namespace SamTestData {
@@ -53,6 +54,10 @@ public:
         coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
         coder_ns::register_free_func(MemoryUtil::safeFree<void>);
         coder_ns::initFcCoder();
+
+        // Ensure SamInfo state is clean
+        SamInfo::getInstance().clearChromosomeInfo();
+        SamInfo::getInstance().resetChrIdCounter();
 
 		pInBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
         pOutBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
@@ -259,13 +264,13 @@ protected:
     // Mapping data for testing
     std::map<uint32_t, uint16_t> mappedFlag;
     std::map<uint32_t, uint64_t> mappedPos;
-
-    PbgzParameter para;
 };
 
 TEST_F(SamActuatorTest, testPreAnalysis) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
     EXPECT_EQ(actuator.headEndLine, 8);  // Header has 8 lines (@HD, 6@SQ, 1@PG, may have other header lines)
@@ -294,7 +299,9 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     file.close();
 
     loadSamData("idinvlid_pre_analysis.sam");
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     int32_t result = actuator.preAnalysis();
     std::remove("idinvlid_pre_analysis.sam");
     EXPECT_EQ(result, 0);
@@ -303,7 +310,9 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
 
 TEST_F(SamActuatorTest, testCompressQuality) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -318,7 +327,9 @@ TEST_F(SamActuatorTest, testCompressQuality) {
 
 TEST_F(SamActuatorTest, testCompressChrName) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -333,7 +344,9 @@ TEST_F(SamActuatorTest, testCompressChrName) {
 
 TEST_F(SamActuatorTest, testCompressWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -347,7 +360,9 @@ TEST_F(SamActuatorTest, testCompressWithoutRef) {
 TEST_F(SamActuatorTest, testCompressWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamCodecActuator actuator(pInBlock, pOutBlock, para, &refGene);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -360,7 +375,9 @@ TEST_F(SamActuatorTest, testCompressWithRef) {
 
 TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -376,7 +393,9 @@ TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
 TEST_F(SamActuatorTest, testCompressBaseWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamCodecActuator actuator(pInBlock, pOutBlock, para, &refGene);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -391,7 +410,9 @@ TEST_F(SamActuatorTest, testCompressBaseWithRef) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -406,7 +427,9 @@ TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -421,7 +444,9 @@ TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
 
 TEST_F(SamActuatorTest, testCompressRegularField) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -436,7 +461,9 @@ TEST_F(SamActuatorTest, testCompressRegularField) {
 
 TEST_F(SamActuatorTest, testNotifyFlag) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Test getNotifyFlag
     bool hasData = actuator.getNotifyFlag();
@@ -445,7 +472,9 @@ TEST_F(SamActuatorTest, testNotifyFlag) {
 
 TEST_F(SamActuatorTest, testSetReference) {
     loadSamData(SamTestData::testSamFile);
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     Reference refGene = createTestReference();
     
@@ -463,11 +492,11 @@ TEST_F(SamActuatorTest, testSetReference) {
 TEST_F(SamActuatorTest, testDecompress) {
     loadSamData(SamTestData::testSamFile);
 
-    fprintf(stderr, "%s \n", pInBlock->getBuffer());
-    
     // Create SamActuator object for compression
-    SamCodecActuator compressor(pInBlock, pOutBlock, para);
-    
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine);
+
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
     EXPECT_EQ(result, 0);
@@ -488,11 +517,10 @@ TEST_F(SamActuatorTest, testDecompress) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamCodecActuator decompressor(pInBlock, pOutBlock, para);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
-    fprintf(stderr, "%s\n", pOutBlock->getBuffer());
     EXPECT_EQ(result, 0);
     
     // Basic check: ensure decompression produced data
@@ -505,7 +533,9 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     Reference reference = createTestReference();
     
     // Create SamActuator object for compression
-    SamCodecActuator compressor(pInBlock, pOutBlock, para, &reference);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
     
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
@@ -527,7 +557,7 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamCodecActuator decompressor(pInBlock, pOutBlock, para, &reference);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
@@ -539,7 +569,9 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
 
 
 TEST_F(SamActuatorTest, testCigarParse) {
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
 
     // Helper function: convert string to uint8_t* to pass to parseCigar
     auto testParse = [](SamCodecActuator& a, const std::string& cigar) -> uint32_t {
@@ -613,8 +645,10 @@ TEST_F(SamActuatorTest, testCigarParse) {
 
 TEST_F(SamActuatorTest, testBuildSamIndexDisabled) {
     loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
     para.isMakeIndex = false;
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
 
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -627,8 +661,10 @@ TEST_F(SamActuatorTest, testBuildSamIndexDisabled) {
 
 TEST_F(SamActuatorTest, testBuildSamIndexSuccess) {
     loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
     para.isMakeIndex = true;
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
 
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -641,8 +677,10 @@ TEST_F(SamActuatorTest, testBuildSamIndexSuccess) {
 
 TEST_F(SamActuatorTest, testBuildSamIndexUnsorted) {
     loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
     para.isMakeIndex = true;
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
 
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -664,8 +702,10 @@ TEST_F(SamActuatorTest, testBuildSamIndexUnsorted) {
 
 TEST_F(SamActuatorTest, testBuildSamIndexSkipUnmapped) {
     loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
     para.isMakeIndex = true;
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
 
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -686,8 +726,10 @@ TEST_F(SamActuatorTest, testBuildSamIndexSkipUnmapped) {
 
 TEST_F(SamActuatorTest, testBuildSamIndexSkipInvalidChr) {
     loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
     para.isMakeIndex = true;
-    SamCodecActuator actuator(pInBlock, pOutBlock, para);
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
 
     // Pre-analysis
     int32_t result = actuator.preAnalysis();

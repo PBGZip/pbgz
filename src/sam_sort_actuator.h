@@ -49,7 +49,7 @@ std::string getSortedSamFileName(uint16_t level, uint32_t blockId);
 
 class SAMSortActuator : public Actuator {
 public:
-    SAMSortActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para) : Actuator(inPtr, outPtr, para) {
+    SAMSortActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr) : Actuator(inPtr, outPtr, engine) {
         headLineNum = 0;
         notifyFlag = false;
     }

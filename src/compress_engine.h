@@ -40,7 +40,7 @@ public:
 
 protected:
     virtual BlockReader* createBlockReader() override;
-    
+
     virtual BlockWriter* createBlockWriter() override;
 
     virtual void releaseBlockReader(BlockReader* &blockReader) override;
@@ -55,13 +55,15 @@ protected:
 
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
 
-    virtual void printTailInfo(Timer& costTimer) override { 
+    virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, true);
     }
 
     virtual void setDataBlockPosition(uint32_t blockId);
 
     virtual int32_t startWorkPreProc() override;
+
+    virtual Reference* getReference() override { return pRefGene; }
 
 private:
     bool initReference();

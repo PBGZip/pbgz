@@ -34,7 +34,7 @@
 
 class IndexActuator : public Actuator {
 public:
-    IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzParameter& para);
+    IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr);
 
     virtual ~IndexActuator();
 
