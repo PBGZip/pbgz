@@ -42,11 +42,32 @@ BlockReader* DecompressEngine::createBlockReader() {
         return nullptr;
     }
 
-    if (parameter.inputFile != STDIN && !parameter.refeGenePos.empty()) {
-        if (!initRefeIndex()) {
-            LOG_INFO("Init reference index for decompress failed");
+    do {
+        if (parameter.inputFile != STDIN && !parameter.refeGenePos.empty()) {
+            if (!initRefeIndex()) {
+                LOG_INFO("Init reference index for decompress failed");
+                break;
+            }
+
+            // Parse the p parameter, format like chr1:100-200, convert the part before : to chrID, the part before and after - for the reference gene start position
+            size_t colonPos = parameter.refeGenePos.find(':');
+            if (colonPos == std::string::npos) {
+                refPosChrName = parameter.refeGenePos;
+                break;
+            }
+            size_t dashPos = parameter.refeGenePos.find('-');
+            if (dashPos == std::string::npos) {
+                refPosChrName = parameter.refeGenePos.substr(0, colonPos);
+                break;
+            }
+            
+            refPosChrName = parameter.refeGenePos.substr(0, colonPos);
+            refPosBegin = std::stoi(parameter.refeGenePos.substr(colonPos + 1, dashPos - colonPos - 1));
+            refPosEnd = std::stoi(parameter.refeGenePos.substr(dashPos + 1));
+
+            LOG_DEBUG("refPosChrName = %s, refPosBegin = %d, refPosEnd = %d", refPosChrName.c_str(), refPosBegin, refPosEnd);
         }
-    }
+    } while (0);
 
     return pbgzReader;
 }
@@ -153,7 +174,7 @@ bool DecompressEngine::initRefeIndex() {
 }
 
 void DecompressEngine::readBlocks(BlockReader* blockReader)  {
-    if (!parameter.refeGenePos.empty() && pRefGene) {
+    if (!parameter.refeGenePos.empty()) {
         return readBlockByPostition(blockReader);
     } else {
         return CodecEngine::readBlocks(blockReader);
@@ -165,16 +186,97 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
         return;
     }
 
-    BlockType fileType = TYPE_UNKNOW;
-    int64_t ret = 0;
+    // Read the beginning block of the Pbgz file to complete the file header parsing
+    std::unique_ptr<RoughIOBlock> inBlockPtr = std::make_unique<RoughIOBlock>(getBlockSize());
+    if (inBlockPtr == nullptr) {
+        LOG_ERROR("Get free block failed.");
+        return;
+    }
+    std::unique_ptr<RoughIOBlock> outBlockPtr = std::make_unique<RoughIOBlock>(getBlockSize());
+    if (outBlockPtr == nullptr) {
+        LOG_ERROR("Get free block failed.");
+        return;
+    }
+
+    std::unique_ptr<SamCodecActuator> actuator;
     do {
-        ret = readOneBlock(blockReader, fileType);
-    } while ((ret > 0 || ret == -2) && readHeadBlockFlag);
+        inBlockPtr->reset();
+        int64_t ret = blockReader->readBlock(inBlockPtr.get(), TYPE_UNKNOW);
+        if (ret <= 0) {
+            break;
+        }
+        outBlockPtr->reset();
+        actuator = std::make_unique<SamCodecActuator>(inBlockPtr.get(), outBlockPtr.get(), this, pRefGene);
+        actuator->initMetaInfo();
+        if (actuator->getHeadLineNumber() > 0) {
+            actuator->decompressHeader(outBlockPtr.get());
+        }
+        if (actuator->getHeadLineNumber() == 0 || actuator->getSamLineNumber() > 0) {
+            break;
+        }
+    } while (true);
 
-    
-    return CodecEngine::readBlocks(blockReader);
+    uint16_t chrIndex = SamInfo::getInstance().getChrNameIndex(refPosChrName);
+    if (chrIndex == 65535) {
+        return;
+    }
+    std::set<std::pair<uint32_t, int64_t>> blockList;
+    SamIndex::getInstance().getSamBlockByRef(chrIndex, refPosBegin, refPosEnd, blockList);
+
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    if (fileReader != nullptr) {
+        BlockType fileType = TYPE_UNKNOW;
+        for (auto block : blockList) {
+            fileReader->seekIO(block.second);
+            int64_t ret = readOneBlock(blockReader, fileType);
+            if (ret <= 0) {
+                break;
+            }
+        }
+    } else {
+        PipeReader* pipeReader = dynamic_cast<PipeReader*>(ioReader);
+        if (pipeReader != nullptr) {
+            BlockType fileType = TYPE_UNKNOW;
+            int64_t ret = 0;
+            do {
+                RoughIOBlock* blockPtr = freeInputPool->get();
+                if (blockPtr == nullptr) {
+                    LOG_ERROR("Get free block failed.");
+                    return;
+                }
+                blockPtr->reset();
+
+                int64_t ret = blockReader->readBlock(blockPtr, fileType);
+                if (ret <= 0) {
+                    freeInputPool->push(blockPtr);
+                    return;
+                }
+
+                if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
+                    freeInputPool->push(blockPtr);
+                    continue;
+                }
+
+                bool isMatch = false;
+                for (auto block : blockList) {
+                    if (blockPtr->getBlockId() == block.first) {
+                        updateInputStatics(blockPtr);
+                        inputDataPool->push(blockPtr);
+                        if (ret > 0) {
+                            blockCount++;
+                        }
+                        isMatch = true;
+                        break;
+                    }
+                }
+                if (!isMatch) {
+                    freeInputPool->push(blockPtr);
+                }
+            } while (ret > 0 || ret == -2);
+        }
+    }
+    return;
 }
-
 
 bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta) {
     int64_t refeSquashLen = refeMeta["squash_len"].asInt64();

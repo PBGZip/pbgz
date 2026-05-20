@@ -37,6 +37,7 @@
 #include "pbgz_manager.h"
 #include "utils/path_util.h"
 #include "pbgz_index.h"
+#include "decompress_engine.h"
 
 SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pReferene): CodecActuator(inPtr, outPtr, engine) {
     pRefeGene = pReferene;
@@ -53,6 +54,10 @@ SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Pb
     baseDiffSquashBuffer = nullptr;
     refeStrecchBuffer = nullptr;
     notifyFlag = false;
+    samLine = 0;
+    refPosChrIndex = 65535;
+    refPosBegin = 0;
+    refPosEnd = 0;
 }
 
 SamCodecActuator::~SamCodecActuator() {
@@ -368,6 +373,25 @@ int32_t SamCodecActuator::compress() {
 
     if (inBlockPtr->getNpos().size() <= (size_t)headEndLine) {
         LOG_DEBUG("SAM head only");
+        // For header-only case, we still need to write the metadata
+        // Calculate MD5 of original data (header only)
+        std::string md5;
+        calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
+        meta["md5"] = md5;
+
+        // Compress and write metadata
+        coder_json metaCoder;
+        int32_t metaLen = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
+        if (metaLen <= 0) {
+            LOG_ERROR("Failed to encode meta information for SAM compression (header only)");
+            return -1;
+        }
+        outBlockPtr->setMetaLen(metaLen);
+
+        // Set block information
+        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+        outBlockPtr->setBlockType(inBlockPtr->getBlockType());
+
         return 0;
     }
 
@@ -667,11 +691,13 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
     // Update output block data length
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
 
-    Json::Value streamMeta;
-    streamMeta["srclen"] = fieldSrcLen;
-    streamMeta["dstlen"] = fieldIo->data_len;
-    streamMeta["coder"] = fieldIo->meta;
+    Json::Value tempIdMeta;
+    tempIdMeta["srclen"] = fieldSrcLen;
+    tempIdMeta["dstlen"] = fieldIo->data_len;
+    tempIdMeta["coder"] = fieldIo->meta;
     
+    Json::Value streamMeta;
+    streamMeta.append(tempIdMeta);
     // Set field metadata
     fieldMeta["totalsrclen"] = fieldSrcLen;
     fieldMeta["totaldstlen"] = fieldIo->data_len;
@@ -1252,16 +1278,62 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     return totalDstLength;
 }
 
+void SamCodecActuator::initMetaInfo() {
+    coder_json metaCoder;
+    metaCoder.decoder(inBlockPtr->getMetaBuffer(), inBlockPtr->getMetaLen(), meta);
+    if (meta.isMember("header")) {
+        headEndLine = meta["header"]["lines"].asInt64();
+    }
+    if (meta.isMember("sam")) {
+        samLine =  meta["sam"]["lines"].asUInt();
+    }
+    return;
+}
+
 int32_t SamCodecActuator::decompress() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter, inBlockPtr or outBlockPtr is nullptr for SAM decompression");
         return -1;
     }
+    // Reset read offset before decompression
+    readOffset = 0;
     // Parse meta information
-    coder_json metaCoder;
-    metaCoder.decoder(inBlockPtr->getMetaBuffer(), inBlockPtr->getMetaLen(), meta);
+    initMetaInfo();
+
+    // Set block information
+    outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+    outBlockPtr->setBlockType(inBlockPtr->getBlockType());
+
+    RoughIOBlock* targeBlock = outBlockPtr;
+
+    const PbgzParameter& parameter = pbgzEngine->getParameter();
+    if (!parameter.refeGenePos.empty()) {
+        do {
+            // Parse the p parameter, format like chr1:100-200, convert the part before : to chrID, the part before and after - for the reference gene start position
+            size_t colonPos = parameter.refeGenePos.find(':');
+            if (colonPos == std::string::npos) {   // Format with only chromosome name
+                refPosChrIndex = SamInfo::getInstance().getChrNameIndex(parameter.refeGenePos);
+                break;
+            }
+
+            size_t dashPos = parameter.refeGenePos.find('-');
+            if (dashPos == std::string::npos) {
+                break;
+            }
+            
+            refPosChrIndex = SamInfo::getInstance().getChrNameIndex(parameter.refeGenePos.substr(0, colonPos));
+            if (refPosChrIndex == 65535) {
+                break;
+            }
+            refPosBegin = std::stoi(parameter.refeGenePos.substr(colonPos + 1, dashPos - colonPos - 1));
+            refPosEnd = std::stoi(parameter.refeGenePos.substr(dashPos + 1));
+            LOG_DEBUG("refPosChrIndex = %d, refPosBegin = %d, refPosEnd = %d", refPosChrIndex);
+            targeBlock = MemoryUtil::safeNewClass<RoughIOBlock>(outBlockPtr->getBlockSize());
+        } while(0);
+    } 
+
     if (meta.isMember("header")) {
-        if (0 != decompressHeader()) {
+        if (0 != decompressHeader(targeBlock)) {
             LOG_ERROR("Decompress header failed. block id = %d.", inBlockPtr->getBlockId());
             return -1;
         }
@@ -1270,26 +1342,30 @@ int32_t SamCodecActuator::decompress() {
         notifyFlag = true;
     }
 
-    if (0 != decompressSamByFields()) {
+    if (0 != decompressSamByFields(targeBlock)) {
         LOG_ERROR("Decompress fields failed. block id = %d", inBlockPtr->getBlockId());
         return -1;
     }
 
-    // Verify checksum of decompressed content
-    std::string md5;
-    calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
-    if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("MD5 check failed for SAM data, blockid = %d, expected: %s, got: %s", outBlockPtr->getBlockId(), 
-            meta["md5"].asString().c_str(), md5.c_str());
-        return -1;
+    if (refPosChrIndex == 65535) {
+        // Verify checksum of decompressed content
+        std::string md5;
+        calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
+        if (md5 != meta["md5"].asString()) {
+            LOG_ERROR("MD5 check failed for SAM data, blockid = %d, expected: %s, got: %s", outBlockPtr->getBlockId(),
+                meta["md5"].asString().c_str(), md5.c_str());
+            return -1;
+        }
+    } else {
+        MemoryUtil::safeDeleteClass(targeBlock);
     }
 
     return 0;
 }
 
-int32_t SamCodecActuator::decompressSamByFields() {
-    if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
-        LOG_ERROR("Invalid parameter, inBlockPtr or outBlockPtr is nullptr for SAM field-by-field decompression");
+int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
+    if (inBlockPtr == nullptr || outBlockPtr == nullptr || outputBlock == nullptr) {
+        LOG_ERROR("Invalid parameter, inBlockPtr or outputBlock is nullptr for SAM field-by-field decompression");
         return -1;
     }
 
@@ -1299,20 +1375,15 @@ int32_t SamCodecActuator::decompressSamByFields() {
     }
 
     // Initialize decoders based on compression metadata
-    if (0 != initDecoder(outBlockPtr)) {
+    if (0 != initDecoder(outputBlock)) {
         LOG_ERROR("Init decoder failed.");
         return -1;
     }
 
-    // Set block information
-    outBlockPtr->setBlockId(inBlockPtr->getBlockId());
-    outBlockPtr->setBlockType(inBlockPtr->getBlockType());
-    
     Json::Value& samMeta = meta["sam"];
     Json::Value& streams = samMeta["streams"];
     uint32_t fieldCount = samMeta["fieldcount"].asUInt();
-    uint32_t lineNum = samMeta["lines"].asUInt();
-    uint8_t* pBaseEnd = outBlockPtr->getBuffer() + outBlockPtr->getBufferSize();
+    uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     baseDiffSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     refeStrecchBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
@@ -1324,79 +1395,81 @@ int32_t SamCodecActuator::decompressSamByFields() {
         pBaseOut = pBaseEnd - streams[9]["totalsrclen"].asUInt();
     }
 
-    for (uint32_t lineNo = 0; lineNo < lineNum; ++lineNo) {
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
         uint8_t* basePtr = nullptr;
         uint32_t actualBaseLen = 0;
         // Decode each field for this line
         for (uint32_t fieldIdx = 0; fieldIdx < fieldCount; ++fieldIdx) {
             int32_t decoderLen = 0;
-            if (fieldIdx == 0) {    /// ID 
-                decoderLen = decompressIdField(fieldIdx, streams[fieldIdx]);
+            if (fieldIdx == 0) {    /// ID
+                decoderLen = decompressIdField(fieldIdx, streams[fieldIdx], outputBlock);
             } else if (fieldIdx == 1) {  /// FLAG
-                decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo);
+                decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 2) {  /// RNAME
-                decoderLen = decompressChrName(fieldIdx, lineNo);
+                decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 3) {  /// POS
-                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo);
+                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 4) {  /// MAPQ
-                decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo);
+                decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 5) {  /// CIGAR
-                decoderLen = decompressCigar(fieldIdx, '\t', lineNo);
+                decoderLen = decompressCigar(fieldIdx, '\t', lineNo, outputBlock);
             } else if (fieldIdx == 6) {  /// RNEXT
-                decoderLen = decompressChrName(fieldIdx, lineNo);
+                decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 7) {  /// PNEXT
-                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo);
+                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 8) {  /// TLEN
-                decoderLen = decompressNumber<int32_t>(fieldIdx, lineNo);
+                decoderLen = decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 9) {  /// SEQ
-                basePtr = outBlockPtr->getCurrent();
-                decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen);
+                basePtr = outputBlock->getCurrent();
+                decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen, outputBlock);
                 actualBaseLen = decoderLen;
-            } else if (fieldIdx == 10 ) {  /// QUAL  
-
-                // LOG_DEBUG("lineNo = %d, actualBaseLen = %d", lineNo, actualBaseLen); 
-
-                // PbgzManager::getInstance().printBufferContent(basePtr, actualBaseLen);
-                
-                decompressQuality(basePtr, actualBaseLen);
+            } else if (fieldIdx == 10 ) {  /// QUAL
+                decompressQuality(basePtr, actualBaseLen, outputBlock);
                 // No optional fields scenario, replace appended \t with \n
                 if (fieldIdx + 1 == fieldCount) {
-                    uint8_t* pEnd = outBlockPtr->getCurrent();
+                    uint8_t* pEnd = outputBlock->getCurrent();
                     *(pEnd - 1) = '\n';
                 }
             } else {   /// Optional fields
                 // Decode field until tab or end
                 if (fieldIdx + 1 == fieldCount) {
-                    decoderLen = decompressRegularField(fieldIdx, '\n');
+                    decoderLen = decompressRegularField(fieldIdx, '\n', outputBlock);
                     // Single newline means it's appended, need to change \t after quality to \n and remove appended \n
                     if (decoderLen == 1) {
-                        uint8_t* pEnd = outBlockPtr->getCurrent();
+                        uint8_t* pEnd = outputBlock->getCurrent();
                         *(pEnd - 2) = '\n';
-                        outBlockPtr->setDataLen(outBlockPtr->getDataLen() - 1);
+                        outputBlock->setDataLen(outputBlock->getDataLen() - 1);
                     }
                 } else {
-                    decoderLen = decompressRegularField(fieldIdx, '\t');
+                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
                 }
             }
-
             if (decoderLen < 0) {
                 LOG_ERROR("Decode field(%d) failed. lineNo = %d", fieldIdx, lineNo);
                 return -1;
             }
+        }
+
+        if (refPosChrIndex != 65535) {
+            if (mappedChr[lineNo] == refPosChrIndex && mappedPos[lineNo]  >= refPosBegin && mappedPos[lineNo] <= refPosEnd) {
+                memcpy(outBlockPtr->getCurrent(), outputBlock->getBuffer(), outputBlock->getDataLen());
+                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + outputBlock->getDataLen());  
+            }
+            outputBlock->reset();
         }
     }
 
     return 0;
 }
 
-int32_t SamCodecActuator::decompressHeader() {
-    if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
+int32_t SamCodecActuator::decompressHeader(RoughIOBlock* outputBlock) {
+    if (inBlockPtr == nullptr || outputBlock == nullptr) {
         LOG_ERROR("Invalid parameter for SAM header decompression");
         return -1;
     }
 
     Json::Value& headerMeta = meta["header"];
-    if (!headerMeta.isMember("srclen") || !headerMeta.isMember("dstlen") || 
+    if (!headerMeta.isMember("srclen") || !headerMeta.isMember("dstlen") ||
         !headerMeta.isMember("lines") || !headerMeta.isMember("coder")) {
         LOG_ERROR("Invalid SAM header metadata for decompression");
         return -1;
@@ -1405,34 +1478,32 @@ int32_t SamCodecActuator::decompressHeader() {
     if (headerMeta["coder"]["magic"].asString() != "coder_bwt_cm") {
         return -1;
     }
-    
-    headEndLine = headerMeta["lines"].asInt64();
-    uint32_t dstLen = headerMeta["dstlen"].asUInt();
 
+    uint32_t dstLen = headerMeta["dstlen"].asUInt();
     // Create SAM file header decompressor
     std::shared_ptr<coder_io> headerIo = std::make_shared<coder_io>(inBlockPtr->getBuffer(), dstLen);
     std::shared_ptr<coder_bwt_cm> headerDecoder = std::make_shared<coder_bwt_cm>(headerIo.get());
-    
+
     // Set decoder level
     if (headerMeta["coder"].isMember("level")) {
         headerDecoder->set_level(headerMeta["coder"]["level"].asInt());
     }
-    
+
     // Decompress SAM file header data
     uint32_t lineCount = 0;
     uint32_t decoderTotalLen = 0;
     while (lineCount < headEndLine) {
         // Decompress one line of data
-        uint32_t decodedLen = headerDecoder->decode_line(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), '\n', false);
+        uint32_t decodedLen = headerDecoder->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), '\n', false);
         if (decodedLen == 0) {
             break; // No more data
         }
-        std::string headStr = std::string((char*)outBlockPtr->getCurrent(), decodedLen);
+        std::string headStr = std::string((char*)outputBlock->getCurrent(), decodedLen);
         if (headStr.substr(0, 3) == "@SQ") {
             SamUtil::parseChromosomeInfo(headStr);
         }
 
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + decodedLen);
+        outputBlock->setDataLen(outputBlock->getDataLen() + decodedLen);
         lineCount++;
         decoderTotalLen += decodedLen;
     }
@@ -1502,7 +1573,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     baseIo.meta = baseMeta;
                     baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
                     coder_fc baseDecoder = coder_fc(&baseIo);
-                    baseDecoder.decode_line(outBlockPtr->getBuffer() + outBlockPtr->getBufferSize() - srcLength, srcLength, UINT8_MAX, false);
+                    baseDecoder.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcLength, srcLength, UINT8_MAX, false);
                 } else if(coderName == "coder_bwt_cm") {
                     std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLength);
                     ioVector.push_back(io);
@@ -1640,13 +1711,13 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     return 0;
 }
 
-int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag) {
-    uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), splitFlag, false);
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldLen);
+int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag, RoughIOBlock* outputBlock) {
+    uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
+    outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
     return fieldLen;
 }
 
-int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta, RoughIOBlock* outputBlock) {
     if (fieldIdx != 0) {
         return -1;
     }
@@ -1658,29 +1729,29 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
         Json::Value& splitMeta = idStreams[splitIdx];
         uint32_t splitDstLen = splitMeta["dstlen"].asUInt();
         std::string coderName = splitMeta["coder"]["magic"].asString();
-        
+
         // Decode segment
-        uint32_t segmentLen = idDecoders[splitIdx]->decode_line(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), 
+        uint32_t segmentLen = idDecoders[splitIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
             (splitIdx < idSplitSymbols.size()) ? idSplitSymbols[splitIdx] : UINT8_MAX, false);
         readOffset += splitDstLen;
         idLength += splitDstLen;
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + segmentLen);
+        outputBlock->setDataLen(outputBlock->getDataLen() + segmentLen);
     }
     return idLength;
 }
 
-int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo) {
+int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock) {
     uint16_t chrIndex = 0;
     fieldDecoders[fieldIdx]->decode_line((uint8_t*)&chrIndex, sizeof(chrIndex), UINT8_MAX, false);
     if (chrIndex == 0xFFFF) {
-        *outBlockPtr->getCurrent() = '*';
-        *(outBlockPtr->getCurrent() + 1) = '\t';
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 2);
+        *outputBlock->getCurrent() = '*';
+        *(outputBlock->getCurrent() + 1) = '\t';
+        outputBlock->setDataLen(outputBlock->getDataLen() + 2);
         return 2;
     } else if (chrIndex == 0xFFFE) {
-        *outBlockPtr->getCurrent() = '=';
-        *(outBlockPtr->getCurrent() + 1) = '\t';
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 2);
+        *outputBlock->getCurrent() = '=';
+        *(outputBlock->getCurrent() + 1) = '\t';
+        outputBlock->setDataLen(outputBlock->getDataLen() + 2);
         return 2;
     } else {
         if (fieldIdx == 2) {
@@ -1689,40 +1760,39 @@ int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo) 
             nextMappedChr[lineNo] = chrIndex;
         }
         std::string chrName = SamInfo::getInstance().getChromosomeInfo(chrIndex).name;
-        memcpy(outBlockPtr->getCurrent(), chrName.c_str(), chrName.length());
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + chrName.length());
-        *outBlockPtr->getCurrent() = '\t';
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+        memcpy(outputBlock->getCurrent(), chrName.c_str(), chrName.length());
+        outputBlock->setDataLen(outputBlock->getDataLen() + chrName.length());
+        *outputBlock->getCurrent() = '\t';
+        outputBlock->setDataLen(outputBlock->getDataLen() + 1);
         return  chrName.length() + 1;
     }
 }
 
 int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
-                                    uint32_t& nposOffset, uint32_t& totalBaseLen) {
-    uint8_t* pBaseEnd = outBlockPtr->getBuffer() + outBlockPtr->getBufferSize();
+                                    uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock) {
+    uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
     bool isUserReference = pRefeGene != nullptr && fieldMeta.isMember("streams");
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
         if (minBaseLength == maxBaseLength) {
             actualBaseLen = baseLengthBuffer[lineNo] == 0 ? maxBaseLength : baseLengthBuffer[lineNo];
-            LOG_DEBUG("actualBaseLen = %d", actualBaseLen);
             if (fieldMeta["coder"]["magic"].asString() == "coder_fc") {
-                memcpy(outBlockPtr->getCurrent(), pBaseOut, actualBaseLen);
+                memcpy(outputBlock->getCurrent(), pBaseOut, actualBaseLen);
                 pBaseOut += actualBaseLen;
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
+                outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
             } else if (fieldMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
-                fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), actualBaseLen, UINT8_MAX, false);
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
+                fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), actualBaseLen, UINT8_MAX, false);
+                outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
             } else {
                 LOG_ERROR("Not supported coder name:%s",fieldMeta["coder"]["magic"].asString().c_str());
                 return -1;
             }
 
-            *(outBlockPtr->getCurrent()) = '\t';
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+            *(outputBlock->getCurrent()) = '\t';
+            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
         } else {
             if (fieldMeta["coder"]["magic"].asString() == "coder_fc") {
-                uint8_t* pBaseTmp = outBlockPtr->getCurrent();
+                uint8_t* pBaseTmp = outputBlock->getCurrent();
                 uint8_t* ptr = pBaseOut;
                 for (; ptr < pBaseEnd; ++ptr) {
                     *pBaseTmp++ = *ptr;
@@ -1732,11 +1802,11 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 }
                 actualBaseLen = ptr - pBaseOut + 1;
                 pBaseOut += actualBaseLen;
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
+                outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
             } else if (fieldMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
-                actualBaseLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), maxBaseLength, '\t', false);
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
+                actualBaseLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), maxBaseLength, '\t', false);
+                outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
             } else {
                 LOG_ERROR("Not supported coder name:%s", fieldMeta["coder"]["magic"].asString().c_str());
@@ -1768,7 +1838,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                     return -1;
                 }
                 for (uint32_t o = 0; o < decoderLen; ++o) {
-                    outBlockPtr->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
+                    outputBlock->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
                 }
             } else {
                 // Get position in reference genome
@@ -1798,7 +1868,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                         return -1;
                     }
                     for (uint32_t o = 0; o < decoderLen; ++o) {
-                        outBlockPtr->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
+                        outputBlock->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
                     }
                 } else {
                     decoderLen = fieldDecoders[fieldIdx]->decode_line(baseDiffSquashBuffer, actualBaseLen, UINT8_MAX, false);
@@ -1808,22 +1878,22 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                     }
                     pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, actualBaseLen, refeMappedPos);
                     actgXor(refeStrecchBuffer, baseDiffSquashBuffer, baseSquashBuffer, actualBaseLen);
-                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outBlockPtr->getCurrent());   
+                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outputBlock->getCurrent());
                 }
             }
-            
+
             // Fill N back
             for (uint32_t n = 0; n < actualBaseLen; ++n) {
                 if (nposOffset < baseNCount && baseNPosBuffer[nposOffset] == totalBaseLen + n) {
-                    *(outBlockPtr->getCurrent() + n) = 'N';
+                    *(outputBlock->getCurrent() + n) = 'N';
                     nposOffset++;
-                } 
+                }
             }
             totalBaseLen += actualBaseLen;
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
+            outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
 
-            *(outBlockPtr->getCurrent()) = '\t';
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+            *(outputBlock->getCurrent()) = '\t';
+            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
         } else {
             LOG_ERROR("Not supported coder name:%s", fieldMeta["coder"]["magic"].asString().c_str());
             return -1;
@@ -1832,24 +1902,24 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
     return actualBaseLen;
 }
 
-int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen) {
-    qualCoder->decode_qual_gen2(basePtr, outBlockPtr->getCurrent(), actualBaseLen);
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
-    *(outBlockPtr->getCurrent()) = '\t';
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
+int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
+    qualCoder->decode_qual_gen2(basePtr, outputBlock->getCurrent(), actualBaseLen);
+    outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
+    *(outputBlock->getCurrent()) = '\t';
+    outputBlock->setDataLen(outputBlock->getDataLen() + 1);
     return actualBaseLen;
 }
 
-int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx) {
-    uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), splitFlag, false);
+int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx, RoughIOBlock* outputBlock) {
+    uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
     if (fieldLen > 1) {
-        uint32_t seqLength = parseCigar(outBlockPtr->getCurrent(), fieldLen);
+        uint32_t seqLength = parseCigar(outputBlock->getCurrent(), fieldLen);
         baseLengthBuffer[lineIdx] = seqLength;
     } else {
         baseLengthBuffer[lineIdx] = 0;
     }
-    
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldLen);
+
+    outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
     return fieldLen;
 }
 
@@ -1947,6 +2017,16 @@ int32_t SamCodecActuator::buildSamIndex() {
                 LOG_ERROR("SAM block %d is not sorted by chrIndex and mapPos: line %d (chr=%u,pos=%ld) < line %d-1 (chr=%u,pos=%ld)",
                     inBlockPtr->getBlockId(), lineNo, chrIndex, mapPos, lineNo,
                     lastKey.chrIndex, lastKey.mapPos);
+                static bool isPrint = true;
+                static std::mutex mutex;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    if (isPrint) {
+                        isPrint = false;
+                        fprintf(stderr, "The SAM file is unsorted, which may cause the index file not to be created.\n");
+                        pbgzEngine->parameter.isMakeIndex = false;
+                    }
+                }
                 return -1;
             }
 

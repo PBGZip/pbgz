@@ -35,6 +35,10 @@ public:
 
     virtual ~DecompressEngine() { }
 
+    void setReadHeadFlag(bool flag) {
+        readHeadBlockFlag = flag;
+    }
+
 protected:
     BlockReader* createBlockReader() override;
 
@@ -63,12 +67,11 @@ private:
 
     void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
 
-    void setReadHeafFlag(bool flag) {
-        readHeadBlockFlag = flag;
-    }
+    virtual Reference* getReference() override { return pRefGene; }
 
 private:
     bool readHeadBlockFlag;
-
-    virtual Reference* getReference() override { return pRefGene; }
+    std::string refPosChrName;
+    uint32_t refPosBegin;
+    uint32_t refPosEnd;
 };

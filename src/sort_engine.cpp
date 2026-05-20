@@ -88,6 +88,20 @@ void SamCombineOutputBlockWriter::flush() {
     return;
 }
 
+void SamCombineOutputBlockWriter::close() {
+    if (outBlock == nullptr) {
+        LOG_ERROR("outBlock is null");
+        return;
+    }
+    if (freePool == nullptr) {
+        LOG_ERROR("freePool is null");
+        return;
+    }
+    outputPool->push(outBlock);
+    return;
+}
+
+
 SortEngine::~SortEngine() {
 
 }
@@ -160,8 +174,8 @@ int32_t SortEngine::startEnginePostProc() {
     std::vector<std::string> outputFiles;
     combineAllSamFile(0, blockCount, outputFiles);
 
-    /// 将生成的排序好的文件进行归并
-    /// 先将头部写入文件
+    /// Merge the generated sorted files
+    /// Write the header first
     uint32_t writeBlockId = blockCount;
     std::string headFileName = getSortedHeadFileName();
     SamCombineOutputBlockWriter blockWriter (freeOutputPool.get(), outputDataPool.get());
@@ -187,6 +201,7 @@ int32_t SortEngine::startEnginePostProc() {
     if (0 != ret ) {
         LOG_ERROR("Combine sam file failed.");
     }
+    blockWriter.close();
     for (std::string& outfile : outputFiles) {
         PathUtil::removeFile(outfile);
     }
@@ -250,9 +265,9 @@ int32_t SortEngine::combineSamFile(std::vector<std::string> fileList, SamCombine
     }
 
     uint32_t combineFileSize = fileList.size();
-    std::map<uint32_t, FileReader*> sortedFileReader;
+    std::map<uint32_t, std::unique_ptr<FileReader>> sortedFileReader;
     for (uint32_t fileIdx =0; fileIdx < combineFileSize; ++fileIdx) {
-        sortedFileReader[fileIdx] = MemoryUtil::safeNewClass<FileReader>(fileList[fileIdx]);
+        sortedFileReader[fileIdx] = std::make_unique<FileReader>(fileList[fileIdx]);
         sortedFileReader[fileIdx]->openIO();
         LOG_DEBUG("Open file : %s", fileList[fileIdx].c_str());
     }
@@ -271,16 +286,16 @@ int32_t SortEngine::combineSamFile(std::vector<std::string> fileList, SamCombine
             if (readedLine > 0) {
                 int64_t sortPos = oneItem.parseData(readLine);
                 if (sortPos >= 0) {
-                    // 第一个读取
+                    // First read
                     if (lastSortPos == -1) {
                         samSorter.push(sortPos, oneItem, (fileIdx << 16) + index++);
                         lastSortPos = sortPos;
                     } else {
-                        // 位置相同，继续加入排序
+                        // Same position, continue to add to sorting
                         if (lastSortPos == sortPos) {
                             samSorter.push(sortPos, oneItem, (fileIdx << 16) + index++);
                         } else {
-                            // 位置不同，进入缓存，结束这个块的读取
+                            // Different position, enter cache, end the reading of this block
                             samLineCache[fileIdx] = std::make_pair(sortPos, oneItem);
                             break;
                         }
@@ -352,10 +367,10 @@ int32_t SortEngine::combineSamFile(std::vector<std::string> fileList, SamCombine
         fileIdxSet.clear();
     }
 
-   outputWriter->flush();
+    outputWriter->flush();
 
-    /// 按照blockid顺序，将未匹配的数据写入sam
-    for (uint32_t fileIdx = 0; fileIdx < combineFileSize; ++fileIdx) {
+     /// Write unmatched data to SAM in blockID order
+     for (uint32_t fileIdx = 0; fileIdx < combineFileSize; ++fileIdx) {
         if (fisrtUnMapSamLines.find(fileIdx) != fisrtUnMapSamLines.end()) {
             SortedSamItem& unmapItem = fisrtUnMapSamLines[fileIdx];
             outputWriter->writerSam(-1, unmapItem.samLine);
@@ -372,6 +387,7 @@ int32_t SortEngine::combineSamFile(std::vector<std::string> fileList, SamCombine
         }
         sortedFileReader[fileIdx]->closeIO();
     }
+    sortedFileReader.clear();
     outputWriter->flush();
 
     return 0;

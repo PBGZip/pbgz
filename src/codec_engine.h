@@ -57,7 +57,7 @@ protected:
 
     void resetReferenceOffset();
 
-    void setDataBlockPosition(uint32_t) {
+    virtual void setDataBlockPosition(uint32_t) {
         return;
     }
 

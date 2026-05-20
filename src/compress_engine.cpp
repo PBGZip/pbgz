@@ -118,6 +118,17 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
     return actuator;
 }
 
+void CompressEngine::writeFilePostProc(BlockWriter*) {
+    // make index
+    if (parameter.isMakeIndex) {
+        std::string indexFileName = parameter.outputFile + ".pbgzi";
+        if (PathUtil::fileExists(indexFileName)) {
+            PathUtil::removeFile(indexFileName);
+        }
+        SamIndex::getInstance().updateFileOffsetsFromBlockPosition();
+        SamIndex::getInstance().dumpToFile(indexFileName);
+    }
+}
 
 
 int32_t CompressEngine::startEnginePreProc() {
@@ -270,12 +281,6 @@ int32_t CompressEngine::startEnginePostProc() {
             dynamicFileMeta.getMetaData("refe")["blocks"] = refBlockCount;
         }
     }
-
-    // 
-    if (parameter.isMakeIndex) {
-        std::string indexFileName = parameter.outputFile + ".pbgzi";
-        SamIndex::getInstance().dumpToFile(indexFileName);
-    }
     
     return CodecEngine::engineStartAfterProc();
 }
@@ -315,15 +320,14 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     return 0;
  }
 
- Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    if (parameter.isMakeIndex) {
-        fprintf(stderr, "Fastq file will not make index.");
-        parameter.isMakeIndex = false;
-    }
-
+Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
     Actuator* pActuator = nullptr;
     if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
-        pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, this,  pRefGene);
+        if (parameter.isMakeIndex) {
+            fprintf(stderr, "Fastq file will not make index.");
+            parameter.isMakeIndex = false;
+        }
+        pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
         pActuator = MemoryUtil::safeNewClass<SamCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (inBlockPtr->getBlockType() == BINARY) {

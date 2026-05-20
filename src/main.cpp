@@ -460,7 +460,7 @@ public:
             inputFile = inputFile.substr(0, inputFile.length() - 3);
         }
 
-        // 根据inputFile的最后一个.的位置将字符分割成两个
+        // Split the string into two parts based on the position of the last . in inputFile
         size_t lastDotPos = inputFile.find_last_of('.');
         if (lastDotPos != std::string::npos && lastDotPos > 0) {
             std::string fileNamePrefix = inputFile.substr(0, lastDotPos);
