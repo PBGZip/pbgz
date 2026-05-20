@@ -63,7 +63,6 @@ protected:
     uint64_t cacheLen;        // Length of data in cache
 };
 
-
 class PbgzBlockReader : public BlockReader {
 public:
     PbgzBlockReader(IOReader* reader): BlockReader(reader) {

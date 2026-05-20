@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <string>
 #include <sstream>
+#include <set>
 
 
 class BlockPosition {
@@ -77,9 +78,10 @@ public:
 
     static SamIndex& getInstance();
 
-    void addSamIndex(uint16_t chrIndex, int64_t refPos, uint32_t readNumber, uint32_t blockId); 
+    void addSamIndex(uint16_t chrIndex, int64_t refPos, uint32_t readNumber, uint32_t blockId, int64_t offset = 0); 
 
-    int32_t getSamBlockByRef(uint16_t chrIndex, int64_t beginRefPos, int64_t endRefPos, std::vector<uint32_t>& outBlockList);
+    int32_t getSamBlockByRef(uint16_t chrIndex, int64_t beginRefPos, int64_t endRefPos, 
+        std::set<std::pair<uint32_t, int64_t>>& outBlockList);
 
     void dumpToFile(std::string& fileName);
 
@@ -92,6 +94,8 @@ public:
     void clear() {
         samIndexList.clear();
     }
+
+    void updateFileOffsetsFromBlockPosition();
 
 private:
     std::map<uint16_t, std::vector<SamIndexItem>> samIndexList;

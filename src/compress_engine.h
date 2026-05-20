@@ -55,11 +55,13 @@ protected:
 
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
 
+    virtual void writeFilePostProc(BlockWriter*) override ;
+
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, true);
     }
 
-    virtual void setDataBlockPosition(uint32_t blockId);
+    virtual void setDataBlockPosition(uint32_t blockId) override;
 
     virtual int32_t startWorkPreProc() override;
 

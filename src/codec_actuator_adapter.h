@@ -156,7 +156,7 @@ public:
     }
 
     int32_t initial() {
-        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzEngine,pReference);
+        codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzEngine, pReference);
         if (codecActuator == nullptr) {
             return -1;
         }

@@ -58,10 +58,10 @@ template <typename Data>
 class SamFileSort {
 protected:
     struct CompareItem {
-        // 参考基因位置
+        // Reference genome position
         int64_t dataPos;
 
-        // 数据在dataItem中的索引
+        // Index of data in dataItem
         uint32_t dataIndex;
 
         // 

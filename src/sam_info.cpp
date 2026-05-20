@@ -52,7 +52,7 @@ void SamInfo::addChromosomeInfo(const std::string& name, uint32_t length) {
     if (it != chrNameIndex.end()) {
         // Chromosome already exists, update its info if needed
         for (auto& chrInfo : chromosomeInfoList) {
-            if (chrInfo.name == name) {
+            if (chrInfo.name == name && chrInfo.length != length) {
                 chrInfo.length = length; // Update length if different
                 // Recalculate position offsets for all chromosomes
                 calculateChromosomePositions();
@@ -61,6 +61,7 @@ void SamInfo::addChromosomeInfo(const std::string& name, uint32_t length) {
         }
     } else {
         // New chromosome, get next available ID and add it
+        LOG_INFO("Parsed chromosome info: Name=%s, Length=%u", name.c_str(), length);
         uint16_t newId = chrIdCounter++;
         ChromosomeInfo chrInfo;
         chrInfo.id = newId;
@@ -70,10 +71,11 @@ void SamInfo::addChromosomeInfo(const std::string& name, uint32_t length) {
         
         // Also add to name-to-id map for quick lookup
         chrNameIndex[name] = newId;
-        
         // Calculate position offsets for all chromosomes
         calculateChromosomePositions();
     }
+
+    return;
 }
 
 const ChromosomeInfo& SamInfo::getChromosomeInfo(uint16_t id) const {
@@ -171,6 +173,5 @@ int32_t SamUtil::parseChromosomeInfo(const std::string& sqLine) {
     
     // Add chromosome information to SamInfo (automatically gets ID internally)
     SamInfo::getInstance().addChromosomeInfo(chrName, chrLength);
-    LOG_INFO("Parsed chromosome info: Name=%s, Length=%u", chrName.c_str(), chrLength);
     return 0;
 }

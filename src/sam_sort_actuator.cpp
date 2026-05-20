@@ -108,7 +108,7 @@ int32_t SAMSortActuator::process() {
     std::stable_sort(mappedSamItem.begin(), mappedSamItem.end());
 
     std::vector<uint32_t>& npos =  inBlockPtr->getNpos();
-    // 先将头部单独写入文件
+    // Write the header separately to the file first
     if (headLineNum > 0) {
         std::string headName = getSortedHeadFileName();
         if (inBlockPtr->getBlockId() == 0) {
@@ -125,7 +125,7 @@ int32_t SAMSortActuator::process() {
         headFileWrite.closeIO();
     }
 
-    /// 已经排序的写入临时文件
+    /// Write the sorted data to a temporary file
     std::string sortSamName = getSortedSamFileName(0, inBlockPtr->getBlockId());
     std::remove(sortSamName.c_str());
     FileWriter fileWrite(sortSamName);
@@ -140,7 +140,7 @@ int32_t SAMSortActuator::process() {
         fileWrite.writeIO(inBlockPtr->getBuffer() + begin,  lineLength);
     }
 
-    /// 未匹配的部分写入文件
+    /// Write the unmatched part to the file
     for (auto item = unmappedSamItem.begin(); item < unmappedSamItem.end(); ++item) {
         uint32_t lineId = item->lineId;
         uint32_t begin = (lineId == 0) ? 0 : npos[lineId - 1] + 1;

@@ -71,6 +71,8 @@ public:
 
     virtual int32_t writerSam(int64_t, std::string& samFileLine) override;
 
+    virtual void close();
+
 private:
     RoughIOBlock* outBlock;
     uint32_t writeBlockId;
