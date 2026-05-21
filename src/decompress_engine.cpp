@@ -55,13 +55,12 @@ BlockReader* DecompressEngine::createBlockReader() {
                 refPosChrName = parameter.refeGenePos;
                 break;
             }
+            refPosChrName = parameter.refeGenePos.substr(0, colonPos);
+
             size_t dashPos = parameter.refeGenePos.find('-');
             if (dashPos == std::string::npos) {
-                refPosChrName = parameter.refeGenePos.substr(0, colonPos);
                 break;
             }
-            
-            refPosChrName = parameter.refeGenePos.substr(0, colonPos);
             refPosBegin = std::stoi(parameter.refeGenePos.substr(colonPos + 1, dashPos - colonPos - 1));
             refPosEnd = std::stoi(parameter.refeGenePos.substr(dashPos + 1));
 
