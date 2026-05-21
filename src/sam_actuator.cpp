@@ -1315,21 +1315,21 @@ int32_t SamCodecActuator::decompress() {
                 refPosChrIndex = SamInfo::getInstance().getChrNameIndex(parameter.refeGenePos);
                 break;
             }
-
+            
+            refPosChrIndex = SamInfo::getInstance().getChrNameIndex(parameter.refeGenePos.substr(0, colonPos));
             size_t dashPos = parameter.refeGenePos.find('-');
             if (dashPos == std::string::npos) {
                 break;
             }
-            
-            refPosChrIndex = SamInfo::getInstance().getChrNameIndex(parameter.refeGenePos.substr(0, colonPos));
-            if (refPosChrIndex == 65535) {
-                break;
-            }
+
             refPosBegin = std::stoi(parameter.refeGenePos.substr(colonPos + 1, dashPos - colonPos - 1));
             refPosEnd = std::stoi(parameter.refeGenePos.substr(dashPos + 1));
-            LOG_DEBUG("refPosChrIndex = %d, refPosBegin = %d, refPosEnd = %d", refPosChrIndex);
-            targeBlock = MemoryUtil::safeNewClass<RoughIOBlock>(outBlockPtr->getBlockSize());
         } while(0);
+
+        LOG_DEBUG("refPosChrIndex = %d, refPosBegin = %d, refPosEnd = %d", refPosChrIndex, refPosBegin, refPosEnd);
+        if (refPosChrIndex != 65535) {
+            targeBlock = MemoryUtil::safeNewClass<RoughIOBlock>(outBlockPtr->getBlockSize());
+        }
     } 
 
     if (meta.isMember("header")) {
@@ -1356,7 +1356,8 @@ int32_t SamCodecActuator::decompress() {
                 meta["md5"].asString().c_str(), md5.c_str());
             return -1;
         }
-    } else {
+    } 
+    if (targeBlock != outBlockPtr) {
         MemoryUtil::safeDeleteClass(targeBlock);
     }
 
@@ -1451,9 +1452,11 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         }
 
         if (refPosChrIndex != 65535) {
-            if (mappedChr[lineNo] == refPosChrIndex && mappedPos[lineNo]  >= refPosBegin && mappedPos[lineNo] <= refPosEnd) {
-                memcpy(outBlockPtr->getCurrent(), outputBlock->getBuffer(), outputBlock->getDataLen());
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + outputBlock->getDataLen());  
+            if (mappedChr[lineNo] == refPosChrIndex) {
+                if ((refPosBegin == 0 && refPosEnd == 0) || (mappedPos[lineNo]  >= refPosBegin && mappedPos[lineNo] <= refPosEnd)) {
+                    memcpy(outBlockPtr->getCurrent(), outputBlock->getBuffer(), outputBlock->getDataLen());
+                    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + outputBlock->getDataLen());  
+                }
             }
             outputBlock->reset();
         }
@@ -1480,35 +1483,37 @@ int32_t SamCodecActuator::decompressHeader(RoughIOBlock* outputBlock) {
     }
 
     uint32_t dstLen = headerMeta["dstlen"].asUInt();
-    // Create SAM file header decompressor
-    std::shared_ptr<coder_io> headerIo = std::make_shared<coder_io>(inBlockPtr->getBuffer(), dstLen);
-    std::shared_ptr<coder_bwt_cm> headerDecoder = std::make_shared<coder_bwt_cm>(headerIo.get());
+    if (refPosChrIndex == 65535) {  // not set position paramter
+        // Create SAM file header decompressor
+        std::shared_ptr<coder_io> headerIo = std::make_shared<coder_io>(inBlockPtr->getBuffer(), dstLen);
+        std::shared_ptr<coder_bwt_cm> headerDecoder = std::make_shared<coder_bwt_cm>(headerIo.get());
 
-    // Set decoder level
-    if (headerMeta["coder"].isMember("level")) {
-        headerDecoder->set_level(headerMeta["coder"]["level"].asInt());
-    }
-
-    // Decompress SAM file header data
-    uint32_t lineCount = 0;
-    uint32_t decoderTotalLen = 0;
-    while (lineCount < headEndLine) {
-        // Decompress one line of data
-        uint32_t decodedLen = headerDecoder->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), '\n', false);
-        if (decodedLen == 0) {
-            break; // No more data
-        }
-        std::string headStr = std::string((char*)outputBlock->getCurrent(), decodedLen);
-        if (headStr.substr(0, 3) == "@SQ") {
-            SamUtil::parseChromosomeInfo(headStr);
+        // Set decoder level
+        if (headerMeta["coder"].isMember("level")) {
+            headerDecoder->set_level(headerMeta["coder"]["level"].asInt());
         }
 
-        outputBlock->setDataLen(outputBlock->getDataLen() + decodedLen);
-        lineCount++;
-        decoderTotalLen += decodedLen;
+        // Decompress SAM file header data
+        uint32_t lineCount = 0;
+        uint32_t decoderTotalLen = 0;
+        while (lineCount < headEndLine) {
+            // Decompress one line of data
+            uint32_t decodedLen = headerDecoder->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), '\n', false);
+            if (decodedLen == 0) {
+                break; // No more data
+            }
+            std::string headStr = std::string((char*)outputBlock->getCurrent(), decodedLen);
+            if (headStr.substr(0, 3) == "@SQ") {
+                SamUtil::parseChromosomeInfo(headStr);
+            }
+
+            outputBlock->setDataLen(outputBlock->getDataLen() + decodedLen);
+            lineCount++;
+            decoderTotalLen += decodedLen;
+        }
+        LOG_DEBUG("SAM header decompression completed: %u lines, %u bytes - > %u bytes.", headEndLine, dstLen, decoderTotalLen);
     }
     readOffset += dstLen;
-    LOG_DEBUG("SAM header decompression completed: %u lines, %u bytes - > %u bytes.", headEndLine, dstLen, decoderTotalLen);
     return 0;
 }
 
