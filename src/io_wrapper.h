@@ -161,6 +161,7 @@ public:
         fo.openMode = O_RDWR | O_CREAT;
         fo.mapMode = PROT_READ|PROT_WRITE;
         mapSize = 0;
+        initialMapSize = 0;
     }
 
     int32_t seekIO(size_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
@@ -170,17 +171,19 @@ public:
     int32_t seekToEnd() {
         return fo.seekIO(fo.fileSize, IOWhence::IO_WHENCE_SET);
     }
- 
+  
     int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen);
 
     void flushIO() {
-        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
     }
 
     ~FileWriter() {
     }
 
     size_t getMappedSize(size_t fileSize);
+
+    size_t calculateNextMapSize();
 
     size_t getCurrentPos() {
         return fo.position;
@@ -189,6 +192,7 @@ public:
 protected:
     FileOperator fo;
     size_t mapSize;
+    size_t initialMapSize;
 };
 
 class PipeReader : public IOReader {

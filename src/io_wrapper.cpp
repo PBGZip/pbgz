@@ -144,6 +144,24 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
 
     size_t left = fo.fileSize - fo.position;
     size_t realRead = readSize > left ? left : readSize; 
+    
+    // Data prefetch optimization for large reads
+    if (realRead >= 64 * 1024) {
+        const uint8_t* src = fo.mappedAddress + fo.position;
+        const size_t prefetchStep = 256;
+        
+        // Prefetch next cache lines to improve memory access pattern
+        for (size_t i = 0; i < realRead; i += 64) {
+            if (i + prefetchStep < realRead) {
+#if defined(__x86_64__)
+                _mm_prefetch((char*)(src + i + prefetchStep), _MM_HINT_T0);
+#elif defined(__aarch64__)
+                __builtin_prefetch(src + i + prefetchStep, 0, 3);
+#endif
+            }
+        }
+    }
+    
     memcpy(pBuffer, fo.mappedAddress + fo.position, realRead);
     
     fo.position += realRead;
@@ -208,7 +226,7 @@ int32_t FileWriter::openIO() {
         LOG_ERROR("File writer open failed.");
         return -1;
     }
-    mapSize = getMappedSize(fo.fileSize);
+    mapSize = calculateNextMapSize();
     ftruncate(fo.fd, mapSize);
     if (0 != fo.mmapFile(mapSize)) {
         LOG_ERROR("File writer mmap failed.");
@@ -238,8 +256,18 @@ void FileWriter::closeIO() {
 }
 
 size_t FileWriter::getMappedSize(size_t fileSize) {
-    const size_t mapSizeUint = 16 * 1024 * 1024;
-    return ((fileSize / mapSizeUint) + 1) * mapSizeUint;
+    return ((fileSize / initialMapSize) + 1) * initialMapSize;
+}
+
+size_t FileWriter::calculateNextMapSize() {
+    const size_t INITIAL_SIZE = 64 * 1024 * 1024; // 64MB initial size
+    
+    if (initialMapSize == 0) {
+        initialMapSize = INITIAL_SIZE;
+        return INITIAL_SIZE;
+    }
+    
+    return mapSize * 2;
 }
 
 size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
@@ -253,15 +281,17 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
         return 0;
     }
 
-    size_t newSize = fo.fileSize + writeLen;
+        size_t newSize = fo.fileSize + writeLen;
     if (newSize > mapSize) {
         // If file size exceeds mapping size, need to remap
-        // Flush content to disk first
-        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        // Flush content to disk first - use ASYNC for better performance
+        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
         // Unmap
         munmap(fo.mappedAddress, mapSize);
-        // Calculate new mapping size
-        mapSize = getMappedSize(newSize);
+        // Calculate new mapping size using exponential growth strategy
+        while (mapSize < newSize) {
+            mapSize = calculateNextMapSize();
+        }
         // Extend file
         ftruncate(fo.fd, mapSize);
         // Remap file
@@ -284,15 +314,20 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
     }
 
     size_t newFileSize = fo.fileSize;
-    if (seekOffset + writeLen > mapSize) {
+    size_t requiredSize = seekOffset + writeLen;
+    
+    if (requiredSize > mapSize) {
          // If file size exceeds mapping size, need to remap
-        // Flush content to disk first
-        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        // Flush content to disk first - use ASYNC for better performance
+        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
         // Unmap
         munmap(fo.mappedAddress, mapSize);
         // New file size
-        newFileSize = seekOffset + writeLen;
-        mapSize = getMappedSize(newFileSize);
+        newFileSize = requiredSize;
+        // Calculate new mapping size using exponential growth strategy
+        while (mapSize < requiredSize) {
+            mapSize = calculateNextMapSize();
+        }
         ftruncate(fo.fd, mapSize);
         if (0 != fo.mmapFile(mapSize)) {
             LOG_ERROR("File not mapped");
