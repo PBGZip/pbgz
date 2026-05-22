@@ -64,7 +64,7 @@ public:
         SamInfo::getInstance().clearChromosomeInfo();
         SamInfo::getInstance().resetChrIdCounter();
 
-        ConfigManager::getInstance().logLevel = LogLevel::DEBUGGING;
+        ConfigManager::getInstance().logLevel = LogLevel::WARNING;
     }
 
     void TearDown() override {

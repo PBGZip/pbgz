@@ -317,6 +317,7 @@ int32_t SamCodecActuator::preAnalysis() {
             }
             // Each line must have at least 10 tabs, less than 10 means not a SAM file
             if (linePos.size() < 10) {
+                LOG_ERROR("Sam field line invalid, size = %d", linePos.size());
                 return -1;
             }
             if (linePos.size() > maxFieldSize) {

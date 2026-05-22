@@ -98,9 +98,9 @@ void SamCombineOutputBlockWriter::close() {
         return;
     }
     outputPool->push(outBlock);
+    outBlock = nullptr;
     return;
 }
-
 
 SortEngine::~SortEngine() {
 

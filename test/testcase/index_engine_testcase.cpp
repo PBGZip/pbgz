@@ -34,7 +34,7 @@ public:
     }
 
     virtual ~MockIndexEngine(){
-        MemoryUtil::safeFree(ioWriter);
+        MemoryUtil::safeDeleteClass(ioWriter);
     }
 };
 

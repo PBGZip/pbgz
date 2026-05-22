@@ -45,7 +45,10 @@ public:
 
     // Override push()
     virtual void push(RoughIOBlock* const &item) override {
-        ioWriter->writeIO(item->getBuffer(), item->getDataLen());
+        if (item->getBuffer() != nullptr && item->getDataLen() > 0) {
+            ioWriter->writeIO(item->getBuffer(), item->getDataLen());
+        }
+        
         RoughIOBlock* dd = const_cast<RoughIOBlock*>(item);
         MemoryUtil::safeDeleteClass(dd);
     }

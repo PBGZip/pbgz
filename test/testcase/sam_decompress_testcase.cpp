@@ -61,7 +61,7 @@ public:
 
         generateSamFile(SamDecompressData::testSamFile);
 
-        ConfigManager::getInstance().logLevel = LogLevel::DEBUGGING;
+        ConfigManager::getInstance().logLevel = LogLevel::WARNING;
 	}
 
 	// Clean up resources
@@ -89,6 +89,10 @@ public:
         std::remove("test_base_fastq3.sam");
         std::remove("test_optional_fields.sam");
         std::remove("test_no_optional_fields.sam");
+        std::remove("test_field_count_too_few.sam");
+        std::remove("test_field_missing.sam");
+        std::remove("test_mixed.sam");
+        std::remove("test_large.sam");
 	}
 
     void loadSamData(const std::string& filename) {
@@ -635,4 +639,70 @@ TEST_F(SamDecompressTest, TestCompressionPerformance) {
 
     // After optimization, only verify compression and decompression return codes, no longer compare file content
     EXPECT_NO_THROW(compressAndDecompress("test_large.sam"));
+}
+
+// Test 6.1: Field count too few scenario
+TEST_F(SamDecompressTest, TestFieldCountTooFew) {
+    std::ofstream file("test_field_count_too_few.sam");
+    if (!file.is_open()) {
+        return;
+    }
+
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:340\n";
+    file << "@SQ\tSN:chr2\tLN:338\n";
+
+    // Normal record
+    file << "read1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\n";
+    // Record with too few fields (only 8 fields, missing 3 required fields)
+    file << "read2\t0\tchr1\t2\t60\t76M\t*\t0\n";
+    // Another normal record
+    file << "read3\t0\tchr2\t3\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\n";
+    file.close();
+
+    // Load input file
+    loadSamData("test_field_count_too_few.sam");
+
+    // Create compressor
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    int32_t ret = compressor.preAnalysis();
+    std::remove("test_field_count_too_few.sam");
+    EXPECT_EQ(ret, -1);
+}
+
+// Test 6.2: Field missing scenario
+TEST_F(SamDecompressTest, TestFieldMissing) {
+    std::ofstream file("test_field_missing.sam");
+    if (!file.is_open()) {
+        return;
+    }
+
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:340\n";
+    file << "@SQ\tSN:chr2\tLN:338\n";
+
+    // Normal record
+    file << "read1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\n";
+    // Record with missing SEQ field (sequence)
+    file << "read2\t0\tchr1\t2\t60\t76M\t*\t0\t0\t\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\n";
+    // Another normal record
+    file << "read3\t0\tchr2\t3\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\n";
+    file.close();
+
+    // Load input file
+    loadSamData("test_field_missing.sam");
+
+    // Create compressor
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    int32_t ret = compressor.preAnalysis();
+    std::remove("test_field_missing.sam");
+    EXPECT_EQ(ret, -1);
 }

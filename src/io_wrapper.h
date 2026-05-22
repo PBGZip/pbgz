@@ -31,6 +31,16 @@
 #include <htslib/bgzf.h>
 #include <isa-l/igzip_lib.h>
 #include <zlib.h>
+#include <cstring>
+
+// Architecture detection - header only, no optimizations yet
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86) || defined(_X86_)
+    #define ARCH_X86_64
+    #include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__aarch64__)
+    #define ARCH_ARM64
+    #include <arm_neon.h>
+#endif
 
 enum class IOWhence {
     IO_WHENCE_SET = 0,

@@ -66,7 +66,7 @@ public:
     }
 
     virtual ~MockSortEngine(){
-        MemoryUtil::safeFree(ioWriter);
+        MemoryUtil::safeDeleteClass(ioWriter);
     }
 };
 
@@ -82,7 +82,7 @@ public:
         SamInfo::getInstance().clearChromosomeInfo();
         SamInfo::getInstance().resetChrIdCounter();
 
-        ConfigManager::getInstance().logLevel = LogLevel::DEBUGGING;
+        ConfigManager::getInstance().logLevel = LogLevel::WARNING;
 
         // Clean up any existing output files
         std::remove(SamSortTestData::sortedHeadFile.c_str());
@@ -745,6 +745,7 @@ TEST_F(SamSortCombineTest, CombineSamFileWithBlockWriter) {
     };
     int32_t result = engine->combineSamFile(fileList, &blockWriter);
     EXPECT_EQ(result, 0);
+    blockWriter.close();
     engine->finish();
 
     MemoryUtil::safeDeleteClass(engine);
@@ -782,6 +783,7 @@ TEST_F(SamSortCombineTest, CombineAllSamFileExceeds128Files) {
     blockWriter.initial(outputFiles.size());
     result = engine2->combineSamFile(outputFiles, &blockWriter);
     EXPECT_EQ(result, 0);
+    blockWriter.close();
     engine2->finish();
 
     int recordCount = 0;

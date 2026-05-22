@@ -168,19 +168,21 @@ size_t FileReader::readLine(std::string& line) {
     size_t startPos = fo.position;
     uint8_t* current = fo.mappedAddress + fo.position;
     
-    // Find newline character
-    while (fo.position < fo.fileSize) {
-        if (*current == '\n') {
-            break;
-        }
-        current++;
-        fo.position++;
+    // Use memchr for faster newline finding - simple and reliable optimization
+    void* newlinePos = memchr(current, '\n', fo.fileSize - fo.position);
+    
+    if (newlinePos != nullptr) {
+        uint8_t* foundPos = static_cast<uint8_t*>(newlinePos);
+        fo.position = foundPos - fo.mappedAddress;
+    } else {
+        // No newline found, go to end of file
+        fo.position = fo.fileSize;
     }
     
     size_t lineLength = fo.position - startPos;
     
     // If newline found, skip it
-    if (fo.position < fo.fileSize && *current == '\n') {
+    if (fo.position < fo.fileSize && fo.mappedAddress[fo.position] == '\n') {
         fo.position++;
     }
     
@@ -192,6 +194,10 @@ size_t FileReader::readLine(std::string& line) {
     // Build string
     if (lineLength > 0) {
         line.append(reinterpret_cast<char*>(fo.mappedAddress + startPos), lineLength);
+    }
+    
+    if (fo.position >= fo.fileSize) {
+        eofFlag = true;
     }
     
     return lineLength;
