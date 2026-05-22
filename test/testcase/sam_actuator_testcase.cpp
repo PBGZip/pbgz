@@ -64,7 +64,7 @@ public:
 
         generateSamFile(SamTestData::testSamFile);
 
-        ConfigManager::getInstance().logLevel = LogLevel::DEBUGGING;
+        ConfigManager::getInstance().logLevel = LogLevel::WARNING;
 	}
 
 	// Clean up resources
