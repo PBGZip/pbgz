@@ -793,23 +793,23 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     for (uint32_t i = 1; i < line; i += 4) {
         uint32_t endPos = inBlockPtr->getNpos()[i];
         uint32_t startPos = inBlockPtr->getNpos()[i - 1] + 1;
+        uint8_t* pBuff = baseStripNBuffer;
         uint32_t outLen = 0;
 
-        uint8_t* src = ptr + startPos;
-        uint8_t* dst = baseStripNBuffer;
-        uint32_t len = endPos - startPos;
-
-        for (uint32_t n = 0; n < len; n++) {
-            uint8_t ch = src[n];
-            if ((ch ^ 'n') * (ch ^ 'N') == 0)
-                baseNPosBuffer[nOffset++] = currPos + n;
-            else
-                *dst++ = 'A' + (ch & 0x5);
+        for (uint32_t n = startPos; n < endPos; n++) {
+            char ch = *(ptr + n);
+            if (ch == 'n' || ch == 'N') {
+                *(baseNPosBuffer + nOffset) = currPos + n - startPos;
+                nOffset++;
+            } else {
+                *pBuff = ch;
+                pBuff++;
+            }
         }
 
-        (this->*mapping)(baseStripNBuffer, dst - baseStripNBuffer,
-                          baseMappedBuffer, outLen, baseMappedPosBuffer[offset], baseMappedPairBuffer[offset]);
-        srcLen += dst - baseStripNBuffer;
+        (this->*mapping)(baseStripNBuffer, pBuff - baseStripNBuffer,
+                         baseMappedBuffer, outLen, baseMappedPosBuffer[offset], baseMappedPairBuffer[offset]);
+        srcLen += pBuff - baseStripNBuffer;
         matchCm->encode_line(baseMappedBuffer, outLen);
         pReference->updateMatchedGene(baseMappedPosBuffer[offset], outLen);
         if (encBaseLen) {
