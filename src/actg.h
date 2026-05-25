@@ -82,13 +82,13 @@ static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len) 
     for (ps = (uint8_t *)src; ps != ealign8; ps += 8) {
         x = (*((uint64_t *)ps)) & 0x0606060606060606;
         pd -= 2;
-        *((uint16_t *)(pd)) = actgp[*((uint16_t *)(&x))];
+        *((uint16_t *)(pd)) = actgp[(uint16_t)(x >> 0)];
         pd -= 2;
-        *((uint16_t *)(pd)) = actgp[*((uint16_t *)(&x) + 1)];
+        *((uint16_t *)(pd)) = actgp[(uint16_t)(x >> 16)];
         pd -= 2;
-        *((uint16_t *)(pd)) = actgp[*((uint16_t *)(&x) + 2)];
+        *((uint16_t *)(pd)) = actgp[(uint16_t)(x >> 32)];
         pd -= 2;
-        *((uint16_t *)(pd)) = actgp[*((uint16_t *)(&x) + 3)];
+        *((uint16_t *)(pd)) = actgp[(uint16_t)(x >> 48)];
     }
 
     ps = ealign8;

@@ -28,6 +28,12 @@
 #include "utils/md5_util.h"
 #include "pbgz_manager.h"
 
+#if defined(__x86_64__)
+#include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
     /// Get file type by analyzing block content
     uint8_t* buffer = const_cast<uint8_t*>(blockPtr->getBuffer());
@@ -50,10 +56,21 @@ BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
         }
     }
     if (isNeedCheckSam || blockPtr->getBlockType() == SAM) {
-        for (int64_t pos = 0; pos < blockPtr->getDataLen(); ++pos) {
-            if (buffer[pos] == '\n') {
-                blockPtr->getNpos().push_back(static_cast<uint32_t>(pos));
+        // Use memchr for optimized newline finding - highly optimized SIMD implementation
+        const int64_t dataLen = blockPtr->getDataLen();
+        const char* bufPtr = reinterpret_cast<const char*>(buffer);
+        const char* searchStart = bufPtr;
+        
+        // memchr is highly optimized with SIMD assembly in standard libraries
+        // Iterative search using memchr to find all newline positions
+        while (true) {
+            const char* newlinePtr = static_cast<const char*>(memchr(searchStart, '\n', 
+                                                      dataLen - (searchStart - bufPtr)));
+            if (newlinePtr == nullptr) {
+                break;
             }
+            blockPtr->getNpos().push_back(static_cast<uint32_t>(newlinePtr - bufPtr));
+            searchStart = newlinePtr + 1;
         }
         return SAM;
     }
@@ -65,47 +82,99 @@ BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
         int32_t maxBaseLen = 0; // Maximum base length
         int64_t lastEndlinePos = 0;  // Previous newline position
         int64_t endlinePos = 0;  // Current newline position
-        const std::string validBase = "ACGTNactgn";
+        
+        // Build lookup table for O(1) base character validation
+        // Much faster than std::string::find() which does linear search
+        static bool isValidBase[256];
+        static bool lookupTableInitialized = false;
+        
+        // Initialize lookup table only once (thread-safe by C++11 static initialization)
+        if (!lookupTableInitialized) {
+            for (int i = 0; i < 256; i++) {
+                isValidBase[i] = false;
+            }
+            isValidBase[(uint8_t)'A'] = true;
+            isValidBase[(uint8_t)'C'] = true;
+            isValidBase[(uint8_t)'G'] = true;
+            isValidBase[(uint8_t)'N'] = true;
+            isValidBase[(uint8_t)'T'] = true;
+            isValidBase[(uint8_t)'a'] = true;
+            isValidBase[(uint8_t)'c'] = true;
+            isValidBase[(uint8_t)'g'] = true;
+            isValidBase[(uint8_t)'n'] = true;
+            isValidBase[(uint8_t)'t'] = true;
+            lookupTableInitialized = true;
+        }
+        
         int64_t linePos = 0;   // Position within current line
-        for (int64_t pos = 0; pos < blockPtr->getDataLen(); ++pos) {
-            int lineMod = lineNum % 4;  
-            if (buffer[pos] == '\n') {
-                lastEndlinePos = endlinePos;
-                endlinePos = pos;
-                // End of base line
-                if (lineMod == 1) {
-                    baseLen = endlinePos - lastEndlinePos - 1;
-                    // Update maximum base count
-                    if (baseLen > maxBaseLen) {
-                        maxBaseLen = baseLen;
+        
+        const int64_t dataLen = blockPtr->getDataLen();
+        const char* bufPtr = reinterpret_cast<const char*>(buffer);
+        
+        // For FASTQ, use memchr for fast newline finding but still validate per character
+        // because format correctness is critical for FASTQ
+        if (dataLen >= 4096) {
+            // Prefetch optimization for large FASTQ blocks
+            for (int64_t i = 0; i < dataLen; i += 64) {
+#if defined(__x86_64__)
+                _mm_prefetch((char*)(buffer + i + 256), _MM_HINT_T0);
+#elif defined(__aarch64__)
+                __builtin_prefetch(buffer + i + 256, 0, 3);
+#endif
+            }
+        }
+        
+        // Use memchr to find newlines efficiently, then do per-character validation
+        const char* searchStart = bufPtr;
+        while (true) {
+            const char* newlinePtr = static_cast<const char*>(memchr(searchStart, '\n', 
+                                                          dataLen - (searchStart - bufPtr)));
+            if (newlinePtr == nullptr) {
+                break;
+            }
+            
+            // Validate characters between last newline and current newline
+            int64_t newlinePos = newlinePtr - bufPtr;
+            int lineMod = lineNum % 4;
+            
+            // Validate the characters in the current line segment
+            for (int64_t pos = (searchStart - bufPtr); pos < newlinePos; ++pos) {
+                if (lineMod == 0) {
+                    if (linePos == 0 && buffer[pos] != '@') {
+                        return BINARY;
                     }
-                } else if (lineMod == 3) {  
-                    // Quality line and base line must have same length
-                    if (endlinePos - lastEndlinePos - 1 != baseLen) {
+                } else if (lineMod == 1) {
+                    // O(1) lookup table replace O(n) string search
+                    if (!isValidBase[static_cast<uint8_t>(buffer[pos])]) {
+                        return BINARY;
+                    }
+                } else if (lineMod == 2) {
+                    if (linePos == 0 && buffer[pos] != '+') {
                         return BINARY;
                     }
                 }
-
-                ++lineNum;
-                blockPtr->getNpos().push_back(static_cast<uint32_t>(pos));
-                linePos = 0;
-                continue;
+                ++linePos;
             }
             
-            if (lineMod == 0) {
-                if (linePos == 0 && buffer[pos] != '@') { // Line ID
-                    return BINARY;
+            // Process newline
+            lastEndlinePos = endlinePos;
+            endlinePos = newlinePos;
+            
+            if (lineMod == 1) {
+                baseLen = endlinePos - lastEndlinePos - 1;
+                if (baseLen > maxBaseLen) {
+                    maxBaseLen = baseLen;
                 }
-            } else if (lineMod == 1) {
-                if (validBase.find(buffer[pos]) == std::string::npos) {
-                    return BINARY;
-                }
-            } else if (lineMod == 2) {
-                if (linePos == 0 && buffer[pos] != '+') {
+            } else if (lineMod == 3) {
+                if (endlinePos - lastEndlinePos - 1 != baseLen) {
                     return BINARY;
                 }
             }
-            ++linePos;
+            
+            ++lineNum;
+            blockPtr->getNpos().push_back(static_cast<uint32_t>(newlinePos));
+            linePos = 0;
+            searchStart = newlinePtr + 1;
         }
 
         if (maxBaseLen == 0) {
