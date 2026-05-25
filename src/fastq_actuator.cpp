@@ -385,7 +385,7 @@ void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLeng
     uint8_t *prefe_squash = (uint8_t*)(pReference->getSquash());
     int64_t refe_squashlen = pReference->getSquashLength();
     uint32_t best_pos_inrefe = UINT32_MAX, best_is_pair = 0; /* Record the position and strand direction in reference for current best match */
-    uint32_t best_unmatchs = UINT32_MAX, best_align4;
+    uint32_t best_unmatchs = UINT32_MAX, best_align4 = 0;
     uint32_t best_pos = UINT32_MAX; /* Position converted to reference original base */
     uint64_t xsquash, xsquash_match, xsquash_macth_refe;
     const uint64_t xsquash_tab[2] = {0xFCFFFFFFFFFFFFFF, 0xFCFFFFFFFFFFFFFF};
@@ -697,8 +697,9 @@ int32_t FastqCodecActuator::compressIdInSplit() {
             }
 
             bool idDigit = true;
+            // Optimized digit check using bit operation: digits 0x30-0x39 all have high nibble 0x03
             for (uint32_t j = 0; j < currLen; ++j) {
-                if (*(data + j) < '0' || *(data + j) > '9') {
+                if ((data[j] & 0xF0) != 0x30) {
                     idDigit = false;
                     break;
                 }
@@ -792,23 +793,23 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     for (uint32_t i = 1; i < line; i += 4) {
         uint32_t endPos = inBlockPtr->getNpos()[i];
         uint32_t startPos = inBlockPtr->getNpos()[i - 1] + 1;
-        uint8_t* pBuff = baseStripNBuffer;
         uint32_t outLen = 0;
 
-        for (uint32_t n = startPos; n < endPos; n++) {
-            char ch = *(ptr + n);
-            if (ch == 'n' || ch == 'N') {
-                *(baseNPosBuffer + nOffset) = currPos + n - startPos;
-                nOffset++;
-            } else {
-                *pBuff = ch;
-                pBuff++;
-            }
+        uint8_t* src = ptr + startPos;
+        uint8_t* dst = baseStripNBuffer;
+        uint32_t len = endPos - startPos;
+
+        for (uint32_t n = 0; n < len; n++) {
+            uint8_t ch = src[n];
+            if ((ch ^ 'n') * (ch ^ 'N') == 0)
+                baseNPosBuffer[nOffset++] = currPos + n;
+            else
+                *dst++ = 'A' + (ch & 0x5);
         }
 
-        (this->*mapping)(baseStripNBuffer, pBuff - baseStripNBuffer,
-                         baseMappedBuffer, outLen, baseMappedPosBuffer[offset], baseMappedPairBuffer[offset]);
-        srcLen += pBuff - baseStripNBuffer;
+        (this->*mapping)(baseStripNBuffer, dst - baseStripNBuffer,
+                          baseMappedBuffer, outLen, baseMappedPosBuffer[offset], baseMappedPairBuffer[offset]);
+        srcLen += dst - baseStripNBuffer;
         matchCm->encode_line(baseMappedBuffer, outLen);
         pReference->updateMatchedGene(baseMappedPosBuffer[offset], outLen);
         if (encBaseLen) {
