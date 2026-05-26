@@ -43,6 +43,77 @@
 
 const uint32_t MAPPED_THRESHOLD_GEN2 = 2;
 
+// SIMD-optimized N character counting using SSE4.2
+uint32_t FastqCodecActuator::countN_SSE2(const uint8_t* data, size_t length) {
+    uint32_t count = 0;
+    size_t i = 0;
+
+#ifdef __SSE4_2__
+    const __m128i target_upper = _mm_set1_epi8('N');
+    const __m128i target_lower = _mm_set1_epi8('n');
+
+    for (; i + 16 <= length; i += 16) {
+        __m128i chunk = _mm_loadu_si128((__m128i*)(data + i));
+        __m128i cmp_upper = _mm_cmpeq_epi8(chunk, target_upper);
+        __m128i cmp_lower = _mm_cmpeq_epi8(chunk, target_lower);
+        __m128i cmp = _mm_or_si128(cmp_upper, cmp_lower);
+        uint32_t mask = _mm_movemask_epi8(cmp);
+        count += __builtin_popcount(mask);
+    }
+#endif
+
+    for (; i < length; i++) {
+        count += (data[i] == 'N' || data[i] == 'n');
+    }
+
+    return count;
+}
+
+// Loop-unrolled version for better branch prediction and reduced loop overhead
+uint32_t FastqCodecActuator::countN_Unrolled(const uint8_t* data, size_t length) {
+    uint32_t count = 0;
+    size_t i = 0;
+
+    for (; i + 8 <= length; i += 8) {
+        uint8_t b0 = data[i];
+        uint8_t b1 = data[i + 1];
+        uint8_t b2 = data[i + 2];
+        uint8_t b3 = data[i + 3];
+        uint8_t b4 = data[i + 4];
+        uint8_t b5 = data[i + 5];
+        uint8_t b6 = data[i + 6];
+        uint8_t b7 = data[i + 7];
+
+        count += (b0 == 'N' || b0 == 'n');
+        count += (b1 == 'N' || b1 == 'n');
+        count += (b2 == 'N' || b2 == 'n');
+        count += (b3 == 'N' || b3 == 'n');
+        count += (b4 == 'N' || b4 == 'n');
+        count += (b5 == 'N' || b5 == 'n');
+        count += (b6 == 'N' || b6 == 'n');
+        count += (b7 == 'N' || b7 == 'n');
+    }
+
+    for (; i < length; i++) {
+        count += (data[i] == 'N' || data[i] == 'n');
+    }
+
+    return count;
+}
+
+// Auto-selecting wrapper that chooses the best implementation
+uint32_t FastqCodecActuator::countN_Optimized(const uint8_t* data, size_t length) {
+    if (length < 16) {
+        return countN_Unrolled(data, length);
+    }
+
+#ifdef __SSE4_2__
+    return countN_SSE2(data, length);
+#else
+    return countN_Unrolled(data, length);
+#endif
+}
+
 int32_t FastqCodecActuator::compress() {
     if (0 != initEncoder()) {
         LOG_ERROR("Init encoder failed");
@@ -135,30 +206,25 @@ int32_t FastqCodecActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) 
     uint32_t lastFindPos = 0;
     for (uint32_t idx = 0; idx < idSplitSymbols.size(); ++idx) {
         uint8_t symbol = idSplitSymbols[idx];
-        uint32_t pos = lastPos;
-        for (; pos < bufferLen; ++pos) {
-            if (*(pBuffer + pos) == symbol) {
-                uint32_t curLen = pos - lastFindPos - (0 == idx ? 0 : 1);
-                if (curLen < idSplitMinLen[idx]) {
-                    idSplitMinLen[idx] = curLen;
-                }
-                if (curLen > idSplitMaxLen[idx]) {
-                    idSplitMaxLen[idx] = curLen; 
-                }
-                idPositions.push_back(static_cast<uint8_t>(pos));
-                idPosLength++;
-                lastPos = pos + 1;
-                lastFindPos = pos;
-                break;
-            }
-            lastPos = pos + 1;
-        }
-
-        if (pos >= bufferLen) {
+        void* found = memchr(pBuffer + lastPos, symbol, bufferLen - lastPos);
+        if (found == nullptr) {
             LOG_DEBUG("preAnalysisId meet exception: block(%d) will compress id in all mode", inBlockPtr->getBlockId());
-            idPosLength = UINT32_MAX; // Mark as unavailable
+            idPosLength = UINT32_MAX;
             break;
         }
+        
+        uint32_t pos = (uint8_t*)found - pBuffer;
+        uint32_t curLen = pos - lastFindPos - (0 == idx ? 0 : 1);
+        if (curLen < idSplitMinLen[idx]) {
+            idSplitMinLen[idx] = curLen;
+        }
+        if (curLen > idSplitMaxLen[idx]) {
+            idSplitMaxLen[idx] = curLen;
+        }
+        idPositions.push_back(static_cast<uint8_t>(pos));
+        idPosLength++;
+        lastPos = pos + 1;
+        lastFindPos = pos;
     }
     return 0;
 }
@@ -172,32 +238,13 @@ int32_t FastqCodecActuator::preAnalysisBase(uint8_t* pBuffer, uint32_t bufLen) {
         minBaseLength = baseLength;
     }
 
-    for (uint32_t idx = 0; idx < bufLen - 1; ++idx) {
-        uint8_t ch = *(pBuffer + idx); 
-        switch (ch)
-        {
-        case 'a':
-        case 'c':
-        case 't':
-        case 'g':
-        case 'A':
-        case 'C':
-        case 'T':
-        case 'G':   
-            break;
-        case 'N':
-        case 'n':
-            baseNCount++;
-            break;
-        
-        default:
-            break;
-        }  
-    }
+    // Use SIMD-optimized N counting for better performance
+    uint32_t segmentLength = bufLen - 1;
+    baseNCount += countN_Optimized(pBuffer, segmentLength);
 
     return 0;
 }
-   
+
 int32_t FastqCodecActuator::preAnalysisComment(uint8_t* pBuffer, uint32_t bufLen, uint32_t lineNo) {
     if (commentType != CommentType::OTHER) {
         if (commentType == CommentType::UNKNOWN) {  // First line
@@ -368,27 +415,22 @@ int32_t FastqCodecActuator::initEncoder() {
 }
 
 void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir) {
-    Mapping mt[4];
-    uint32_t n, m, o, l, squashLen[2], loffset;
-    uint32_t align4_curr;
-    uint8_t *psquash, *psquash_refe, ch;
+    Mapping mappingTable[4];
+    uint8_t ch;
     const uint32_t baseGroupLen = pReference->getBaseGroupLength();
-    const uint32_t bg_mid = baseGroupLen >> 1;
-    const uint8_t *pseq[2] = {base, basePairBuffer};
-    uint32_t hash32, pos_cnts, *pos_vals, total;
-    const uint8_t bg_is_unalign4 = !!(baseGroupLen & 0x3);
-    const uint32_t len_bgs = (baseGroupLen >> 2) + bg_is_unalign4;
-
-    uint32_t base_squash_align4 = (baseLength >> 2) + !!(baseLength & 0x3);
-    uint32_t match_pair, match_pair_origin;
-    uint32_t match_pos, unmatchs = baseLength;
-    uint8_t *prefe_squash = (uint8_t*)(pReference->getSquash());
-    int64_t refe_squashlen = pReference->getSquashLength();
-    uint32_t best_pos_inrefe = UINT32_MAX, best_is_pair = 0; /* Record the position and strand direction in reference for current best match */
-    uint32_t best_unmatchs = UINT32_MAX, best_align4 = 0;
-    uint32_t best_pos = UINT32_MAX; /* Position converted to reference original base */
-    uint64_t xsquash, xsquash_match, xsquash_macth_refe;
-    const uint64_t xsquash_tab[2] = {0xFCFFFFFFFFFFFFFF, 0xFCFFFFFFFFFFFFFF};
+    const uint32_t bgMid = baseGroupLen >> 1;
+    const uint8_t* pSeq[2] = {base, basePairBuffer};
+    const uint8_t bgIsUnalign4 = !!(baseGroupLen & 0x3);
+    const uint32_t lenBgs = (baseGroupLen >> 2) + bgIsUnalign4;
+    const uint32_t baseSquashAlign4 = (baseLength >> 2) + !!(baseLength & 0x3);
+    uint8_t* prefSquash = (uint8_t*)(pReference->getSquash());
+    const int64_t refeSquashLen = pReference->getSquashLength();
+    uint32_t bestPosInRefe = UINT32_MAX;
+    uint32_t bestIsPair = 0;
+    uint32_t bestUnmatches = UINT32_MAX;
+    uint32_t bestAlign4 = 0;
+    uint32_t bestPos = UINT32_MAX;
+    const uint64_t xSquashTab[2] = {0xFCFFFFFFFFFFFFFF, 0xFCFFFFFFFFFFFFFF};
 
     /* case 1: base length is not greater than reference index corresponding base length */
     if (baseLength <= (baseGroupLen + 4)) {
@@ -400,209 +442,215 @@ void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLeng
     }
 
     /* case 2: base length is greater than reference index corresponding base length */
-    uint32_t e = baseLength - baseGroupLen;
+    const uint32_t edge = baseLength - baseGroupLen;
     actgPair(basePairBuffer, base, baseLength);
 
     /* Calculate align4 squash buffer and pair squash buffer */
-    for (n = 0; n < 4; n++) {
-        squashLen[0] = (baseLength - n) >> 2;
-        total = squashLen[0] << 2;
-        mt[n].leftUnalignLen[0] = n;
-        for (m = 0; m < n; m++) {
-            mt[n].leftUnalign[0][m] = ((*(pseq[0] + m)) >> 1) & 0x3; /* squash value of bases not 4-aligned on the left */
+    for (uint32_t n = 0; n < 4; n++) {
+        uint32_t squashLength[2];
+        squashLength[0] = (baseLength - n) >> 2;
+        uint32_t total = squashLength[0] << 2;
+        mappingTable[n].leftUnalignLen[0] = n;
+        for (uint32_t m = 0; m < n; m++) {
+            mappingTable[n].leftUnalign[0][m] = ((*(pSeq[0] + m)) >> 1) & 0x3; /* squash value of bases not 4-aligned on the left */
         }
-        mt[n].rightUnalignLen[0] = baseLength - n - total;
-        for (m = 0; m < mt[n].rightUnalignLen[0]; m++) {
-            mt[n].rightUnalign[0][m] = ((*(pseq[0] + baseLength - mt[n].rightUnalignLen[0] + m)) >> 1) & 0x3;
+        mappingTable[n].rightUnalignLen[0] = baseLength - n - total;
+        for (uint32_t m = 0; m < mappingTable[n].rightUnalignLen[0]; m++) {
+            mappingTable[n].rightUnalign[0][m] = ((*(pSeq[0] + baseLength - mappingTable[n].rightUnalignLen[0] + m)) >> 1) & 0x3;
         }
-        actgSquash(pseq[0] + n, total, baseSquashBuffer[n]);
+        actgSquash(pSeq[0] + n, total, baseSquashBuffer[n]);
 
-        squashLen[1] = (baseLength - n + 1) >> 2; /* Add a character to the right for 32-byte alignment; need to handle the last character when matching to mt[0]'s pair and mt[0] offset is 0 */
-        total = squashLen[1] << 2;
-        mt[n].leftUnalignLen[1] = baseLength + 1 - n - total;
-        for (m = 0; m < mt[n].leftUnalignLen[1]; m++) {
-            mt[n].leftUnalign[1][m] = ((*(pseq[1] + m)) >> 1) & 0x3;
+        squashLength[1] = (baseLength - n + 1) >> 2; /* Add a character to the right for 32-byte alignment; need to handle the last character when matching to mappingTable[0]'s pair and mappingTable[0] offset is 0 */
+        total = squashLength[1] << 2;
+        mappingTable[n].leftUnalignLen[1] = baseLength + 1 - n - total;
+        for (uint32_t m = 0; m < mappingTable[n].leftUnalignLen[1]; m++) {
+            mappingTable[n].leftUnalign[1][m] = ((*(pSeq[1] + m)) >> 1) & 0x3;
         }
-        mt[n].rightUnalignLen[1] = (n == 0) ? 0 : (n - 1); /* Subtract 1 because one character is added to the right for key alignment */
-        for (m = 0; m < mt[n].rightUnalignLen[1]; m++) {
-            mt[n].rightUnalign[1][m] = ((*(pseq[1] + baseLength - mt[n].rightUnalignLen[1] + m) >> 1) & 0x3);
+        mappingTable[n].rightUnalignLen[1] = (n == 0) ? 0 : (n - 1); /* Subtract 1 because one character is added to the right for key alignment */
+        for (uint32_t m = 0; m < mappingTable[n].rightUnalignLen[1]; m++) {
+            mappingTable[n].rightUnalign[1][m] = ((*(pSeq[1] + baseLength - mappingTable[n].rightUnalignLen[1] + m)) >> 1) & 0x3;
         }
-        actgSquash(pseq[1] + mt[n].leftUnalignLen[1], total, basePairSquashBuffer[n]);
+        actgSquash(pSeq[1] + mappingTable[n].leftUnalignLen[1], total, basePairSquashBuffer[n]);
 
         /* Establish the relationship between base squash and corresponding pair base squash */
-        mt[n].set(baseSquashBuffer[n], squashLen[0], basePairSquashBuffer[n] + squashLen[1] - len_bgs, squashLen[1], 0);
+        mappingTable[n].set(baseSquashBuffer[n], squashLength[0], basePairSquashBuffer[n] + squashLength[1] - lenBgs, squashLength[1], 0);
 
         /* do mapping */
-        align4_curr = n & 0x3;
-        match_pair_origin = (*(pseq[0] + n + bg_mid) < *(pseq[1] + baseLength - baseGroupLen - n + bg_mid));
+        uint32_t align4Curr = n & 0x3;
+        uint32_t matchPairOrigin = (*(pSeq[0] + n + bgMid) < *(pSeq[1] + baseLength - baseGroupLen - n + bgMid));
 
-        psquash = mt[align4_curr].getSquash(match_pair_origin);
-        xsquash = *((uint64_t *)(psquash));
-        xsquash &= xsquash_tab[match_pair_origin];
-        hash32 = (uint32_t)CityHash64((const char *)(&xsquash), len_bgs);
-        pos_vals = (uint32_t *)(pReference->queryPosition(hash32, pos_cnts));
+        uint8_t* pSquash = mappingTable[align4Curr].getSquash(matchPairOrigin);
+        uint64_t xSquash = *((uint64_t *)(pSquash));
+        xSquash &= xSquashTab[matchPairOrigin];
+        uint32_t hash32 = (uint32_t)CityHash64((const char *)(&xSquash), lenBgs);
+        uint32_t posCnts;
+        uint32_t* posVals = (uint32_t *)(pReference->queryPosition(hash32, posCnts));
 
-        for (o = 0; o < pos_cnts; o++) {
-            match_pos = *pos_vals++;
-            match_pair = ((match_pos & 0x80000000) >> 31) ^ match_pair_origin;
-            match_pos = (match_pos & 0x7FFFFFFF) << 3; /* to squash reference pos */
+        for (uint32_t o = 0; o < posCnts; o++) {
+            uint32_t matchPos = *posVals++;
+            uint32_t matchPair = ((matchPos & 0x80000000) >> 31) ^ matchPairOrigin;
+            matchPos = (matchPos & 0x7FFFFFFF) << 3; /* to squash reference pos */
 
             /* check left and right boundary simply */
-            if (match_pos + base_squash_align4 >= refe_squashlen || match_pos < base_squash_align4) {
+            if (matchPos + baseSquashAlign4 >= refeSquashLen || matchPos < baseSquashAlign4) {
                 continue;
             }
 
-            loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
+            uint32_t lOffset = (matchPair) ? (mappingTable[align4Curr].squashBufferLen[1] - mappingTable[align4Curr].offset - lenBgs) : (mappingTable[align4Curr].offset);
 
             /* caculate unmatch count */
-            psquash = mt[align4_curr].getSquash(match_pair) - loffset;
-            psquash_refe = prefe_squash + match_pos - loffset;
+            pSquash = mappingTable[align4Curr].getSquash(matchPair) - lOffset;
+            uint8_t* pSquashRefe = prefSquash + matchPos - lOffset;
 
-            xsquash_match = ((*((uint64_t *)(mt[align4_curr].getSquash(match_pair)))) & xsquash_tab[match_pair]);
-            xsquash_macth_refe = ((*((uint64_t *)(prefe_squash + match_pos))) & xsquash_tab[match_pair]);
-            if (xsquash_match != xsquash_macth_refe)  {
+            uint64_t xSquashMatch = ((*((uint64_t *)(mappingTable[align4Curr].getSquash(matchPair)))) & xSquashTab[matchPair]);
+            uint64_t xSquashMatchRefe = ((*((uint64_t *)(prefSquash + matchPos))) & xSquashTab[matchPair]);
+            if (xSquashMatch != xSquashMatchRefe)  {
                 /* key is not same, skip */
                 continue;
-            } 
+            }
             /* align 4 */
-            unmatchs = actgSquashDiffCnt(psquash, psquash_refe, mt[align4_curr].squashBufferLen[match_pair]);
-            if (unmatchs >= best_unmatchs) {
+            uint32_t unmatches = actgSquashDiffCnt(pSquash, pSquashRefe, mappingTable[align4Curr].squashBufferLen[matchPair]);
+            if (unmatches >= bestUnmatches) {
                 continue;
             }
 
-            /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mt[0]'s pair and mt[0] offset is 0 */
-            unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
+            /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mappingTable[0]'s pair and mappingTable[0] offset is 0 */
+            unmatches -= (matchPair && (mappingTable[align4Curr].offset == 0)) ? ((xSquashMatch & 0x80000000000000) != (xSquashMatchRefe & 0x80000000000000)) : 0;
 
             /* left unalign */
-            l = mt[align4_curr].leftUnalignLen[match_pair];
-            for (ch = *(psquash_refe - 1), m = 0; m < mt[align4_curr].leftUnalignLen[match_pair]; m++) {
-                unmatchs += ((ch >> (m << 1)) & 0x3) != (mt[align4_curr].leftUnalign[match_pair][l - 1]);
+            uint32_t l = mappingTable[align4Curr].leftUnalignLen[matchPair];
+            uint32_t m;
+            for (ch = *(pSquashRefe - 1), m = 0; m < mappingTable[align4Curr].leftUnalignLen[matchPair]; m++) {
+                unmatches += ((ch >> (m << 1)) & 0x3) != (mappingTable[align4Curr].leftUnalign[matchPair][l - 1]);
                 l--;
             }
             /* right unalign */
-            l = mt[align4_curr].squashBufferLen[match_pair];
-            for (ch = *(psquash_refe + l), m = 0; m < mt[align4_curr].rightUnalignLen[match_pair]; m++) {
-                unmatchs += ((ch >> (6 - (m << 1)) & 0x3) != (mt[align4_curr].rightUnalign[match_pair][m]));
+            l = mappingTable[align4Curr].squashBufferLen[matchPair];
+            for (ch = *(pSquashRefe + l), m = 0; m < mappingTable[align4Curr].rightUnalignLen[matchPair]; m++) {
+                unmatches += ((ch >> (6 - (m << 1)) & 0x3) != (mappingTable[align4Curr].rightUnalign[matchPair][m]));
             }
-            if (unmatchs < best_unmatchs) {
-                best_pos = (match_pos << 2) - (loffset << 2) - mt[align4_curr].leftUnalignLen[match_pair];
-                best_pos_inrefe = match_pos - loffset;
-                best_is_pair = match_pair;
-                best_align4 = align4_curr;
-                best_unmatchs = unmatchs;
+            if (unmatches < bestUnmatches) {
+                bestPos = (matchPos << 2) - (lOffset << 2) - mappingTable[align4Curr].leftUnalignLen[matchPair];
+                bestPosInRefe = matchPos - lOffset;
+                bestIsPair = matchPair;
+                bestAlign4 = align4Curr;
+                bestUnmatches = unmatches;
             }
-            if (best_unmatchs <= MAPPED_THRESHOLD_GEN2) {
+            if (bestUnmatches <= MAPPED_THRESHOLD_GEN2) {
                 break;
             }
         }
-        if (best_unmatchs <= MAPPED_THRESHOLD_GEN2) {
+        if (bestUnmatches <= MAPPED_THRESHOLD_GEN2) {
             break;
         }
-        mt[align4_curr].incOffset();
+        mappingTable[align4Curr].incOffset();
     }
 
-    if (best_unmatchs > MAPPED_THRESHOLD_GEN2) { /* continue mapping */
-        for (n = 4; n <= e; n++) {
+    if (bestUnmatches > MAPPED_THRESHOLD_GEN2) { /* continue mapping */
+        for (uint32_t n = 4; n <= edge; n++) {
             /* do mapping */
-            align4_curr = n & 0x3;
-            match_pair_origin = (*(pseq[0] + n + bg_mid) < *(pseq[1] + baseLength - baseGroupLen - n + bg_mid));
+            uint32_t align4Curr = n & 0x3;
+            uint32_t matchPairOrigin = (*(pSeq[0] + n + bgMid) < *(pSeq[1] + baseLength - baseGroupLen - n + bgMid));
 
-            psquash = mt[align4_curr].getSquash(match_pair_origin);
-            xsquash = *((uint64_t *)(psquash));
-            xsquash &= xsquash_tab[match_pair_origin];
-            hash32 = (uint32_t)CityHash64((const char *)(&xsquash), len_bgs);
-            pos_vals = (uint32_t *)(pReference->queryPosition(hash32, pos_cnts));
+            uint8_t* pSquash = mappingTable[align4Curr].getSquash(matchPairOrigin);
+            uint64_t xSquash = *((uint64_t *)(pSquash));
+            xSquash &= xSquashTab[matchPairOrigin];
+            uint32_t hash32 = (uint32_t)CityHash64((const char *)(&xSquash), lenBgs);
+            uint32_t posCnts;
+            uint32_t* posVals = (uint32_t *)(pReference->queryPosition(hash32, posCnts));
 
-            for (o = 0; o < pos_cnts; o++) {
-                match_pos = *pos_vals++;
-                match_pair = ((match_pos & 0x80000000) >> 31) ^ match_pair_origin;
-                match_pos = (match_pos & 0x7FFFFFFF) << 3; /* to squash reference pos */
+            for (uint32_t o = 0; o < posCnts; o++) {
+                uint32_t matchPos = *posVals++;
+                uint32_t matchPair = ((matchPos & 0x80000000) >> 31) ^ matchPairOrigin;
+                matchPos = (matchPos & 0x7FFFFFFF) << 3; /* to squash reference pos */
 
                 /* check left and right boundary simply */
-                if (match_pos + base_squash_align4 >= refe_squashlen || match_pos < base_squash_align4) {
+                if (matchPos + baseSquashAlign4 >= refeSquashLen || matchPos < baseSquashAlign4) {
                     continue;
                 }
 
-                loffset = (match_pair) ? (mt[align4_curr].squashBufferLen[1] - mt[align4_curr].offset - len_bgs) : (mt[align4_curr].offset);
+                uint32_t lOffset = (matchPair) ? (mappingTable[align4Curr].squashBufferLen[1] - mappingTable[align4Curr].offset - lenBgs) : (mappingTable[align4Curr].offset);
                 /* caculate unmatch count */
-                psquash = mt[align4_curr].getSquash(match_pair) - loffset;
-                psquash_refe = prefe_squash + match_pos - loffset;
+                pSquash = mappingTable[align4Curr].getSquash(matchPair) - lOffset;
+                uint8_t* pSquashRefe = prefSquash + matchPos - lOffset;
 
-                xsquash_match = ((*((uint64_t *)(mt[align4_curr].getSquash(match_pair)))) & xsquash_tab[match_pair]);
-                xsquash_macth_refe = ((*((uint64_t *)(prefe_squash + match_pos))) & xsquash_tab[match_pair]);
-                if (xsquash_match != xsquash_macth_refe) { /* key is not same, skip */
+                uint64_t xSquashMatch = ((*((uint64_t *)(mappingTable[align4Curr].getSquash(matchPair)))) & xSquashTab[matchPair]);
+                uint64_t xSquashMatchRefe = ((*((uint64_t *)(prefSquash + matchPos))) & xSquashTab[matchPair]);
+                if (xSquashMatch != xSquashMatchRefe) { /* key is not same, skip */
                     continue;
                 }
 
                 /* align 4 */
-                unmatchs = actgSquashDiffCnt(psquash, psquash_refe, mt[align4_curr].squashBufferLen[match_pair]);
-                if (unmatchs >= best_unmatchs) {
+                uint32_t unmatches = actgSquashDiffCnt(pSquash, pSquashRefe, mappingTable[align4Curr].squashBufferLen[matchPair]);
+                if (unmatches >= bestUnmatches) {
                     continue;
                 }
 
-                /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mt[0]'s pair and mt[0] offset is 0 */
-                unmatchs -= (match_pair && (mt[align4_curr].offset == 0)) ? ((xsquash_match & 0x80000000000000) != (xsquash_macth_refe & 0x80000000000000)) : 0;
+                /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mappingTable[0]'s pair and mappingTable[0] offset is 0 */
+                unmatches -= (matchPair && (mappingTable[align4Curr].offset == 0)) ? ((xSquashMatch & 0x80000000000000) != (xSquashMatchRefe & 0x80000000000000)) : 0;
 
                 /* left unalign */
-                l = mt[align4_curr].leftUnalignLen[match_pair];
-                for (ch = *(psquash_refe - 1), m = 0; m < mt[align4_curr].leftUnalignLen[match_pair]; m++) {
-                    unmatchs += ((ch >> (m << 1)) & 0x3) != (mt[align4_curr].leftUnalign[match_pair][l - 1]);
+                uint32_t l = mappingTable[align4Curr].leftUnalignLen[matchPair];
+                uint32_t m;
+                for (ch = *(pSquashRefe - 1), m = 0; m < mappingTable[align4Curr].leftUnalignLen[matchPair]; m++) {
+                    unmatches += ((ch >> (m << 1)) & 0x3) != (mappingTable[align4Curr].leftUnalign[matchPair][l - 1]);
                     l--;
                 }
                 /* right unalign */
-                l = mt[align4_curr].squashBufferLen[match_pair];
-                for (ch = *(psquash_refe + l), m = 0; m < mt[align4_curr].rightUnalignLen[match_pair]; m++) {
-                    unmatchs += ((ch >> (6 - (m << 1)) & 0x3) != (mt[align4_curr].rightUnalign[match_pair][m]));
+                l = mappingTable[align4Curr].squashBufferLen[matchPair];
+                for (ch = *(pSquashRefe + l), m = 0; m < mappingTable[align4Curr].rightUnalignLen[matchPair]; m++) {
+                    unmatches += ((ch >> (6 - (m << 1)) & 0x3) != (mappingTable[align4Curr].rightUnalign[matchPair][m]));
                 }
-                if (unmatchs < best_unmatchs) {
-                    best_pos = (match_pos << 2) - (loffset << 2) - mt[align4_curr].leftUnalignLen[match_pair];
-                    best_pos_inrefe = match_pos - loffset;
-                    best_is_pair = match_pair;
-                    best_align4 = align4_curr;
-                    best_unmatchs = unmatchs;
+                if (unmatches < bestUnmatches) {
+                    bestPos = (matchPos << 2) - (lOffset << 2) - mappingTable[align4Curr].leftUnalignLen[matchPair];
+                    bestPosInRefe = matchPos - lOffset;
+                    bestIsPair = matchPair;
+                    bestAlign4 = align4Curr;
+                    bestUnmatches = unmatches;
                 }
-                if (best_unmatchs <= MAPPED_THRESHOLD_GEN2) {
+                if (bestUnmatches <= MAPPED_THRESHOLD_GEN2) {
                     break;
                 }
             }
 
-            if (best_unmatchs <= MAPPED_THRESHOLD_GEN2) {
+            if (bestUnmatches <= MAPPED_THRESHOLD_GEN2) {
                 break;
             }
-            mt[align4_curr].incOffset();
+            mappingTable[align4Curr].incOffset();
         }
     }
 
     /* calc the result of base or base pair mapping with the match pos reference */
     outLength = 0;
-    if (best_unmatchs != UINT32_MAX)  {
+    if (bestUnmatches != UINT32_MAX)  {
         /* get pos in reference table */
-        psquash = (best_is_pair) ? (mt[best_align4].squashBuffer[1] - (mt[best_align4].squashBufferLen[1] - len_bgs)) : (mt[best_align4].squashBuffer[0]);
-        psquash_refe = prefe_squash + best_pos_inrefe;
+        uint8_t* pSquash = (bestIsPair) ? (mappingTable[bestAlign4].squashBuffer[1] - (mappingTable[bestAlign4].squashBufferLen[1] - lenBgs)) : (mappingTable[bestAlign4].squashBuffer[0]);
+        uint8_t* pSquashRefe = prefSquash + bestPosInRefe;
 
-        n = o = l = mt[best_align4].leftUnalignLen[best_is_pair];
-        for (ch = *(psquash_refe - 1), m = 0; m < mt[best_align4].leftUnalignLen[best_is_pair]; m++) {
-            out[--o] = (((ch >> (m << 1)) & 0x3) ^ (mt[best_align4].leftUnalign[best_is_pair][l - 1]));
+        uint32_t n, o, l;
+        o = l = mappingTable[bestAlign4].leftUnalignLen[bestIsPair];
+        for (ch = *(pSquashRefe - 1), n = 0; n < mappingTable[bestAlign4].leftUnalignLen[bestIsPair]; n++) {
+            out[--o] = (((ch >> (n << 1)) & 0x3) ^ (mappingTable[bestAlign4].leftUnalign[bestIsPair][l - 1]));
             l--;
         }
         outLength += n; /* Note byte order */
-        outLength += actgStretchMappingXor(psquash, psquash_refe, mt[best_align4].squashBufferLen[best_is_pair], out + outLength);
+        outLength += actgStretchMappingXor(pSquash, pSquashRefe, mappingTable[bestAlign4].squashBufferLen[bestIsPair], out + outLength);
 
-        outLength -= (best_is_pair && best_align4 == 0);
-        l = mt[best_align4].squashBufferLen[best_is_pair];
-        for (ch = *(psquash_refe + l), m = 0; m < mt[best_align4].rightUnalignLen[best_is_pair]; m++) {
-            out[outLength++] = ((ch >> (6 - (m << 1)) & 0x3) ^ (mt[best_align4].rightUnalign[best_is_pair][m]));
+        outLength -= (bestIsPair && bestAlign4 == 0);
+        l = mappingTable[bestAlign4].squashBufferLen[bestIsPair];
+        for (ch = *(pSquashRefe + l), n = 0; n < mappingTable[bestAlign4].rightUnalignLen[bestIsPair]; n++) {
+            out[outLength++] = ((ch >> (6 - (n << 1)) & 0x3) ^ (mappingTable[bestAlign4].rightUnalign[bestIsPair][n]));
         }
     } else {
         /* not match valid pos */
         actgEncode(base, out, baseLength);
         outLength = baseLength;
-        best_pos = 0;
-        best_is_pair = 2; ///*  During decompression, check mdir first; if it's 2, it means no match */
+        bestPos = 0;
+        bestIsPair = 2; ///*  During decompression, check mdir first; if it's 2, it means no match */
     }
 
-    mappingPos = best_pos;
-    mappingDir = best_is_pair;
+    mappingPos = bestPos;
+    mappingDir = bestIsPair;
     return;
 }
 
@@ -782,6 +830,12 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     int64_t nOffset = 0;
     int64_t currPos = 0;
     uint32_t offset = 0;
+
+    // Prepare SIMD targets for N detection
+#ifdef __SSE4_2__
+    const __m128i target_upper = _mm_set1_epi8('N');
+    const __m128i target_lower = _mm_set1_epi8('n');
+#endif
     Json::Value metaSubs;
     Json::Value metaStreams;
     Json::Value metaBase;
@@ -796,10 +850,40 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         uint8_t* pBuff = baseStripNBuffer;
         uint32_t outLen = 0;
 
-        for (uint32_t n = startPos; n < endPos; n++) {
-            char ch = *(ptr + n);
-            if (ch == 'n' || ch == 'N') {
-                *(baseNPosBuffer + nOffset) = currPos + n - startPos;
+        // Use SIMD-optimized N detection when processing base sequences
+        size_t segmentLength = endPos - startPos;
+        const uint8_t* segmentStart = ptr + startPos;
+        size_t simdIdx = 0;
+
+#ifdef __SSE4_2__
+        // Process 16 bytes at a time with SIMD
+        for (; simdIdx + 16 <= segmentLength; simdIdx += 16) {
+            __m128i chunk = _mm_loadu_si128((__m128i*)(segmentStart + simdIdx));
+            __m128i cmp_upper = _mm_cmpeq_epi8(chunk, target_upper);
+            __m128i cmp_lower = _mm_cmpeq_epi8(chunk, target_lower);
+            __m128i cmp = _mm_or_si128(cmp_upper, cmp_lower);
+            uint32_t mask = _mm_movemask_epi8(cmp);
+
+            // Process each byte in the 16-byte chunk
+            for (int j = 0; j < 16; j++) {
+                if (mask & (1 << j)) {
+                    // Found N at position simdIdx + j
+                    *(baseNPosBuffer + nOffset) = currPos + simdIdx + j;
+                    nOffset++;
+                } else {
+                    // Non-N character, copy to output buffer
+                    *pBuff = segmentStart[simdIdx + j];
+                    pBuff++;
+                }
+            }
+        }
+#endif
+
+        // Process remaining bytes with scalar code
+        for (; simdIdx < segmentLength; simdIdx++) {
+            uint8_t ch = segmentStart[simdIdx];
+            if (ch == 'N' || ch == 'n') {
+                *(baseNPosBuffer + nOffset) = currPos + simdIdx;
                 nOffset++;
             } else {
                 *pBuff = ch;

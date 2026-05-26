@@ -102,14 +102,20 @@ public:
 
     void TearDown() override {
         // Clean up all generated test files
-        // std::remove(SamSortTestData::sortedHeadFile.c_str());
-        // std::remove(SamSortTestData::sortedSamFile0.c_str());
-        // std::remove(SamSortTestData::sortedSamFile1.c_str());
-        // std::remove(SamSortTestData::sortedSamFile2.c_str());
-        // std::remove(SamSortTestData::mergedOutputFile.c_str());
-        // std::remove("merge_output.sam");
-        // std::remove("final_output.bam");
-       
+        std::remove(SamSortTestData::sortedHeadFile.c_str());
+        std::remove(SamSortTestData::sortedSamFile0.c_str());
+        std::remove(SamSortTestData::sortedSamFile1.c_str());
+        std::remove(SamSortTestData::sortedSamFile2.c_str());
+        std::remove(SamSortTestData::mergedOutputFile.c_str());
+        std::remove("merge_output.sam");
+        std::remove("final_output.bam");
+        std::remove("sorted_head.sam");
+        std::remove("sorted_sam_0_0.sam");
+        std::remove("sorted_sam_0_1.sam");
+        std::remove("sorted_sam_0_2.sam");
+        std::remove("merged_output.sam");
+        std::remove("test_merged.sam");
+
     }
 
     void createTestSortedHeadFile(const std::string& filename) {
@@ -690,7 +696,7 @@ TEST_F(SamSortCombineTest, CombineSamFileWithFileWriter) {
 
     PbgzParameter para;
     MockSortEngine* engine = MemoryUtil::safeNewClass<MockSortEngine>(para);
-   
+
     std::vector<std::string> fileList = {
         SamSortTestData::sortedSamFile0,
         SamSortTestData::sortedSamFile1,
@@ -725,6 +731,10 @@ TEST_F(SamSortCombineTest, CombineSamFileWithFileWriter) {
         EXPECT_TRUE(sortedLines[i].find(expectedOrder[i]) == 0)
             << "Expected line " << i << " to start with " << expectedOrder[i];
     }
+
+    // Clean up generated test file
+    std::remove(outputFile.c_str());
+
     MemoryUtil::safeDeleteClass(engine);
 }
 
@@ -810,8 +820,15 @@ TEST_F(SamSortCombineTest, CombineAllSamFileExceeds128Files) {
 
     EXPECT_EQ(foundPositions, expectedPositions) << "Should have all positions in correct order";
 
+    // Clean up all generated intermediate files
     for (const auto& file : outputFiles) {
         std::remove(file.c_str());
+    }
+
+    // Clean up all temporary SAM files created for this test
+    for (uint32_t i = 0; i < fileCount; ++i) {
+        std::string filename = "sorted_sam_0_" + std::to_string(i) + ".sam";
+        std::remove(filename.c_str());
     }
 
     MemoryUtil::safeDeleteClass(engine);
