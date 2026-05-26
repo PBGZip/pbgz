@@ -32,6 +32,14 @@
 #include "coder_io.h"
 #include "coder_qual.h"
 
+#ifdef __SSE4_2__
+#include <emmintrin.h>
+#endif
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
 
 enum class CommentType {
     PLUS_ONLY,     // Comment line contains only a '+' sign
@@ -149,6 +157,11 @@ private:
     void mappingFastqGen2(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
 
     void mappingFastQGen3(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
+
+    // SIMD-optimized N character counting methods
+    static inline uint32_t countN_SSE2(const uint8_t* data, size_t length);
+    static inline uint32_t countN_Unrolled(const uint8_t* data, size_t length);
+    static inline uint32_t countN_Optimized(const uint8_t* data, size_t length);
 
 private:
     std::vector<uint8_t> idSplitSymbols;
