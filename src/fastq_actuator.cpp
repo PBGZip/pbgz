@@ -718,6 +718,7 @@ int32_t FastqCodecActuator::compressIdInAll() {
     idMeta["splitsym"] = std::string("\n");
     idMeta["streams"] = streamMeta;
     meta["id"] = idMeta;
+    LOG_INFO("Compress Id in all: from %d to %d, compress ratio: %.2f%%", srcDataLen, idIo->data_len, ((float)(idIo->data_len * 100)) / srcDataLen);
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
@@ -788,6 +789,7 @@ int32_t FastqCodecActuator::compressIdInSplit() {
     idMeta["splitsym"] = std::string((char*)idSplitSymbols.data(), idSplitSymbols.size());
     idMeta["streams"] = streamMeta;
     meta["id"] = idMeta;
+    LOG_INFO("Compress Id in split: from %d to %d, compress ratio: %.2f%%.", totalSrcLength, totalDstLength, ((float)(totalDstLength * 100)) / totalSrcLength);
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
@@ -1011,6 +1013,8 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     metaBase["totaldstlen"] = (Json::Value::UInt)totalDstLen;
     metaBase["streams"] = metaStreams;
     meta["base"] = metaBase;
+    
+    LOG_INFO("Compress base with reference: from %d to %d, compress ratio: %.2f%%.", totalSrcLen, totalDstLen, ((float)(totalDstLen * 100)) / totalSrcLen);
     return 0;
 }
 
@@ -1059,8 +1063,9 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
     baseMeta["coder"] = baseIo->meta;
     baseMeta["totalsrclen"] = baseSrcLength;
     baseMeta["totaldstlen"] = baseIo->data_len;
-
     meta["base"] = baseMeta;
+
+    LOG_INFO("Compress base: from %d to %d, compress ratio: %.2f%%.", baseSrcLength, baseIo->data_len, ((float)(baseIo->data_len * 100)) / baseSrcLength);
     return 0;
 }
 
@@ -1072,9 +1077,11 @@ int32_t FastqCodecActuator::compressComment() {
     switch (commentType) {
     case CommentType::PLUS_ONLY:
         commentMeta["type"] = "plusonly";
+        LOG_INFO("Compress comment: plus only.");
         break;
     case CommentType::SAME_AS_ID:
         commentMeta["type"] = "sameasid";
+        LOG_INFO("Compress comment: same as id.");
         break;
     case CommentType::OTHER:{
         commentMeta["type"] = "other";
@@ -1093,12 +1100,15 @@ int32_t FastqCodecActuator::compressComment() {
         commentMeta["srclen"] = commmentSrcLength;
         commentMeta["dstlen"] = commentIo->data_len;
         commentMeta["coder"] = commentIo->meta;
+        
+        LOG_INFO("Compress comment: from %d to %d, compress ratio: %.2f%%.", commmentSrcLength, commentIo->data_len, ((float)(commentIo->data_len * 100)) / commmentSrcLength);
         break;
     }
     default:
         break;
     }
     meta["comment"] = commentMeta;
+
     return 0;
 }
 
@@ -1165,6 +1175,7 @@ int32_t FastqCodecActuator::compressQuality() {
     qualityMeta["streams"] = streamMeta;
     meta["quality"] = qualityMeta;
 
+    LOG_INFO("Compress quality: from %d to %d, compress ratio: %.2f%%.", totalSrcLength, totalDstLength, ((float)(totalDstLength * 100)) / totalSrcLength);
     return 0;
 }
 

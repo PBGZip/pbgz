@@ -461,7 +461,7 @@ int32_t SamCodecActuator::compressSamHeader() {
     headerMeta["coder"] = headerIo->meta;
     meta["header"] = headerMeta;
     
-    LOG_DEBUG("SAM header compression completed: %u lines, %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM header compression completed: %u lines, %u bytes -> %u bytes, compress ratio = %.2f%%", 
              headEndLine, headerSrcLen, headerDstLen, (double)(headerDstLen* 100)/(double)headerSrcLen);
     
     return 0;
@@ -538,7 +538,7 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
         }
 
-        // LOG_INFO("Compress Rate for block(%d fieldId=%d): src = %d, dst = %d, ratio =  %0.2f%%.",
+        // LOG_INFO("Compress Rate for block(%d fieldId=%d): src = %d, dst = %d, ratio = %.2f%%.",
         //     outBlockPtr->getBlockId(), fieldIdx, fieldSrcLen, fieldDstLen, ((fieldDstLen * 1.0) * 100) / fieldSrcLen);
         
         streamMeta.append(fieldMeta);
@@ -706,7 +706,7 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
     fieldMeta["splitsym"] = "\t";
     fieldMeta["field"] = 0;
 
-    LOG_DEBUG("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
     
     return fieldIo->data_len;
@@ -773,7 +773,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
     fieldMeta["coder"] = chrIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldIdx, fieldSrcLen, chrIo->data_len, (double)(chrIo->data_len * 100)/(double)fieldSrcLen);
 
     return chrIo->data_len;
@@ -833,7 +833,7 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
@@ -897,7 +897,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
@@ -957,7 +957,7 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_DEBUG("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
     
     return fieldIo->data_len;
@@ -1170,7 +1170,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     fieldMeta["field"] = fieldIdx;
     fieldSrcLen = totalSrcLen;
 
-    LOG_DEBUG("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         totalSrcLen, totalDstLen, (double)(totalDstLen * 100)/(double)totalSrcLen);
     
     return totalDstLen;
@@ -1273,7 +1273,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     
     fieldSrcLen = totalSrcLength;
 
-    LOG_DEBUG("SAM quality field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM quality field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
     
     return totalDstLength;

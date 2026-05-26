@@ -183,7 +183,7 @@ private:
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
 
-        LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldIdx, fieldSrcLen, numberIo->data_len, (double)(numberIo->data_len * 100)/(double)fieldSrcLen);
         
         return numberIo->data_len;
