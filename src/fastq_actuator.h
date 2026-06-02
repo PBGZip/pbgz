@@ -31,6 +31,10 @@
 #include "coder.h"
 #include "coder_io.h"
 #include "coder_qual.h"
+#include "pbgz_stat.h"
+
+// Forward declaration
+class CompressEngine;
 
 #ifdef __SSE4_2__
 #include <emmintrin.h>

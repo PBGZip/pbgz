@@ -26,6 +26,7 @@
 #include <memory>
 
 #include "fastq_actuator.h"
+#include "compress_engine.h"
 #include "reference.h"
 #include "log/logger.h"
 #include "utils/memory_util.h"
@@ -40,6 +41,24 @@
 #include "actg.h"
 #include "city.h"
 #include "pbgz_manager.h"
+#include "pbgz_stat.h"
+
+namespace {
+    void recordFastqFieldStats(PbgzEngine* engine, uint16_t objectId, uint32_t srcLen, uint32_t dstLen) {
+        if (!engine) return;
+        
+        auto compressEngine = dynamic_cast<CompressEngine*>(engine);
+        if (!compressEngine || !compressEngine->getStats()) return;
+        
+        auto fastqStat = dynamic_cast<FastqStat*>(compressEngine->getStats());
+        if (!fastqStat) return;
+        
+        if (objectId != 0 && srcLen > 0) {
+            fastqStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, objectId, StatMetricIds::ORIGINAL_SIZE, srcLen);
+            fastqStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, objectId, StatMetricIds::COMPRESSED_SIZE, dstLen);
+        }
+    }
+}
 
 const uint32_t MAPPED_THRESHOLD_GEN2 = 2;
 
@@ -719,6 +738,10 @@ int32_t FastqCodecActuator::compressIdInAll() {
     idMeta["streams"] = streamMeta;
     meta["id"] = idMeta;
     LOG_INFO("Compress Id in all: from %d to %d, compress ratio: %.2f%%", srcDataLen, idIo->data_len, ((float)(idIo->data_len * 100)) / srcDataLen);
+    
+    // Record statistics for ID compression
+    recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_ID, srcDataLen, idIo->data_len);
+    
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
@@ -790,6 +813,10 @@ int32_t FastqCodecActuator::compressIdInSplit() {
     idMeta["streams"] = streamMeta;
     meta["id"] = idMeta;
     LOG_INFO("Compress Id in split: from %d to %d, compress ratio: %.2f%%.", totalSrcLength, totalDstLength, ((float)(totalDstLength * 100)) / totalSrcLength);
+    
+    // Record statistics for ID compression
+    recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_ID, totalSrcLength, totalDstLength);
+    
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
@@ -1015,6 +1042,10 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     meta["base"] = metaBase;
     
     LOG_INFO("Compress base with reference: from %d to %d, compress ratio: %.2f%%.", totalSrcLen, totalDstLen, ((float)(totalDstLen * 100)) / totalSrcLen);
+    
+    // Record statistics for base compression
+    recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_BASE, totalSrcLen, totalDstLen);
+    
     return 0;
 }
 
@@ -1066,6 +1097,10 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
     meta["base"] = baseMeta;
 
     LOG_INFO("Compress base: from %d to %d, compress ratio: %.2f%%.", baseSrcLength, baseIo->data_len, ((float)(baseIo->data_len * 100)) / baseSrcLength);
+    
+    // Record statistics for base compression
+    recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_BASE, baseSrcLength, baseIo->data_len);
+    
     return 0;
 }
 
@@ -1176,6 +1211,10 @@ int32_t FastqCodecActuator::compressQuality() {
     meta["quality"] = qualityMeta;
 
     LOG_INFO("Compress quality: from %d to %d, compress ratio: %.2f%%.", totalSrcLength, totalDstLength, ((float)(totalDstLength * 100)) / totalSrcLength);
+    
+    // Record statistics for quality compression
+    recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_QUALITY, totalSrcLength, totalDstLength);
+    
     return 0;
 }
 
