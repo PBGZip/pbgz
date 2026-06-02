@@ -38,6 +38,59 @@
 #include "utils/path_util.h"
 #include "pbgz_index.h"
 #include "decompress_engine.h"
+#include "compress_engine.h"
+#include "pbgz_stat.h"
+
+namespace {
+    uint16_t mapFieldIdxToStatUnitId(uint16_t fieldIdx) {
+        switch (fieldIdx) {
+            case 0: return StatObjectId::SAM_QNAME;
+            case 1: return StatObjectId::SAM_FLAG;
+            case 2: return StatObjectId::SAM_RNAME;
+            case 3: return StatObjectId::SAM_POS;
+            case 4: return StatObjectId::SAM_MAPQ;
+            case 5: return StatObjectId::SAM_CIGAR;
+            case 6: return StatObjectId::SAM_RNEXT;
+            case 7: return StatObjectId::SAM_PNEXT;
+            case 8: return StatObjectId::SAM_TLEN;
+            case 9: return StatObjectId::SAM_SEQ;
+            case 10: return StatObjectId::SAM_QUAL;
+            default: return 0;
+        }
+    }
+    
+    void recordSamFieldStats(PbgzEngine* engine, uint16_t fieldIdx, uint32_t fieldSrcLen, uint32_t fieldDstLen) {
+        if (!engine) return;
+        
+        auto compressEngine = dynamic_cast<CompressEngine*>(engine);
+        if (!compressEngine || !compressEngine->getStats()) return;
+        
+        auto samStat = dynamic_cast<SamStat*>(compressEngine->getStats());
+        if (!samStat) return;
+        
+        uint16_t statObjectId = mapFieldIdxToStatUnitId(fieldIdx);
+        if (statObjectId != 0) {
+            samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::ORIGINAL_SIZE, fieldSrcLen);
+            samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::COMPRESSED_SIZE, fieldDstLen);
+        }
+    }
+    
+    void recordFieldStats(PbgzEngine* engine, uint32_t fieldIdx, uint32_t fieldSrcLen, uint32_t fieldDstLen) {
+        if (!engine) return;
+        
+        auto compressEngine = dynamic_cast<CompressEngine*>(engine);
+        if (!compressEngine || !compressEngine->getStats()) return;
+        
+        auto samStat = dynamic_cast<SamStat*>(compressEngine->getStats());
+        if (!samStat) return;
+        
+        uint16_t statObjectId = mapFieldIdxToStatUnitId(fieldIdx);
+        if (statObjectId != 0) {
+            samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::ORIGINAL_SIZE, fieldSrcLen);
+            samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::COMPRESSED_SIZE, fieldDstLen);
+        }
+    }
+}
 
 SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pReferene): CodecActuator(inPtr, outPtr, engine) {
     pRefeGene = pReferene;
@@ -534,9 +587,12 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 11: // Optional fields
-                fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+                 fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
         }
+
+        // Record statistics for this field
+        recordFieldStats(pbgzEngine, fieldIdx, fieldSrcLen, fieldDstLen);
 
         // LOG_INFO("Compress Rate for block(%d fieldId=%d): src = %d, dst = %d, ratio = %.2f%%.",
         //     outBlockPtr->getBlockId(), fieldIdx, fieldSrcLen, fieldDstLen, ((fieldDstLen * 1.0) * 100) / fieldSrcLen);
@@ -722,6 +778,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
     std::shared_ptr<coder_bwt_cm> chrCoder = std::make_shared<coder_bwt_cm>(chrIo.get());
 
     fieldSrcLen = 0;
+    uint32_t srcLen = 0;
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -758,7 +815,8 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
         }
         // Encode the chromosome index
         chrCoder->encode_line(reinterpret_cast<const uint8_t*>(&chrIndex), sizeof(chrIndex));
-        fieldSrcLen += sizeof(chrIndex);
+        srcLen += sizeof(chrIndex);
+        fieldSrcLen += str.length();
     }
     
     // Flush the encoder
@@ -768,7 +826,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + chrIo->data_len);
     
     // Set field metadata
-    fieldMeta["srclen"] = fieldSrcLen;
+    fieldMeta["srclen"] = srcLen;
     fieldMeta["dstlen"] = chrIo->data_len;
     fieldMeta["coder"] = chrIo->meta;
     fieldMeta["field"] = fieldIdx;
