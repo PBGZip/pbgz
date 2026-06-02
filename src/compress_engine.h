@@ -26,6 +26,8 @@
 #include "codec_engine.h"
 #include "actuator.h"
 #include <mutex>
+#include "pbgz_stat.h"
+#include "block_wrapper.h"
 
 class CompressEngine : public CodecEngine {
 public:
@@ -38,6 +40,12 @@ public:
 
     virtual int32_t init();
 
+    PbgzStat* getStats() { return stats.get(); }
+    
+    void initStatsBasedOnFileType(BlockType fileType);
+    
+    virtual int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType) override;
+    
 protected:
     virtual BlockReader* createBlockReader() override;
 
@@ -55,10 +63,13 @@ protected:
 
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
 
-    virtual void writeFilePostProc(BlockWriter*) override ;
+    virtual void writeFilePostProc(BlockWriter* blockWriter) override ;
 
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, true);
+        if (stats) {
+            stats->printStats();
+        }
     }
 
     virtual void setDataBlockPosition(uint32_t blockId) override;
@@ -78,5 +89,7 @@ private:
     std::map<uint32_t, std::vector<int64_t>> blockRefePos;
     std::map<int64_t, uint32_t> blockRefeIndex;
     std::unique_ptr<BlockingQueueType> indexBlockQueue;
-    std::unique_ptr<BlockingQueueType> freeIndexBlockQueue;  
+    std::unique_ptr<BlockingQueueType> freeIndexBlockQueue;
+    std::unique_ptr<PbgzStat> stats;
+    bool statsInitialized = false;
 };

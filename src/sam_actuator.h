@@ -33,6 +33,10 @@
 #include "reference.h"
 #include "sam_info.h"
 #include "coder_bwt_cm.h"
+#include "pbgz_stat.h"
+
+// Forward declaration
+class CompressEngine;
 
 class SamCodecActuator : public CodecActuator {
 public:
@@ -138,6 +142,7 @@ private:
         std::shared_ptr<coder_bwt_cm> numberCoder = std::make_shared<coder_bwt_cm>(numberIo.get());
         
         fieldSrcLen = 0;
+        uint32_t srcLen = 0;
         // Process each line and extract the current field
         for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
             uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -158,9 +163,10 @@ private:
 
             std::string str = std::string((char*)fieldStart, fieldLength);
             T value = (T)std::stoll(str);
+            fieldSrcLen += str.length();
             // Encode the field data
             numberCoder->encode_line(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
-            fieldSrcLen += sizeof(T);
+            srcLen += sizeof(T);
             
             if (fieldIdx == 3) {
                 mappedPos[lineIdx] = value;
@@ -178,7 +184,7 @@ private:
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + numberIo->data_len);
         
         // Set field metadata
-        fieldMeta["srclen"] = fieldSrcLen;
+        fieldMeta["srclen"] = srcLen;
         fieldMeta["dstlen"] = numberIo->data_len;
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
