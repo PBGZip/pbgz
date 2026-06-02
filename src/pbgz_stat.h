@@ -21,8 +21,7 @@
  * SOFTWARE.
  */
 
-#ifndef PBGZ_STAT_H
-#define PBGZ_STAT_H
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -226,5 +225,3 @@ public:
     
 private:
 };
-
-#endif // PBGZ_STAT_H
