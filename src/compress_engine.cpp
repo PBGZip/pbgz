@@ -28,6 +28,17 @@
 #include "coder_json.h"
 #include "codec_actuator_adapter.h"
 
+int64_t CompressEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
+    int64_t ret = CodecEngine::readOneBlock(blockReader, fileType);
+    
+    // Initialize statistics when file type is determined (first block)
+    if (ret > 0 && !statsInitialized && fileType != TYPE_UNKNOW) {
+        initStatsBasedOnFileType(fileType);
+    }
+    
+    return ret;
+}
+
 int32_t CompressEngine::init() {
     if (0 != CodecEngine::init()) {
         return -1;
@@ -45,6 +56,32 @@ int32_t CompressEngine::init() {
     }
     
     return 0;
+}
+
+void CompressEngine::initStatsBasedOnFileType(BlockType fileType) {
+    if (statsInitialized) {
+        return;
+    }
+    
+    if (BlockUtil::isSAMBlock(fileType)) {
+        stats = std::make_unique<SamStat>();
+        if (stats->init() != 0) {
+            LOG_ERROR("Failed to initialize SamStat");
+        } else {
+            LOG_INFO("Initialized SamStat for SAM file compression");
+        }
+    } else if (BlockUtil::isFastqBlock(fileType)) {
+        stats = std::make_unique<FastqStat>();
+        if (stats->init() != 0) {
+            LOG_ERROR("Failed to initialize FastqStat");
+        } else {
+            LOG_INFO("Initialized FastqStat for FASTQ file compression");
+        }
+    } else {
+        LOG_DEBUG("File type %d does not require stats initialization", fileType);
+    }
+    
+    statsInitialized = true;
 }
 
 CompressEngine::~CompressEngine() {
@@ -118,7 +155,8 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
     return actuator;
 }
 
-void CompressEngine::writeFilePostProc(BlockWriter*) {
+void CompressEngine::writeFilePostProc(BlockWriter* blockWriter) {
+    CodecEngine::writeFilePostProc(blockWriter);
     // make index
     if (parameter.isMakeIndex) {
         std::string indexFileName = parameter.outputFile + ".pbgzi";
