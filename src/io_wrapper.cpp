@@ -60,6 +60,10 @@ int FileOperator::openIO() {
 }
 
 int32_t FileOperator::mmapFile(size_t mapFileSize) {
+    if (mapFileSize == 0) {
+        return 0;
+    }
+    
     mappedAddress = static_cast<uint8_t*>(mmap(nullptr, mapFileSize, mapMode, MAP_SHARED, fd, 0));
     if (mappedAddress == MAP_FAILED) {
         LOG_ERROR("file mmaped failed.file name = %s, errno = %d", fileName.c_str(), errno);
@@ -140,9 +144,84 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
 
     size_t left = fo.fileSize - fo.position;
     size_t realRead = readSize > left ? left : readSize; 
-    memcpy(pBuffer, fo.mappedAddress + fo.position, realRead);
+    
+    const uint8_t* src = fo.mappedAddress + fo.position;
+    uint8_t* dst = (uint8_t*)pBuffer;
+    
+    // Conservative SIMD optimization: only for large data (>= 1MB)
+    // Use aligned SIMD copy for better performance on large reads
+    if (realRead >= 1024 * 1024) {
+        // Enhanced prefetch for large data
+        const size_t prefetchDistance = 2048;
+        
+        // Prefetch source regions
+        for (size_t i = 0; i < realRead; i += 32) {
+            if (i + prefetchDistance < realRead) {
+#if defined(__x86_64__)
+                _mm_prefetch((char*)(src + i + prefetchDistance), _MM_HINT_NTA);
+                _mm_prefetch((char*)(src + i + prefetchDistance + 64), _MM_HINT_NTA);
+#elif defined(__aarch64__)
+                __builtin_prefetch(src + i + prefetchDistance, 0, 0);
+                __builtin_prefetch(src + i + prefetchDistance + 64, 0, 0);
+#endif
+            }
+        }
+        
+        // SIMD copy with boundary handling
+        size_t i = 0;
+        
+        // Handle leading unaligned bytes (<16 bytes)
+        size_t misalignment = ((uintptr_t)(src + i)) & 15;
+        if (misalignment > 0 && i < realRead) {
+            size_t prefix = (misalignment > (realRead - i)) ? (realRead - i) : misalignment;
+            memcpy(dst + i, src + i, prefix);
+            i += prefix;
+        }
+        
+        // Main SIMD copy loop (16-byte aligned)
+        if (i + 16 <= realRead) {
+#if defined(__x86_64__) && defined(__AVX2__)
+            while (i + 16 <= realRead) {
+                __m128i data = _mm_loadu_si128((__m128i*)(src + i));
+                _mm_storeu_si128((__m128i*)(dst + i), data);
+                i += 16;
+            }
+#elif defined(__aarch64__)
+            while (i + 16 <= realRead) {
+                uint8x16_t data = vld1q_u8(src + i);
+                vst1q_u8(dst + i, data);
+                i += 16;
+            }
+#endif
+        }
+        
+        // Handle trailing bytes
+        if (i < realRead) {
+            memcpy(dst + i, src + i, realRead - i);
+        }
+    } else {
+        // Small data: use standard memcpy and light prefetch
+        if (realRead >= 64 * 1024) {
+            const size_t prefetchDistance = 2048;
+            for (size_t i = 0; i < realRead; i += 32) {
+                if (i + prefetchDistance < realRead) {
+#if defined(__x86_64__)
+                    _mm_prefetch((char*)(src + i + prefetchDistance), _MM_HINT_NTA);
+                    _mm_prefetch((char*)(src + i + prefetchDistance + 64), _MM_HINT_NTA);
+#elif defined(__aarch64__)
+                    __builtin_prefetch(src + i + prefetchDistance, 0, 0);
+                    __builtin_prefetch(src + i + prefetchDistance + 64, 0, 0);
+#endif
+                }
+            }
+        }
+        memcpy(dst, src, realRead);
+    }
     
     fo.position += realRead;
+    if (fo.position >= fo.fileSize) {
+        eofFlag = true;
+    }
     return realRead;
 }
 
@@ -154,25 +233,72 @@ size_t FileReader::readLine(std::string& line) {
     line.clear();
     
     if (fo.mappedAddress == nullptr || fo.position >= fo.fileSize) {
+        eofFlag = true;
         return 0;
     }
     
     size_t startPos = fo.position;
-    uint8_t* current = fo.mappedAddress + fo.position;
+    const size_t remaining = fo.fileSize - fo.position;
+    const char* current = (const char*)(fo.mappedAddress + fo.position);
     
-    // Find newline character
-    while (fo.position < fo.fileSize) {
-        if (*current == '\n') {
-            break;
+    // Conservative SIMD optimization: only for long lines (>500 bytes)
+    // Avoid overhead for common short lines, use standard method for consistency
+    if (remaining > 500) {
+#if defined(__x86_64__) && defined(__AVX2__)
+        const __m256i newline_vec = _mm256_set1_epi8('\n');
+        size_t processed = 0;
+        
+        while (processed + 32 <= remaining) {
+            __m256i data = _mm256_loadu_si256((__m256i*)(current + processed));
+            __m256i cmp = _mm256_cmpeq_epi8(data, newline_vec);
+            unsigned mask = _mm256_movemask_epi8(cmp);
+            
+            if (mask != 0) {
+                // Found newline: use standard method for consistent behavior
+                const void* newlinePos = memchr(current + processed, '\n', remaining - processed);
+                if (newlinePos != nullptr) {
+                    const char* foundPos = static_cast<const char*>(newlinePos);
+                    size_t lineLength = foundPos - current;
+                    
+                    // Handle carriage return
+                    if (lineLength > 0 && current[lineLength - 1] == '\r') {
+                        lineLength--;
+                    }
+                    
+                    if (lineLength > 0) {
+                        line.append(current, lineLength);
+                    }
+                    
+                    fo.position = foundPos - (const char*)fo.mappedAddress + 1; // Skip newline
+                    
+                    if (fo.position >= fo.fileSize) {
+                        eofFlag = true;
+                    }
+                    
+                    return line.length();
+                }
+                break;
+            }
+            processed += 32;
         }
-        current++;
-        fo.position++;
+#endif
+    }
+    
+    // Standard fallback method for all cases
+    const void* newlinePos = memchr(current, '\n', remaining);
+    
+    if (newlinePos != nullptr) {
+        const char* foundPos = static_cast<const char*>(newlinePos);
+        fo.position = foundPos - (const char*)fo.mappedAddress;
+    } else {
+        // No newline found, go to end of file
+        fo.position = fo.fileSize;
     }
     
     size_t lineLength = fo.position - startPos;
     
     // If newline found, skip it
-    if (fo.position < fo.fileSize && *current == '\n') {
+    if (fo.position < fo.fileSize && fo.mappedAddress[fo.position] == '\n') {
         fo.position++;
     }
     
@@ -186,6 +312,10 @@ size_t FileReader::readLine(std::string& line) {
         line.append(reinterpret_cast<char*>(fo.mappedAddress + startPos), lineLength);
     }
     
+    if (fo.position >= fo.fileSize) {
+        eofFlag = true;
+    }
+    
     return lineLength;
 }
 
@@ -194,7 +324,7 @@ int32_t FileWriter::openIO() {
         LOG_ERROR("File writer open failed.");
         return -1;
     }
-    mapSize = getMappedSize(fo.fileSize);
+    mapSize = calculateNextMapSize();
     ftruncate(fo.fd, mapSize);
     if (0 != fo.mmapFile(mapSize)) {
         LOG_ERROR("File writer mmap failed.");
@@ -224,8 +354,18 @@ void FileWriter::closeIO() {
 }
 
 size_t FileWriter::getMappedSize(size_t fileSize) {
-    const size_t mapSizeUint = 16 * 1024 * 1024;
-    return ((fileSize / mapSizeUint) + 1) * mapSizeUint;
+    return ((fileSize / initialMapSize) + 1) * initialMapSize;
+}
+
+size_t FileWriter::calculateNextMapSize() {
+    const size_t INITIAL_SIZE = 64 * 1024 * 1024; // 64MB initial size
+    
+    if (initialMapSize == 0) {
+        initialMapSize = INITIAL_SIZE;
+        return INITIAL_SIZE;
+    }
+    
+    return mapSize * 2;
 }
 
 size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
@@ -239,15 +379,17 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
         return 0;
     }
 
-    size_t newSize = fo.fileSize + writeLen;
+        size_t newSize = fo.fileSize + writeLen;
     if (newSize > mapSize) {
         // If file size exceeds mapping size, need to remap
-        // Flush content to disk first
-        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        // Flush content to disk first - use ASYNC for better performance
+        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
         // Unmap
         munmap(fo.mappedAddress, mapSize);
-        // Calculate new mapping size
-        mapSize = getMappedSize(newSize);
+        // Calculate new mapping size using exponential growth strategy
+        while (mapSize < newSize) {
+            mapSize = calculateNextMapSize();
+        }
         // Extend file
         ftruncate(fo.fd, mapSize);
         // Remap file
@@ -256,8 +398,77 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
             return 0;
         }
     }
-   
-    (void)memcpy(fo.mappedAddress + fo.fileSize, pBuffer, writeLen);
+    
+    const uint8_t* src = (const uint8_t*)pBuffer;
+    uint8_t* dst = fo.mappedAddress + fo.fileSize;
+    
+    // Conservative SIMD optimization: only for large data (>= 1MB)
+    // Use aligned SIMD copy for better performance on large writes
+    if (writeLen >= 1024 * 1024) {
+        // Prefetch destination regions for write-combining optimization
+        const size_t prefetchDistance = 2048;
+        for (size_t i = 0; i < writeLen; i += 32) {
+            if (i + prefetchDistance < writeLen) {
+#if defined(__x86_64__)
+                _mm_prefetch((char*)(dst + i + prefetchDistance), _MM_HINT_NTA);
+                _mm_prefetch((char*)(dst + i + prefetchDistance + 64), _MM_HINT_NTA);
+#elif defined(__aarch64__)
+                __builtin_prefetch(dst + i + prefetchDistance, 0, 0);
+                __builtin_prefetch(dst + i + prefetchDistance + 64, 0, 0);
+#endif
+            }
+        }
+        
+        // SIMD copy with boundary handling
+        size_t i = 0;
+        
+        // Handle leading unaligned bytes (<16 bytes)
+        size_t misalignment = (16 - (uintptr_t)(dst + i)) & 15;
+        if (misalignment > 0 && i < writeLen) {
+            size_t prefix = (misalignment > (writeLen - i)) ? (writeLen - i) : misalignment;
+            memcpy(dst + i, src + i, prefix);
+            i += prefix;
+        }
+        
+        // Main SIMD copy loop (16-byte aligned)
+        if (i + 16 <= writeLen) {
+#if defined(__x86_64__) && defined(__AVX2__)
+            while (i + 16 <= writeLen) {
+                __m128i data = _mm_loadu_si128((__m128i*)(src + i));
+                _mm_storeu_si128((__m128i*)(dst + i), data);
+                i += 16;
+            }
+#elif defined(__aarch64__)
+            while (i + 16 <= writeLen) {
+                uint8x16_t data = vld1q_u8(src + i);
+                vst1q_u8(dst + i, data);
+                i += 16;
+            }
+#endif
+        }
+        
+        // Handle trailing bytes
+        if (i < writeLen) {
+            memcpy(dst + i, src + i, writeLen - i);
+        }
+    } else {
+        // Small data: use standard memcpy and light prefetch
+        if (writeLen >= 64 * 1024) {
+            const size_t prefetchDistance = 2048;
+            for (size_t i = 0; i < writeLen; i += 32) {
+                if (i + prefetchDistance < writeLen) {
+#if defined(__x86_64__)
+                    _mm_prefetch((char*)(dst + i + prefetchDistance), _MM_HINT_NTA);
+                    _mm_prefetch((char*)(dst + i + prefetchDistance + 64), _MM_HINT_NTA);
+#elif defined(__aarch64__)
+                    __builtin_prefetch(dst + i + prefetchDistance, 0, 0);
+                    __builtin_prefetch(dst + i + prefetchDistance + 64, 0, 0);
+#endif
+                }
+            }
+        }
+        memcpy(dst, src, writeLen);
+    }
     fo.fileSize = newSize;
     fo.position = fo.fileSize;
     return newSize;
@@ -270,15 +481,20 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
     }
 
     size_t newFileSize = fo.fileSize;
-    if (seekOffset + writeLen > mapSize) {
+    size_t requiredSize = seekOffset + writeLen;
+    
+    if (requiredSize > mapSize) {
          // If file size exceeds mapping size, need to remap
-        // Flush content to disk first
-        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        // Flush content to disk first - use ASYNC for better performance
+        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
         // Unmap
         munmap(fo.mappedAddress, mapSize);
         // New file size
-        newFileSize = seekOffset + writeLen;
-        mapSize = getMappedSize(newFileSize);
+        newFileSize = requiredSize;
+        // Calculate new mapping size using exponential growth strategy
+        while (mapSize < requiredSize) {
+            mapSize = calculateNextMapSize();
+        }
         ftruncate(fo.fd, mapSize);
         if (0 != fo.mmapFile(mapSize)) {
             LOG_ERROR("File not mapped");
@@ -312,6 +528,7 @@ size_t PipeReader::readIO(void* pBuffer, size_t readSize) {
                 return -1; // Other errors
             }
         } else if (bytesRead == 0) {
+            eofFlag = true;
             break; // EOF, write end closed
         }
         
@@ -338,8 +555,17 @@ size_t PipeReader::readLine(std::string& line) {
         // If buffer data has been processed, read new data
         if (bufferPos >= static_cast<size_t>(bytesRead)) {
             bytesRead = read(STDIN_FILENO, lineBuffer, bufferSize);
-            if (bytesRead <= 0) {
+            if (bytesRead < 0) {
+                if (errno == EINTR) {
+                continue; // Interrupted by signal, retry
+                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break; // No data available in non-blocking mode
+                } else {
+                    return -1; // Other errors
+                }
+            } else if (bytesRead == 0) {
                 // EOF or error, return number of characters read
+                eofFlag = true;
                 return totalRead;
             }
             bufferPos = 0;
@@ -402,6 +628,9 @@ size_t GzFileReader::readIO(void* pBuffer, size_t readSize) {
     ssize_t readLen = bgzf_read(fpGz, pBuffer, readSize);
     if (readLen < 0) {
         LOG_ERROR("Read file from %s failed", gzFileName.c_str());
+        return -1;
+    } else if (readLen == 0) {
+        eofFlag = true;
         return 0;
     }
 
@@ -444,6 +673,9 @@ size_t GzFileReader::readLine(std::string& line) {
             bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
             if (bytesRead <= 0) {
                 // EOF or error, return number of characters read
+                if (bytesRead == 0) {
+                    eofFlag = true;
+                }
                 return totalRead;
             }
             bufferPos = 0;
@@ -733,9 +965,15 @@ int GzPipeReader::openIO() {
 }
 
 size_t GzPipeReader::readIO(void* pBuffer, size_t readSize) {
+    if (readSize == 0 || pBuffer == nullptr) {
+        return 0;
+    }
     ssize_t readLen = bgzf_read(fpGz, pBuffer, readSize);
     if (readLen < 0) {
         LOG_ERROR("Read file from pipe failed");
+        return -1;
+    } else if (readLen == 0) {
+        eofFlag = true;
         return 0;
     }
 
@@ -778,6 +1016,9 @@ size_t GzPipeReader::readLine(std::string& line) {
             bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
             if (bytesRead <= 0) {
                 // EOF or error, return number of characters read
+                if (bytesRead == 0) {
+                    eofFlag = true;
+                }
                 return totalRead;
             }
             bufferPos = 0;
@@ -1012,6 +1253,7 @@ size_t FastGzPipeReader::readLine(std::string& line) {
             bytesRead = readIO(buffer, BUFFER_SIZE);
             if (bytesRead == 0) {
                 // EOF, return number of characters read
+                eofFlag = true;
                 return totalRead;
             }
             bufferPos = 0;

@@ -1,274 +1,276 @@
-# PBGZ 
+# PBGZ
 
-- 可以理解为： **P**hytium & **B**IG 的研究人员一起发起的一个极具竞争力的高速.高压缩比大型 **G**enomic数据或大型通用数据的压缩(**Z**ip)工具。
-- 也可以理解为：支持PB级别的 **G**enomic数据或大型通用数据的压缩(**Z**ip)工具。
+[English](README.md) | [中文](README.zh-CN.md)
 
-# PBGZ 的优势
+- Can be understood as: A highly competitive, high-speed, high-compression-ratio compression (Zip) tool for large-scale Genomic data or large general-purpose data, jointly launched by researchers from Phytium and BIG.
+- Can also be understood as: A compression (Zip) tool supporting PB-level Genomic data or large general-purpose data.
 
-- 极致压缩率：最高可达 gzip 的8倍。
-- 极致加解压速度：最高可达 gzip 的13倍。
-- 先进算法：采用 Phytium ResearchLab 在2021 全球压缩竞赛中 平衡组第2名的 FC 高效压缩算法
-- 多平台支持：在Intel/AMD等x86_64 和 飞腾等ARMv8体系结构 CPU 上均可高效运行；支持 麒麟.Ubuntu等Linux 和 MAC OSX 操作系统。
-- 多种数据支持：针对基因数据专门优化，但同时支持任意二进制文件的压缩；
-- 完全自由开放：基于 MIT License 开源，允许任何人.任何组织使用.修改和分发。
+# Advantages of PBGZ
+
+- **Extreme compression ratio**: Up to 8 times that of gzip
+- **Extreme compression/decompression speed**: Up to 13 times that of gzip  
+- **Advanced algorithm**: Uses the FC high-efficiency compression algorithm from Phytium ResearchLab, which ranked 2nd in the balanced category of the 2021 Global Compression Championship
+- **Multi-platform support**: Efficiently runs on Intel/AMD x86_64 and Phytium ARMv8 architecture CPUs; supports Linux (Kylin, Ubuntu, etc.) and macOS operating systems
+- **Multiple data support**: Specifically optimized for genomic data, but also supports compression of any binary files
+- **Completely free and open**: Open source under MIT License, allowing anyone and any organization to use, modify, and distribute
 
 ![alt text](images/gdcc2021.png)
 
 
-| 指标/特性              | 平台    | GZip (.gz)    | Enancio (.ora)                               | Ours                             |
-|----------------------|---------|---------------|-----------------------------------------------|---------------------------------|
-| **压缩率**            | NovaSeq | 17.01%        | 2.7%                                          | 2.4%                            |
-|                      | T7      | 35.51%        | ---                                           | 17.03%                          |
-| **压缩速度**           | NovaSeq| 19.54MB/s     | 240MB/s (白皮书)                               | **265.84MB/s**                   |
-|                       | T7     | 12.87MB/s     | ---                                           | **144MB/s**                     |
-| **发布包不需要字典数据** |        | Yes           | No, 发布包必须配600MB的字典                      | Yes (直接使用用户的fasta)           |
-| **支持多物种参考基因组** |        | ---           | No, 目前受发布包600MB字典数据影响，实际很难支持多种物种基因数据。 | Yes, 可以广泛支持所有物种  |
-| **支持的体系结构**      |        | x86_64，ARMv8  | x86_64                                        | x86_64，ARMv8                    |
-| **解压不需要参考基因组** |        | Yes           | No，必须依赖发布包的bin数据                       | Yes                              |
-| **支持MD5校验**        |        | No            | Yes                                           | Yes                              |
-| **支持多个压缩包直接合并**|       | Yes             | No                                           | Yes                             |
+| Metric/Feature                          | Platform  | GZip (.gz)    | Enancio (.ora)                               | Ours                             |
+|----------------------------------------|----------|---------------|-----------------------------------------------|---------------------------------|
+| **Compression Ratio**                 | NovaSeq   | 17.01%        | 2.7%                                          | 2.4%                            |
+|                                        | T7        | 35.51%        | ---                                           | 17.03%                          |
+| **Compression Speed**                 | NovaSeq   | 19.54MB/s     | 240MB/s (Whitepaper)                          | **265.84MB/s**                   |
+|                                        | T7        | 12.87MB/s     | ---                                           | **144MB/s**                     |
+| **Release package doesn't need dictionary data** |           | Yes           | No, release package must be paired with 600MB dictionary | Yes (directly uses user's fasta) |
+| **Supports multiple species reference genomes** |           | ---           | No, currently limited by 600MB dictionary data in release package, difficult to support multiple species genomic data | Yes, can widely support all species |
+| **Supported architectures**           |           | x86_64, ARMv8 | x86_64                                        | x86_64, ARMv8                    |
+| **Decompression doesn't need reference genome** |           | Yes           | No, must rely on release package's bin data   | Yes                              |
+| **Supports MD5 verification**         |           | No            | Yes                                           | Yes                              |
+| **Supports direct merging of multiple compressed packages** |         | Yes           | No                                            | Yes                             |
 
-## 安装说明
+## Installation Instructions
 
-### 系统要求
+### System Requirements
 
-- **操作系统**: Linux (Ubuntu, 麒麟等), macOS
-- **架构**: x86_64 (Intel/AMD), ARMv8 (飞腾等)
-- **编译器**: GCC 7.0+ 或 Clang 8.0+
-- **CMake**: 版本 3.10 或更高
-- **内存**: 建议 4GB 以上内存用于编译
+- **Operating System**: Linux (Ubuntu, Kylin, etc.), macOS
+- **Architecture**: x86_64 (Intel/AMD), ARMv8 (Phytium, etc.)
+- **Compiler**: GCC 7.0+ or Clang 8.0+
+- **CMake**: Version 3.10 or higher
+- **Memory**: Recommended 4GB+ memory for compilation
 
-### 依赖库
+### Dependency Libraries
 
-PBGZ 需要以下第三方库支持：
+PBGZ requires the following third-party libraries:
 
-- **Intel ISA-L**: 用于优化压缩算法
-- **libdeflate**: 高性能压缩库
-- **HTSlib**: 基因数据处理库
-- **JSONCPP**: JSON 处理库
-- **Zstd**: Zstandard 压缩库
-- **Bzip2**: bzip2 压缩库
-- **Zlib**: zlib 压缩库
+- **Intel ISA-L**: For optimizing compression algorithms
+- **libdeflate**: High-performance compression library
+- **HTSlib**: Genomic data processing library
+- **JSONCPP**: JSON processing library
+- **Zstd**: Zstandard compression library
+- **Bzip2**: bzip2 compression library
+- **Zlib**: zlib compression library
 
-### 快速安装
+### Quick Installation
 
-#### 1. 克隆仓库
+#### 1. Clone Repository
 
 ```bash
 git clone https://github.com/PBGZip/pbgz.git
 cd pbgz
 ```
 
-#### 2. 构建第三方依赖库
+#### 2. Build Third-Party Dependencies
 
 ```bash
-# 首先构建所有第三方依赖库
+# First build all third-party dependencies
 cd 3rd_party
 ./build.all.gcc.sh
 cd ..
 ```
 
-#### 3. 编译主程序
+#### 3. Compile Main Program
 
 ```bash
-# 编译 Release 版本（推荐用于生产环境）
+# Compile Release version (recommended for production environment)
 ./build-release.sh
 
-# 或者编译 Debug 版本（用于开发调试）
+# Or compile Debug version (for development and debugging)
 ./build-debug.sh
 ```
 
-#### 4. 验证安装
+#### 4. Verify Installation
 
 ```bash
-# 检查依赖库
+# Check dependencies
 ./scripts/check_dependencies.sh
 
-# 运行测试
+# Run tests
 ./test/pbgz_test
 ```
 
-### 预编译版本
+### Precompiled Version
 
-如果您不想从源码编译，可以使用预编译版本：
+If you don't want to compile from source, you can use a precompiled version:
 
 ```bash
-# 下载预编译版本
+# Download precompiled version
 wget https://github.com/PBGZip/pbgz/releases/latest/download/pbgz-linux-x86_64.tar.gz
 
-# 解压
+# Extract
 tar -xzf pbgz-linux-x86_64.tar.gz
 
-# 添加到 PATH
+# Add to PATH
 export PATH=$PWD/pbgz/bin:$PATH
 ```
 
-## 使用指南
+## Usage Guide
 
-### 基本用法
+### Basic Usage
 
-PBGZ 采用子命令设计，支持三种主要操作：压缩、解压和创建索引。
+PBGZ uses a subcommand design, supporting three main operations: compression, decompression, and index creation.
 
 ```bash
-# 查看帮助
-pbgz help                    # 显示通用帮助
-pbgz help compress           # 显示压缩命令帮助
-pbgz help decompress         # 显示解压命令帮助
+# View help
+pbgz help                    # Display general help
+pbgz help compress           # Display compression command help
+pbgz help decompress         # Display decompression command help
 
-# 查看版本
+# View version
 pbgz version
 ```
 
-#### 压缩文件
+#### Compress Files
 
 ```bash
-# 基本压缩
+# Basic compression
 pbgz compress input.fastq -o output.pbgz
 
-# 使用参考基因组（推荐，可获得更好的压缩比）
+# Use reference genome (recommended for better compression ratio)
 pbgz compress input.fastq -o output.pbgz -r reference.fa
 
-# 指定输出目录
+# Specify output directory
 pbgz compress input.fastq -O /output/directory/
 
-# 指定线程数和压缩级别
+# Specify thread count and compression level
 pbgz compress input.fastq -o output.pbgz -t 8 -l 6
 ```
 
-#### 解压文件
+#### Decompress Files
 
 ```bash
-# 基本解压
+# Basic decompression
 pbgz decompress input.pbgz
 
-# 指定输出文件名
+# Specify output filename
 pbgz decompress input.pbgz -o output.fastq
 
-# 解压为gzip格式
+# Decompress to gzip format
 pbgz decompress input.pbgz -z
 
-# 使用参考基因组（如果需要）
+# Use reference genome (if needed)
 pbgz decompress input.pbgz -r reference.fa
 ```
 
-### 命令行参数说明
+### Command Line Parameters
 
-PBGZ 使用子命令格式，主要参数如下：
+PBGZ uses subcommand format with the following main parameters:
 
-#### 压缩参数 (compress)
-- `-o, --outfile`: 指定输出文件名
-- `-O, --outdir`: 指定输出目录
-- `-r, --reference`: 指定参考基因组文件（FASTA格式，基因数据压缩推荐）
-- `-t, --threads`: 指定线程数（默认为CPU核心数）
-- `-l, --level`: 压缩级别（1-9，1最快，9压缩比最好，默认5）
-- `-e, --remove`: 压缩成功后删除原文件
-- `-f, --force`: 强制覆盖输出文件
-- `-i, --index`: 压缩时创建索引文件
+#### Compression Parameters (compress)
+- `-o, --outfile`: Specify output filename
+- `-O, --outdir`: Specify output directory
+- `-r, --reference`: Specify reference genome file (FASTA format, recommended for genomic data compression)
+- `-t, --threads`: Specify thread count (default is number of CPU cores)
+- `-l, --level`: Compression level (1-9, 1 is fastest, 9 is best compression ratio, default 5)
+- `-e, --remove`: Delete original file after successful compression
+- `-f, --force`: Force overwrite output file
+- `-i, --index`: Create index file during compression
 
-#### 解压参数 (decompress)
-- `-o, --outfile`: 指定输出文件名
-- `-O, --outdir`: 指定输出目录
-- `-r, --reference`: 指定参考基因组文件（某些压缩文件需要）
-- `-p, --position`: 指定基因位置范围（如chr1:1000-2000）
-- `-z, --gz`: 解压为gzip格式
-- `-f, --force`: 强制覆盖输出文件
+#### Decompression Parameters (decompress)
+- `-o, --outfile`: Specify output filename
+- `-O, --outdir`: Specify output directory
+- `-r, --reference`: Specify reference genome file (some compressed files require this)
+- `-p, --position`: Specify genomic position range (e.g., chr1:1000-2000)
+- `-z, --gz`: Decompress to gzip format
+- `-f, --force`: Force overwrite output file
 
-### 使用示例
+### Usage Examples
 
-#### 示例1：压缩 FASTQ 文件
+#### Example 1: Compress FASTQ Files
 
 
 ```bash
-# 压缩基因测序数据
+# Compress genomic sequencing data
 pbgz compress sample_NovaSeq.fastq -o sample_NovaSeq.pbgz -r hg38.fa -l 9 -t 16
 ```
 
-#### 示例2：解压缩
+#### Example 2: Decompression
 
 ```bash
-# 解压并验证
+# Decompress and verify
 pbgz decompress sample_NovaSeq.pbgz -o sample_NovaSeq.fastq -t 16
 ```
 
-### 性能优化建议
+### Performance Optimization Tips
 
-#### 压缩优化
+#### Compression Optimization
 
-1. **使用参考基因组**: 对于基因数据，使用参考基因组可以显著提高压缩率
-2. **选择合适的压缩级别**: 
-   - 级别 1-3: 速度快，压缩率一般
-   - 级别 4-6: 平衡速度和压缩率（推荐）
-   - 级别 7-9: 压缩率最高，速度较慢
-3. **多线程**: 根据CPU核心数设置合适的线程数
-4. **块大小**: 对于大文件，可以增加块大小以提高压缩效率
+1. **Use reference genome**: For genomic data, using a reference genome can significantly improve compression ratio
+2. **Choose appropriate compression level**: 
+   - Level 1-3: Fast speed, general compression ratio
+   - Level 4-6: Balance speed and compression ratio (recommended)
+   - Level 7-9: Highest compression ratio, slower speed
+3. **Multi-threading**: Set appropriate thread count based on number of CPU cores
+4. **Block size**: For large files, you can increase block size to improve compression efficiency
 
-#### 解压优化
+#### Decompression Optimization
 
-1. **多线程解压**: 使用多线程可以显著提高解压速度
-2. **验证选项**: 在生产环境中建议开启 MD5 验证
-3. **内存使用**: 解压过程会使用一定内存，建议系统内存充足
+1. **Multi-threaded decompression**: Using multiple threads can significantly improve decompression speed
+2. **Verification options**: MD5 verification is recommended in production environments
+3. **Memory usage**: The decompression process will use some memory, so sufficient system memory is recommended
 
-### 故障排除
+### Troubleshooting
 
-#### 常见问题
+#### Common Issues
 
-1. **依赖库缺失**
-   ```bash
-   # 检查依赖
-   ./scripts/check_dependencies.sh
-   
-   # 重新构建依赖
-   cd 3rd_party && ./build.intel.sh
-   ```
+1. **Missing dependencies**
+    ```bash
+    # Check dependencies
+    ./scripts/check_dependencies.sh
+    
+    # Rebuild dependencies
+    cd 3rd_party && ./build.intel.sh
+    ```
 
-2. **运行时错误**
-   ```bash
-   # 检查库文件路径
-   export LD_LIBRARY_PATH=/path/to/pbgz/3rd_party/release/lib:$LD_LIBRARY_PATH
-   
-   # 使用日志模式查看错误信息
-   pbgz compress input.txt -o output.pbgz -g 2
-   ```
+2. **Runtime errors**
+    ```bash
+    # Check library file path
+    export LD_LIBRARY_PATH=/path/to/pbgz/3rd_party/release/lib:$LD_LIBRARY_PATH
+    
+    # Use log mode to view error messages
+    pbgz compress input.txt -o output.pbgz -g 2
+    ```
 
 
-#### 调试模式
+#### Debug Mode
 
-启用详细输出进行问题诊断：
+Enable verbose output for problem diagnosis:
 
 ```bash
 pbgz compress input.fastq -o output.pbgz -g 1
 ```
 
-### 高级功能
+### Advanced Features
 
-#### 流式压缩
+#### Streaming Compression
 
-PBGZ 支持流式压缩，适合处理大文件或管道操作：
+PBGZ supports streaming compression, suitable for processing large files or pipeline operations:
 
 ```bash
-# 从管道压缩
+# Compress from pipeline
 cat large_file.fastq | pbgz compress -o compressed.pbgz
 
-# 解压到管道
+# Decompress to pipeline
 pbgz decompress compressed.pbgz -o - | grep "sequence"
 ```
 
-## 贡献指南
+## Contributing Guide
 
-我们欢迎社区贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解详细信息。
+We welcome community contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
-## 许可证
+## License
 
-本项目基于 MIT 许可证开源。详见 [LICENSE](LICENSE) 文件。
+This project is open source under the MIT License. See [LICENSE](LICENSE) file for details.
 
-## 致谢
+## Acknowledgments
 
-- Intel ISA-L 库用于压缩算法优化
-- HTSlib 库用于基因数据处理
-- FC 算法在 2021 全球压缩竞赛中获得平衡组第2名
+- Intel ISA-L library for compression algorithm optimization
+- HTSlib library for genomic data processing
+- FC algorithm, which ranked 2nd in the balanced category of the 2021 Global Compression Championship
 
-## 联系我们
+## Contact Us
 
-- 项目主页: https://github.com/PBGZip/pbgz
-- 问题报告: https://github.com/PBGZip/pbgz/issues
-- 邮箱: wenjinyang2729@phytium.com.cn
+- Project homepage: https://github.com/PBGZip/pbgz
+- Issue reporting: https://github.com/PBGZip/pbgz/issues
+- Email: wenjinyang2729@phytium.com.cn

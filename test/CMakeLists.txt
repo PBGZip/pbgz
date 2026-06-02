@@ -44,6 +44,7 @@ include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/libdeflate/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/bzip2/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd_party/release/zlib/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/googletest/googletest/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/googletest/googlemock/include)
 
 # Link to libraries - Add PRIVATE keyword to match style with CoreServices linkage
 target_link_libraries(pbgz_test PRIVATE
@@ -61,7 +62,7 @@ target_link_libraries(pbgz_test PRIVATE
 add_subdirectory(googletest)
 
 # Optional: Add gtest support
-target_link_libraries(pbgz_test PRIVATE gtest_main)
+target_link_libraries(pbgz_test PRIVATE gmock gmock_main gtest)
 
 # Enable testing
 enable_testing()

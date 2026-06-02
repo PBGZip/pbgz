@@ -21,15 +21,15 @@
  * SOFTWARE.
  */
 
+#include <set>
 
 #include "decompress_engine.h"
 #include "utils/path_util.h"
 #include "coder.h"
 #include "coder_json.h"
 #include "coder_ppmd.h"
-#include <set>
-#include "fastq_actuator.h"
 #include "pbgz_types.h"
+#include "codec_actuator_adapter.h"
 
 BlockReader* DecompressEngine::createBlockReader() {
     PbgzBlockReader* pbgzReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
@@ -42,11 +42,31 @@ BlockReader* DecompressEngine::createBlockReader() {
         return nullptr;
     }
 
-    if (parameter.inputFile != STDIN && !parameter.refeGenePos.empty()) {
-        if (!initRefeIndex()) {
-            LOG_INFO("Init reference index for decompress failed");
+    do {
+        if (parameter.inputFile != STDIN && !parameter.refeGenePos.empty()) {
+            if (!initRefeIndex()) {
+                LOG_INFO("Init reference index for decompress failed");
+                break;
+            }
+
+            // Parse the p parameter, format like chr1:100-200, convert the part before : to chrID, the part before and after - for the reference gene start position
+            size_t colonPos = parameter.refeGenePos.find(':');
+            if (colonPos == std::string::npos) {
+                refPosChrName = parameter.refeGenePos;
+                break;
+            }
+            refPosChrName = parameter.refeGenePos.substr(0, colonPos);
+
+            size_t dashPos = parameter.refeGenePos.find('-');
+            if (dashPos == std::string::npos) {
+                break;
+            }
+            refPosBegin = std::stoi(parameter.refeGenePos.substr(colonPos + 1, dashPos - colonPos - 1));
+            refPosEnd = std::stoi(parameter.refeGenePos.substr(dashPos + 1));
+
+            LOG_DEBUG("refPosChrName = %s, refPosBegin = %d, refPosEnd = %d", refPosChrName.c_str(), refPosBegin, refPosEnd);
         }
-    }
+    } while (0);
 
     return pbgzReader;
 }
@@ -59,6 +79,14 @@ BlockWriter* DecompressEngine::createBlockWriter() {
     }
     blockWriter->init();
     return blockWriter;
+}
+
+void DecompressEngine::releaseBlockReader(BlockReader* &blockReader) {
+    MemoryUtil::safeDeleteClass(blockReader);
+}
+
+void DecompressEngine::releaseBlockWriter(BlockWriter* &BlockWriter) {
+    MemoryUtil::safeDeleteClass(BlockWriter);
 }
 
 bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
@@ -90,10 +118,7 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
 
     std::string fastaNameInput = parameter.referenceGenic;
     if (fastaNameInput.empty()) { /* No reference file specified */
-        fprintf(stderr, "need to specify the following FASTA file:\n\n");
-        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
-        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+        printFastqFileNotMatchInfo(metaRefe);
         LOG_ERROR("reference file needs to be specified to complete decompression");
         return false;
     }
@@ -103,18 +128,12 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     /* check whether fasta is matched */
     if (PathUtil::getFileName(fastaNameInput) != fastaName) {
         fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
-        fprintf(stderr, "need to specify the following FASTA file:\n\n");
-        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
-        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+        printFastqFileNotMatchInfo(metaRefe);
         LOG_ERROR("initialize reference failed: used fasta %s, should be %s", fastaNameInput.c_str(), fastaName.c_str());
         return false;
     }
     if (fastaLength != fastqFileLenInput) {
-        fprintf(stderr, "need to specify the following FASTA file:\n\n");
-        fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
-        fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-        fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+        printFastqFileNotMatchInfo(metaRefe);
         LOG_ERROR("initialize reference failed: used fasta file len %ld, should be %ld", fastqFileLenInput, fastaLength);
         return false;
     }
@@ -140,18 +159,24 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     return true;
 }
 
+void DecompressEngine::printFastqFileNotMatchInfo(const Json::Value& metaRefe) {
+    fprintf(stderr, "need to specify the following FASTA file:\n\n");
+    fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
+    fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
+    fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+}
+
 bool DecompressEngine::initRefeIndex() {
-    if (pbgzIndex.initIndex() != 0) {
-        return false;
-    }
+    std::string indexFileName = parameter.inputFile + ".pbgzi";
+    SamIndex::getInstance().loadFromFile(indexFileName);
     return true;
 }
 
 void DecompressEngine::readBlocks(BlockReader* blockReader)  {
-    if (!parameter.refeGenePos.empty() && pRefGene) {
+    if (!parameter.refeGenePos.empty()) {
         return readBlockByPostition(blockReader);
     } else {
-        return PbgzEngine::readBlocks(blockReader);
+        return CodecEngine::readBlocks(blockReader);
     }
 }
 
@@ -160,15 +185,96 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
         return;
     }
 
-    return PbgzEngine::readBlocks(blockReader);
-}
+    // Read the beginning block of the Pbgz file to complete the file header parsing
+    std::unique_ptr<RoughIOBlock> inBlockPtr = std::make_unique<RoughIOBlock>(getBlockSize());
+    if (inBlockPtr == nullptr) {
+        LOG_ERROR("Get free block failed.");
+        return;
+    }
+    std::unique_ptr<RoughIOBlock> outBlockPtr = std::make_unique<RoughIOBlock>(getBlockSize());
+    if (outBlockPtr == nullptr) {
+        LOG_ERROR("Get free block failed.");
+        return;
+    }
 
-Actuator* DecompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
-    return actuator;
-}
+    std::unique_ptr<SamCodecActuator> actuator;
+    do {
+        inBlockPtr->reset();
+        int64_t ret = blockReader->readBlock(inBlockPtr.get(), TYPE_UNKNOW);
+        if (ret <= 0) {
+            break;
+        }
+        outBlockPtr->reset();
+        actuator = std::make_unique<SamCodecActuator>(inBlockPtr.get(), outBlockPtr.get(), this, pRefGene);
+        actuator->initMetaInfo();
+        if (actuator->getHeadLineNumber() > 0) {
+            actuator->decompressHeader(outBlockPtr.get());
+        }
+        if (actuator->getHeadLineNumber() == 0 || actuator->getSamLineNumber() > 0) {
+            break;
+        }
+    } while (true);
 
-int32_t DecompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
-    return actuator->decompress();
+    uint16_t chrIndex = SamInfo::getInstance().getChrNameIndex(refPosChrName);
+    if (chrIndex == 65535) {
+        return;
+    }
+    std::set<std::pair<uint32_t, int64_t>> blockList;
+    SamIndex::getInstance().getSamBlockByRef(chrIndex, refPosBegin, refPosEnd, blockList);
+
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    if (fileReader != nullptr) {
+        BlockType fileType = TYPE_UNKNOW;
+        for (auto block : blockList) {
+            fileReader->seekIO(block.second);
+            int64_t ret = readOneBlock(blockReader, fileType);
+            if (ret <= 0) {
+                break;
+            }
+        }
+    } else {
+        PipeReader* pipeReader = dynamic_cast<PipeReader*>(ioReader);
+        if (pipeReader != nullptr) {
+            BlockType fileType = TYPE_UNKNOW;
+            int64_t ret = 0;
+            do {
+                RoughIOBlock* blockPtr = freeInputPool->get();
+                if (blockPtr == nullptr) {
+                    LOG_ERROR("Get free block failed.");
+                    return;
+                }
+                blockPtr->reset();
+
+                int64_t ret = blockReader->readBlock(blockPtr, fileType);
+                if (ret <= 0) {
+                    freeInputPool->push(blockPtr);
+                    return;
+                }
+
+                if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
+                    freeInputPool->push(blockPtr);
+                    continue;
+                }
+
+                bool isMatch = false;
+                for (auto block : blockList) {
+                    if (blockPtr->getBlockId() == block.first) {
+                        updateInputStatics(blockPtr);
+                        inputDataPool->push(blockPtr);
+                        if (ret > 0) {
+                            blockCount++;
+                        }
+                        isMatch = true;
+                        break;
+                    }
+                }
+                if (!isMatch) {
+                    freeInputPool->push(blockPtr);
+                }
+            } while (ret > 0 || ret == -2);
+        }
+    }
+    return;
 }
 
 bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta) {
@@ -276,4 +382,38 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
         MemoryUtil::safeDeleteClass(block[n]);
     }
     return true;
+}
+
+Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
+     if (parameter.isMakeIndex) {
+        fprintf(stderr, "Binary file will not make index.");
+        parameter.isMakeIndex = false;
+    }
+
+    Actuator* pActuator = nullptr;
+    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
+        pActuator = MemoryUtil::safeNewClass<FastqDecompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
+    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+        pActuator = MemoryUtil::safeNewClass<SamDecompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
+    } else if (inBlockPtr->getBlockType() == BINARY) {
+        pActuator = MemoryUtil::safeNewClass<BinaryDecompressActuator>(inBlockPtr, outBlockPtr, this);
+    }
+
+    if (pActuator == nullptr) {
+        LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
+        freeInputPool->push(inBlockPtr);
+        outBlockPtr->reset();
+        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+        // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
+        outputDataPool->push(outBlockPtr);
+        return nullptr;
+    }
+
+    if (pActuator->initial() != 0) {
+        LOG_ERROR("actuator initial failed");
+        MemoryUtil::safeDeleteClass(pActuator);
+        return nullptr;
+    }
+
+    return pActuator;
 }

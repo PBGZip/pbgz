@@ -146,7 +146,7 @@ public:
         pIoReader->openIO();
         BlockReader* pBlockReader = new BlockReader(pIoReader);
         
-        int32_t result = pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
+        pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
         
         bool isSam = (pBlock->getBlockType() == SAM);
         

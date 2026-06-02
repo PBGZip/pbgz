@@ -26,14 +26,20 @@
 #include <json/json.h>
 
 #include "io_block.h"
+#include "pbgz_types.h"
+
+class PbgzEngine;
 
 class Actuator {
 public:
-    virtual int32_t decompress() = 0;
-    virtual int32_t compress() = 0;
+    virtual int32_t process() = 0;
 
-    Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr): inBlockPtr(inPtr), outBlockPtr(outPtr) {};
-    
+    virtual int32_t initial() { return 0; }
+
+    virtual int32_t cleanup() { return 0; }
+
+    Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzEngine(engine) {};
+
     virtual ~Actuator() {
         inBlockPtr = nullptr;
         outBlockPtr = nullptr;
@@ -41,10 +47,11 @@ public:
 
     virtual bool getNotifyFlag() {
         return true;
-    } 
+    }
 
-protected: 
+protected:
     RoughIOBlock* inBlockPtr;
-    RoughIOBlock* outBlockPtr;  
-    Json::Value meta;
+    RoughIOBlock* outBlockPtr;
+    PbgzEngine* pbgzEngine;
 };
+

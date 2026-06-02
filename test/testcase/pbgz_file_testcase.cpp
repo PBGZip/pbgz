@@ -31,7 +31,7 @@
 TEST(PbgzFileHeader, PbgzFileHeaderInit) {
     PbgzFileHeader header;
     EXPECT_EQ(header.getBlockType(), FILE_HEADER);
-    EXPECT_EQ(header.getVersionStr(), "2.1.0");
+    EXPECT_EQ(header.getVersionStr(), "2.2.0");
 }
 
 // Test cases for PbgzFileMeta

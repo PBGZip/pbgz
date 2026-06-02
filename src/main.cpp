@@ -36,6 +36,7 @@
 #include "decompress_engine.h"
 #include "compress_engine.h"
 #include "index_engine.h"
+#include "sort_engine.h"
 
 
 typedef struct
@@ -293,10 +294,6 @@ public:
                 return -1;
             }
         }
-        if (!parameter.refeGenePos.empty()) {
-            fprintf(stdout, "Reference position is not support in compress scenario.\n");
-            return -1;
-        }
         return 0;
     }
     
@@ -386,6 +383,32 @@ public:
         if (0 != CommandProc::reconstructPorc()) {
             return -1;
         }
+
+        if (!parameter.outputFile.empty()) {
+            return 0;
+        }
+
+        std::string inputFile = PathUtil::getFileName(parameter.inputFile);
+        if (inputFile.length() <= 5) {
+            fprintf(stderr, "input file %s invalid.", inputFile.c_str());
+            return -1;
+        }
+        if (!PathUtil::suffixCheck(inputFile, ".pbgz")) {
+            fprintf(stdout, "Decompress file must be pbgz format.\n");
+            return -1;
+        }
+   
+        inputFile = inputFile + ".pbgzi";
+        if (parameter.isDecToGZ) {
+            inputFile = inputFile + ".gz";
+        }
+
+        if (parameter.outputFile.empty() && parameter.outputDir.empty()) {
+            parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + inputFile;
+        } else if (!parameter.outputDir.empty() && parameter.outputFile.empty()) {
+            parameter.outputFile = PathUtil::getFilePath(parameter.outputDir) + inputFile;
+        }
+
         return 0;
     }
     
@@ -394,7 +417,19 @@ public:
             return -1;
         }
 
-        return -1;
+        if (STDIN != parameter.inputFile) {
+            if (PathUtil::isDir(parameter.inputFile)) {
+                fprintf(stdout, "Decompress file cannot be directory.\n");
+                return -1;
+            }
+            
+            if (!PathUtil::suffixCheck(parameter.inputFile, "pbgz")) {
+                fprintf(stdout, "Decompress file must be pbgz format.\n");
+                return -1;
+            }
+        }
+
+        return 0;
     }
     
     int32_t startEngine() override {
@@ -406,6 +441,65 @@ public:
         return engine->start();
     }
 };
+
+class SortCmdProc : public CommandProc {
+public:
+    SortCmdProc(PbgzParameter& para) : CommandProc(para) {}
+    
+    int32_t reconstructPorc() override {
+        if (0 != CommandProc::reconstructPorc()) {
+            return -1;
+        }
+
+        if (!parameter.outputFile.empty()) {
+            return 0;
+        }
+
+        std::string inputFile = PathUtil::getFileName(parameter.inputFile);
+        if (inputFile.length() > 3 && PathUtil::suffixCheck(inputFile, ".gz")) {
+            inputFile = inputFile.substr(0, inputFile.length() - 3);
+        }
+
+        // Split the string into two parts based on the position of the last . in inputFile
+        size_t lastDotPos = inputFile.find_last_of('.');
+        if (lastDotPos != std::string::npos && lastDotPos > 0) {
+            std::string fileNamePrefix = inputFile.substr(0, lastDotPos);
+            std::string  fileExtension = inputFile.substr(lastDotPos);
+            inputFile = fileNamePrefix + ".sort" + fileExtension;
+        } else {
+            inputFile = inputFile + ".sort";
+        }
+
+        if (parameter.isDecToGZ) {
+            inputFile = inputFile + ".gz";
+        }
+
+        if (parameter.outputFile.empty() && parameter.outputDir.empty()) {
+            parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + inputFile;
+        } else if (!parameter.outputDir.empty() && parameter.outputFile.empty()) {
+            parameter.outputFile = PathUtil::getFilePath(parameter.outputDir) + inputFile;
+        }
+
+        return 0;
+    }
+    
+    int32_t checkProc() override {
+        if (0 != CommandProc::checkProc()) {
+            return -1;
+        }
+
+        return 0;
+    }
+    
+    int32_t startEngine() override {
+        // Implement index engine startup logic
+        engine = new SortEngine(parameter);
+        if (engine->init() != 0) {
+            return -1;
+        }
+        return engine->start();
+    }
+} ;
 
 using CommandHandler = std::function<CommandProc*(PbgzParameter&)>;
 
@@ -421,7 +515,7 @@ static std::vector<SubCommand> subCommands = {
     {   
         "compress", 
         "Compress file to pbgz format",
-        {'h', 'v', 'o', 'O', 'f', 'r', 'n', 't', 'l', 'e', 'i', 'g', 'G', 'h'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'n', 't', 'l', 'e', 'i', 'g', 'G'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<CompressCmdProc>(para);
         },
@@ -429,7 +523,7 @@ static std::vector<SubCommand> subCommands = {
     {   
         "decompress", 
         "Decompress file from pbgz file",
-        {'h', 'v', 'o', 'O', 'f', 'r', 't', 'e', 'p', 'g', 'G', 'h', 'z'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 't', 'e', 'p', 'g', 'G', 'z'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<DecompressCmdProc>(para);
         },
@@ -437,9 +531,17 @@ static std::vector<SubCommand> subCommands = {
     {   
         "index", 
         "Create index file from pbgz file",
-        {'h', 'v', 'o', 'O', 'f', 't', 'g', 'G', 'h'},
+        {'h', 'v', 'o', 'O', 'f', 't', 'g', 'G'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<IndexCmdProc>(para);
+        },
+    },
+    {   
+        "sort", 
+        "Sort sam file",
+        {'h', 'v', 'o', 'O', 'f', 't', 'g', 'G', 'z'},
+        [](PbgzParameter& para) {
+            return MemoryUtil::safeNewClass<SortCmdProc>(para);
         },
     },
 };
@@ -464,7 +566,7 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "\nExamples:\n");
         fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
         fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
-        fprintf(fp, "  pbgz index human.fq.gz.pbgz\n\n");
+        fprintf(fp, "  pbgz index human.sam.gz.pbgz\n\n");
     } else {
         // Display specific subcommand help information
         SubCommand* targetCmd = nullptr;
@@ -507,15 +609,19 @@ void printUsage(const std::string& subCommandName = "") {
         if (subCommandName == "compress") {
             fprintf(fp, "\nExample:\n");
             fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
-            fprintf(fp, "  pbgz compress input.fastq -O /output/directory/ -t 8 -l 6\n\n");
+            fprintf(fp, "  pbgz compress input.fastq -O /output -t 8 -l 6\n\n");
         } else if (subCommandName == "decompress") {
             fprintf(fp, "\nExample:\n");
             fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
-            fprintf(fp, "  pbgz decompress input.pbgz -o output.fastq -p chr1:1000-2000\n\n");
+            fprintf(fp, "  pbgz decompress input.pbgz -O /output \n\n");
         } else if (subCommandName == "index") {
             fprintf(fp, "\nExample:\n");
-            fprintf(fp, "  pbgz index human.fq.gz.pbgz\n");
-            fprintf(fp, "  pbgz index input.pbgz -O /output/directory/\n\n");
+            fprintf(fp, "  pbgz index human.sam.gz.pbgz\n");
+            fprintf(fp, "  pbgz index input.pbgz -O /output\n\n");
+        } else if (subCommandName == "sort") {
+            fprintf(fp, "\nExample:\n");
+            fprintf(fp, "  pbgz sort human.sam -O /output\n");
+            fprintf(fp, "  pbgz sort human.sam.gz -O /output -z\n\n");
         }
     }
 }

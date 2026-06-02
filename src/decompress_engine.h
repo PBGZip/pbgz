@@ -23,26 +23,38 @@
 
 #pragma once
 
-#include "pbgz_engine.h"
+#include "codec_engine.h"
 #include "actuator.h"
 
 
-class DecompressEngine : public PbgzEngine {
+class DecompressEngine : public CodecEngine {
 public:
-    DecompressEngine(PbgzParameter& para) : PbgzEngine(para) {
+    DecompressEngine(PbgzParameter& para) : CodecEngine(para) {
+        readHeadBlockFlag = true;
+     }
 
+    virtual ~DecompressEngine() { }
+
+    void setReadHeadFlag(bool flag) {
+        readHeadBlockFlag = flag;
     }
 
 protected:
-    BlockReader* createBlockReader();
+    BlockReader* createBlockReader() override;
 
-    BlockWriter* createBlockWriter();
+    BlockWriter* createBlockWriter() override;
+
+    void releaseBlockReader(BlockReader* &blockReader) override;
+
+    void releaseBlockWriter(BlockWriter* &BlockWriter) override;
 
     virtual void readBlocks(BlockReader* blockReader);
 
-    virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*);
+    virtual void printTailInfo(Timer& costTimer) override { 
+        PbgzManager::getInstance().printTailInfo(costTimer, false);
+    }
 
-    virtual int32_t actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*);
+    virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
 private:
     bool initRefGene(PbgzBlockReader* blockReader);
@@ -52,4 +64,14 @@ private:
     void readBlockByPostition(BlockReader* blockReader);
 
     bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
+
+    void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
+
+    virtual Reference* getReference() override { return pRefGene; }
+
+private:
+    bool readHeadBlockFlag;
+    std::string refPosChrName;
+    uint32_t refPosBegin;
+    uint32_t refPosEnd;
 };
