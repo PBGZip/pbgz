@@ -1,5 +1,5 @@
 /*
- * transform.h - BWT transform for frequency compression
+ * codec_actuator.h - Head file for pbgz project
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -21,9 +21,42 @@
  * SOFTWARE.
  */
 
-#ifndef _BWT_H_
-#define _BWT_H_
+#pragma once
 
-int fc_transform(unsigned char * T, int n, unsigned char * num_indexes, int * indexes);
-int fc_untransform(unsigned char * T, int n, int index, unsigned char num_indexes, int * indexes);
+#include <stdint.h>
+#include <json/json.h>
+
+#include "io_block.h"
+#include "pbgz_types.h"
+#include "pbgz_engine.h"
+
+class CodecActuator {
+
+public:
+    virtual int32_t decompress() = 0;
+    virtual int32_t compress() = 0;
+
+    CodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzEngine(engine) {};
+
+    virtual ~CodecActuator() {
+        inBlockPtr = nullptr;
+        outBlockPtr = nullptr;
+    }
+
+    virtual bool getNotifyFlag() {
+        return true;
+    }
+
+#if defined(TEST_MODE) || defined(GTEST_ENABLED)
+    // Test-only constructor: creates a dummy engine wrapper
+    static PbgzEngine* createTestEngine(const PbgzParameter& para);
 #endif
+
+protected:
+    RoughIOBlock* inBlockPtr;
+    RoughIOBlock* outBlockPtr;
+    Json::Value meta;
+    PbgzEngine* pbgzEngine;
+};
+
+

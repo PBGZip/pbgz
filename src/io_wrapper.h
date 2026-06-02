@@ -31,6 +31,16 @@
 #include <htslib/bgzf.h>
 #include <isa-l/igzip_lib.h>
 #include <zlib.h>
+#include <cstring>
+
+// Architecture detection - header only, no optimizations yet
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86) || defined(_X86_)
+    #define ARCH_X86_64
+    #include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__aarch64__)
+    #define ARCH_ARM64
+    #include <arm_neon.h>
+#endif
 
 enum class IOWhence {
     IO_WHENCE_SET = 0,
@@ -40,6 +50,9 @@ enum class IOWhence {
 
 class IOReader {
 public:
+    IOReader() {
+        eofFlag = false;
+    }
     virtual int32_t openIO() = 0;
 
     virtual void closeIO() = 0;
@@ -49,6 +62,11 @@ public:
     virtual ~IOReader() {};
 
     virtual size_t readLine(std::string& line) = 0;
+
+    virtual bool isEOF() { return eofFlag; } 
+
+protected:
+    bool eofFlag;
 };
 
 class IOWriter {
@@ -143,22 +161,29 @@ public:
         fo.openMode = O_RDWR | O_CREAT;
         fo.mapMode = PROT_READ|PROT_WRITE;
         mapSize = 0;
+        initialMapSize = 0;
     }
 
     int32_t seekIO(size_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
-        return fo.seekIO( seekOffset, whence);
+        return fo.seekIO(seekOffset, whence);
     }
 
+    int32_t seekToEnd() {
+        return fo.seekIO(fo.fileSize, IOWhence::IO_WHENCE_SET);
+    }
+  
     int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen);
 
     void flushIO() {
-        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
     }
 
     ~FileWriter() {
     }
 
     size_t getMappedSize(size_t fileSize);
+
+    size_t calculateNextMapSize();
 
     size_t getCurrentPos() {
         return fo.position;
@@ -167,6 +192,7 @@ public:
 protected:
     FileOperator fo;
     size_t mapSize;
+    size_t initialMapSize;
 };
 
 class PipeReader : public IOReader {

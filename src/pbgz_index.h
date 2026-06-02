@@ -25,33 +25,78 @@
 
 #include <stdint.h>
 #include <map>
+#include <vector>
+#include <algorithm>
+#include <string>
+#include <sstream>
+#include <set>
 
 
-
-class PbgzIndex {
-
+class BlockPosition {
 public:
+    void setBlockPosition(uint32_t blockId, int64_t position);
 
-    void setBlockPosition(uint32_t blockId, int64_t position) {
-        blockPositions[blockId] = position;
+    static BlockPosition& getInstance();
+
+    const std::map<uint32_t, int64_t>& getBlockPosition() {
+        return blockPositions;
     }
 
-    int32_t loadIndex() {
-        return 0;
-    }
-
-    int32_t initIndex() {
-        return 0;
-    }
-
-    int32_t packIndex() {
-        return 0;
+    int64_t getBlockPosition(uint32_t blockId) {
+        if (blockPositions.find(blockId) == blockPositions.end()) {
+            return -1;
+        }
+        return blockPositions[blockId];
     }
 
 private:
-    int64_t refeBeginPos;
-    int64_t refeEndPos;
-    
     std::map<uint32_t, int64_t> blockPositions;
+};
 
+struct SamIndexItem{
+    int64_t referenceMapPos;
+    uint32_t readNumber;
+    uint32_t blockId;
+    int64_t fileOffset;
+
+    SamIndexItem() {
+        referenceMapPos = -1;
+        readNumber = 0;
+        blockId = 0;
+        fileOffset = 0;
+    }
+
+    bool operator<(const SamIndexItem& other) const {
+        return referenceMapPos < other.referenceMapPos;
+    }
+};
+
+class SamIndex {
+public:
+    SamIndex() {
+    }
+
+    static SamIndex& getInstance();
+
+    void addSamIndex(uint16_t chrIndex, int64_t refPos, uint32_t readNumber, uint32_t blockId, int64_t offset = 0); 
+
+    int32_t getSamBlockByRef(uint16_t chrIndex, int64_t beginRefPos, int64_t endRefPos, 
+        std::set<std::pair<uint32_t, int64_t>>& outBlockList);
+
+    void dumpToFile(std::string& fileName);
+
+    void loadFromFile(std::string& fileName);
+
+    const std::map<uint16_t, std::vector<SamIndexItem>>& getSamIndexList() const {
+        return samIndexList;
+    }
+
+    void clear() {
+        samIndexList.clear();
+    }
+
+    void updateFileOffsetsFromBlockPosition();
+
+private:
+    std::map<uint16_t, std::vector<SamIndexItem>> samIndexList;
 };

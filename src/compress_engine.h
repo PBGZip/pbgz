@@ -23,14 +23,15 @@
 
 #pragma once
 
-#include "pbgz_engine.h"
+#include "codec_engine.h"
 #include "actuator.h"
 #include <mutex>
 
-class CompressEngine : public PbgzEngine {
+class CompressEngine : public CodecEngine {
 public:
-    CompressEngine(PbgzParameter& para) : PbgzEngine(para) {
-        
+    CompressEngine(PbgzParameter& para) : CodecEngine(para) {
+        indexBlockQueue = std::make_unique<BlockingQueueType>();
+        freeIndexBlockQueue = std::make_unique<BlockingQueueType>();
     }
 
     virtual ~CompressEngine();
@@ -39,26 +40,32 @@ public:
 
 protected:
     virtual BlockReader* createBlockReader() override;
-    
+
     virtual BlockWriter* createBlockWriter() override;
 
-    virtual int32_t engineStartPreProc() override;
+    virtual void releaseBlockReader(BlockReader* &blockReader) override;
 
-    virtual int32_t engineStartAfterProc() override;
+    virtual void releaseBlockWriter(BlockWriter* &blockWriter) override;
+
+    virtual int32_t startEnginePreProc() override;
+
+    virtual int32_t startEnginePostProc() override;
+
+    virtual  Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
 
-    virtual int32_t actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock* outBlockPtr);
+    virtual void writeFilePostProc(BlockWriter*) override ;
 
-    virtual bool isPrintRatio() {
-        return true;
+    virtual void printTailInfo(Timer& costTimer) override {
+        PbgzManager::getInstance().printTailInfo(costTimer, true);
     }
 
-    virtual void setDataBlockPosition(uint32_t blockId);
+    virtual void setDataBlockPosition(uint32_t blockId) override;
 
-    void startWriteIndexTask();
+    virtual int32_t startWorkPreProc() override;
 
-    virtual int32_t beforeCoderProc();
+    virtual Reference* getReference() override { return pRefGene; }
 
 private:
     bool initReference();
@@ -70,6 +77,6 @@ private:
 private:
     std::map<uint32_t, std::vector<int64_t>> blockRefePos;
     std::map<int64_t, uint32_t> blockRefeIndex;
-    BlockingQueue<RoughIOBlock*> indexBlockQueue;
-    BlockingQueue<RoughIOBlock*> freeIndexBlockQueue;  
+    std::unique_ptr<BlockingQueueType> indexBlockQueue;
+    std::unique_ptr<BlockingQueueType> freeIndexBlockQueue;  
 };

@@ -26,7 +26,7 @@
 #include <map>
 #include <vector>
 
-#include "actuator.h"
+#include "codec_actuator.h"
 #include "coder.h"
 #include "coder_io.h"
 #include "coder_qual.h"
@@ -34,10 +34,10 @@
 #include "sam_info.h"
 #include "coder_bwt_cm.h"
 
-class SamActuator : public Actuator {
+class SamCodecActuator : public CodecActuator {
 public:
-    SamActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRefeGene = nullptr);
-    virtual ~SamActuator() override;
+    SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr, Reference* pRefeGene = nullptr);
+    virtual ~SamCodecActuator() override;
 
     int32_t preAnalysis();
     
@@ -47,6 +47,61 @@ public:
     virtual bool getNotifyFlag() override {
         return notifyFlag;
     }
+
+    int32_t decompressHeader(RoughIOBlock* outputBlock);
+
+    // Field-by-field decompression
+    int32_t decompressSamByFields(RoughIOBlock* outputBlock);
+
+    int32_t initDecoder(RoughIOBlock* outputBlock);
+
+    int32_t decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag, RoughIOBlock* outputBlock);
+
+    int32_t decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta, RoughIOBlock* outputBlock);
+
+    int32_t decompressChrName(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock);
+
+    int32_t decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
+                                    uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock);
+
+    int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock);
+
+    template<typename T>
+    int32_t decompressNumber(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock) {
+        uint32_t outLen = sizeof(T);
+        uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outLen, UINT8_MAX, false);
+        if (outLen != fieldLen) {
+            LOG_ERROR("Decode failed, filed = %u, lineNo = %u", fieldIdx, lineNo);
+            return -1;
+        }
+
+        T val = *(T*)outputBlock->getCurrent();
+        std::string strVal = std::to_string(val);
+        if (fieldIdx == 1) {
+            mappedFlag[lineNo] = val;
+        } else if (fieldIdx == 3) {
+            mappedPos[lineNo] = val;
+        } else if (fieldIdx == 7) {
+            nextMappedChr[lineNo] = val;
+        }
+        memcpy(outputBlock->getCurrent(), strVal.c_str(), strVal.length());
+        outputBlock->setDataLen(outputBlock->getDataLen() + strVal.length());
+        *outputBlock->getCurrent() = '\t';
+        outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+        return strVal.length() + 1;
+    }
+
+    int32_t decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx, RoughIOBlock* outputBlock); 
+
+    int64_t getHeadLineNumber() {
+        return headEndLine;
+    }
+
+    int64_t getSamLineNumber() {
+        return samLine;
+    }
+
+    void initMetaInfo();
 
 private:
     int32_t preAnalysisIdLine(uint8_t* buffer, uint32_t length);
@@ -58,9 +113,6 @@ private:
 
     // Field-by-field compression
     int32_t compressSamByFields(); 
-
-    // Field-by-field decompression
-    int32_t decompressSamByFields(); 
 
     // ID field split compression
     int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
@@ -131,7 +183,7 @@ private:
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
 
-        LOG_DEBUG("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldIdx, fieldSrcLen, numberIo->data_len, (double)(numberIo->data_len * 100)/(double)fieldSrcLen);
         
         return numberIo->data_len;
@@ -148,53 +200,11 @@ private:
     
     int32_t compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    // Parse chromosome information from @SQ line
-    int32_t parseChromosomeInfo(const std::string& sqLine);
-
-    int32_t decompressHeader();
-
-    int32_t initDecoder(RoughIOBlock* outputBlock);
-
-    int32_t decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag);
-
-    int32_t decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta);
-
-    int32_t decompressChrName(uint32_t fieldIdx, uint32_t lineNo);
-
-    int32_t decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
-                                    uint32_t& nposOffset, uint32_t& totalBaseLength);
-
-    int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen);
-
-    template<typename T>
-    int32_t decompressNumber(uint32_t fieldIdx, uint32_t lineNo) {
-        uint32_t outLen = sizeof(T);
-        uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outBlockPtr->getCurrent(), outLen, UINT8_MAX, false);
-        if (outLen != fieldLen) {
-            LOG_ERROR("Decode failed, filed = %u, lineNo = %u", fieldIdx, lineNo);
-            return -1;
-        }
-
-        T val = *(T*)outBlockPtr->getCurrent();
-        std::string strVal = std::to_string(val);
-        if (fieldIdx == 1) {
-            mappedFlag[lineNo] = val;
-        } else if (fieldIdx == 3) {
-            mappedPos[lineNo] = val;
-        } else if (fieldIdx == 7) {
-            nextMappedChr[lineNo] = val;
-        }
-        memcpy(outBlockPtr->getCurrent(), strVal.c_str(), strVal.length());
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + strVal.length());
-        *outBlockPtr->getCurrent() = '\t';
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
-        return strVal.length() + 1;
-    }
-
-    int32_t decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx);
+    int32_t buildSamIndex();
 
 private:
     int64_t headEndLine;
+    uint32_t samLine;
     std::vector<std::vector<int64_t>> contentPos;
     
     Reference* pRefeGene;
@@ -240,6 +250,9 @@ private:
     uint8_t* refeStrecchBuffer;
 
     const uint8_t atcg4[4] = {'A', 'C', 'T', 'G'}; 
-
     bool notifyFlag;
+
+    uint16_t refPosChrIndex;
+    uint32_t refPosBegin;
+    uint32_t refPosEnd;
 };

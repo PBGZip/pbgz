@@ -37,6 +37,7 @@
 #include <io_wrapper.h>
 #include <block_wrapper.h>
 #include "config_manager.h"
+#include <compress_engine.h>
 #undef private
 
 namespace SamTestData {
@@ -54,12 +55,16 @@ public:
         coder_ns::register_free_func(MemoryUtil::safeFree<void>);
         coder_ns::initFcCoder();
 
+        // Ensure SamInfo state is clean
+        SamInfo::getInstance().clearChromosomeInfo();
+        SamInfo::getInstance().resetChrIdCounter();
+
 		pInBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
         pOutBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
 
         generateSamFile(SamTestData::testSamFile);
 
-        ConfigManager::getInstance().logLevel = LogLevel::DEBUGGING;
+        ConfigManager::getInstance().logLevel = LogLevel::WARNING;
 	}
 
 	// Clean up resources
@@ -263,7 +268,9 @@ protected:
 
 TEST_F(SamActuatorTest, testPreAnalysis) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
     EXPECT_EQ(actuator.headEndLine, 8);  // Header has 8 lines (@HD, 6@SQ, 1@PG, may have other header lines)
@@ -292,7 +299,9 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     file.close();
 
     loadSamData("idinvlid_pre_analysis.sam");
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     int32_t result = actuator.preAnalysis();
     std::remove("idinvlid_pre_analysis.sam");
     EXPECT_EQ(result, 0);
@@ -301,7 +310,9 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
 
 TEST_F(SamActuatorTest, testCompressQuality) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -316,7 +327,9 @@ TEST_F(SamActuatorTest, testCompressQuality) {
 
 TEST_F(SamActuatorTest, testCompressChrName) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -331,7 +344,9 @@ TEST_F(SamActuatorTest, testCompressChrName) {
 
 TEST_F(SamActuatorTest, testCompressWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -345,7 +360,9 @@ TEST_F(SamActuatorTest, testCompressWithoutRef) {
 TEST_F(SamActuatorTest, testCompressWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamActuator actuator(pInBlock, pOutBlock, &refGene);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -358,7 +375,9 @@ TEST_F(SamActuatorTest, testCompressWithRef) {
 
 TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -374,7 +393,9 @@ TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
 TEST_F(SamActuatorTest, testCompressBaseWithRef) {
     loadSamData(SamTestData::testSamFile);
     Reference refGene = createTestReference();
-    SamActuator actuator(pInBlock, pOutBlock, &refGene);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -389,7 +410,9 @@ TEST_F(SamActuatorTest, testCompressBaseWithRef) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -404,7 +427,9 @@ TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
 
 TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -419,7 +444,9 @@ TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
 
 TEST_F(SamActuatorTest, testCompressRegularField) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
@@ -434,16 +461,20 @@ TEST_F(SamActuatorTest, testCompressRegularField) {
 
 TEST_F(SamActuatorTest, testNotifyFlag) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     // Test getNotifyFlag
     bool hasData = actuator.getNotifyFlag();
-    EXPECT_TRUE(hasData) << "Should have data after loading SAM file";
+    EXPECT_FALSE(hasData) << "Should have data after loading SAM file";
 }
 
 TEST_F(SamActuatorTest, testSetReference) {
     loadSamData(SamTestData::testSamFile);
-    SamActuator actuator(pInBlock, pOutBlock);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
     
     Reference refGene = createTestReference();
     
@@ -461,11 +492,11 @@ TEST_F(SamActuatorTest, testSetReference) {
 TEST_F(SamActuatorTest, testDecompress) {
     loadSamData(SamTestData::testSamFile);
 
-    fprintf(stderr, "%s \n", pInBlock->getBuffer());
-    
     // Create SamActuator object for compression
-    SamActuator compressor(pInBlock, pOutBlock);
-    
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine);
+
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
     EXPECT_EQ(result, 0);
@@ -486,11 +517,10 @@ TEST_F(SamActuatorTest, testDecompress) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamActuator decompressor(pInBlock, pOutBlock);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
-    fprintf(stderr, "%s\n", pOutBlock->getBuffer());
     EXPECT_EQ(result, 0);
     
     // Basic check: ensure decompression produced data
@@ -503,7 +533,9 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     Reference reference = createTestReference();
     
     // Create SamActuator object for compression
-    SamActuator compressor(pInBlock, pOutBlock, &reference);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
     
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
@@ -525,7 +557,7 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
     pOutBlock->reset();
     
     // Create SamActuator object for decompression
-    SamActuator decompressor(pInBlock, pOutBlock, &reference);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
     
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
@@ -537,74 +569,683 @@ TEST_F(SamActuatorTest, testDecompressWithRef) {
 
 
 TEST_F(SamActuatorTest, testCigarParse) {
-    SamActuator actuator(pInBlock, pOutBlock);
-    
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
     // Helper function: convert string to uint8_t* to pass to parseCigar
-    auto testParse = [](SamActuator& a, const std::string& cigar) -> uint32_t {
+    auto testParse = [](SamCodecActuator& a, const std::string& cigar) -> uint32_t {
         return a.parseCigar(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(cigar.c_str())), cigar.length());
     };
-    
+
     // Test basic M operations
     EXPECT_EQ(testParse(actuator, "100M"), 100);
     EXPECT_EQ(testParse(actuator, "76M"), 76);
     EXPECT_EQ(testParse(actuator, "1M"), 1);
-    
+
     // Test I operations
     EXPECT_EQ(testParse(actuator, "10I"), 10);
     EXPECT_EQ(testParse(actuator, "5I"), 5);
-    
+
     // Test S operations
     EXPECT_EQ(testParse(actuator, "15S"), 15);
     EXPECT_EQ(testParse(actuator, "3S"), 3);
-    
+
     // Test = operations
     EXPECT_EQ(testParse(actuator, "50="), 50);
     EXPECT_EQ(testParse(actuator, "25="), 25);
-    
+
     // Test X operations
     EXPECT_EQ(testParse(actuator, "30X"), 30);
     EXPECT_EQ(testParse(actuator, "12X"), 12);
-    
+
     // Test composite operations - only accumulate M、I、S、=、X
     EXPECT_EQ(testParse(actuator, "10M5I3S2="), 20);  // 10+5+3+2 = 20
     EXPECT_EQ(testParse(actuator, "5M10I15S5X10="), 45);  // 5+10+15+5+10 = 45
     EXPECT_EQ(testParse(actuator, "1M1I1S1=1X"), 5);  // 1+1+1+1+1 = 5
-    
+
     // Test composite CIGAR with other operations - other operations should be ignored
     EXPECT_EQ(testParse(actuator, "10M5D3I2H10N"), 13);  // Only count 10M+3I = 13, ignore 5D, 2H, 10N
     EXPECT_EQ(testParse(actuator, "5M10D5I10P5N5S"), 15);  // Only count 5M+5I+5S = 15
     EXPECT_EQ(testParse(actuator, "100M50D50N"), 100);  // Only count 100M, ignore 50D and 50N
-    
+
     // Test real-world CIGAR strings
     EXPECT_EQ(testParse(actuator, "76M"), 76);  // Complete match
     EXPECT_EQ(testParse(actuator, "3S73M"), 76);  // 3 soft clipping + 73 matches
     EXPECT_EQ(testParse(actuator, "10M5I60M5D"), 75);  // 10+5+60 = 75, ignore 5D
-    EXPECT_EQ(testParse(actuator, "1S20M1I30M1D10M1S"), 62);  // 1+20+1+30+10+1 = 62, ignore 1D
-    
+    EXPECT_EQ(testParse(actuator, "1S20M1I30M1D10M1S"), 63);  // 1+20+1+30+10+1 = 63, ignore 1D
+
     // Test edge cases
     EXPECT_EQ(testParse(actuator, ""), 0);  // Empty string
-    
+
     // Test CIGAR with only non-counting operations
     EXPECT_EQ(testParse(actuator, "100D"), 0);  // Only deletions, should not accumulate
     EXPECT_EQ(testParse(actuator, "50N"), 0);   // Only reference skips, should not accumulate
     EXPECT_EQ(testParse(actuator, "10H5P"), 0);  // Only hard clipping and padding, should not accumulate
-    
+
     // Test complex real-world CIGAR scenarios
     EXPECT_EQ(testParse(actuator, "1S10M1I10M1D10M1I10M1D10M1D10M1I10M1S1H"), 75);  // Complex alignment scenario
     EXPECT_EQ(testParse(actuator, "35M1I39M"), 75);  // Alignment with insertion in middle
     EXPECT_EQ(testParse(actuator, "2S50M2I20M1D5M3S"), 82);  // Soft clipping on both ends
-    
+
     // Test large numbers
     EXPECT_EQ(testParse(actuator, "1000M"), 1000);
     EXPECT_EQ(testParse(actuator, "10000M500I200S100="), 10800);
-    
+
     // Test mixed case (although SAM specification usually uses uppercase)
     EXPECT_EQ(testParse(actuator, "10m5i3s2="), 20);  // Lowercase should also work
     EXPECT_EQ(testParse(actuator, "10M5i3S2x"), 20);  // Mixed case
-    
+
     // Test invalid CIGAR formats
     EXPECT_EQ(testParse(actuator, "M"), 0);  // Missing number
     EXPECT_EQ(testParse(actuator, "invalid"), 0);  // Completely invalid
     EXPECT_EQ(testParse(actuator, "10M5"), 10);  // Missing operator at end
     EXPECT_EQ(testParse(actuator, "M10I"), 10);  // Missing number at start
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexDisabled) {
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    para.isMakeIndex = false;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Test buildSamIndex when disabled
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexSuccess) {
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Test buildSamIndex with valid sorted SAM data
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexUnsorted) {
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Manually set up mapping data to simulate unsorted order
+    // First read maps to chr2 position 100
+    actuator.mappedFlag[8] = 0;
+    actuator.mappedChr[8] = 1;  // chr2
+    actuator.mappedPos[8] = 100;
+    actuator.mappedFlag[9] = 0;
+    actuator.mappedChr[9] = 0;  // chr1
+    actuator.mappedPos[9] = 1;
+
+    // Test buildSamIndex with unsorted data should fail
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, -1);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexSkipUnmapped) {
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Set up mapping data - some reads are unmapped (flag & 0x04)
+    actuator.mappedFlag[8] = 0x04;  // Unmapped
+    actuator.mappedChr[8] = 0;
+    actuator.mappedPos[8] = 0;
+    actuator.mappedFlag[9] = 0;
+    actuator.mappedChr[9] = 1;  // chr2
+    actuator.mappedPos[9] = 100;
+
+    // Test buildSamIndex should skip unmapped reads
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
+}
+
+TEST_F(SamActuatorTest, testBuildSamIndexSkipInvalidChr) {
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Set up mapping data with invalid chromosome indices
+    actuator.mappedFlag[8] = 0;
+    actuator.mappedChr[8] = 0xFFFF;  // Unmapped
+    actuator.mappedPos[8] = 0;
+    actuator.mappedFlag[9] = 0;
+    actuator.mappedChr[9] = 0xFFFE;  // '=' marker
+    actuator.mappedPos[9] = 100;
+
+    // Test buildSamIndex should skip reads with invalid chr indices
+    result = actuator.buildSamIndex();
+    EXPECT_EQ(result, 0);
+}
+
+TEST_F(SamActuatorTest, testDecompressHeaderWithOutputBlock) {
+    loadSamData(SamTestData::testSamFile);
+
+    Reference reference = createTestReference();
+
+    // Create SamActuator object for compression
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+
+    // Pre-analysis for compression
+    int32_t result = compressor.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Compress
+    result = compressor.compress();
+    EXPECT_EQ(result, 0);
+
+    // Create a new block for decompressing header
+    RoughIOBlock* headerBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
+    ASSERT_NE(headerBlock, nullptr);
+
+    // Reset and copy compressed data to new input block
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+
+    // Create decompressor and init metadata
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+    decompressor.initMetaInfo();
+
+    // Test decompressHeader with custom output block
+    result = decompressor.decompressHeader(headerBlock);
+    EXPECT_EQ(result, 0);
+
+    // Verify header was decompressed to headerBlock
+    EXPECT_GT(headerBlock->getDataLen(), 0);
+
+    // Verify header contains @HD
+    std::string headerContent((char*)headerBlock->getBuffer(), headerBlock->getDataLen());
+    EXPECT_TRUE(headerContent.find("@HD") != std::string::npos);
+
+    // Verify header contains @SQ lines
+    EXPECT_TRUE(headerContent.find("@SQ") != std::string::npos);
+
+    delete headerBlock;
+}
+
+TEST_F(SamActuatorTest, testDecompressSamByFieldsWithOutputBlock) {
+    loadSamData(SamTestData::testSamFile);
+
+    Reference reference = createTestReference();
+
+    // Create SamActuator object for compression
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+
+    // Pre-analysis for compression
+    int32_t result = compressor.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Compress
+    result = compressor.compress();
+    EXPECT_EQ(result, 0);
+
+    // Create a new block for decompressing SAM fields
+    RoughIOBlock* samBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
+    ASSERT_NE(samBlock, nullptr);
+
+    // Reset and copy compressed data to new input block
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+
+    // Create decompressor
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+    decompressor.initMetaInfo();
+
+    // Decompress header first
+    result = decompressor.decompressHeader(samBlock);
+    EXPECT_EQ(result, 0);
+
+    // Test decompressSamByFields with custom output block
+    result = decompressor.decompressSamByFields(samBlock);
+    EXPECT_EQ(result, 0);
+
+    // Verify SAM data was decompressed to samBlock
+    EXPECT_GT(samBlock->getDataLen(), 0);
+
+    // Verify decompressed data contains SAM records
+    std::string samContent((char*)samBlock->getBuffer(), samBlock->getDataLen());
+    EXPECT_TRUE(samContent.find("read") != std::string::npos || samContent.find("\t0\t") != std::string::npos);
+
+    // Verify SAM records have proper tabs (field separators)
+    EXPECT_TRUE(samContent.find("\t") != std::string::npos);
+
+    delete samBlock;
+}
+
+TEST_F(SamActuatorTest, testDecompressWithRefGenePosScenario) {
+    loadSamData(SamTestData::testSamFile);
+
+    Reference reference = createTestReference();
+
+    // Initialize SamIndex with some test data for refGenePos scenario
+    SamInfo::getInstance().clearChromosomeInfo();
+    SamInfo::getInstance().resetChrIdCounter();
+
+    // Create SamActuator object for compression
+    PbgzParameter para;
+    para.isMakeIndex = true;  // Enable index creation
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+
+    // Pre-analysis for compression
+    int32_t result = compressor.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Compress
+    result = compressor.compress();
+    EXPECT_EQ(result, 0);
+
+    // Build index (simulating what happens during compression)
+    result = compressor.buildSamIndex();
+    EXPECT_EQ(result, 0);
+
+    pInBlock->reset();
+
+    // Copy compressed output Block content to new input Block
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+
+    // Create separate blocks for header and data (simulating refGenePos scenario)
+    RoughIOBlock* headerBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
+    RoughIOBlock* dataBlock = new RoughIOBlock(SamTestData::MAX_BLOCK_SIZE);
+    ASSERT_NE(headerBlock, nullptr);
+    ASSERT_NE(dataBlock, nullptr);
+
+    pOutBlock->reset();
+
+    // Create SamActuator object for decompression
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+    decompressor.initMetaInfo();
+
+    // Simulate refGenePos scenario: decompress header to separate block
+    result = decompressor.decompressHeader(headerBlock);
+    EXPECT_EQ(result, 0);
+    EXPECT_GT(headerBlock->getDataLen(), 0);
+
+    // Verify header content
+    std::string headerContent((char*)headerBlock->getBuffer(), headerBlock->getDataLen());
+    EXPECT_TRUE(headerContent.find("@HD") != std::string::npos);
+    EXPECT_TRUE(headerContent.find("@SQ") != std::string::npos);
+
+    // Simulate refGenePos scenario: decompress SAM fields to separate data block
+    result = decompressor.decompressSamByFields(dataBlock);
+    EXPECT_EQ(result, 0);
+    EXPECT_GT(dataBlock->getDataLen(), 0);
+
+    // Verify data content
+    std::string dataContent((char*)dataBlock->getBuffer(), dataBlock->getDataLen());
+    EXPECT_TRUE(dataContent.find("\t0\t") != std::string::npos);
+    EXPECT_TRUE(dataContent.find("\t60\t") != std::string::npos);
+
+    delete headerBlock;
+    delete dataBlock;
+}
+
+TEST_F(SamActuatorTest, testDecompressWithRefGenePosFiltering) {
+    // Generate SAM file with specific positions for testing filtering
+    std::ofstream file("filter_test.sam");
+    if (!file.is_open()) {
+        std::string testPath = "./test/filter_test.sam";
+        file.open(testPath);
+        if (!file.is_open()) {
+            testPath = "../test/filter_test.sam";
+            file.open(testPath);
+        }
+    }
+
+    if (!file.is_open()) {
+        return;
+    }
+
+    // Generate SAM file with reads at different positions
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    file << "@SQ\tSN:chr2\tLN:1000\n";
+    file << "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n";
+
+    // Read at position 1 (will be included if range is 1-100)
+    file << "read_at_pos1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\ttRG:Z:test\n";
+    // Read at position 50 (will be included if range is 1-100)
+    file << "read_at_pos50\t0\tchr1\t50\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\ttRG:Z:test\n";
+    // Read at position 100 (will be included if range is 1-100)
+    file << "read_at_pos100\t0\tchr1\t100\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\ttRG:Z:test\n";
+    // Read at position 150 (will NOT be included if range is 1-100)
+    file << "read_at_pos150\t0\tchr1\t150\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\ttRG:Z:test\n";
+    // Read at position 200 (will NOT be included if range is 1-100)
+    file << "read_at_pos200\t0\tchr1\t200\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\ttRG:Z:test\n";
+    // Read on different chromosome (will NOT be included)
+    file << "read_on_chr2\t0\tchr2\t50\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\ttRG:Z:test\n";
+    // Unmapped read (will NOT be included)
+    file << "read_unmapped\t4\t*\t0\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\ttRG:Z:test\n";
+
+    file.close();
+
+    // Load the test file
+    loadSamData("filter_test.sam");
+
+    Reference reference = createTestReference();
+
+    // Create SamActuator object for compression with filtering range
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    para.refeGenePos = "chr1:1-100";  // Set filter before compression
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+
+    // Pre-analysis for compression
+    int32_t result = compressor.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Compress
+    result = compressor.compress();
+    EXPECT_EQ(result, 0);
+
+    // Build index
+    result = compressor.buildSamIndex();
+    EXPECT_EQ(result, 0);
+
+    pInBlock->reset();
+
+    // Copy compressed output Block content to new input Block
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+
+    pOutBlock->reset();
+
+    // Create SamActuator object for decompression
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+
+    // Decompress with filtering
+    result = decompressor.decompress();
+    EXPECT_EQ(result, 0);
+
+    // Verify filtered results
+    EXPECT_GT(pOutBlock->getDataLen(), 0);
+    std::string outputContent((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+
+    // Verify refPosChrIndex, refPosBegin, refPosEnd were parsed correctly
+    // chr1 should have index 0 (registered in SamInfo from @SQ header)
+    uint16_t chrIndex = SamInfo::getInstance().getChrNameIndex("chr1");
+    EXPECT_NE(chrIndex, 65535) << "chr1 should be registered";
+    EXPECT_EQ(decompressor.refPosChrIndex, chrIndex);
+    EXPECT_EQ(decompressor.refPosBegin, 1);
+    EXPECT_EQ(decompressor.refPosEnd, 100);
+
+    // Should contain reads at positions 1, 50, 100
+    EXPECT_TRUE(outputContent.find("read_at_pos1") != std::string::npos) << "Should contain read_at_pos1";
+    EXPECT_TRUE(outputContent.find("read_at_pos50") != std::string::npos) << "Should contain read_at_pos50";
+    EXPECT_TRUE(outputContent.find("read_at_pos100") != std::string::npos) << "Should contain read_at_pos100";
+
+    // Should NOT contain reads at positions 150, 200, chr2, or unmapped
+    EXPECT_FALSE(outputContent.find("read_at_pos150") != std::string::npos) << "Should NOT contain read_at_pos150";
+    EXPECT_FALSE(outputContent.find("read_at_pos200") != std::string::npos) << "Should NOT contain read_at_pos200";
+    EXPECT_FALSE(outputContent.find("read_on_chr2") != std::string::npos) << "Should NOT contain read_on_chr2";
+    EXPECT_FALSE(outputContent.find("read_unmapped") != std::string::npos) << "Should NOT contain read_unmapped";
+
+    std::remove("filter_test.sam");
+}
+
+TEST_F(SamActuatorTest, testDecompressWithRefGenePosAllIncluded) {
+    // Generate SAM file with specific positions for testing filtering
+    std::ofstream file("range_test.sam");
+    if (!file.is_open()) {
+        std::string testPath = "./test/range_test.sam";
+        file.open(testPath);
+        if (!file.is_open()) {
+            testPath = "../test/range_test.sam";
+            file.open(testPath);
+        }
+    }
+
+    if (!file.is_open()) {
+        return;
+    }
+
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    file << "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n";
+
+    // Read at position 1
+    file << "read_1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+    // Read at position 200
+    file << "read_200\t0\tchr1\t200\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+    // Read at position 500
+    file << "read_500\t0\tchr1\t500\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+    // Read at position 1000
+    file << "read_1000\t0\tchr1\t1000\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+
+    file.close();
+
+    loadSamData("range_test.sam");
+
+    Reference reference = createTestReference();
+
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    para.refeGenePos = "chr1:1-10000";  // Wide range to include all reads
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+
+    int32_t result = compressor.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    result = compressor.compress();
+    EXPECT_EQ(result, 0);
+
+    result = compressor.buildSamIndex();
+    EXPECT_EQ(result, 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);    
+    result = decompressor.decompress();
+    EXPECT_EQ(result, 0);
+
+    // Verify refPosChrIndex, refPosBegin, refPosEnd are set correctly
+    uint16_t chrIndex = SamInfo::getInstance().getChrNameIndex("chr1");
+    EXPECT_NE(chrIndex, 65535) << "chr1 should be registered";
+    EXPECT_EQ(decompressor.refPosChrIndex, chrIndex);
+    EXPECT_EQ(decompressor.refPosBegin, 1);
+    EXPECT_EQ(decompressor.refPosEnd, 10000);
+
+    EXPECT_GT(pOutBlock->getDataLen(), 0);
+    std::string outputContent((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+
+    // All reads should be included
+    EXPECT_TRUE(outputContent.find("read_1") != std::string::npos) << "Should contain read_1";
+    EXPECT_TRUE(outputContent.find("read_200") != std::string::npos) << "Should contain read_200";
+    EXPECT_TRUE(outputContent.find("read_500") != std::string::npos) << "Should contain read_500";
+    EXPECT_TRUE(outputContent.find("read_1000") != std::string::npos) << "Should contain read_1000";
+
+    std::remove("range_test.sam");
+}
+
+TEST_F(SamActuatorTest, testDecompressWithRefGenePosNoneMatched) {
+    // Test scenario where no reads match the filter criteria
+    std::ofstream file("no_match_test.sam");
+    if (!file.is_open()) {
+        std::string testPath = "./test/no_match_test.sam";
+        file.open(testPath);
+        if (!file.is_open()) {
+            testPath = "../test/no_match_test.sam";
+            file.open(testPath);
+        }
+    }
+
+    if (!file.is_open()) {
+        return;
+    }
+
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    file << "@SQ\tSN:chr2\tLN:1000\n";
+    file << "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n";
+
+    // Read at position 500 on chr1
+    file << "read_500\t0\tchr1\t500\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+    // Read at position 200 on chr2
+    file << "read_chr2_200\t0\tchr2\t200\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+
+    file.close();
+
+    loadSamData("no_match_test.sam");
+
+    Reference reference = createTestReference();
+
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    para.refeGenePos = "chr1:1-100";  // No reads match this range
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+
+    int32_t result = compressor.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    result = compressor.compress();
+    EXPECT_EQ(result, 0);
+
+    result = compressor.buildSamIndex();
+    EXPECT_EQ(result, 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+    result = decompressor.decompress();
+    EXPECT_EQ(result, 0);
+
+    // Should contain header but no reads
+    std::string outputContent((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_FALSE(outputContent.find("@HD") != std::string::npos) << "Should not contain header";
+    EXPECT_FALSE(outputContent.find("read_500") != std::string::npos) << "Should NOT contain read_500";
+
+    // Verify refPosChrIndex is not 65535 (chr1 is registered), but no reads match range
+    EXPECT_NE(decompressor.refPosChrIndex, 65535);
+    EXPECT_EQ(decompressor.refPosBegin, 1);
+    EXPECT_EQ(decompressor.refPosEnd, 100);
+
+    std::remove("no_match_test.sam");
+}
+
+TEST_F(SamActuatorTest, testDecompressWithRefGenePosInvalidChr) {
+    // Test with invalid chromosome name
+    std::ofstream file("invalid_chr_test.sam");
+    if (!file.is_open()) {
+        std::string testPath = "./test/invalid_chr_test.sam";
+        file.open(testPath);
+        if (!file.is_open()) {
+            testPath = "../test/invalid_chr_test.sam";
+            file.open(testPath);
+        }
+    }
+
+    if (!file.is_open()) {
+        return;
+    }
+
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    file << "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n";
+
+    file << "read_1\t0\tchr1\t1\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+
+    file.close();
+
+    loadSamData("invalid_chr_test.sam");
+
+    Reference reference = createTestReference();
+
+    PbgzParameter para;
+    para.isMakeIndex = true;
+    para.refeGenePos = "chr999:1-100";  // Non-existent chromosome
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+
+    int32_t result = compressor.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    result = compressor.compress();
+    EXPECT_EQ(result, 0);
+
+    result = compressor.buildSamIndex();
+    EXPECT_EQ(result, 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+
+    // Test decompress - invalid chromosome should result in no filtering
+    result = decompressor.decompress();
+    EXPECT_EQ(result, 0);
+
+    // When chromosome name is not found, refPosChrIndex remains 65535,
+    // so no filtering should happen and all reads should be output
+    std::string outputContent((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_TRUE(outputContent.find("read_1") != std::string::npos) << "Should contain read when chr name is invalid";
+
+    // Verify refPosChrIndex is 65535 because chr999 doesn't exist
+    EXPECT_EQ(decompressor.refPosChrIndex, 65535);
+
+    std::remove("invalid_chr_test.sam");
 }

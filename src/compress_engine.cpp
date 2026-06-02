@@ -23,40 +23,38 @@
 
 
 #include "compress_engine.h"
-#include "fastq_actuator.h"
-#include "binary_actuator.h"
 #include "utils/path_util.h"
 #include "coder_ppmd.h"
 #include "coder_json.h"
-#include "sam_actuator.h"
+#include "codec_actuator_adapter.h"
 
 int32_t CompressEngine::init() {
-    if (0 != PbgzEngine::init()) {
+    if (0 != CodecEngine::init()) {
         return -1;
     }
 
-    indexBlockQueue.setCapility(2);
-    freeIndexBlockQueue.setCapility(2);
-    for (uint32_t i = 0; i < freeIndexBlockQueue.getCapility(); ++i) {
+    indexBlockQueue->setCapility(2);
+    freeIndexBlockQueue->setCapility(2);
+    for (uint32_t i = 0; i < freeIndexBlockQueue->getCapility(); ++i) {
         RoughIOBlock* ptr = MemoryUtil::safeNewClass<RoughIOBlock>();
         if (ptr == nullptr) {
             LOG_ERROR("Failed to create RoughIOBlock for freeIndexBlockQueue");
             return -1;
         }
-        freeIndexBlockQueue.push(ptr);
+        freeIndexBlockQueue->push(ptr);
     }
     
     return 0;
 }
 
 CompressEngine::~CompressEngine() {
-    while(!freeIndexBlockQueue.empty()) {
-        RoughIOBlock* ptr = freeIndexBlockQueue.get();
+    while(!freeIndexBlockQueue->empty()) {
+        RoughIOBlock* ptr = freeIndexBlockQueue->get();
         MemoryUtil::safeDeleteClass(ptr);
     }
 
-    while(!indexBlockQueue.empty()) {
-        RoughIOBlock* ptr = indexBlockQueue.get();
+    while(!indexBlockQueue->empty()) {
+        RoughIOBlock* ptr = indexBlockQueue->get();
         MemoryUtil::safeDeleteClass(ptr);
     }
 }
@@ -88,34 +86,52 @@ BlockWriter* CompressEngine::createBlockWriter() {
     return blockWriter;
 }
 
+void CompressEngine::releaseBlockReader(BlockReader* &blockReader) {
+    MemoryUtil::safeDeleteClass(blockReader);
+}
+
+void CompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
+    MemoryUtil::safeDeleteClass(blockWriter);
+}
+
 Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    FastqActuator* fastqActuator = dynamic_cast<FastqActuator*>(actuator);
+    FastqCompressActuator* fastqActuator = dynamic_cast<FastqCompressActuator*>(actuator);
     if (fastqActuator != nullptr) {
-        if (0 != fastqActuator->preAnalysis()) {
+        FastqCodecActuator* fastqCodecActuator = fastqActuator->getCodecActuator();
+        if (0 != fastqCodecActuator->preAnalysis()) {
             LOG_INFO("Fastq preAnalysis failed");
             MemoryUtil::safeDeleteClass(fastqActuator);
-            return MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
+            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
         }
     }
 
-    SamActuator* samActuator = dynamic_cast<SamActuator*>(actuator);
+    SamCompressActuator* samActuator = dynamic_cast<SamCompressActuator*>(actuator);
     if (samActuator != nullptr) {
-        if (0 != samActuator->preAnalysis()) {
+        SamCodecActuator* samCodecActuator = samActuator->getCodecActuator();
+        if (0 != samCodecActuator->preAnalysis()) {
             LOG_INFO("sam preAnalysis failed");
             MemoryUtil::safeDeleteClass(samActuator);
-            return MemoryUtil::safeNewClass<BinaryActuator>(inBlockPtr, outBlockPtr);
+            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
         }
     }
-    
+
     return actuator;
 }
 
-int32_t CompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
-    int32_t ret = actuator->compress();
-    return ret;
+void CompressEngine::writeFilePostProc(BlockWriter*) {
+    // make index
+    if (parameter.isMakeIndex) {
+        std::string indexFileName = parameter.outputFile + ".pbgzi";
+        if (PathUtil::fileExists(indexFileName)) {
+            PathUtil::removeFile(indexFileName);
+        }
+        SamIndex::getInstance().updateFileOffsetsFromBlockPosition();
+        SamIndex::getInstance().dumpToFile(indexFileName);
+    }
 }
 
-int32_t CompressEngine::engineStartPreProc() {
+
+int32_t CompressEngine::startEnginePreProc() {
     if (!initReference()) {
         LOG_ERROR("Engine init reference failed.");
         return -1;
@@ -164,8 +180,8 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
     Reference* refe = pRefGene;
     int64_t current;
     std::mutex m;
-    BlockingQueue<RoughIOBlock*>& freeOutput = freeOutputPool;
-    BlockingQueue<RoughIOBlock*>& outputPool = outputDataPool;
+    BlockingQueueType* freeOutput = freeOutputPool.get();
+    BlockingQueueType* outputPool = outputDataPool.get();
     uint32_t count = blockCount;
 
     // Start threads
@@ -199,7 +215,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 cmeta.encoder(meta, metaString); /*  Compress block meta */
             
                 /* Write compressed stream of current block's meta */
-                RoughIOBlock* outBlock = freeOutput.get();
+                RoughIOBlock* outBlock = freeOutput->get();
                 outBlock->reset();
                  int64_t currBlockLen = metaString.length() + refeIo.data_len;
                 if (currBlockLen >= outBlock->getRemain()) {
@@ -212,7 +228,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 outBlock->setMetaLen(metaString.length());
                 outBlock->setBlockType(REFERENCE);
                 outBlock->setBlockId(count + refe2do.first.first);
-                outputPool.push(outBlock);
+                outputPool->push(outBlock);
 
                 m.lock();
                 maxBlockLen = (currBlockLen > maxBlockLen) ? currBlockLen : maxBlockLen;
@@ -245,7 +261,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
     return block;
 }
 
-int32_t CompressEngine::engineStartAfterProc() {
+int32_t CompressEngine::startEnginePostProc() {
     bool isPackRefeInTail = pRefGene && !parameter.isUnpackRef && parameter.outputFile != STDOUT;
     if (isPackRefeInTail) {
         int64_t maxRefLen = 0;
@@ -266,30 +282,19 @@ int32_t CompressEngine::engineStartAfterProc() {
         }
     }
     
-    return PbgzEngine::engineStartAfterProc();
+    return CodecEngine::engineStartAfterProc();
 }
 
 void CompressEngine::setDataBlockPosition(uint32_t blockId) {
-    if (!parameter.isMakeIndex) {
-        return;
-    }
     FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
     if (fileWriter == nullptr) {
         return;
     }
-    pbgzIndex.setBlockPosition(blockId, fileWriter->getCurrentPos());
+    BlockPosition::getInstance().setBlockPosition(blockId, fileWriter->getCurrentPos());
     return;
  }
 
- void CompressEngine::startWriteIndexTask() {
-    if (!parameter.isMakeIndex) {
-        return;
-    }
-
-    return;
- }
-
- int32_t CompressEngine::beforeCoderProc() {
+ int32_t CompressEngine::startWorkPreProc() {
     // Refresh file meta
     if (pRefGene) {
         Json::Value refeMeta;
@@ -314,3 +319,40 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
 
     return 0;
  }
+
+Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
+    Actuator* pActuator = nullptr;
+    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
+        if (parameter.isMakeIndex) {
+            fprintf(stderr, "Fastq file will not make index.");
+            parameter.isMakeIndex = false;
+        }
+        pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
+    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+        pActuator = MemoryUtil::safeNewClass<SamCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
+    } else if (inBlockPtr->getBlockType() == BINARY) {
+        pActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
+    }
+
+    if (pActuator == nullptr) {
+        LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
+        freeInputPool->push(inBlockPtr);
+        outBlockPtr->reset();
+        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+        // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
+        outputDataPool->push(outBlockPtr);
+        return nullptr;
+    }
+
+    if (pActuator->initial() != 0) {
+        LOG_ERROR("actuator initial failed");
+        MemoryUtil::safeDeleteClass(pActuator);
+        return nullptr;
+    }
+
+    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType()) || BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+        pActuator = actuatorPreProc(pActuator, inBlockPtr, outBlockPtr);
+    }
+
+    return pActuator;
+}

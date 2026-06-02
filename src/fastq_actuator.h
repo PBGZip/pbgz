@@ -27,10 +27,18 @@
 
 #include "io_block.h"
 #include "reference.h"
-#include "actuator.h"
+#include "codec_actuator.h"
 #include "coder.h"
 #include "coder_io.h"
 #include "coder_qual.h"
+
+#ifdef __SSE4_2__
+#include <emmintrin.h>
+#endif
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 
 enum class CommentType {
@@ -66,9 +74,9 @@ typedef struct {
 } Mapping;
 
 
-class FastqActuator : public Actuator {
+class FastqCodecActuator : public CodecActuator {
 public:
-    FastqActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Reference* pRef = nullptr): Actuator(inPtr, outPtr) {
+    FastqCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr, Reference* pRef = nullptr): CodecActuator(inPtr, outPtr, engine) {
         idPosLength = 0;
         minBaseLength = INT32_MAX;
         maxBaseLength = 0;
@@ -95,7 +103,7 @@ public:
         refeStretchBuffer = nullptr;
     }
 
-    virtual ~FastqActuator() {
+    virtual ~FastqCodecActuator() {
         qualityDecoder.reset();
         baseDecoder.reset();
         commentDecoder.reset();
@@ -144,11 +152,16 @@ private:
 
     int32_t initDecoder(RoughIOBlock* outputBlock);
 
-    void (FastqActuator::*mapping)(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&);
+    void (FastqCodecActuator::*mapping)(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&);
 
     void mappingFastqGen2(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
 
     void mappingFastQGen3(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
+
+    // SIMD-optimized N character counting methods
+    static inline uint32_t countN_SSE2(const uint8_t* data, size_t length);
+    static inline uint32_t countN_Unrolled(const uint8_t* data, size_t length);
+    static inline uint32_t countN_Optimized(const uint8_t* data, size_t length);
 
 private:
     std::vector<uint8_t> idSplitSymbols;
