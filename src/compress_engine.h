@@ -67,7 +67,7 @@ protected:
 
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, true);
-        if (stats) {
+        if (parameter.showStat && stats) {
             stats->printStats();
         }
     }

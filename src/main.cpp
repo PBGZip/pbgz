@@ -65,6 +65,7 @@ static PbgzArg pbgzArgs =
     {'G', "logfile", required_argument, "sepcify log file"},
     {'p', "position", required_argument, "sepecify the reference gene posision"},
     {'i', "index", no_argument, "make index"},
+    {'s', "stat ", no_argument, "show statistics data"},
 };
 
 class CommandProc {
@@ -515,7 +516,7 @@ static std::vector<SubCommand> subCommands = {
     {   
         "compress", 
         "Compress file to pbgz format",
-        {'h', 'v', 'o', 'O', 'f', 'r', 'n', 't', 'l', 'e', 'i', 'g', 'G'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'n', 't', 'l', 'e', 'i', 'g', 'G', 's'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<CompressCmdProc>(para);
         },
@@ -768,6 +769,9 @@ int main(int argc, char** argv) {
         case '?':
         case 'h':
             parameter.showHelp = true;
+            break;
+        case 's':
+            parameter.showStat = true;
             break;
         default:
             fprintf(stdout, "Use pbgz help %s to show usage.\n\n", selectedSubCommand->name.c_str());
