@@ -43,6 +43,7 @@ typedef struct PbgzParameter{
     std::string refeGenePos;
     bool isMakeIndex;
     bool showHelp;
+    bool showStat;
 
     PbgzParameter() {
         isDecToGZ = false;
@@ -54,6 +55,7 @@ typedef struct PbgzParameter{
         logLevel = 6;
         isMakeIndex = false;
         showHelp = false;
+        showStat = false;
     }
 } PbgzParameter;
 
