@@ -138,7 +138,12 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
         if (0 != fastqCodecActuator->preAnalysis()) {
             LOG_INFO("Fastq preAnalysis failed");
             MemoryUtil::safeDeleteClass(fastqActuator);
-            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
+            BinaryCompressActuator* binaryActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
+            if (binaryActuator == nullptr) {
+                return nullptr;
+            }
+            binaryActuator->initial();
+            return binaryActuator;
         }
     }
 
@@ -148,7 +153,12 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
         if (0 != samCodecActuator->preAnalysis()) {
             LOG_INFO("sam preAnalysis failed");
             MemoryUtil::safeDeleteClass(samActuator);
-            return MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
+            BinaryCompressActuator* binaryActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
+            if (binaryActuator == nullptr) {
+                return nullptr;
+            }
+            binaryActuator->initial();
+            return binaryActuator;
         }
     }
 

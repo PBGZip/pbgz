@@ -32,7 +32,7 @@ class PbgzEngine;
 class BinaryCompressActuator : public Actuator {
 public:
     BinaryCompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr) : Actuator(inPtr, outPtr, engine) {
-
+        codecActuator = nullptr;
     }
 
     virtual ~BinaryCompressActuator() {
@@ -67,7 +67,7 @@ protected:
 class BinaryDecompressActuator : public Actuator {
 public:
     BinaryDecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr) : Actuator(inPtr, outPtr, engine) {
-
+        codecActuator = nullptr;
     }
 
     virtual ~BinaryDecompressActuator() {
@@ -103,6 +103,7 @@ class CompressActuator : public Actuator {
 public:
     CompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pRef) : Actuator(inPtr, outPtr, engine) {
         pReference = pRef;
+        codecActuator = nullptr;
     }
 
     virtual ~CompressActuator() {
@@ -141,6 +142,7 @@ class DecompressActuator : public Actuator {
 public:
     DecompressActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pRef) : Actuator(inPtr, outPtr, engine) {
         pReference = pRef;
+        codecActuator = nullptr;
     }
 
     virtual ~DecompressActuator() {
