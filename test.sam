@@ -1,0 +1,18 @@
+@HD	VN:1.6	SO:coordinate
+@SQ	SN:chr1	LN:340
+@SQ	SN:chr2	LN:338
+@SQ	SN:chr3	LN:339
+@SQ	SN:chr4	LN:339
+@SQ	SN:chrX	LN:340
+@SQ	SN:chrY	LN:339
+@PG	ID:bwa	PN:bwa	VN:0.7.17-r1188	CL:bwa mem test_data/reference.fa test_data/test_reads.fastq
+read1_11.1	0	chr1	1	60	76M	*	0	0	ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:1	MD:Z:75A0	AS:i:75	XS:i:0
+read3_11.2	0	chr1	153	60	74M	*	0	0	GGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCCGCAAG	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!T!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:3	MD:Z:37C37C0	AS:i:72	XS:i:0
+read4_11.3	0	chr2	1	60	76M	*	0	0	AATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGACAATCGCCGGAAT	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!F!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:2	MD:Z:74A0	AS:i:74	XS:i:0
+read5_11.4	0	chr2	77	60	76M	*	0	0	ATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAACGCAATCGATCGA	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!K!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:1	MD:Z:75A0	AS:i:75	XS:i:0
+read6_11.5	16	chr3	1	60	76M	*	0	0	CCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCACAATCGGCGGCCGAATC	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:2	MD:Z:74A0	AS:i:74	XS:i:0
+read7_11.6	0	chr3	77	60	76M	*	0	0	ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATACGCAATCGGCGGCCGAT	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:1	MD:Z:74A0	AS:i:75	XS:i:0
+read8_11.7	16	chr4	1	60	76M	*	0	0	TACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGGCAACAATCGGCGGCC	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:2	MD:Z:74A0	AS:i:74	XS:i:0
+read9_11.8	0	chrX	1	60	76M	*	0	0	GGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGGCCGACGCAATCGCCGGCCTAAT	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:2	MD:Z:74A0	AS:i:74	XS:i:0
+read10_11.9	16	chrY	1	60	75M	*	0	0	AATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:2	MD:Z:74A0	AS:i:74	XS:i:0
+read10_11.10	16	chrY	1	60	75M	*	0	0	AATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAACGCAATCGCCGGCCTTGTTC	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	NM:i:2	MD:Z:74A0	AS:i:74	XS:i:0
