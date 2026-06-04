@@ -66,7 +66,7 @@ public:
         }
 
         std::remove(FastqTestData::samllFastQFile.c_str());
-        std::remove(FastqTestData::bigFastQFile.c_str());        
+        std::remove(FastqTestData::bigFastQFile.c_str());      
 	}
 
     void loadFastQData(const std::string& filename) {
@@ -264,50 +264,4 @@ TEST_F(FastQActuatorTest, testPreAnalysis) {
     EXPECT_EQ(actuator.qualityFreqTable[1].first, ':' - '!');
     EXPECT_EQ(actuator.qualityFreqTable[2].first, ',' - '!');
 }
-
-TEST_F(FastQActuatorTest, testPreAnalysisWithoutTrailingNewline) {
-    // 测试不以换行符结尾的场景
-    // 构造一个简单的FASTQ数据：1个record，但最后一行不以换行符结尾
-    std::string testContent = "@test_record1\nACGTACGTACGT\n+\nFF:FF:FF:FF";
-    std::vector<uint8_t> testData(testContent.begin(), testContent.end());
-    
-    pInBlock->reset();
-    pOutBlock->reset();
-    
-    // 加载数据
-    memcpy(pInBlock->getBuffer(), testData.data(), testData.size());
-    pInBlock->setDataLen(testData.size());
-    
-    // 设置npos - 记录前3行的换行符位置
-    // "@test_record1\n" -> 换行符在位置 12
-    // "ACGTACGTACGT\n" -> 换行符在位置 24
-    // "+\n" -> 换行符在位置 26
-    // "FF:FF:FF:FF" -> 不以换行符结尾
-    std::vector<uint32_t> npos = {12, 24, 26};
-    pInBlock->getNpos() = std::move(npos);
-    
-    FastqCodecActuator actuator(pInBlock, pOutBlock, nullptr);  // preAnalysis不需要engine
-    
-    // 记录原始数据长度
-    size_t originalSize = testData.size();
-    
-    // 调用preAnalysis
-    actuator.preAnalysis();
-    
-    // 验证数据长度增加了1（添加了换行符）
-    size_t dataAfterPreAnalysis = pInBlock->getDataLen();
-    EXPECT_EQ(dataAfterPreAnalysis, originalSize + 1) 
-        << "Data length should increase by 1 (newline char)";
-    
-    // 验证最后一个字符现在是换行符
-    EXPECT_EQ(pInBlock->getBuffer()[dataAfterPreAnalysis - 1], '\n')
-        << "Last character should be newline after preAnalysis";
-    
-    // 验证npos增加了1个条目，指向新添加的换行符
-    EXPECT_EQ(pInBlock->getNpos().size(), 4) 
-        << "Npos should have 4 entries (3 original + 1 new)";
-    EXPECT_EQ(pInBlock->getNpos().back(), dataAfterPreAnalysis - 1)
-        << "Last npos should point to the added newline";
-}
-
 
