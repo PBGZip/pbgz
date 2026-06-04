@@ -59,22 +59,6 @@ namespace {
         }
     }
     
-    void recordSamFieldStats(PbgzEngine* engine, uint16_t fieldIdx, uint32_t fieldSrcLen, uint32_t fieldDstLen) {
-        if (!engine) return;
-        
-        auto compressEngine = dynamic_cast<CompressEngine*>(engine);
-        if (!compressEngine || !compressEngine->getStats()) return;
-        
-        auto samStat = dynamic_cast<SamStat*>(compressEngine->getStats());
-        if (!samStat) return;
-        
-        uint16_t statObjectId = mapFieldIdxToStatUnitId(fieldIdx);
-        if (statObjectId != 0) {
-            samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::ORIGINAL_SIZE, fieldSrcLen);
-            samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::COMPRESSED_SIZE, fieldDstLen);
-        }
-    }
-    
     void recordFieldStats(PbgzEngine* engine, uint32_t fieldIdx, uint32_t fieldSrcLen, uint32_t fieldDstLen) {
         if (!engine) return;
         
