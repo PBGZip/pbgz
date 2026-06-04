@@ -254,11 +254,13 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
         // If FASTQ format, ensure block integrity
         int32_t lineNum = static_cast<int32_t>(blockPtr->getNpos().size());
         int64_t remainLen = 0;
-        if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) { 
-            remainLen = totalLen - blockPtr->getNpos()[((lineNum >> 2) << 2) - 1] - 1;
-        } else if (BlockUtil::isSAMBlock(blockPtr->getBlockType())) {
-            remainLen = totalLen - blockPtr->getNpos()[lineNum - 1] - 1;
-        }
+        if (totalLen >= blockSize) {
+            if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) { 
+                remainLen = totalLen - blockPtr->getNpos()[((lineNum >> 2) << 2) - 1] - 1;      
+            } else if (BlockUtil::isSAMBlock(blockPtr->getBlockType())) {
+                remainLen = totalLen - blockPtr->getNpos()[lineNum - 1] - 1;
+            }
+        } 
         
         if (remainLen > 0) {
             // If there's still data in cache, do memmove first
@@ -269,6 +271,16 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
             memcpy(cache, buffer + totalLen - remainLen, remainLen);
             cacheLen = cacheLen + remainLen;
             totalLen -= remainLen;
+        } else {
+            // if not end with \n, add one
+            uint32_t lastNPos  = blockPtr->getNpos()[lineNum - 1];
+            if (lastNPos < totalLen - 1) {
+                LOG_INFO("Append new line");
+                blockPtr->getBuffer()[totalLen] = '\n';
+                blockPtr->getNpos().push_back(totalLen);
+                totalLen += 1;
+                lineNum += 1;
+            }
         }
 
         blockPtr->setDataLen(static_cast<int64_t>(totalLen));

@@ -33,6 +33,7 @@
 #include "fastq_actuator.h"
 #include <io_wrapper.h>
 #include <block_wrapper.h>
+#include "compress_engine.h"
 #include <random>
 #undef private
 
@@ -65,7 +66,7 @@ public:
         }
 
         std::remove(FastqTestData::samllFastQFile.c_str());
-        std::remove(FastqTestData::bigFastQFile.c_str());        
+        std::remove(FastqTestData::bigFastQFile.c_str());      
 	}
 
     void loadFastQData(const std::string& filename) {
@@ -263,3 +264,4 @@ TEST_F(FastQActuatorTest, testPreAnalysis) {
     EXPECT_EQ(actuator.qualityFreqTable[1].first, ':' - '!');
     EXPECT_EQ(actuator.qualityFreqTable[2].first, ',' - '!');
 }
+
