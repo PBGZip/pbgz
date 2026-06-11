@@ -37,14 +37,14 @@
 BlockType BlockReader::constructBlock(RoughIOBlock* blockPtr) {
     /// Get file type by analyzing block content
     uint8_t* buffer = const_cast<uint8_t*>(blockPtr->getBuffer());
-    if (blockPtr->getBlockId() == 0 && blockPtr->getDataLen() >= 2 && buffer[0] == 0x1f && buffer[1] == 0x8b) {
-        return GZIP;
-    }
+    // if (blockPtr->getBlockId() == 0 && blockPtr->getDataLen() >= 2 && buffer[0] == 0x1f && buffer[1] == 0x8b) {
+    //     return GZIP;
+    // }
 
-    if (blockPtr->getBlockId() == 0 && blockPtr->getDataLen() >= 4  && buffer[0] == 'B' && buffer[1] == 'A' 
-        && buffer[2] == 'M' && buffer[3] == '\1') {
-        return BAM;
-    }
+    // if (blockPtr->getBlockId() == 0 && blockPtr->getDataLen() >= 4  && buffer[0] == 'B' && buffer[1] == 'A' 
+    //     && buffer[2] == 'M' && buffer[3] == '\1') {
+    //     return BAM;
+    // }
 
     // Check if it's a SAM file by detecting headers starting with @HD, @SQ, @RG, @PG, @CO
     bool isNeedCheckSam = false;

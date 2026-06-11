@@ -242,6 +242,8 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 if (plen == 0) {
                     break;
                 }
+
+                RoughIOBlock* outBlock = freeOutput->get();
                 const uint8_t *p = refe->getSquash() + refe2do.second.first;
                 if (isSanitizeRef) {
                     refe->sanitizeRefSquash(refe2do.second.first, plen);
@@ -263,9 +265,8 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 cmeta.encoder(meta, metaString); /*  Compress block meta */
             
                 /* Write compressed stream of current block's meta */
-                RoughIOBlock* outBlock = freeOutput->get();
                 outBlock->reset();
-                 int64_t currBlockLen = metaString.length() + refeIo.data_len;
+                int64_t currBlockLen = metaString.length() + refeIo.data_len;
                 if (currBlockLen >= outBlock->getRemain()) {
                     LOG_ERROR("reference block pack failed");
                     break;
