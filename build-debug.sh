@@ -99,6 +99,7 @@ cd "$BUILD_DIR"
 cmake -DCMAKE_BUILD_TYPE=Debug \
       -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
       -DENABLE_SANITIZER=ON \
+      -DFARMHASH_DEBUG=0 \
       "$ROOT_DIR"
 
 echo "Building project with $JOBS parallel jobs..."
