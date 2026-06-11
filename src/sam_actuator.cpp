@@ -233,53 +233,84 @@ int32_t SamCodecActuator::preAnalysis() {
                 
                 // Extract reference file path from @SQ line
                 // Format: @SQ SN:ref_name LN:length UR:file_path
-                size_t pos = line.find("UR:");
-                if (pos != std::string::npos) {
-                    pos += 3;
-                    size_t endPos = line.find("\t", pos);
-                    if (endPos == std::string::npos) {
-                        endPos = line.length();
-                    }
-                    std::string refFilePath = line.substr(pos, endPos - pos);
-                    LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
-                    if (pRefeGene != nullptr) {
-                        std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
-                        if (refFilePath != inputFastq) {
-                            fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s. \n", refFilePath.c_str(), inputFastq.c_str());
+                static bool isCheckUR = false;
+                if (!isCheckUR) {
+                    size_t pos = line.find("UR:");
+                    if (pos != std::string::npos) {
+                        pos += 3;
+                        size_t endPos = line.find("\t", pos);
+                        if (endPos == std::string::npos) {
+                            endPos = line.length();
+                        }
+                        std::string refFilePath = line.substr(pos, endPos - pos);
+                        // Parse filename from refFilePath, compatible with local and network paths
+                        std::string refFileName;
+                        size_t lastSlash = refFilePath.find_last_of("/\\");
+                        if (lastSlash != std::string::npos) {
+                            refFileName = refFilePath.substr(lastSlash + 1);
+                        } else {
+                            refFileName = refFilePath;
+                        }
+
+                        LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
+                        if (pRefeGene != nullptr) {
+                            std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
+                            if (refFileName != inputFastq) {
+                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s. \n", refFileName.c_str(), inputFastq.c_str());
+                                isCheckUR = true;
+                            }
                         }
                     }
                 }
                 continue;
             } else if (line.substr(0, 3) == "@PG") {
-                size_t pos = line.find("CL:");
-                if (pos != std::string::npos) {
-                    pos += 3;
-                    size_t endPos = line.find("\t", pos);
-                    if (endPos == std::string::npos) {
-                        endPos = line.length();
-                    }
-
-                    std::string command = line.substr(pos, endPos - pos);
-                    // Split command by spaces and take the third as reference gene name
-                    std::stringstream ss(command);
-                    std::string item;
-                    std::vector<std::string> tokens;
-                    while (std::getline(ss, item, ' ')) {
-                        if (!item.empty()) {
-                            tokens.push_back(item);
+                static bool isCheckPG = false;
+                if (!isCheckPG) {
+                    size_t pos = line.find("CL:");
+                    if (pos != std::string::npos) {
+                        pos += 3;
+                        size_t endPos = line.find("\t", pos);
+                        if (endPos == std::string::npos) {
+                            endPos = line.length();
                         }
-                    }
-                    if (tokens.size() >= 3) {
-                        std::string refGeneName = tokens[2];
-                        LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
-                        // Reference gene name can be saved or used here as needed
-                        if (pRefeGene != nullptr) {
-                            std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
-                            if (PathUtil::isGzFile(pRefeGene->getFastaFileName())) {
-                                inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
+
+                        std::string command = line.substr(pos, endPos - pos);
+                        // Split command by spaces and take the third as reference gene name
+                        std::stringstream ss(command);
+                        std::string item;
+                        std::vector<std::string> tokens;
+                        while (std::getline(ss, item, ' ')) {
+                            if (!item.empty()) {
+                                tokens.push_back(item);
                             }
-                            if (refGeneName != inputFastq) {
-                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s \n", refGeneName.c_str(), inputFastq.c_str());
+                        }
+                        if (tokens.size() >= 3) {
+                            std::string refGeneName;
+                            if (tokens.size() >= 2 && tokens[0] == "bwa" && tokens[1] == "mem") {
+                                int nonOptionCount = 0;
+                                for (size_t i = 2; i < tokens.size(); i++) {
+                                    if (tokens[i].substr(0, 1) != "-") {
+                                        nonOptionCount++;
+                                        if (nonOptionCount == 1) {
+                                            refGeneName = tokens[i];
+                                            break;
+                                        }
+                                    }
+                                }
+                            } 
+
+                            if (!refGeneName.empty()) {
+                                LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
+                                if (pRefeGene != nullptr) {
+                                    std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
+                                    if (PathUtil::isGzFile(pRefeGene->getFastaFileName())) {
+                                        inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
+                                    }
+                                    if (refGeneName != inputFastq) {
+                                        fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s \n", refGeneName.c_str(), inputFastq.c_str());
+                                        isCheckPG = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1182,14 +1213,15 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         if (baseLenBuffer == nullptr) {
             return -1;
         }
-        for (uint32_t i = 0; i < unmapedReadLength.size(); i += 2) {
+        for (uint32_t i = 0; i < unmapedReadLength.size(); i++) {
             std::pair baseLenPos = unmapedReadLength[i];
-            baseLenBuffer[i] = baseLenPos.first;
-            baseLenBuffer[i + 1] = baseLenPos.second;
+            baseLenBuffer[2 * i] = baseLenPos.first;
+            baseLenBuffer[(2 * i) + 1] = baseLenPos.second;
         }
         std::shared_ptr<coder_bwt_cm> lenCoder = std::make_shared<coder_bwt_cm>(lenIo.get());
-        lenCoder->decode_line((uint8_t*)baseLenBuffer, baseLenSrcLen<<2);
+        lenCoder->encode_line((uint8_t*)baseLenBuffer, baseLenSrcLen<<2);
         lenCoder->encode_flush();
+        MemoryUtil::safeFree(baseLenBuffer);
 
         metaSubs.clear();
         metaSubs["srclen"] = baseLenSrcLen<<2;
@@ -1690,6 +1722,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                         coder_bwt_cm baseLenCoder(&baseLenIo);
                         baseLenCoder.decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false);
                     } else {
+                        MemoryUtil::safeFree(baseLenBuffer);
                         LOG_ERROR("check sub stream failed. coder not match. coder = %s.", 
                             baseMetaStreams[id]["coder"]["magic"].asString().c_str());
                         return -1;
@@ -1700,6 +1733,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                         unmapedReadLength.push_back(std::make_pair(baseLenPtr[i], baseLenPtr[i+1]));
                     }
                     readOffset += dstlen;
+                    MemoryUtil::safeFree(baseLenBuffer);
                 }
             }
         } else if (idx == 10) {
