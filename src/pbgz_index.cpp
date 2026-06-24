@@ -71,7 +71,7 @@ int32_t SamIndex::getSamBlockByRef(uint16_t chrIndex, int64_t beginRefPos, int64
         auto itLow = std::lower_bound(items.begin(), items.end(), lowerBound);
         auto itHigh = std::upper_bound(items.begin(), items.end(), upperBound);
 
-        if (itLow != items.begin() || itLow->referenceMapPos != beginRefPos) {
+        if (itLow != items.begin() && itLow->referenceMapPos != beginRefPos) {
             itLow = std::prev(itLow);
         }
         for (auto it = itLow; it != itHigh; ++it) {

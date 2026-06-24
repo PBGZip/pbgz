@@ -381,7 +381,6 @@ int32_t PbgzEngine::startWorkTask() {
             }
             outBlockPtr->reset();
             outBlockPtr->setBlockId(inBlockPtr->getBlockId());
-            outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
             Actuator* pActuator = createActuator(inBlockPtr, outBlockPtr);
             if (pActuator == nullptr) {
@@ -403,11 +402,15 @@ int32_t PbgzEngine::startWorkTask() {
                 MemoryUtil::safeDeleteClass(pActuator);
                 continue;
             }
+            
+            outBlockPtr->setBlockType(inBlockPtr->getBlockType());
+
             if (isNeedNotify(pActuator->getNotifyFlag())) {
                 conditionVar.notify_all();
             }
     
             MemoryUtil::safeDeleteClass(pActuator);
+            
             freeInputPool->push(inBlockPtr);
             outputDataPool->push(outBlockPtr);
         }
