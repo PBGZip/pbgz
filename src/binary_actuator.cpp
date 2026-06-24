@@ -44,6 +44,10 @@ int32_t BinaryCodecActuator::compress() {
     }
 
     outBlockPtr->setDataLen(io.data_len);
+    if (inBlockPtr->getBlockType() != BINARY) {
+        LOG_DEBUG("Reset block type to %d", BINARY);
+        inBlockPtr->setBlockType(BINARY);
+    }
 
     Json::Value subMeta;
     Json::Value meta;
@@ -64,6 +68,7 @@ int32_t BinaryCodecActuator::compress() {
         return -1;
     }
     outBlockPtr->setMetaLen((uint32_t)metaLength);
+    LOG_DEBUG("Compress binary from %d to %d.", srcLength, io.data_len);
     return 0;
 }
 

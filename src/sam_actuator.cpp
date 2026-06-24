@@ -323,6 +323,7 @@ int32_t SamCodecActuator::preAnalysis() {
             std::vector<int64_t> linePos;
             uint32_t baseLen = 0;
             bool lineCigarMatchFlag = false;
+            uint32_t baseFieldLen = 0;
             for (uint32_t i = 0; i < line.length(); ++i) {
                 if (line.at(i) == '\t' || line.at(i) == '\n') {
                     // First tab before is ID column, need to split and analyze ID column
@@ -334,18 +335,27 @@ int32_t SamCodecActuator::preAnalysis() {
                             // Pass ID column content (from line start to first tab position)
                             preAnalysisIdLine((uint8_t*)line.data(), i + 1);
                         }
-                    } 
-                    // CIGAR is the 6th field
-                    if (linePos.size() == 5) {
-                        uint32_t cigarLen = baseLen = i - linePos.at(4) - 1;
+                    } else if (linePos.size() == 2) {  // RNAME is the 3th field
+                        uint32_t chrLen = i - linePos.at(1) - 1;
+                        std::string chrName = line.substr(linePos.at(1) + 1, chrLen);
+                        if (chrName != "*" && chrName != "=") {
+                            if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
+                                if (headEndLine >= 0) {
+                                    SamInfo::getInstance().clearChromosomeInfo();
+                                }
+                                return -1;
+                            }
+                        }
+                    } else if (linePos.size() == 5) {  // CIGAR is the 6th field
+                        uint32_t cigarLen = i - linePos.at(4) - 1;
                         if (cigarLen > 1) {
                             lineCigarMatchFlag = true;
+                            uint8_t* cigarBegin  = (uint8_t*)line.c_str() + linePos.at(4) + 1;
+                            baseFieldLen = parseCigar(cigarBegin, cigarLen);
                         } else {
                             lineCigarMatchFlag = false;
                         }
-                    }
-                    // Base is the 10th field
-                    if (linePos.size() == 9) {
+                    } else if (linePos.size() == 9) {   // Base is the 10th field
                         baseLen = i - linePos.at(8) - 1;
                         if (baseLen > maxBaseLength) {
                             maxBaseLength = baseLen;
@@ -354,10 +364,15 @@ int32_t SamCodecActuator::preAnalysis() {
                             if (baseLen < minBaseLength) {
                                 minBaseLength =  baseLen;
                             }
+                        } else {
+                            if (baseFieldLen != baseLen) {
+                                if (headEndLine >= 0) {
+                                    SamInfo::getInstance().clearChromosomeInfo();
+                                }
+                                return -1;
+                            }
                         }
-                    }
-                    // Quality value is the 11th field
-                    if (linePos.size() == 10) {
+                    } else if (linePos.size() == 10) {  // Quality value is the 11th field
                         uint32_t qualityLen = i - linePos.at(9) - 1;
                         if (baseLen != qualityLen) {
                             LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
@@ -386,6 +401,9 @@ int32_t SamCodecActuator::preAnalysis() {
             // Each line must have at least 10 tabs, less than 10 means not a SAM file
             if (linePos.size() < 10) {
                 LOG_ERROR("Sam field line invalid, size = %d", linePos.size());
+                if (headEndLine >= 0) {
+                    SamInfo::getInstance().clearChromosomeInfo();
+                }
                 return -1;
             }
             if (linePos.size() > maxFieldSize) {
@@ -1099,6 +1117,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
 
         if (baseLengthBuffer && baseLengthBuffer[contentIdx] != seqLength) {
             LOG_WARNING("Warnning: sequece length(%u) not match cigar(%u)", seqLength, baseLengthBuffer[contentIdx]);
+            baseLengthBuffer[contentIdx] = seqLength;
         }
         
         // Get mapping information from SAM fields
