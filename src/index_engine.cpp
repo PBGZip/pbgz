@@ -92,6 +92,12 @@ int64_t IndexEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
     }
     blockPtr->reset();
 
+    int64_t offset = 0;
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    if (fileReader != nullptr) {
+        offset = fileReader->getCurrentPos();
+    }
+
     int64_t ret = blockReader->readBlock(blockPtr, fileType);
     if (ret <= 0) {
         freeInputPool->push(blockPtr);
@@ -113,6 +119,10 @@ int64_t IndexEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
         fileType = blockPtr->getBlockType();
     }
 
+    if (offset != 0) {
+        BlockPosition::getInstance().setBlockPosition(blockPtr->getBlockId(), offset);
+    }
+
     updateInputStatics(blockPtr);
     inputDataPool->push(blockPtr);
     if (ret > 0) {
@@ -123,6 +133,12 @@ int64_t IndexEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
 }
 
 int32_t IndexEngine::startEnginePostProc() {
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    if (fileReader == nullptr) {
+        return 0;
+    }
+
+    SamIndex::getInstance().updateFileOffsetsFromBlockPosition();
     const auto& samIndexList = SamIndex::getInstance().getSamIndexList();
 
     // Collect all SamIndexItems and sort by blockId
@@ -168,9 +184,9 @@ int32_t IndexEngine::startEnginePostProc() {
         uint16_t chrIndex = std::get<0>(entry);
         const SamIndexItem& item = std::get<1>(entry);
 
-        int len = snprintf((char*)current, remain, "%hu\t%ld\t%u\t%u\n",
+        int len = snprintf((char*)current, remain, "%hu\t%ld\t%u\t%u\t%ld\n",
                           chrIndex, item.referenceMapPos, item.readNumber,
-                          item.blockId);
+                          item.blockId, item.fileOffset);
 
         if (len <= 0 || len >= (int)remain) {
             LOG_ERROR("Index output buffer overflow");

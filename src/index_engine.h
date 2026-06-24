@@ -47,4 +47,7 @@ protected:
     virtual int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType) override;
 
     virtual int32_t startEnginePostProc() override;
+
+private:
+    std::map<uint32_t, int64_t> blockFileOffset;
 };
