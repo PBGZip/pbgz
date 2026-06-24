@@ -275,7 +275,6 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
             // if not end with \n, add one
             uint32_t lastNPos  = blockPtr->getNpos()[lineNum - 1];
             if (lastNPos < totalLen - 1) {
-                LOG_INFO("Append new line");
                 blockPtr->getBuffer()[totalLen] = '\n';
                 blockPtr->getNpos().push_back(totalLen);
                 totalLen += 1;
