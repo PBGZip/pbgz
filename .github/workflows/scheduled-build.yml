@@ -1,0 +1,170 @@
+---
+name: Scheduled Build
+
+# Scheduled build tasks
+# Automatically runs build verification daily to ensure code continuous availability
+
+on:
+  schedule:
+    # Runs daily at UTC 2:00 (Beijing time 10:00 AM)
+    - cron: '0 2 * * *'
+  # Allow manual trigger for debugging
+  workflow_dispatch:
+
+jobs:
+  scheduled-build:
+    name: Scheduled Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # Display start information
+      - name: Start Scheduled Build
+        run: |
+          echo "🚀 Starting scheduled build process"
+          echo "Trigger time: $(date)"
+          echo "Trigger type: scheduled (cron: 0 2 * * *)"
+
+      # Checkout code
+      - uses: actions/checkout@v3
+
+      # Read CI configuration file
+      - name: Load CI Configuration
+        run: |
+          echo "Loading CI configuration file..."
+
+          if [ -f "ci/ci-config.properties" ]; then
+            while IFS='=' read -r key value; do
+              [[ $key =~ ^#.*$ ]] && continue
+              [[ -z $key ]] && continue
+
+              value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              value=$(echo "$value" |
+                      sed 's/^["'\'''\'''"'"']\(.*\)["'\'''\'''"'"']$/\1/')
+              echo "$key=$value" >> $GITHUB_ENV
+              echo "✅ Configuration $key=$value"
+            done < ci/ci-config.properties
+          else
+            echo "⚠️ Configuration file ci/ci-config.properties does not exist"
+            echo "using default values"
+
+            echo "BUILD_SERVER_REGION=cn-hangzhou" >> $GITHUB_ENV
+            echo "INSTANCE_TYPE=ecs.c6.xlarge" >> $GITHUB_ENV
+            echo "GITHUB_REPO=https://github.com/PBGZip/pbgz.git" >> $GITHUB_ENV
+            echo "GITHUB_BRANCH=pbgz_v2.2.0" >> $GITHUB_ENV
+            echo "BUILD_SCRIPT_GCC=3rd_party/build.all.gcc.sh" >> $GITHUB_ENV
+            echo "BUILD_SCRIPT_RELEASE=build-release.sh" >> $GITHUB_ENV
+            echo "GITHUB_CI_REPO=https://github.com/your-username/pbgz_ci.git" >>
+            $GITHUB_ENV
+            echo "GITHUB_CI_BRANCH=main" >> $GITHUB_ENV
+            echo "TEST_ENABLED=true" >> $GITHUB_ENV
+          fi
+          echo "✅ CIConfiguration loading completed"
+
+      # Configure SSH key
+      # NOTE: Actual server IP is dynamically set after server creation step
+      # Here only configure SSH key, do not configure known_hosts
+      - name: Setup SSH Key
+        run: |
+          echo "🔧 Configuring SSH key..."
+          mkdir -p ~/.ssh
+          echo "${{ secrets.BUILD_SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "✅ SSH key configuration completed"
+
+      # Script 001: Create build server
+      - name: Create Build Server
+        run: bash ci/scripts/create-build-server.sh
+        env:
+          BUILD_SERVER_ACCESS_KEY_ID: ${{ secrets.BUILD_SERVER_ACCESS_KEY_ID }}
+          BUILD_SERVER_ACCESS_KEY_SECRET: ${{ secrets.BUILD_SERVER_ACCESS_KEY_SECRET }}
+          BUILD_SERVER_REGION: ${{ env.BUILD_SERVER_REGION }}
+          INSTANCE_TYPE: ${{ env.INSTANCE_TYPE }}
+          SERVER_NAME: >-
+            pbgz-ci-scheduled-$(date +%Y%m%d-%H%M%S)
+
+      # Script 002: Prepare build environment
+      - name: Prepare Build Environment
+        run: bash ci/scripts/prepare-build-environment.sh
+        env:
+          BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
+
+      # Script 004: Run Gradle build (including source download, GCC build, Release build, testing)
+      - name: Run Gradle Build
+        run: bash ci/scripts/run-gradle-build.sh
+        env:
+          BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
+          GITHUB_REPO: ${{ env.GITHUB_REPO }}
+          GITHUB_BRANCH: ${{ env.GITHUB_BRANCH }}
+          BUILD_SCRIPT_GCC: ${{ env.BUILD_SCRIPT_GCC }}
+          BUILD_SCRIPT_RELEASE: ${{ env.BUILD_SCRIPT_RELEASE }}
+          GITHUB_CI_REPO: ${{ env.GITHUB_CI_REPO }}
+          GITHUB_CI_BRANCH: ${{ env.GITHUB_CI_BRANCH }}
+          TEST_ENABLED: "true"
+          TEST_SCRIPT: "ci/scripts/run_all_tests.sh"
+
+      # Script 006: Collect build artifacts
+      - name: Collect Build Artifacts
+        if: always()
+        run: bash ci/scripts/collect-artifacts.sh
+        env:
+          BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
+
+      # Upload build artifacts
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: scheduled-build-artifacts
+          path: |
+            ci_logs_*.tar.gz
+            build_artifacts_*.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Script 007: Terminate build server and cleanup resources
+      - name: Terminate Build Server and Cleanup
+        if: always()
+        run: bash ci/scripts/terminate-build-server.sh
+        env:
+          BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
+          BUILD_SERVER_ACCESS_KEY_ID: ${{ secrets.BUILD_SERVER_ACCESS_KEY_ID }}
+          BUILD_SERVER_ACCESS_KEY_SECRET: ${{ secrets.BUILD_SERVER_ACCESS_KEY_SECRET }}
+
+      # Script 008: Cleanup temporary resources
+      - name: Cleanup Resources
+        if: always()
+        run: bash ci/scripts/cleanup-resources.sh
+
+      # Send notification (when build fails)
+      - name: Notify Failure
+        if: failure()
+        run: |
+          echo "⚠️ Scheduled build failed"
+          echo "Please check build logs to determine failure cause"
+          echo "Failure time: $(date)"
+      
+      # Record build and test results
+      - name: Record Build Results
+        if: always()
+        run: bash ci/scripts/record_build_results.sh --build-status="${{ job.status }}" --test-status="${{ job.status }}" --build-start="${{ github.event.head_commit.timestamp }}" --build-end="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        env:
+          BUILD_LOG_FILE: ci_logs_*.tar.gz
+
+      # Display completion information
+      - name: Scheduled Build Complete
+        if: always()
+        run: |
+          echo "🎉 Scheduled build completed"
+          echo ""
+          echo "📋 Build results:"
+          echo "  ✅ Cloud build server created and configured"
+          echo "  ✅ CI script repository downloaded"
+          echo "  ✅ Gradle environment configured"
+          echo "  ✅ Complete CI process executed via Gradle"
+          echo "     (source download, GCC build, Release build, testing)"
+          echo "  ✅ Build artifacts collected"
+          echo "  ✅ Cloud build server terminated"
+          echo "  ✅ Temporary resources cleaned up"
+          echo ""
+          echo "❓ View details: Actions -> History -> Current run"

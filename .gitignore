@@ -167,10 +167,20 @@ pbgz
 #MCP config
 *mcprules*
 
-#memory-bank
+ # Gradle
+.gradle/
+ci/.gradle/**
+ci/.gradle/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Development files
+.clinerules
 memory-bank/
 memory-bank/*
-
-#clinerule
-.clinerules
 
