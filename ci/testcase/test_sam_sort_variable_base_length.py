@@ -1,19 +1,19 @@
 """
-测试用例：SamSortVariableBaseLengthTest - 变长基线长度的SAM排序测试
+Test case: SamSortVariableBaseLengthTest - variable-lengthbaselinelengthofSAMsortedTest
 
-测试场景：
-- 测试SAM数据中包含变长基线长度（CIGAR字符串中M的数量变化）的排序
-- 验证pbgz处理变长序列的排序能力
-- 测试多样化序列数据的处理
+Test scenario：
+- TestSAMdatadataincontainingvariable-lengthbaselinelength（CIGARfieldcharacterstringinMofdataquantityvariabletransform）ofsorted
+- Verifypbgzhandlingvariable-lengthsequenceofsortedalityforce
+- Testmultiplesampletransformsequencedatadataofhandling
 
-使用命令：
-1. ./bin/pbgz sort {input_file} -o {sorted_file}
-2. ./bin/pbgz compress {sorted_file} -o {compressed_file}
+Usecommand：
+1. ./release-release/bin/pbgz sort {input_file} -o {sorted_file}
+2. ./release-release/bin/pbgz compress {sorted_file} -o {compressed_file}
 
-预期结果：
-- 排序命令成功执行
-- 变长序列排序正确
-- 压缩解压成功，数据完整
+Expected results：
+- sortedcommandgeneratefunctionexecuteexecution
+- variable-lengthsequencesortedcorrectEnsure
+- compressdecompressgeneratefunction，datadatacompletecomplete
 """
 
 import os
@@ -58,7 +58,7 @@ class SamSortVariableBaseLengthTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz sort {self.source_file} -o {self.sorted_file} -f")
+        self.add_test_command(f"./release-release/bin/pbgz sort {self.source_file} -o {self.sorted_file} -f")
 
     def cleanup_test_data(self):
         for filename in [self.source_file, self.sorted_file]:
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     test_case = SamSortVariableBaseLengthTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultensuresaveJSONfile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

@@ -1,19 +1,19 @@
 """
-测试用例：SamVariableBaseLengthPipelineReferenceTest - 变长基线长度SAM管道测试（带参考基因组）
+Test case: SamVariableBaseLengthPipelineReferenceTest - variable-lengthbaselinelengthSAMpipelineTest（withreferencebasegenegenome）
 
-测试场景：
-- 测试通过管道方式处理包含变长基线长度的SAM（带参考基因组）
-- 验证复杂管道与参考基因组的组合
-- 测试变长序列的高级处理能力
+Test scenario：
+- TestThrough pipelinemethodformathandlingcontainingvariable-lengthbaselinelengthofSAM（withreferencebasegenegenome）
+- Verifycomplexcomplexpipelinewithreferencebasegenegenomeofgenomematch
+- Testvariable-lengthsequenceofhighlevelhandlingabilityforce
 
-使用命令：
-1. cat {input_file} | ./bin/pbgz compress -o {compressed_file} -r {reference_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
+Usecommand：
+1. cat {input_file} | ./release-release/bin/pbgz compress -o {compressed_file} -r {reference_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
 
-预期结果：
-- 管道处理成功，支持变长序列
-- 参考基因组优化生效
-- 解压成功，数据完整
+Expected results：
+- pipelinehandlinggeneratesuccess，supportsupportvariable-lengthsequence
+- referencebasegenegenomeoptimaltransformGeneratevalid
+- decompressgeneratesuccess，datadatacompletecomplete
 """
 
 import os
@@ -61,8 +61,8 @@ class SamVariableBaseLengthPipelineReferenceTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
 
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -79,7 +79,7 @@ if __name__ == "__main__":
     test_case = SamVariableBaseLengthPipelineReferenceTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultsavesaveJSONfile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

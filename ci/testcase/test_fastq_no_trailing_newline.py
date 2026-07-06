@@ -1,24 +1,24 @@
 """
-测试用例：FastqNoTrailingNewlineTest - FASTQ文件无尾随换行符处理测试
+Test case: FastqNoTrailingNewlineTest - FASTQ file no trailing newline handling test
 
-测试场景：
-- 测试FASTQ文件末尾缺少换行符的情况
-- 验证pbgz对非标准文件结尾的处理能力
-- 测试文件边界情况的处理
+Test scenario:
+- Test FASTQ files missing newline at the end
+- Verify pbgz's capability to handle non-standard file endings
+- Test processing of file boundary cases
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-参数说明：
-- 正常文件通常以换行符结尾
-- 测试无尾随换行符的边界情况
-- 验证文件格式标准化处理
+Parameter description:
+- Normal files usually end with newline
+- Test boundary case without trailing newline
+- Verify file format standardization processing
 
-预期结果：
-- 压缩成功，处理文件边界
-- 解压成功，数据完全一致
-- MD5校验一致
+Expected results:
+- Compression succeeds, processing file boundary
+- Decompression succeeds, data completely consistent
+- MD5 verification matches
 """
 
 import os
@@ -40,7 +40,7 @@ class FastqNoTrailingNewlineTest(PBGZTestCase):
         self.decompressed_file = "no_trailing_newline_test.fq.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
@@ -60,17 +60,17 @@ class FastqNoTrailingNewlineTest(PBGZTestCase):
             
             fastq_content.extend([seq_id, bases, separator, quality])
         
-        full_content = '\n'.join(fastq_content)  # 没有尾部的换行符
+        full_content = '\n'.join(fastq_content)  # No trailing newline
         self.original_hash = hashlib.md5(full_content.encode('utf-8')).hexdigest()
         
         with open(self.source_file, 'w', encoding='utf-8') as f:
             f.write(full_content)
         
         
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}"
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}"
         self.add_test_command(compress_command)
         
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
@@ -103,8 +103,8 @@ class FastqNoTrailingNewlineTest(PBGZTestCase):
             original_content = f1.read()
             decompressed_content = f2.read()
         
-        # 解压后的文件会追加一个\n，需要特殊处理校验逻辑
-        # 去掉解压文件末尾可能的\n后再比较
+        # Decompressed file will append a \n, requiring special handling for verification logic
+        # Remove possible \n at the end of decompressed file before comparison
         if decompressed_content.endswith('\n'):
             decompressed_content_trimmed = decompressed_content[:-1]
         else:
@@ -131,7 +131,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)

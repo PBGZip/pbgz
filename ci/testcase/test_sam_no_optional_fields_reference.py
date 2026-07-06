@@ -1,14 +1,16 @@
 """
-测试用例：Sam No Optional Fields Reference
+Test case: Sam No Optional Fields Reference
 
-测试场景：
-- 测试pbgz的Sam No Optional Fields Reference功能
-- 验证相关命令的正确执行
-- 确保数据完整性
+Test scenario:
 
-预期结果：
-- 测试命令执行成功
-- 数据完整性验证通过
+- Test pbgz's Sam No Optional Fields Reference functionality
+- Verify correct execution of related commands
+- Ensure data integrity
+
+Expected results:
+
+- Test command executes successfully
+- Data integrity verification passed
 """
 
 import os
@@ -16,7 +18,7 @@ import sys
 import random
 import hashlib
 from testcase.pbgz_test_framework import PBGZTestCase
-# 添加父目录到Python路径
+# Add parent directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class SamNoOptionalFieldsReferenceTest(PBGZTestCase):
@@ -54,8 +56,8 @@ class SamNoOptionalFieldsReferenceTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}")
     
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -76,7 +78,7 @@ if __name__ == "__main__":
     test_case = SamNoOptionalFieldsReferenceTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # Save JSON file for debugging results
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

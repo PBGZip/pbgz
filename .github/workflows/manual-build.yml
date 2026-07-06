@@ -49,17 +49,17 @@ jobs:
             echo "⚠️ Configuration file ci/ci-config.properties does not exist"
             echo "using default values"
 
-          # Set default values
-          echo "BUILD_SERVER_REGION=cn-hangzhou" >> $GITHUB_ENV
-          echo "INSTANCE_TYPE=ecs.c6.xlarge" >> $GITHUB_ENV
-          echo "GITHUB_REPO=https://github.com/PBGZip/pbgz.git" >> $GITHUB_ENV
-          echo "GITHUB_BRANCH=pbgz_v2.2.0" >> $GITHUB_ENV
-          echo "BUILD_SCRIPT_GCC=3rd_party/build.all.gcc.sh" >> $GITHUB_ENV
-          echo "BUILD_SCRIPT_RELEASE=build-release.sh" >> $GITHUB_ENV
-          echo "GITHUB_CI_REPO=https://github.com/your-username/pbgz_ci.git" >>
-          $GITHUB_ENV
-          echo "GITHUB_CI_BRANCH=main" >> $GITHUB_ENV
-          echo "TEST_ENABLED=false" >> $GITHUB_ENV
+            # Set default values
+            echo "BUILD_SERVER_REGION=cn-hangzhou" >> $GITHUB_ENV
+            echo "INSTANCE_TYPE=ecs.c6.xlarge" >> $GITHUB_ENV
+            echo "GITHUB_REPO=https://github.com/PBGZip/pbgz.git" >> $GITHUB_ENV
+            echo "GITHUB_BRANCH=pbgz_v2.2.0" >> $GITHUB_ENV
+            echo "BUILD_SCRIPT_GCC=3rd_party/build.all.gcc.sh" >> $GITHUB_ENV
+            echo "BUILD_SCRIPT_RELEASE=build-release.sh" >> $GITHUB_ENV
+            echo "GITHUB_CI_REPO=https://github.com/your-username/pbgz_ci.git" >>
+            $GITHUB_ENV
+            echo "GITHUB_CI_BRANCH=main" >> $GITHUB_ENV
+            echo "TEST_ENABLED=false" >> $GITHUB_ENV
           fi
 
           echo "✅ CIConfiguration loading completed"
@@ -103,6 +103,21 @@ jobs:
           BUILD_SCRIPT_RELEASE: ${{ env.BUILD_SCRIPT_RELEASE }}
           GITHUB_CI_REPO: ${{ env.GITHUB_CI_REPO }}
           GITHUB_CI_BRANCH: ${{ env.GITHUB_CI_BRANCH }}
+
+       # Setup MinIO Storage Environment
+      - name: Setup MinIO Storage
+        run: |
+          echo "🗄️ Setting up MinIO storage environment..."
+          
+          # Non-sensitive configuration already loaded from ci-config.properties
+          # Sensitive configuration from GitHub Secrets
+          echo "MINIO_ACCESS_KEY=${{ secrets.MINIO_ACCESS_KEY }}" >> $GITHUB_ENV
+          echo "MINIO_SECRET_KEY=${{ secrets.MINIO_SECRET_KEY }}" >> $GITHUB_ENV
+           
+          echo "✅ MinIO storage environment configured"
+          echo "   Endpoint: $MINIO_ENDPOINT"
+          echo "   Compressed Bucket: $MINIO_COMPRESSED_BUCKET"
+          echo "   Results Bucket: $MINIO_RESULTS_BUCKET"
 
       # Script 006: Collect build artifacts
       - name: Collect Build Artifacts

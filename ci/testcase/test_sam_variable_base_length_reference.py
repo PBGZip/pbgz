@@ -1,20 +1,20 @@
 """
-测试用例：SamVariableBaseLengthReferenceTest - 变长基线长度SAM压缩解压测试（带参考基因组）
+testtestusecase：SamVariableBaseLengthReferenceTest - variablelengthbaselinelengthdegreeSAMcompresscompressdecompresscompresstesttest（withreferencebasegenegenome）
 
-测试场景：
-- 测试包含变长基线长度（CIGAR中M的数量变化）的SAM数据压缩解压（带参考基因组）
-- 验证变长序列与参考基因组优化的组合
-- 测试多样化序列数据的高级压缩能力
+testtestscenarioscenario：
+- testtestcontainingcontainvariablelengthbaselinelengthdegree（CIGARinMofdataquantityvariabletransform）ofSAMdatadatacompresscompressdecompresscompress（withreferencebasegenegenome）
+- Verifyverifyvariablelengthorderlistwithreferencebasegenegenomeoptimaltransformofgenomematch
+- testtestmultipleliketransformorderlistdatadataofhighlevelcompresscompressabilityforce
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
+useusecommand：
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
 
-预期结果：
-- 压缩成功，变长序列压缩优化
-- 参考基因组优化生效
-- 解压成功，数据完整恢复
-- MD5校验完全一致
+Expectedexpectedresultresult：
+- compresscompressgeneratesuccess，variablelengthorderlistcompresscompressoptimaltransform
+- referencebasegenegenomeoptimaltransformGeneratevalid
+- decompresscompressgeneratesuccess，datadatacompletecompleterestorecomplex
+- MD5verifyVerifycompletefullonecause
 """
 
 import os
@@ -36,11 +36,11 @@ class SamVariableBaseLengthReferenceTest(PBGZTestCase):
         self.reference_file = "fa/ABQD01.fasta.gz"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Returnreturntesttestfilefileinformationinformation"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
-        # 生成变化Base长度的SAM文件，带参考基因组
+        # GenerategeneratevariabletransformBaselengthdegreeofSAMfilefile，withreferencebasegenegenome
         sam_content = []
         sam_content.append("@HD\tVN:1.0\tSO:unsorted")
         sam_content.append("@SQ\tSN:ENA|ABQD01000001|ABQD01000001.1\tLN:1000000")
@@ -67,8 +67,8 @@ class SamVariableBaseLengthReferenceTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}")
     
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     test_case = SamVariableBaseLengthReferenceTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # foradjusttestresultresultensuresaveJSONfilefile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

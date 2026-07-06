@@ -92,19 +92,33 @@ jobs:
         env:
           BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
 
-      # Script 004: Run Gradle build (including source download, GCC build, Release build, testing)
-      - name: Run Gradle Build
-        run: bash ci/scripts/run-gradle-build.sh
-        env:
-          BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
-          GITHUB_REPO: ${{ env.GITHUB_REPO }}
-          GITHUB_BRANCH: ${{ env.GITHUB_BRANCH }}
-          BUILD_SCRIPT_GCC: ${{ env.BUILD_SCRIPT_GCC }}
-          BUILD_SCRIPT_RELEASE: ${{ env.BUILD_SCRIPT_RELEASE }}
-          GITHUB_CI_REPO: ${{ env.GITHUB_CI_REPO }}
-          GITHUB_CI_BRANCH: ${{ env.GITHUB_CI_BRANCH }}
-          TEST_ENABLED: "true"
-          TEST_SCRIPT: "ci/scripts/run_all_tests.sh"
+       # Script 004: Run Gradle build (including source download, GCC build, Release build, testing)
+       - name: Run Gradle Build
+         run: bash ci/scripts/run-gradle-build.sh
+         env:
+           BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
+           GITHUB_REPO: ${{ env.GITHUB_REPO }}
+           GITHUB_BRANCH: ${{ env.GITHUB_BRANCH }}
+           BUILD_SCRIPT_GCC: ${{ env.BUILD_SCRIPT_GCC }}
+           BUILD_SCRIPT_RELEASE: ${{ env.BUILD_SCRIPT_RELEASE }}
+           GITHUB_CI_REPO: ${{ env.GITHUB_CI_REPO }}
+           GITHUB_CI_BRANCH: ${{ env.GITHUB_CI_BRANCH }}
+           TEST_ENABLED: "true"
+           TEST_SCRIPT: "ci/scripts/run_all_tests.sh"
+
+       # Setup MinIO Storage Environment
+       - name: Setup MinIO Storage
+         run: |
+           echo "🗄️ Setting up MinIO storage environment for PR build..."
+           
+           # Non-sensitive configuration already loaded from ci-config.properties
+           # Sensitive configuration from GitHub Secrets
+           echo "MINIO_ACCESS_KEY=${{ secrets.MINIO_ACCESS_KEY }}" >> $GITHUB_ENV
+           echo "MINIO_SECRET_KEY=${{ secrets.MINIO_SECRET_KEY }}" >> $GITHUB_ENV
+           
+           echo "✅ MinIO storage environment configured"
+           echo "   Endpoint: $MINIO_ENDPOINT"
+           echo "   PR Results Bucket: $MINIO_RESULTS_BUCKET"
 
       # Script 005: Verify Gradle test results (testing already integrated in Gradle process)
       - name: Verify Gradle Test Results

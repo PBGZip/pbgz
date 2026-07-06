@@ -1,24 +1,24 @@
 """
-测试用例：FastqExtraSeparatorReferenceTest - FASTQ文件额外分隔符处理测试（带参考基因组）
+Test case: FastqExtraSeparatorReferenceTest - FASTQ file extra separator handling test (with reference genome)
 
-测试场景：
-- 测试pbgz处理包含额外分隔符的FASTQ文件（带参考基因组优化）
-- 验证非标准格式的容错能力和参考基因组的结合使用
-- 测试极端情况下的数据完整性
+Test scenario:
+- Test pbgz handling FASTQ files containing extra separators (with reference genome optimization)
+- Verify fault tolerance of non-standard formats combined with reference genome usage
+- Test data integrity in extreme cases
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
 
-参数说明：
-- FASTQ格式要求严格的分隔符，测试额外分隔符的容错
-- -r参数：使用参考基因组优化压缩
-- 验证文件格式容错性和参考基因组优化的组合
+Parameter description:
+- FASTQ format requires strict separators, test fault tolerance for extra separators
+- -r parameter: Use reference genome for optimized compression
+- Verify combination of file format fault tolerance and reference genome optimization
 
-预期结果：
-- 压缩成功，通过参考基因组优化
-- 解压成功，数据完整恢复
-- MD5校验完全一致
+Expected results:
+- Compression succeeds, optimized via reference genome
+- Decompression succeeds, data completely restored
+- MD5 verification matches completely
 """
 
 import os
@@ -41,7 +41,7 @@ class FastqExtraSeparatorReferenceTest(PBGZTestCase):
         self.reference_file = "fa/GCA_000002985.3.fasta.gz"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
@@ -77,10 +77,10 @@ class FastqExtraSeparatorReferenceTest(PBGZTestCase):
         
 
         
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file}"
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file}"
         self.add_test_command(compress_command)
         
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}"
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
@@ -136,7 +136,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)

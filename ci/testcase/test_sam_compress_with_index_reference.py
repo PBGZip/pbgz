@@ -1,19 +1,19 @@
 """
-测试用例：SamCompressWithIndexReferenceTest - SAM文件压缩解压测试（带参考基因组索引）
+Test case: SamCompressWithIndexReferenceTest - SAM file compression/decompression test (with reference genome index)
 
-测试场景：
-- 测试SAM压缩解压功能，使用参考基因组
-- 验证参考基因组的索引和压缩协同
-- 测试复杂字段的正确处理
+Test scenario:
+- Test SAM compression/decompression functionality using reference genome
+- Verify coordination between reference genome indexing and compression
+- Test correct handling of complex fields
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
 
-预期结果：
-- 压缩成功，使用参考基因组优化
-- 解压成功，数据完美恢复
-- MD5校验完全一致
+Expected results:
+- Compression succeeds, using reference genome optimization
+- Decompression succeeds, data perfectly restored
+- MD5 verification matches completely
 """
 
 import os
@@ -60,7 +60,7 @@ class SamCompressWithIndexReferenceTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file} -i")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file} -i")
 
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.index_file]:
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     test_case = SamCompressWithIndexReferenceTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # Save JSON file for debugging results
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

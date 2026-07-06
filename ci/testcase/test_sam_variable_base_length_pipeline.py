@@ -1,18 +1,18 @@
 """
-测试用例：Sam Variable Base Length Pipeline - 变长基线长度SAM处理测试
+Test case: Sam Variable Base Length Pipeline - variable-lengthbaselinelengthSAMhandlingtest
 
-测试场景：
-- 测试包含变长基线长度（CIGAR中M的数量变化）的SAM数据处理
-- 验证pbgz对变长序列的处理能力
-- 测试多样化序列组合的处理稳定性
+Test scenario：
+- testcontainingvariable-lengthbaselinelength（CIGARinMofdataquantityvariabletransform）ofSAMdatadatahandling
+- Verifypbgztovariable-lengthsequenceofhandlingabilityforce
+- testmultiplesampletransformsequencegenomematchofhandlingstabledeterminequality
 
-使用命令：
-1. ./bin/pbgz sort {input_file} | ./bin/pbgz compress -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Usecommand：
+1. ./release-release/bin/pbgz sort {input_file} | ./release-release/bin/pbgz compress -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-预期结果：
-- 处理成功，支持变长基线长度
-- 解压成功，数据完整
+Expected results：
+- handlinggeneratesuccess，supportsupportvariable-lengthbaselinelength
+- decompressgeneratesuccess，datadatacompletecomplete
 """
 
 import os
@@ -59,8 +59,8 @@ class SamVariableBaseLengthPipelineTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
 
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     test_case = SamVariableBaseLengthPipelineTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultsavesaveJSONfile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

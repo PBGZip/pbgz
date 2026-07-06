@@ -2,49 +2,48 @@ import os
 import sys
 import inspect
 import importlib.util
+
 from testcase.pbgz_test_framework import PBGZTestCase, run_test_suite
 
 def find_testcase_subclasses(testcase_dir="testcase"):
-    """查找所有继承自PBGZTestCase的子类"""
+    """Find all subclasses inheriting from PBGZTestCase"""
     testcase_classes = []
     
     if not os.path.exists(testcase_dir):
-        print(f"Testcase directory not found: {testcase_dir}")
+        print(f"Test case directory not found: {testcase_dir}")
         return testcase_classes
     
-    # 遍历testcase目录下的所有Python文件
+    # Traverse all Python files in testcase directory
     for filename in os.listdir(testcase_dir):
         if filename.endswith('.py') and filename != '__init__.py' and filename != 'pbgz_test_framework.py':
             filepath = os.path.join(testcase_dir, filename)
-            
             try:
-                # 动态导入模块
-                module_name = filename[:-3]  # 去掉.py后缀
+                # Dynamically import module
+                module_name = filename[:-3]  # Remove .py extension
                 file_path = os.path.join(os.getcwd(), filepath)
                 spec = importlib.util.spec_from_file_location(module_name, file_path)
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 
-                # 查找模块中所有的类
+                # Find all classes in module
                 for name, obj in inspect.getmembers(module, inspect.isclass):
-                    # 检查是否是PBGZTestCase的子类，且不是PBGZTestCase本身
+                    # Check if it is a subclass of PBGZTestCase and not PBGZTestCase itself
                     if issubclass(obj, PBGZTestCase) and obj != PBGZTestCase:
-                        # 确保该类是在当前模块中定义的，避免重复
+                        # Ensure the class is defined in the current module to avoid duplication
                         if obj.__module__ == module_name or obj.__module__.startswith(module_name):
                             testcase_classes.append(obj)
-                            
             except Exception as e:
                 print(f"Error loading test case from {filename}: {e}")
     
     return testcase_classes
 
 def run_all_testcases():
-    """运行所有测试用例"""
+    """Run all test cases"""
     print("=" * 60)
-    print("开始扫描测试用例...")
+    print("Start scanning test cases...")
     print("=" * 60)
     
-    # 查找所有测试用例类
+    # Find testcase classes
     testcase_classes = find_testcase_subclasses()
     
     if not testcase_classes:
@@ -53,10 +52,11 @@ def run_all_testcases():
     
     print(f"Found {len(testcase_classes)} test case(s):")
     for tc_class in testcase_classes:
-        print(f"  - {tc_class.__name__}")
+        print(f" - {tc_class.__name__}")
+    
     print("=" * 60)
     
-    # 实例化所有测试用例
+    # Instantiate all test cases
     test_cases = []
     for tc_class in testcase_classes:
         try:
@@ -65,12 +65,12 @@ def run_all_testcases():
         except Exception as e:
             print(f"Error instantiating {tc_class.__name__}: {e}")
     
-    # 运行所有测试用例
+    # Run all test cases
     if test_cases:
         run_test_suite(test_cases)
 
 if __name__ == "__main__":
-    # 清理之前的JSON文件（如果存在）
+    # Clean up previous JSON files (if exist)
     from testcase.pbgz_test_framework import cleanup_all_json_results
     cleanup_all_json_results()
     

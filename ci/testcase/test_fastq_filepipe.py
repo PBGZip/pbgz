@@ -1,20 +1,20 @@
 """
-测试用例：FastqFilepipeTest - FASTQ文件管道压缩解压测试
+Test case: FastqFilepipeTest - FASTQ file pipe compression/decompression test
 
-测试场景：
-- 测试FASTQ格式文件通过管道方式进行压缩和解压
-- 验证FASTQ格式与标准Unix管道的兼容性
-- 测试cat命令与pbgz的组合使用
+Test scenario:
+- Test FASTQ format file compression and decompression via pipe method
+- Verify FASTQ format compatibility with standard Unix pipes
+- Test combination usage of cat command and pbgz
 
-使用命令：
-1. cat {source_file} | ./bin/pbgz compress -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} | cat > {decompressed_file}
+Commands used:
+1. cat {source_file} | ./release-release/bin/pbgz compress -o - > {compressed_file}
+2. cat {compressed_file} | ./release-release/bin/pbgz decompress -o - > {decompressed_file}
 
-预期结果：
-- 管道压缩解压成功
-- FASTQ文件格式完整保留（@、+分隔符）
-- 解压后文件的MD5与原始文件完全一致
-- 管道模式功能正常工作
+Expected results:
+- Pipe compression/decompression succeeds
+- FASTQ file format completely preserved (@ and + separators)
+- Decompressed file MD5 matches original file completely
+- Pipe mode functionality works normally
 """
 
 import os
@@ -22,7 +22,7 @@ import sys
 import random
 import hashlib
 
-# 添加父目录到Python路径
+# Add parent directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
@@ -37,51 +37,51 @@ class FastqFilepipeTest(PBGZTestCase):
         self.decompressed_file = "filepipe_test.fq.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
-        # 生成正常的FASTQ文件数据
+        # Generate normal FASTQ file data
         fastq_content = []
-        num_reads = 200  # 生成200条序列
+        num_reads = 200  # Generate 200 sequences
         
         for i in range(num_reads):
-            # ID行：@开头的序列标识符
+            # ID line: sequence identifier starting with @
             seq_id = f"@FILEPIPE{i:06d} 1/1"
-            
-            # 序列内容：只包含ATGCN的随机序列
+
+            # Sequence content: random sequence containing only ATGCN
             bases = ''.join(random.choices('ATGCN', k=random.randint(50, 100)))
-            
-            # + 行：分隔符
+
+            # + line: separator
             separator = '+'
-            
-            # 质量分数行：生成与序列长度匹配的质量分数（使用常见的Phred质量分数范围）
+
+            # Quality score line: generate quality scores matching sequence length (using common Phred quality score range)
             quality_length = len(bases)
-            # 使用ASCII 33-73范围内的字符（对应Phred质量分数0-40）
-            quality = ''.join(random.choice('\"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHI') 
+            # Use characters in ASCII 33-73 range (corresponding to Phred quality score 0-40)
+            quality = ''.join(random.choice('"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHI')
                              for _ in range(quality_length))
             
             fastq_content.extend([seq_id, bases, separator, quality])
         
-        full_content = 'n'.join(fastq_content) + 'n'  # 正常FASTQ文件以换行符结尾
+        full_content = 'n'.join(fastq_content) + 'n'  # Normal FASTQ file ends with newline
         self.original_hash = hashlib.md5(full_content.encode('utf-8')).hexdigest()
-        
+
         with open(self.source_file, 'w', encoding='utf-8') as f:
             f.write(full_content)
-        
 
-        
-        # 添加压缩测试命令：文件输入，管道输出
-        # -o - 参数将压缩数据输出到stdout，> 重定向到文件
-        compress_command = f"./bin/pbgz compress {self.source_file} -o - > {self.compressed_file}"
+
+
+        # Add compression test command: file input, pipe output
+        # -o - parameter outputs compressed data to stdout, > redirects to file
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o - > {self.compressed_file}"
         self.add_test_command(compress_command)
-        
-        # 添加解压测试命令
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
+
+        # Add decompression test command
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
         self.add_test_command(decompress_command)
-    
+
     def cleanup_test_data(self):
-        """清理测试用例创建的临时文件"""
+        """Clean up temporary files created by test case"""
         files_to_clean = [self.source_file, self.compressed_file, self.decompressed_file]
         for filename in files_to_clean:
             try:
@@ -91,40 +91,40 @@ class FastqFilepipeTest(PBGZTestCase):
                 print(f"Warning: Failed to remove {filename}: {e}")
     
     def verify_expected_results(self) -> bool:
-        # 验证压缩文件是否生成
+        # Verify compressed file is generated
         if not os.path.exists(self.compressed_file):
             print(f"Error: Compressed file {self.compressed_file} not created")
             return False
-        
-        # 验证解压文件是否生成
+
+        # Verify decompressed file is generated
         if not os.path.exists(self.decompressed_file):
             print(f"Error: Decompressed file {self.decompressed_file} not created")
             return False
-        
-        # 验证压缩比是否合理
+
+        # Verify compression ratio is reasonable
         compression_ratio = self.get_compression_rate()
         if compression_ratio is None:
             print(f"Error: Failed to get compression ratio")
             return False
-        
-        # 打印获取到的执行时间和压缩比
+
+        # Print execution time and compression ratio
         exec_time = self.get_execution_time()
-        
-        
-        # 验证压缩比是否有效
+
+
+        # Verify compression ratio is valid
         if compression_ratio <= 0:
             print(f"Error: Invalid compression ratio: {compression_ratio:.2f}%")
             return False
-        
-        # 对比原文件和解压文件是否一致
+
+        # Compare original file and decompressed file for consistency
         with open(self.source_file, 'r', encoding='utf-8') as f1, open(self.decompressed_file, 'r', encoding='utf-8') as f2:
             original_content = f1.read()
             decompressed_content = f2.read()
-        
-        # 使用哈希值对比
+
+        # Use hash value comparison
         decompressed_hash = hashlib.md5(decompressed_content.encode('utf-8')).hexdigest()
         original_hash = hashlib.md5(original_content.encode('utf-8')).hexdigest()
-        
+
         if original_hash == decompressed_hash:
             return True
         else:
@@ -140,8 +140,8 @@ if __name__ == "__main__":
     if result:
         print("\nTest passed successfully!")
     else:
-        print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        print("\\nTest failed!")
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)

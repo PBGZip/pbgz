@@ -1,18 +1,18 @@
 """
-测试用例：SamLargeFileIllegalTest - 大文件非法字段处理测试
+Test case: SamLargeFileIllegalTest - largefileillegalfieldhandlingTest
 
-测试场景：
-- 测试SAM文件中包含非法字段（optionals tags）的处理
-- 验证pbgz对非法字段的容错能力
-- 数据合法性边界测试
+Test scenario：
+- TestSAMfileincontainingillegalfield（optionals tags）ofhandling
+- Verifypbgztoillegalfieldofcapacityerroralityforce
+- datadatamatchmethodqualityedgeboundaryTest
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Usecommand：
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-预期结果：
-- 压缩解压命令执行完成
-- pbgz成功处理包含非法字段的SAM文件
+Expected results：
+- compressdecompresscommandexecuteexecutioncompletegenerate
+- pbgzgeneratefunctionhandlingcontainingillegalfieldofSAMfile
 """
 
 import os
@@ -20,7 +20,7 @@ import sys
 import random
 import hashlib
 from testcase.pbgz_test_framework import PBGZTestCase
-# 添加父目录到Python路径
+# AddaddparenttargetrecordtoPythonroadpath
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class SamLargeFileIllegalTest(PBGZTestCase):
@@ -38,7 +38,7 @@ class SamLargeFileIllegalTest(PBGZTestCase):
         sam_content.append("@HD\tVN:1.0\tSO:unsorted")
         sam_content.append("@SQ\tSN:ref1\tLN:1000")
         
-        # 添加大量非法字符的reads
+        # Addaddlargequantityillegalfieldcharacterofreads
         for i in range(50):
             qname = f"LARGE_ILLEGAL_{i:04d}"
             flag = 0
@@ -49,7 +49,7 @@ class SamLargeFileIllegalTest(PBGZTestCase):
             rnext = "*"
             pnext = 0
             tlen = 0
-            # 使用各种非法字符
+            # Usevarioustypeillegalfieldcharacter
             illegal_bases = ['A', 'T', 'C', 'G', 'N', 'K', 'M', 'R', 'S', 'W', 'Y']
             seq = ''.join(random.choice(illegal_bases) for _ in range(20))
             qual = '!' * 20
@@ -60,8 +60,8 @@ class SamLargeFileIllegalTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
     
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     test_case = SamLargeFileIllegalTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultensuresaveJSONfile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

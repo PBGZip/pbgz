@@ -1,14 +1,14 @@
 """
-测试用例：Sam Unsorted Compress Index
+testusecase：Sam Unsorted Compress Index
 
-测试场景：
-- 测试pbgz的Sam Unsorted Compress Index功能
-- 验证相关命令的正确执行
-- 确保数据完整性
+testscenarioscenario：
+- testpbgzofSam Unsorted Compress Indexfunctionality
+- Verifymutualrelatedcommandofcorrectaccurateexecuteexecution
+- ensuredatadatacompletecompletequality
 
-预期结果：
-- 测试命令执行成功
-- 数据完整性验证通过"""
+Expectedexpectedresultresult：
+- testcommandexecuteexecutiongeneratesuccess
+- datadatacompletecompletequalityVerifythrough"""
 
 import os
 import sys
@@ -53,9 +53,9 @@ class SamUnsortedCompressIndexTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}")
-        # 索引命令对未排序文件会失败，这是预期行为，不打印错误
-        self.add_test_command(f"./bin/pbgz index -f {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}")
+        # indexcommandtonotsortedfilewilllosefail，thisisExpectedexpectedexecutionfor，nottypeprinterrorerror
+        self.add_test_command(f"./release-release/bin/pbgz index -f {self.compressed_file}")
 
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.index_file]:
@@ -66,19 +66,19 @@ class SamUnsortedCompressIndexTest(PBGZTestCase):
                 pass
     
     def verify_expected_results(self) -> bool:
-        # 检查压缩文件是否存在
+        # Checkcompressfileiswhethersaveat
         if not os.path.exists(self.compressed_file):
             return False
         
-        # 索引命令的失败不影响测试结果，因为这是针对索引功能单独的测试
-        # 压缩成功即可
+        # indexcommandoflosefailnotinfluenceresponsetestresultresult，geneforthisisneedletoindexfunctionalitysingleuniqueoftest
+        # compressgeneratesuccessimmediatelycan
         return True
 
 if __name__ == "__main__":
     test_case = SamUnsortedCompressIndexTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # Save JSON file for debugging results
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

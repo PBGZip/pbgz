@@ -1,31 +1,31 @@
 """
-测试用例：NormalFastqTest - 基本FASTQ文件压缩解压测试
+Test case: NormalFastqTest - Basic FASTQ file compression/decompression test
 
-测试场景：
-- 测试pbgz对标准FASTQ格式的基因组测序文件进行压缩和解压
-- 验证FASTQ格式数据的完整保留
-- FASTQ是下一代测序数据的通用格式
+Test scenario:
+- Test pbgz's compression and decompression for standard FASTQ format genomic sequencing files
+- Verify complete preservation of FASTQ format data
+- FASTQ is the common format for next-generation sequencing data
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-参数说明：
-- FASTQ格式包含序列ID、序列、质量分数（用!表示）
-- 测试数据包含随机生成的DNA序列（ATCGN）
-- 每条记录30个碱基，质量分数全部设为！
+Parameter description:
+- FASTQ format contains sequence ID, sequence, quality scores (represented by !)
+- Test data contains randomly generated DNA sequences (ATCGN)
+- Each record has 30 bases, all quality scores set to !
 
-预期结果：
-- 压缩成功，生成压缩文件
-- 解压成功，恢复原始FASTQ文件
-- 解压后文件的MD5与原始文件完全一致
-- FASTQ记录的所有字段正确保留（ID、序列、质量分）
-- 压缩率合理（因为基因序列数据有重复模式）
+Expected results:
+- Compression succeeds, generating compressed file
+- Decompression succeeds, restoring original FASTQ file
+- Decompressed file MD5 matches original file completely
+- All fields of FASTQ records are correctly preserved (ID, sequence, quality score)
+- Compression ratio is reasonable (because gene sequence data has repeated patterns)
 
-技术说明：
-- FASTQ格式是基因组测序的标准格式
-- 测试基本的FASTQ数据处理能力
-- 验证序列和质量分数的正确处理
+Technical notes:
+- FASTQ format is the standard format for genomic sequencing
+- Test basic FASTQ data processing capability
+- Verify correct handling of sequences and quality scores
 """
 
 import os
@@ -33,7 +33,7 @@ import sys
 import random
 import hashlib
 
-# 添加父目录到Python路径
+# Add parent directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
@@ -48,29 +48,29 @@ class NormalFastqTest(PBGZTestCase):
         self.decompressed_file = "normal_test.fq.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
-        # 生成正常的FASTQ文件数据
+        # Generate normal FASTQ file data
         fastq_content = []
-        num_reads = 200  # 生成200条序列（避免pbgz处理超大文件的段错误）
+        num_reads = 200  # Generate 200 sequences (avoid pbgz segment fault when processing very large files)
         
         for i in range(num_reads):
-            # ID行：@开头的序列标识符
+            # ID line: sequence identifier starting with @
             seq_id = f"@TEST{i:06d} 1/1"
-            
-            # 序列内容：只包含ATGCN的随机序列
+
+            # Sequence content: random sequence containing only ATGCN
             bases = ''.join(random.choices('ATGCN', k=random.randint(50, 100)))
             
-            # + 行：分隔符
+            # + line: separator
             separator = '+'
-            
-            # 质量分数行：生成与序列长度匹配的质量分数（使用常见的Phred质量分数范围）
+
+            # Quality score line: generate quality scores matching sequence length (using common Phred quality score range)
             quality_length = len(bases)
-            quality_scores = ''.join(random.choices('!"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHI', k=quality_length))
+            quality_scores = ''.join(random.choices('"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHI', k=quality_length))
             
-            # 添加到内容
+            # Add to content
             fastq_content.append(seq_id)
             fastq_content.append(bases)
             fastq_content.append(separator)
@@ -78,23 +78,23 @@ class NormalFastqTest(PBGZTestCase):
         
         self.original_hash = hashlib.md5('\n'.join(fastq_content).encode('utf-8')).hexdigest()
         
-        # 生成完整内容（每行一个元素，添加最后的换行符）
+        # Generate complete content (one element per line, adding final newline)
         with open(self.source_file, 'w') as f:
             for line in fastq_content:
                 f.write(line + '\n')
         
 
         
-        # 添加压缩测试命令
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}"
+        # Add compression test command
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}"
         self.add_test_command(compress_command, cmd_id=1)
-        
-        # 添加解压测试命令
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
+
+        # Add decompression test command
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
         self.add_test_command(decompress_command, cmd_id=2)
     
     def cleanup_test_data(self):
-        """清理测试用例创建的临时文件"""
+        """Clean up temporary files created by test case"""
         files_to_clean = [self.source_file, self.compressed_file, self.decompressed_file]
         for filename in files_to_clean:
             try:
@@ -104,32 +104,32 @@ class NormalFastqTest(PBGZTestCase):
                 print(f"Warning: Failed to remove {filename}: {e}")
     
     def verify_expected_results(self) -> bool:
-        # 验证压缩文件是否生成
+        # Verify compressed file is generated
         if not os.path.exists(self.compressed_file):
             print(f"Error: Compressed file {self.compressed_file} not created")
             return False
         
-        # 验证解压文件是否生成
+        # Verify decompressed file is generated
         if not os.path.exists(self.decompressed_file):
             print(f"Error: Decompressed file {self.decompressed_file} not created")
             return False
         
-        # 验证压缩比是否合理
+        # Verify compression ratio is reasonable
         compression_ratio = self.get_compression_rate()
         if compression_ratio is None:
             print(f"Error: Failed to get compression ratio")
             return False
         
-        # 打印获取到的执行时间和压缩比
+        # Print execution time and compression ratio obtained
         exec_time = self.get_execution_time()
         
         
-        # 对比原文件和解压文件是否一致
+        # Compare whether original file and decompressed file are consistent
         with open(self.source_file, 'r') as f1, open(self.decompressed_file, 'r') as f2:
             original_content = f1.read().encode('utf-8')
             decompressed_content = f2.read().encode('utf-8')
         
-        # 使用哈希值对比，避免内存对比问题
+        # Use hash value comparison to avoid memory comparison issues
         decompressed_hash = hashlib.md5(decompressed_content).hexdigest()
         original_hash = hashlib.md5(original_content).hexdigest()
         
@@ -149,7 +149,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)

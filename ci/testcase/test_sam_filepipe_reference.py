@@ -1,19 +1,19 @@
 """
-测试用例：SamFilepipeReferenceTest - SAM文件管道压缩解压测试（带参考基因组）
+Test case: SamFilepipeReferenceTest - SAMfilepipelinepipelinecompressdecompressTest（withreferencebasegenegenome）
 
-测试场景：
-- 测试SAM文件通过管道方式进行压缩和解压
-- 使用参考基因组优化压缩
-- 验证管道模式和参考基因组的组合
+Test scenario：
+- TestSAMfileThrough pipelinemethodformatadvanceexecutioncompressanddecompress
+- Usereferencebasegenegenomeoptimaltransformcompress
+- Verifypipelinepipelinepatternformatandreferencebasegenegenomeofgenomematch
 
-使用命令：
-1. cat {source_file} | ./bin/pbgz compress -o {compressed_file} -r {reference_file}
-2. ./bin/pbgz decompress {compressed_file} | cat > {decompressed_file}
+Usecommand：
+1. cat {source_file} | ./release-release/bin/pbgz compress -o {compressed_file} -r {reference_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} | cat > {decompressed_file}
 
-预期结果：
-- 管道压缩解压成功
-- 参考基因组优化生效
-- 数据完整性验证通过
+Expected results：
+- pipelinepipelinecompressdecompressgeneratefunction
+- referencebasegenegenomeoptimaltransformGeneratevalid
+- datadatacompletecompletequalityVerifyThroughthrough
 """
 
 import os
@@ -22,7 +22,7 @@ import random
 import hashlib
 from testcase.pbgz_test_framework import PBGZTestCase
 
-# 添加父目录到Python路径
+# AddaddparenttargetrecordtoPythonroadpath
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -61,8 +61,8 @@ class SamFilepipeReferenceTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
     
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -84,7 +84,7 @@ if __name__ == "__main__":
     test_case = SamFilepipeReferenceTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultensuresaveJSONfile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

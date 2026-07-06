@@ -1,26 +1,26 @@
 """
-测试用例：FastqRealFileReferenceTest - 真实FASTQ文件压缩解压测试（带参考基因组）
+testtestusecase：FastqRealFileReferenceTest - realrealFASTQfilefilecompresscompressdecompresscompresstesttest（withreferencereferencebasegenegenome）
 
-测试场景：
-- 使用真实的FASTQ数据文件（SRR17052138_1.fastq.gz）进行压缩解压测试（带参考基因组）
-- 验证参考基因组对真实数据的压缩优化效果
-- 测试大规模真实数据与参考基因组的协同处理
-- 监控压缩解压性能评分比
+testtestscenarioscenario：
+- useuserealrealofFASTQdatadatafilefile（SRR17052138_1.fastq.gz）advanceexecutioncompresscompressdecompresscompresstesttest（withreferencereferencebasegenegenome）
+- Verifyverifyreferencereferencebasegenegenometorealrealdatadataofcompresscompressoptimaltransformvalidresult
+- testtestlargerulepatternrealrealdatadatawithreferencereferencebasegenegenomeofcoordinatesamehandlemanage
+- monitorcontrolcompresscompressdecompresscompressqualityabilityevaluatedividecompare
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
+useusecommand：
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file} -r {reference_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
 
-预期结果：
-- 压缩成功，参考基因组优化生效
-- 解压成功，数据完美还原
-- MD5校验完全一致
+Expectedexpectedresultresult：
+- compresscompressgeneratesuccess，referencereferencebasegenegenomeoptimaltransformGeneratevalid
+- decompresscompressgeneratesuccess，datadatacompletebeautystilloriginal
+- MD5verifyVerifycompletefullonecause
 """
 
 import os
 import sys
 
-# 添加父目录到Python路径
+# AddparenttargetrecordtoPythonroadpath
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
@@ -28,7 +28,7 @@ from testcase.pbgz_test_framework import PBGZTestCase
 import os
 import sys
 
-# 添加父目录到Python路径
+# AddparenttargetrecordtoPythonroadpath
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
@@ -45,7 +45,7 @@ class FastqRealFileReferenceTest(PBGZTestCase):
         self.saved_original_size = 0
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Returnreturntesttestfilefileinformationinformation"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
     
     def prepare_data(self):
@@ -63,15 +63,15 @@ class FastqRealFileReferenceTest(PBGZTestCase):
         print(f"Real FASTQ file: {self.source_file}")
         print(f"  Reference genome: {self.reference_file}")
         
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file} -n -f"
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file} -r {self.reference_file} -n -f"
         self.add_test_command(compress_command)
         
-        # 添加解压命令
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file} -z"
+        # Adddecompresscompresscommand
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file} -z"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
-        # 删除压缩和解压文件
+        # deleteremovecompresscompressanddecompresscompressfilefile
         for filename in [self.compressed_file, self.decompressed_file]:
             if os.path.exists(filename):
                 try:
@@ -79,7 +79,7 @@ class FastqRealFileReferenceTest(PBGZTestCase):
                 except Exception as e:
                     pass
     def verify_expected_results(self) -> bool:
-        # 检查命令执行结果
+        # Checkcheckcommandexecuteexecutionresultresult
         compress_success = False
         decompress_success = False
         
@@ -93,48 +93,48 @@ class FastqRealFileReferenceTest(PBGZTestCase):
                 
                 if main_cmd == "compress":
                     compress_success = success
-                    # 记录压缩时间
+                    # recordrecordcompresscompresstimebetween
                     if "execution_time" in cmd_result:
                         comp_time = cmd_result["execution_time"]
-                        print(f"  压缩时间: {comp_time:.2f}秒")
+                        print(f"  compresscompresstimebetween: {comp_time:.2f}second")
                 elif main_cmd == "decompress":
                     decompress_success = success
-                    # 记录解压时间
+                    # recordrecorddecompresscompresstimebetween
                     if "execution_time" in cmd_result:
                         decomp_time = cmd_result["execution_time"]
-                        print(f"  解压时间: {decomp_time:.2f}秒")
+                        print(f"  decompresscompresstimebetween: {decomp_time:.2f}second")
         
-        # 验证基本功能
+        # Verifyverifybasebasesuccessability
         if not compress_success:
-            print("压缩命令失败")
+            print("compresscompresscommandlosefail")
             return False
         
         if not decompress_success:
-            print("解压命令失败")
+            print("decompresscompresscommandlosefail")
             return False
         
-        # 验证压缩文件存在
+        # Verifyverifycompresscompressfilefilesaveat
         if not os.path.exists(self.compressed_file):
-            print("压缩文件不存在")
+            print("compresscompressfilefilenotsaveat")
             return False
         
-        # 验证解压文件存在
+        # Verifyverifydecompresscompressfilefilesaveat
         if not os.path.exists(self.decompressed_file):
-            print("解压文件不存在")
+            print("decompresscompressfilefilenotsaveat")
             return False
         
-        # 计算压缩性能
+        # countcomputecompresscompressqualityability
         original_size = os.path.getsize(self.source_file)
         compressed_size = os.path.getsize(self.compressed_file)
         compression_ratio = (original_size - compressed_size) / original_size * 100
-        print(f"  压缩率: {compression_ratio:.2f}%")
+        print(f"  compresscompressrate: {compression_ratio:.2f}%")
         
-        # 验证解压文件存在且大小合理
+        # Verifyverifydecompresscompressfilefilesaveatandlargesmallmatchmanage
         decompressed_size = os.path.getsize(self.decompressed_file)
-        print(f"  解压文件大小: {decompressed_size:,} 字节 ({decompressed_size / (1024**3):.2f}GB)")
+        print(f"  decompresscompressfilefilelargesmall: {decompressed_size:,} fieldnode ({decompressed_size / (1024**3):.2f}GB)")
         
-        print("✓ FastqRealFileReferenceTest 性能测试完成！")
-        print("✓ 参考基因组优化显著提升压缩效果")
+        print("✓ FastqRealFileReferenceTest qualityabilitytesttestcompletegenerate！")
+        print("✓ referencereferencebasegenegenomeoptimaltransformdisplaysignificantimproveupgradecompresscompressvalidresult")
         return True
 
 
@@ -143,7 +143,7 @@ if __name__ == "__main__":
     result = test_case.execute()
     test_case.print_results()
     
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultensuresaveJSONfilefile
     if not result:
         test_case.save_to_json()
     

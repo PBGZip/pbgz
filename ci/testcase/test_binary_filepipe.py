@@ -1,24 +1,24 @@
 """
-测试用例：BinaryPipeTest - 二进制文件管道压缩解压测试
+Test case: BinaryPipeTest - Binary file pipe compression/decompression test
 
-测试场景：
-- 测试pbgz通过管道方式压缩和解压二进制文件
-- 验证利用标准输入/输出管道接口的功能
-- 测试cat命令与pbgz的组合使用
+Test scenario:
+- Test pbgz compressing and decompressing binary files via pipe method
+- Verify functionality of using standard input/output pipe interface
+- Test combination usage of cat command and pbgz
 
-使用命令：
-1. cat {source_file} | ./bin/pbgz compress -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} > {decompressed_file}
+Commands used:
+1. cat {source_file} | ./release-release/bin/pbgz compress -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} > {decompressed_file}
 
-预期结果：
-- 管道压缩成功，生成压缩文件
-- 管道解压成功，恢复原始文件
-- 管道接口功能正常工作
-- 文件内容完全一致
+Expected results:
+- Pipe compression succeeds, generating compressed file
+- Pipe decompression succeeds, restoring original file
+- Pipe interface function works normally
+- File contents are completely consistent
 
-技术说明：
-- 测试标准输入输出管道模式
-- 验证pbgz与Unix管道系统兼容性
+Technical notes:
+- Test standard input/output pipe mode
+- Verify pbgz compatibility with Unix pipe system
 """
 
 import os
@@ -26,7 +26,7 @@ import sys
 import random
 import hashlib
 
-# 添加父目录到Python路径
+# Add parent directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
@@ -41,28 +41,28 @@ class BinaryFilePipeTest(PBGZTestCase):
         self.decompressed_file = "filepipe_test_data.bin.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
-        # 生成一个非fastq非sam格式的二进制文件
-        binary_data = bytearray(random.getrandbits(8) for _ in range(1024 * 1024))  # 1MB随机二进制数据
+        # Generate a binary file in non-fastq non-sam format
+        binary_data = bytearray(random.getrandbits(8) for _ in range(1024 * 1024))  # 1MB random binary data
         self.original_hash = hashlib.md5(binary_data).hexdigest()
         
         with open(self.source_file, 'wb') as f:
             f.write(binary_data)
         
         
-        # 添加测试命令：文件输入，管道输出
-        compress_command = f"./bin/pbgz compress {self.source_file} -o - > {self.compressed_file}"
+        # Add test command: file input, pipe output
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o - > {self.compressed_file}"
         self.add_test_command(compress_command)
-        
-        # 添加解压测试命令
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
+
+        # Add decompression test command
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
-        """清理测试用例创建的临时文件"""
+        """Clean up temporary files created by test case"""
         files_to_clean = [self.source_file, self.compressed_file, self.decompressed_file]
         for filename in files_to_clean:
             try:
@@ -72,37 +72,37 @@ class BinaryFilePipeTest(PBGZTestCase):
                 print(f"Warning: Failed to remove {filename}: {e}")
     
     def verify_expected_results(self) -> bool:
-        # 验证压缩文件是否生成
+        # Verify compressed file is generated
         if not os.path.exists(self.compressed_file):
             print(f"Error: Compressed file {self.compressed_file} not created")
             return False
-        
-        # 验证解压文件是否生成
+
+        # Verify decompressed file is generated
         if not os.path.exists(self.decompressed_file):
             print(f"Error: Decompressed file {self.decompressed_file} not created")
             return False
-        
-        # 验证压缩比是否合理
+
+        # Verify compression ratio is reasonable
         compression_ratio = self.get_compression_rate()
         if compression_ratio is None:
             print(f"Error: Failed to get compression ratio")
             return False
-        
-        # 打印获取到的执行时间和压缩比
+
+        # Print execution time and compression ratio
         exec_time = self.get_execution_time()
-        
-        
-        # 验证压缩比是否有效
+
+
+        # Verify compression ratio is valid
         if compression_ratio <= 0:
             print(f"Error: Invalid compression ratio: {compression_ratio:.2f}%")
             return False
-        
-        # 对比原文件和解压文件是否一致
+
+        # Compare original file and decompressed file for consistency
         with open(self.source_file, 'rb') as f1, open(self.decompressed_file, 'rb') as f2:
             original_data = f1.read()
             decompressed_data = f2.read()
-        
-        # 使用哈希值对比，避免内存对比问题
+
+        # Use hash value comparison to avoid memory comparison issues
         decompressed_hash = hashlib.md5(decompressed_data).hexdigest()
         original_hash = hashlib.md5(original_data).hexdigest()
         
@@ -122,7 +122,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)

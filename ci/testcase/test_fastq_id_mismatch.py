@@ -1,24 +1,24 @@
 """
-测试用例：FastqIdMismatchTest - FASTQ文件ID不匹配处理测试
+Test case: FastqIdMismatchTest - FASTQ file ID mismatch handling test
 
-测试场景：
-- 测试FASTQ文件中序列ID（@行）和质量ID（+行）不匹配的情况
-- 验证pbgz对非标准FASTQ格式的容错能力
-- 测试格式严格性检查
+Test scenario:
+- Test FASTQ files where sequence IDs (@ lines) and quality IDs (+ lines) don't match
+- Verify pbgz's fault tolerance for non-standard FASTQ formats
+- Test format strictness checking
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-参数说明：
-- FASTQ格式要求@和+行的ID必须匹配
-- 测试ID不匹配的边界情况
-- 验证格式验证和容错处理
+Parameter description:
+- FASTQ format requires IDs on @ and + lines to match
+- Test edge cases with ID mismatches
+- Verify format validation and fault tolerance handling
 
-预期结果：
-- 压缩成功，处理格式异常
-- 解压成功，保留原始数据结构
-- MD5校验一致（保留原始格式）
+Expected results:
+- Compression succeeds, handling format exceptions
+- Decompression succeeds, preserving original data structure
+- MD5 verification matches (preserving original format)
 """
 
 import os
@@ -40,7 +40,7 @@ class FastqIdMismatchTest(PBGZTestCase):
         self.decompressed_file = "id_mismatch_test.fq.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
@@ -52,7 +52,7 @@ class FastqIdMismatchTest(PBGZTestCase):
             
             bases = ''.join(random.choices('ATGCN', k=random.randint(50, 100)))
             
-            separator = f"+DIFFERENT{i:06d}"  # ID与+行不匹配
+            separator = f"+DIFFERENT{i:06d}"  # ID doesn't match + line
             
             quality_length = len(bases)
             quality = ''.join(random.choice('"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHI') 
@@ -68,10 +68,10 @@ class FastqIdMismatchTest(PBGZTestCase):
         
 
         
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}"
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}"
         self.add_test_command(compress_command)
         
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
@@ -123,7 +123,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)

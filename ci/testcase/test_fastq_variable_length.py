@@ -1,24 +1,24 @@
 """
-测试用例：FastqVariableLengthTest - 变长序列FASTQ文件压缩解压测试
+testtestusecase：FastqVariableLengthTest - variablelengthorderlistFASTQfilefilecompresscompressdecompresscompresstesttest
 
-测试场景：
-- 测试包含不同长度序列的FASTQ文件处理能力
-- 验证pbgz对多样长度序列的适应性
-- 测试真实测序数据的特点（序列长度不一）
+testtestscenarioscenario：
+- testtestcontainingcontainnotsamelengthdegreeorderlistofFASTQfilefilehandlemanageabilityforce
+- Verifyverifypbgztomultiplelikelengthdegreeorderlistofsuitablerespondquality
+- testtestrealrealtestorderdatadataofspecialpoint（orderlistlengthdegreenotone）
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+useusecommand：
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-参数说明：
-- 测序数据通常包含不同长度的序列片段
-- 变长序列是真实生物数据的典型特征
-- 测试pbgz对序列多样性处理的稳定性
+referencedatasayclear：
+- testorderdatadataThroughnormalcontainingcontainnotsamelengthdegreeoforderlistpiecefield
+- variablelengthorderlistisrealrealGenerateobjectdatadataofclassictypespecialcharacteristic
+- testtestpbgztoorderlistmultiplelikequalityhandlemanageofstabledeterminequality
 
-预期结果：
-- 压缩成功，有效压缩变长序列
-- 解压成功，所有序列完整恢复
-- MD5校验完全一致
+Expectedexpectedresultresult：
+- compresscompressgeneratesuccess，havevalidcompresscompressvariablelengthorderlist
+- decompresscompressgeneratesuccess，placehaveorderlistcompletecompleterestorecomplex
+- MD5verifyVerifycompletefullonecause
 """
 
 import os
@@ -40,7 +40,7 @@ class FastqVariableLengthTest(PBGZTestCase):
         self.decompressed_file = "variable_length_test.fq.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Returnreturntesttestfilefileinformationinformation"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
@@ -68,10 +68,10 @@ class FastqVariableLengthTest(PBGZTestCase):
         
 
         
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}"
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}"
         self.add_test_command(compress_command)
         
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
@@ -123,7 +123,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # foradjusttestresultresultensuresaveJSONfilefile
         if not result:
             test_case.save_to_json()
         sys.exit(1)

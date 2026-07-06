@@ -1,18 +1,18 @@
 """
-测试用例：SamVariableBaseLengthFilepipeTest - 变长基线长度SAM管道处理测试
+Test case: SamVariableBaseLengthFilepipeTest - variable-lengthbaselinelengthSAMpipelinehandlingtest
 
-测试场景：
-- 测试通过管道方式处理包含变长基线长度的SAM排序
-- 验证变长序列在管道模式下的处理能力
-- 测试复杂pipeline组合的特殊字符处理
+Test scenario：
+- testThrough pipelinemethodformathandlingcontainingvariable-lengthbaselinelengthofSAMsorted
+- Verifyvariable-lengthsequenceatpipelinepatternformatdownofhandlingabilityforce
+- testcomplexcomplexpipelinegenomematchofspecialspecialfieldcharacterhandling
 
-使用命令：
-1. cat {input_file} | ./bin/pbgz sort | ./bin/pbgz compress -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Usecommand：
+1. cat {input_file} | ./release-release/bin/pbgz sort | ./release-release/bin/pbgz compress -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-预期结果：
-- 管道处理成功，支持 变长CIGAR
-- 解压成功，数据完整
+Expected results：
+- pipelinehandlinggeneratesuccess，supportsupport variable-lengthCIGAR
+- decompressgeneratesuccess，datadatacompletecomplete
 """
 
 import os
@@ -60,8 +60,8 @@ class SamVariableBaseLengthFilepipeTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o - > {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
 
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -78,7 +78,7 @@ if __name__ == "__main__":
     test_case = SamVariableBaseLengthFilepipeTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultsavesaveJSONfile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

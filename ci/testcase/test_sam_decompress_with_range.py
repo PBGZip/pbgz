@@ -1,19 +1,19 @@
 """
-测试用例：SamDecompressWithRangeTest - SAM文件区域解压测试
+Test case: SamDecompressWithRangeTest - SAM file region decompression test
 
-测试场景：
-- 测试使用-p参数解压SAM压缩文件的指定染色体区域
-- 验证区域过滤功能的正确性和精确性
-- 测试基因组坐标范围查询的处理能力
+Test scenario:
+- Test using -p parameter to decompress specified chromosome region of SAM compressed files
+- Verify correctness and precision of region filtering functionality
+- Test processing capability of genomic coordinate range queries
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress -p chr3:100-200 {compressed_file} -o {decompressed_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress -p chr3:100-200 {compressed_file} -o {decompressed_file}
 
-预期结果：
-- 压缩命令执行成功
-- 区域解压命令成功，只包含chr3位置100-200的记录
-- 解压文件内容精确匹配目标区域
+Expected results:
+- Compression command executes successfully
+- Region decompression command succeeds, only containing chr3 position 100-200 records
+- Decompressed file content exactly matches target region
 """
 
 import os
@@ -39,33 +39,33 @@ class SamDecompressWithRangeTest(PBGZTestCase):
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
-        # 生成已排序的SAM文件，使用pbgz支持的格式
+        # Generate sorted SAM file, using pbgz-supported format
         sam_content = []
         sam_content.append("@HD\tVN:1.0\tSO:coordinate")
         sam_content.append("@SQ\tSN:chr1\tLN:1000000")
         sam_content.append("@SQ\tSN:chr2\tLN:1000000")
         sam_content.append("@SQ\tSN:chr3\tLN:1000000")
         
-        # 添加不同区域的reads
-        # chr1: 位置100-500范围
+        # Add reads from different regions
+        # chr1: position 100-500 range
         for pos in [100, 200, 300, 400, 500]:
             qname = f"CHR1_{pos:04d}"
             read_line = self._create_sam_line(qname, "chr1", pos)
             sam_content.append(read_line)
         
-        # chr1: 位置1000-1500范围（不在目标范围内）
+        # chr1: position 1000-1500 range (not in target range)
         for pos in [1000, 1200, 1500]:
             qname = f"CHR1_OUT_{pos:04d}"
             read_line = self._create_sam_line(qname, "chr1", pos)
             sam_content.append(read_line)
         
-        # chr2: 位置50-150范围（不同染色体）
+        # chr2: position 50-150 range (different chromosome)
         for pos in [50, 150]:
             qname = f"CHR2_{pos:04d}"
             read_line = self._create_sam_line(qname, "chr2", pos)
             sam_content.append(read_line)
         
-        # chr3: 位置100-200范围（目标区域）
+        # chr3: position 100-200 range (target region)
         for pos in [120, 180]:
             qname = f"CHR3_{pos:04d}"
             read_line = self._create_sam_line(qname, "chr3", pos)
@@ -75,14 +75,14 @@ class SamDecompressWithRangeTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        # 先压缩
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file} -i")
+        # First compress
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file} -i")
         
-        # 测试区域解压（如果pbgz支持）
-        self.add_test_command(f"./bin/pbgz decompress -p 'chr3:100-200' {self.compressed_file} -o {self.decompressed_file}")
+        # Test region decompression (if pbgz supports it)
+        self.add_test_command(f"./release-release/bin/pbgz decompress -p 'chr3:100-200' {self.compressed_file} -o {self.decompressed_file}")
 
     def _create_sam_line(self, qname, rname, pos):
-        """创建SAM记录行"""
+        """Create SAM record line"""
         flag = 0
         mapq = 60
         cigar = "30M"
@@ -105,7 +105,7 @@ class SamDecompressWithRangeTest(PBGZTestCase):
                 pass
     
     def verify_expected_results(self) -> bool:
-        # 检查命令执行情况 - 基于命令类型来判断，而不是文件存在性
+        # Check command execution - based on command type, not file existence
         compress_success = False
         decompress_success = False
         
@@ -114,13 +114,13 @@ class SamDecompressWithRangeTest(PBGZTestCase):
             success = cmd_result.get("success", False)
             file_sizes = cmd_result.get("file_sizes", {})
             
-            # 通过命令内容判断是压缩还是解压命令 - 必须先检查"decompress"避免被"compress"包含
+            # Judge by command content if it's compression or decompression command - must check "decompress" first to avoid being contained by "compress"
             if "decompress" in command and "pbgz" in command:
                 decompress_success = success
             elif "compress" in command and "pbgz" in command:
                 compress_success = success
         
-        # 验证基本功能
+        # Verify basic functionality
         if not compress_success:
             print("Compression command failed")
             return False
@@ -136,7 +136,7 @@ if __name__ == "__main__":
     test_case = SamDecompressWithRangeTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # Save JSON file for debugging results
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

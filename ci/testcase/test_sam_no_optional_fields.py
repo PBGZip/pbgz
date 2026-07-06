@@ -1,19 +1,19 @@
 """
-测试用例：SamNoOptionalFieldsTest - 最小SAM格式（无可选字段）压缩解压测试
+testtestusecase：SamNoOptionalFieldsTest - mostsmallSAMformatformat（invalidcanselectfieldfield）compresscompressdecompresscompresstesttest
 
-测试场景：
-- 测试只包含SAM格式必需字段的文件（无optional fields）的压缩解压
-- 验证pbgz处理最小SAM格式能力
-- 测试SAM格式的基本功能验证
+testtestscenarioscenario：
+- testtestonlycontainingcontainSAMformatformatmustneedfieldfieldoffilefile（invalidoptional fields）ofcompresscompressdecompresscompress
+- VerifyverifypbgzhandlemanagemostsmallSAMformatformatabilityforce
+- testtestSAMformatformatofbasebasesuccessabilityVerifyverify
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+useusecommand：
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-预期结果：
-- 压缩成功，处理最小SAM格式
-- 解压成功，11列必需字段完整保留
-- MD5校验完全一致
+Expectedexpectedresultresult：
+- compresscompressgeneratesuccess，handlemanagemostsmallSAMformatformat
+- decompresscompressgeneratesuccess，11listmustneedfieldfieldcompletecompleteensurekeep
+- MD5verifyVerifycompletefullonecause
 """
 
 import os
@@ -21,7 +21,7 @@ import sys
 import random
 import hashlib
 
-# 添加父目录到Python路径
+# AddparenttargetrecordtoPythonroadpath
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
@@ -35,18 +35,18 @@ class SamNoOptionalFieldsTest(PBGZTestCase):
         self.decompressed_file = "sam_no_optional.sam.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Returnreturntesttestfilefileinformationinformation"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
-        # 生成没有可选字段的SAM文件
+        # GenerategeneratenohavecanselectfieldfieldofSAMfilefile
         sam_content = []
         
-        # SAM文件头部
+        # SAMfilefileheaderheader
         sam_content.append("@HD\tVN:1.0\tSO:unsorted")
         sam_content.append("@SQ\tSN:ENA|ABQD01000001|ABQD01000001.1\tLN:1000000")
         
-        # 添加只有必需字段的read记录（没有NM:i:0, MD:Z:50等可选字段）
+        # Addonlyhavemustneedfieldfieldofreadrecordrecord（nohaveNM:i:0, MD:Z:50equalcanselectfieldfield）
         num_reads = 50
         for i in range(num_reads):
             qname = f"SAM_NO_OPT_{i:03d}"
@@ -60,7 +60,7 @@ class SamNoOptionalFieldsTest(PBGZTestCase):
             tlen = 0
             seq = ''.join(random.choices('ATCGN', k=30))
             qual = '!' * 30
-            # 只有必需字段，没有可选字段
+            # onlyhavemustneedfieldfield，nohavecanselectfieldfield
             read_line = f"{qname}\t{flag}\t{rname}\t{pos}\t{mapq}\t{cigar}\t{rnext}\t{pnext}\t{tlen}\t{seq}\t{qual}"
             sam_content.append(read_line)
         
@@ -70,16 +70,16 @@ class SamNoOptionalFieldsTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        # 添加压缩测试命令
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file} -r fa/ABQD01.fasta.gz"
+        # Addcompresscompresstesttestcommand
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file} -r fa/ABQD01.fasta.gz"
         self.add_test_command(compress_command)
         
-        # 添加解压测试命令
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r fa/ABQD01.fasta.gz"
+        # Adddecompresscompresstesttestcommand
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r fa/ABQD01.fasta.gz"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
-        """清理测试用例创建的临时文件"""
+        """clearmanagetesttestusecaseCreatecreateoftemporarytimefilefile"""
         files_to_clean = [self.source_file, self.compressed_file, self.decompressed_file]
         for filename in files_to_clean:
             try:
@@ -89,27 +89,27 @@ class SamNoOptionalFieldsTest(PBGZTestCase):
                 print(f"Warning: Failed to remove {filename}: {e}")
     
     def verify_expected_results(self) -> bool:
-        # 验证压缩文件是否生成
+        # VerifyverifycompresscompressfilefileiswhetherGenerategenerate
         if not os.path.exists(self.compressed_file):
             print(f"Error: Compressed file {self.compressed_file} not created")
             return False
         
-        # 验证解压文件是否生成
+        # VerifyverifydecompresscompressfilefileiswhetherGenerategenerate
         if not os.path.exists(self.decompressed_file):
             print(f"Error: Decompressed file {self.decompressed_file} not created")
             return False
         
-        # 验证压缩比是否合理
+        # Verifyverifycompresscompresscompareiswhethermatchmanage
         compression_ratio = self.get_compression_rate()
         if compression_ratio is None:
             print(f"Error: Failed to get compression ratio")
             return False
         
-        # 打印获取到的执行时间和压缩比
+        # typeprintobtaingettoofexecuteexecutiontimebetweenandcompresscompresscompare
         exec_time = self.get_execution_time()
         print(f"Verification: Compression ratio = {compression_ratio:.2f}%, Execution time = {exec_time:.2f}s")
         
-        # 对比原文件和解压文件是否一致
+        # tocompareoriginalfilefileanddecompresscompressfilefileiswhetheronecause
         with open(self.source_file, 'r') as f1, open(self.decompressed_file, 'r') as f2:
             original_content = f1.read()
             decompressed_content = f2.read()
@@ -134,7 +134,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # fordebugtestresultresultensuresaveJSONfilefile
         if not result:
             test_case.save_to_json()
         sys.exit(1)

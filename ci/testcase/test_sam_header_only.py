@@ -1,24 +1,24 @@
 """
-测试用例：SamHeaderOnlyTest - 纯Header SAM文件压缩解压测试
+Test case: SamHeaderOnlyTest - Header-only SAM file compression/decompression test
 
-测试场景：
-- 测试只包含header、没有实际记录的SAM文件处理
-- 验证pbgz对空数据体SAM文件的处理能力
-- 测试文件边界情况和最小数据集处理
+Test scenario:
+- Test SAM file processing containing only header, no actual records
+- Verify pbgz's capability to handle SAM files with empty data body
+- Test file boundary cases and minimum dataset processing
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-参数说明：
-- SAM header以@开头的元数据行
-- 测试只有header、无sequence records的极端情况
-- 验证最小数据集的压缩解压稳定性
+Parameter description:
+- SAM header lines starting with @ for metadata
+- Test extreme case with only header, no sequence records
+- Verify compression/decompression stability of minimum dataset
 
-预期结果：
-- 压缩成功，处理只有header的文件
-- 解压成功，header完整保留
-- MD5校验完全一致
+Expected results:
+- Compression succeeds, processing header-only file
+- Decompression succeeds, header completely preserved
+- MD5 verification completely matches
 """
 
 import os
@@ -26,7 +26,7 @@ import sys
 import hashlib
 from testcase.pbgz_test_framework import PBGZTestCase
 
-# 添加父目录到Python路径
+# Add parent directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -38,11 +38,11 @@ class SamHeaderOnlyTest(PBGZTestCase):
         self.decompressed_file = "sam_header_only.sam.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
-        # 生成只有头部的SAM文件
+        # Generate header-only SAM file
         sam_content = []
         sam_content.append("@HD\tVN:1.0\tSO:unsorted")
         sam_content.append("@SQ\tSN:ref1\tLN:1000")
@@ -53,8 +53,8 @@ class SamHeaderOnlyTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
     
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     test_case = SamHeaderOnlyTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # Save JSON file for debugging results
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

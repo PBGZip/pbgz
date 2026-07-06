@@ -1,39 +1,39 @@
 """
-测试用例：SamMixedOptionalFieldsTest - 混合可选字段SAM文件压缩解压测试
+testtestusecase：SamMixedOptionalFieldsTest - mixmatchcanselectfieldfieldSAMfilefilecompresscompressdecompresscompresstesttest
 
-测试场景：
-- 测试SAM文件中包含混合可选字段（部分记录有，部分记录没有）
-- 验证pbgz对可选字段处理的一致性
-- 测试数据格式灵活性
+testtestscenarioscenario：
+- testtestSAMfilefileincontainingcontainmixmatchcanselectfieldfield（headerdividerecordrecordhave，headerdividerecordrecordnohave）
+- Verifyverifypbgztocanselectfieldfieldhandlemanageofonecausequality
+- testtestdatadataformatformatflexibleactivequality
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+useusecommand：
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-预期结果：
-- 压缩成功，正确处理混合可选字段
-- 解压成功，可选字段完整保留
-- MD5校验完全一致
+Expectedexpectedresultresult：
+- compresscompressgeneratesuccess，correctaccuratehandlemanagemixmatchcanselectfieldfield
+- decompresscompressgeneratesuccess，canselectfieldfieldcompletecompleteensurekeep
+- MD5verifyVerifycompletefullonecause
 """
 
 import sys
 import random
 import hashlib
 
-# 添加父目录到Python路径
+# AddparenttargetrecordtoPythonroadpath
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
 import random
 import hashlib
-# 添加父目录到Python路径
+# AddparenttargetrecordtoPythonroadpath
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from testcase.pbgz_test_framework import PBGZTestCase
-# 有重复sys.path.insert，需要修复一下结构，但先继续处理其他文件
-# 添加父目录到Python路径
+# haveheavycomplexsys.path.insert，needwantrepaircomplexonedownresultstructure，butfirstcontinuecontinuehandlemanageitsotherfilefile
+# AddparenttargetrecordtoPythonroadpath
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -64,7 +64,7 @@ class SamMixedOptionalFieldsTest(PBGZTestCase):
             tlen = 0
             seq = ''.join(random.choices('ATCGN', k=25))
             qual = '!' * 25
-            # 混合可选字段
+            # mixmatchcanselectfieldfield
             if i % 3 == 0:
                 read_line = f"{qname}\t{flag}\t{rname}\t{pos}\t{mapq}\t{cigar}\t{rnext}\t{pnext}\t{tlen}\t{seq}\t{qual}"
             elif i % 3 == 1:
@@ -77,8 +77,8 @@ class SamMixedOptionalFieldsTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
     
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     test_case = SamMixedOptionalFieldsTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # foradjusttestresultresultensuresaveJSONfilefile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

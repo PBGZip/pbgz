@@ -1,14 +1,14 @@
 """
-测试用例：Sam Illegal Fields
+Test case: Sam Illegal Fields
 
-测试场景：
-- 测试pbgz的Sam Illegal Fields功能
-- 验证相关命令的正确执行
-- 确保数据完整性
+Test scenario：
+- Test pbgz's Sam Illegal Fields functionality
+- VerifymutualrelatedcommandofcorrectEnsureexecuteexecution
+- Ensuredatadatacompletecompletequality
 
-预期结果：
-- 测试命令执行成功
-- 数据完整性验证通过
+Expected results：
+- Testcommandexecuteexecutiongeneratefunction
+- datadatacompletecompletequalityVerifyThroughthrough
 """ 
 
 import os
@@ -16,7 +16,7 @@ import sys
 import random
 import hashlib
 from testcase.pbgz_test_framework import PBGZTestCase
-# 添加父目录到Python路径
+# AddaddparenttargetrecordtoPythonroadpath
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class SamIllegalFieldsTest(PBGZTestCase):
@@ -34,7 +34,7 @@ class SamIllegalFieldsTest(PBGZTestCase):
         sam_content.append("@HD\tVN:1.0\tSO:unsorted")
         sam_content.append("@SQ\tSN:ENA|ABQD01000001|ABQD01000001.1\tLN:1000000")
         
-        # 添加一些有非法字段的reads
+        # Addaddonesomehaveillegalfieldofreads
         for i in range(5):
             qname = f"ILLEGAL_{i:03d}"
             flag = 0
@@ -45,8 +45,8 @@ class SamIllegalFieldsTest(PBGZTestCase):
             rnext = "*"
             pnext = 0
             tlen = 0
-            # 使用一些不标准的碱基
-            seq = 'ATCG' + 'N' * 21  # 大量N碱基
+            # Useonesomenotstandardstandardofbasebase
+            seq = 'ATCG' + 'N' * 21  # largequantityNbasebase
             qual = '!' * 25
             read_line = f"{qname}\t{flag}\t{rname}\t{pos}\t{mapq}\t{cigar}\t{rnext}\t{pnext}\t{tlen}\t{seq}\t{qual}"
             sam_content.append(read_line)
@@ -55,8 +55,8 @@ class SamIllegalFieldsTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}")
-        self.add_test_command(f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}")
+        self.add_test_command(f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}")
     
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.decompressed_file]:
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     test_case = SamIllegalFieldsTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # fordebugtestresultresultensuresaveJSONfile
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

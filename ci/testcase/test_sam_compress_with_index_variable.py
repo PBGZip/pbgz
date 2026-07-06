@@ -1,19 +1,19 @@
 """
-测试用例：SamCompressWithIndexVariableTest - 有序变长SAM文件索引生成测试
+Test case: SamCompressWithIndexVariableTest - Index generation test for ordered variable-length SAM files
 
-测试场景：
-- 测试包含变长序列的有序SAM文件能够成功生成索引文件
-- 验证有序数据与索引创建的协同工作
-- 测试变量长度序列的索引处理
+Test scenario:
+- Test that ordered SAM files containing variable-length sequences can successfully generate index files
+- Verify coordination between ordered data and index creation
+- Test index processing for variable-length sequences
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz index -f {compressed_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz index -f {compressed_file}
 
-预期结果：
-- 压缩成功
-- 索引文件成功生成且不为空
-- 索引文件格式正确（每行5个tab分隔字段）
+Expected results:
+- Compression succeeds
+- Index file successfully generated and not empty
+- Index file format is correct (5 tab-separated fields per line)
 """
 
 import sys
@@ -37,7 +37,7 @@ class SamCompressWithIndexVariableTest(PBGZTestCase):
 
     def prepare_data(self):
         sam_content = []
-        sam_content.append("@HD\tVN:1.0\tSO:coordinate")  # 修改为有序
+        sam_content.append("@HD\tVN:1.0\tSO:coordinate")  # Change to ordered
         sam_content.append("@SQ\tSN:ENA|ABQD01000001|ABQD01000001.1\tLN:1000000")
         
         base_lengths = [15, 20, 25, 30, 35]
@@ -45,7 +45,7 @@ class SamCompressWithIndexVariableTest(PBGZTestCase):
             qname = f"INDEX_VAR_{i:03d}"
             flag = 0
             rname = "ENA|ABQD01000001|ABQD01000001.1"
-            pos = (i + 1) * 700  # 位置递增，确保有序
+            pos = (i + 1) * 700  # Position increasing, ensuring ordered
             mapq = 60
             cigar = f"{base_len}M"
             rnext = "*"
@@ -60,10 +60,10 @@ class SamCompressWithIndexVariableTest(PBGZTestCase):
             for line in sam_content:
                 f.write(line + '\n')
         
-        self.add_test_command(f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}")
-        # 有序文件应该能够成功生成索引文件
-        self.add_test_command(f"./bin/pbgz index -f {self.compressed_file}")
-
+        self.add_test_command(f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}")
+        # Ordered files should be able to successfully generate index files
+        self.add_test_command(f"./release-release/bin/pbgz index -f {self.compressed_file}")
+    
     def cleanup_test_data(self):
         for filename in [self.source_file, self.compressed_file, self.index_file]:
             try:
@@ -73,7 +73,7 @@ class SamCompressWithIndexVariableTest(PBGZTestCase):
                 pass
     
     def verify_expected_results(self) -> bool:
-        # 检查命令执行结果
+        # Check command execution results
         compress_success = False
         index_success = False
         
@@ -81,7 +81,7 @@ class SamCompressWithIndexVariableTest(PBGZTestCase):
             command = cmd_result.get("command", "")
             success = cmd_result.get("success", False)
             
-            # 基于命令类型精确判断，避免字符串包含问题
+            # Precise judgment based on command type, avoiding string inclusion issues
             parts = command.split()
             if len(parts) >= 2:
                 main_cmd = parts[1]
@@ -91,22 +91,22 @@ class SamCompressWithIndexVariableTest(PBGZTestCase):
                 elif main_cmd == "compress":
                     compress_success = success
         
-        # 压缩必须成功
+        # Compression must succeed
         if not compress_success:
             print("Compression command failed")
             return False
         
-        # 压缩文件必须存在
+        # Compressed file must exist
         if not os.path.exists(self.compressed_file):
             print(f"Compressed file {self.compressed_file} not found")
             return False
         
-        # 对于有序SAM文件，我们期望索引命令成功
+        # For ordered SAM files, we expect index command to succeed
         if not index_success:
             print("Index command failed - ordered SAM should be able to generate index")
             return False
         
-        # 索引文件必须存在且不为空
+        # Index file must exist and not be empty
         if not os.path.exists(self.index_file):
             print(f"Index file {self.index_file} not created")
             return False
@@ -115,7 +115,7 @@ class SamCompressWithIndexVariableTest(PBGZTestCase):
             print(f"Index file {self.index_file} is empty")
             return False
         
-        # 验证索引文件格式：每行5个tab分隔字段
+        # Verify index file format: 5 tab-separated fields per line
         try:
             with open(self.index_file, 'r') as f:
                 for line_num, line in enumerate(f, 1):
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     test_case = SamCompressWithIndexVariableTest()
     result = test_case.execute()
     test_case.print_results()
-    # 为调试结果保存JSON文件
+    # Save JSON file for debugging results
     if not result:
         test_case.save_to_json()
     sys.exit(0 if result else 1)

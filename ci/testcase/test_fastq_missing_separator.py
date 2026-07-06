@@ -1,24 +1,24 @@
 """
-测试用例：FastqMissingSeparatorTest - FASTQ文件缺失分隔符处理测试
+Test case: FastqMissingSeparatorTest - FASTQ file missing separator handling test
 
-测试场景：
-- 测试FASTQ文件中缺少必需分隔符（@或+）的情况
-- 验证pbgz对不完整FASTQ格式的容错能力
-- 测试格式完整性检查
+Test scenario:
+- Test FASTQ files missing required separators (@ or +)
+- Verify pbgz's fault tolerance for incomplete FASTQ formats
+- Test format integrity checking
 
-使用命令：
-1. ./bin/pbgz compress {source_file} -o {compressed_file}
-2. ./bin/pbgz decompress {compressed_file} -o {decompressed_file}
+Commands used:
+1. ./release-release/bin/pbgz compress {source_file} -o {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file}
 
-参数说明：
-- FASTQ格式要求严格的@和+分隔符
-- 测试缺失分隔符的边界情况
-- 验证数据完整性保护机制
+Parameter description:
+- FASTQ format requires strict @ and + separators
+- Test border cases with missing separators
+- Verify data integrity protection mechanism
 
-预期结果：
-- 压缩成功，处理格式异常
-- 解压成功，保留有效数据
-- MD5校验一致
+Expected results:
+- Compression succeeds, handling format exceptions
+- Decompression succeeds, preserving valid data
+- MD5 verification matches
 """
 
 import os
@@ -40,7 +40,7 @@ class FastqMissingSeparatorTest(PBGZTestCase):
         self.decompressed_file = "missing_separator_test.fq.dec"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
@@ -65,10 +65,10 @@ class FastqMissingSeparatorTest(PBGZTestCase):
             f.write(full_content)
         
         
-        compress_command = f"./bin/pbgz compress {self.source_file} -o {self.compressed_file}"
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o {self.compressed_file}"
         self.add_test_command(compress_command)
         
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file}"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
@@ -120,7 +120,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)

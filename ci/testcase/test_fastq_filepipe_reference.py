@@ -1,20 +1,20 @@
 """
-测试用例：FastqFilepipeReferenceTest - FASTQ文件管道压缩解压测试（带参考基因组）
+Test case: FastqFilepipeReferenceTest - FASTQ file pipe compression/decompression test (with reference genome)
 
-测试场景：
-- 测试FASTQ文件通过管道方式进行压缩和解压（带参考基因组优化）
-- 验证管道模式与参考基因组优化的组合
-- 测试FASTQ格式匹配数据的压缩效果
+Test scenario:
+- Test FASTQ file compression and decompression via pipe method (with reference genome optimization)
+- Verify combination of pipe mode and reference genome optimization
+- Test compression effect of FASTQ format matching data
 
-使用命令：
-1. cat {source_file} | ./bin/pbgz compress -o {compressed_file} -r {reference_file}
-2. ./bin/pbgz decompress {compressed_file} -r {reference_file} | cat > {decompressed_file}
+Commands used:
+1. cat {source_file} | ./release-release/bin/pbgz compress -o - > {compressed_file}
+2. ./release-release/bin/pbgz decompress {compressed_file} -o {decompressed_file} -r {reference_file}
 
-预期结果：
-- 管道压缩解压成功
-- 参考基因组优化生效，压缩率提升
-- FASTQ格式完整保留
-- 解压后文件MD5与原始文件完全一致
+Expected results:
+- Pipe compression/decompression succeeds
+- Reference genome optimization takes effect, compression ratio improved
+- FASTQ format completely preserved
+- Decompressed file MD5 matches original file completely
 """
 
 import os
@@ -37,7 +37,7 @@ class FastqFilepipeReferenceTest(PBGZTestCase):
         self.reference_file = "fa/GCA_000002985.3.fasta.gz"
 
     def get_test_files(self) -> tuple:
-        """返回测试文件信息"""
+        """Return test file information"""
         return (self.source_file, self.compressed_file, self.decompressed_file)
 
     def prepare_data(self):
@@ -65,10 +65,10 @@ class FastqFilepipeReferenceTest(PBGZTestCase):
         
 
         
-        compress_command = f"./bin/pbgz compress {self.source_file} -o - > {self.compressed_file} -r {self.reference_file}"
+        compress_command = f"./release-release/bin/pbgz compress {self.source_file} -o - > {self.compressed_file} -r {self.reference_file}"
         self.add_test_command(compress_command)
         
-        decompress_command = f"./bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}"
+        decompress_command = f"./release-release/bin/pbgz decompress {self.compressed_file} -o {self.decompressed_file} -r {self.reference_file}"
         self.add_test_command(decompress_command)
     
     def cleanup_test_data(self):
@@ -124,7 +124,7 @@ if __name__ == "__main__":
         print("\nTest passed successfully!")
     else:
         print("\nTest failed!")
-        # 为调试结果保存JSON文件
+        # Save JSON file for debugging results
         if not result:
             test_case.save_to_json()
         sys.exit(1)
