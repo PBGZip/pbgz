@@ -55,6 +55,7 @@ namespace {
             case 8: return StatObjectId::SAM_TLEN;
             case 9: return StatObjectId::SAM_SEQ;
             case 10: return StatObjectId::SAM_QUAL;
+            case 11: return StatObjectId::SAM_OPTION;
             default: return 0;
         }
     }
@@ -620,7 +621,7 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 11: // Optional fields
-                 fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
         }
 
@@ -672,59 +673,56 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
 
     // Process each split symbol (similar to FastqActuator)
     for (uint32_t i = 0; i < idSplitSymbols.size(); ++i) {
-        std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-        std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
-        uint32_t srcLength = 0;
-        // Process each line and compress the specific split segment
         std::vector<uint32_t>& npos = inBlockPtr->getNpos();
-        uint32_t lineNum = npos.size();
-        uint8_t* buffer = inBlockPtr->getBuffer();
-        
-        for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
-            uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
-            uint8_t* line = buffer + lineStart;
-            
-            // Skip header lines (starting with @)
-            if (*line == '@') {
-                continue;
-            }
-            
-            // Extract the specific split segment for this symbol
+        bool idDigit = false;
+        if (idSplitMaxLen[i] != idSplitMinLen[i]) {
             uint8_t* segmentStart = nullptr;
             uint32_t segmentLength = 0;
-            uint32_t contentId = lineIdx - headEndLine;
-            
+            uint32_t contentId = 0;
+            uint32_t lineIdx = headEndLine;
+            uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+            uint8_t* line = inBlockPtr->getBuffer() + lineStart;
+
             if (i == 0) {
                 segmentStart = line;
-                segmentLength = idSplitPos[contentId][0] + 1; 
+                segmentLength = idSplitPos[contentId][0] + 1;
             } else {
                 uint32_t prevPos = idSplitPos[contentId][i-1];
                 uint32_t currPos = idSplitPos[contentId][i];
-                segmentStart = line + prevPos + 1; 
+                segmentStart = line + prevPos + 1;
                 segmentLength = currPos - prevPos;
             }
 
-            // Encode the segment data
-            if (segmentLength > 0) {
-                idCoder->encode_line(segmentStart, segmentLength);
-                srcLength += segmentLength;
+            idDigit = true;
+            for (uint32_t j = 0; j < segmentLength; ++j) {
+                if ((segmentStart[j] & 0xF0) != 0x30) {
+                    idDigit = false;
+                    break;
+                }
             }
         }
-        
-        // Flush the encoder for this segment
-        idCoder->encode_flush();
-        
-        // Update output block data length
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idIo->data_len);
-        
-        // Create metadata for this stream (similar to FastqActuator)
-        Json::Value tmpMeta;
-        tmpMeta["srclen"] = srcLength;
-        tmpMeta["dstlen"] = idIo->data_len;
-        tmpMeta["coder"] = idIo->meta;
-        tmpMeta["splitidx"] = i; // Index of split symbol
-        
-        streamMeta.append(tmpMeta);
+
+        uint32_t srcLength = 0;
+        std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        if (idDigit) {
+            // Use coder_bwt_cm for all digits and variable length
+            LOG_DEBUG("All digit, use coder_bwt_cm");
+            std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
+            int32_t ret = compressIdStream<coder_bwt_cm>(idIo.get(), idCoder.get(), streamMeta, srcLength, i);
+            if (ret != 0) {
+                LOG_ERROR("Failed to compress ID stream, splitid = %d", i);
+                return -1;
+            }
+        } else {
+            // Use coder_affix_match for fixed length or not all digits
+            LOG_DEBUG("Fixed length or not all digits, use coder_affix_match");
+            std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
+            int32_t ret = compressIdStream<coder_affix_match>(idIo.get(), idCoder.get(), streamMeta, srcLength, i);
+            if (ret != 0) {
+                LOG_ERROR("Failed to compress ID stream, splitid = %d", i);
+                return -1;
+            }
+        }
         totalSrcLength += srcLength;
         totalDstLength += idIo->data_len;
     }
@@ -744,6 +742,60 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
     return totalDstLength;
 }
 
+template<typename TCoder>
+int32_t SamCodecActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Json::Value& streamMeta, uint32_t& srcDataLen, int32_t splitSymIdx) {
+    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+    srcDataLen = 0;
+
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        uint8_t* line = buffer + lineStart;
+        // Skip header lines (starting with @)
+        if (*line == '@') {
+            continue;
+        }
+
+        // Extract the specific split segment for this symbol
+        uint8_t* segmentStart = nullptr;
+        uint32_t segmentLength = 0;
+        uint32_t contentId = lineIdx - headEndLine;
+
+        if (splitSymIdx == 0) {
+            segmentStart = line;
+            segmentLength = idSplitPos[contentId][0] + 1;
+        } else {
+            uint32_t prevPos = idSplitPos[contentId][splitSymIdx - 1];
+            uint32_t currPos = idSplitPos[contentId][splitSymIdx];
+            segmentStart = line + prevPos + 1;
+            segmentLength = currPos - prevPos;
+        }
+
+        // Encode the segment data
+        if (segmentLength > 0) {
+            idCoder->encode_line(segmentStart, segmentLength);
+            srcDataLen += segmentLength;
+        }
+    }
+
+    // Flush the encoder for this segment
+    idCoder->encode_flush();
+
+    // Update output block data length
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idIo->data_len);
+
+    // Create metadata for this stream (similar to FastqActuator)
+    Json::Value tmpMeta;
+    tmpMeta["srclen"] = srcDataLen;
+    tmpMeta["dstlen"] = idIo->data_len;
+    tmpMeta["coder"] = idIo->meta;
+    tmpMeta["splitidx"] = splitSymIdx; // Index of split symbol
+
+    streamMeta.append(tmpMeta);
+    return 0;
+}
+
 int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
@@ -754,7 +806,6 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
     std::shared_ptr<coder_bwt_cm> fieldCoder = std::make_shared<coder_bwt_cm>(fieldIo.get());
     
     fieldSrcLen = 0;
-    
     // Process each line and compress ID field as whole
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
