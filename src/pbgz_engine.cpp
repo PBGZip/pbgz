@@ -25,7 +25,9 @@
 #include "utils/timer.h"
 #include "log/logger.h"
 #include "utils/path_util.h"
+#ifdef __SSE4_2__
 #include "hardware.h"
+#endif
 #include "coder.h"
 #include "pbgz_manager.h"
 #include "config_manager.h"
@@ -217,7 +219,7 @@ int32_t PbgzEngine::start() {
         return ret;
     }
 
-    ret =startReadTask();
+    ret = startReadTask();
     if (ret != 0) {
         LOG_ERROR("call startReadTask failed, ret = %d", ret);
 
