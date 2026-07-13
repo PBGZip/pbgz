@@ -40,6 +40,8 @@
 #include <random>
 #include <compress_engine.h>
 #include <decompress_engine.h>
+#include "pbgz_index.h"
+#include "sam_info.h"
 
 namespace SamDecompressData {
     const std::string testSamFile = "test.sam";
@@ -93,6 +95,12 @@ public:
         std::remove("test_field_missing.sam");
         std::remove("test_mixed.sam");
         std::remove("test_large.sam");
+        
+        // Clear global singletons to avoid cross-test contamination
+        SamIndex::getInstance().clear();
+        // BlockPosition::getInstance().getBlockPosition().clear(); // Can't clear const reference
+        SamInfo::getInstance().clearChromosomeInfo();
+        SamInfo::getInstance().resetChrIdCounter();
 	}
 
     void loadSamData(const std::string& filename) {
@@ -467,8 +475,8 @@ public:
         // Create compressor
         Reference ref = createTestReference();
         PbgzParameter para;
-        DecompressEngine engine(para);
-        SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+        CompressEngine compressEngine(para);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &compressEngine, &ref);
         ASSERT_EQ(compressor.preAnalysis(), 0);
         ASSERT_EQ(compressor.compress(), 0);
 
@@ -482,7 +490,8 @@ public:
         pOutBlock->reset();
 
         // Use these two blocks for decompression, only need to verify decompression return code
-        SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+        DecompressEngine decompressEngine(para);
+        SamCodecActuator decompressor(pInBlock, pOutBlock, &decompressEngine, &ref);
 
         int32_t ret = decompressor.decompress();
         std::remove(inputFile.c_str());

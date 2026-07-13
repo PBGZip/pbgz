@@ -124,6 +124,10 @@ private:
     // ID field whole compression
     int32_t compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
 
+    // ID stream compression
+    template <typename TCoder>
+    int32_t compressIdStream(coder_io* idIo, TCoder* idCoder, Json::Value& streamMeta, uint32_t& srcDataLen, int32_t splitSymIdx);
+
     // Regular field compression
     int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
 

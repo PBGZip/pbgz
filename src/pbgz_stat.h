@@ -181,6 +181,7 @@ namespace StatObjectId {
     const uint16_t SAM_TLEN = 13;
     const uint16_t SAM_SEQ = 14;
     const uint16_t SAM_QUAL = 15;
+    const uint16_t SAM_OPTION = 16;
 }
 
 namespace StatObjectNames {
@@ -203,6 +204,7 @@ namespace StatObjectNames {
         const std::string TLEN = "TLEN";
         const std::string SEQ = "SEQ";
         const std::string QUAL = "QUAL";
+        const std::string OPTION = "OPTION";
     }
 }
 

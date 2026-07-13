@@ -299,6 +299,7 @@ int SamStat::init() {
     addStatObject(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_TLEN, StatObjectNames::Sam::TLEN);
     addStatObject(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_SEQ, StatObjectNames::Sam::SEQ);
     addStatObject(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QUAL, StatObjectNames::Sam::QUAL);
+    addStatObject(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_OPTION, StatObjectNames::Sam::OPTION);
     
     return 0;
 }

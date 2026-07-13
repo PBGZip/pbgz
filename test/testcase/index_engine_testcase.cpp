@@ -19,9 +19,15 @@ public:
         : IndexEngine(para) {
         freeOutputPool = std::make_unique<MockBlockingQueue>(blockSz);
         outputDataPool = std::make_unique<MockBlockingQueue>(blockSz);
+        tempFile = "./test_mock_input.txt";
+        std::ofstream ofs(tempFile);
+        ofs << "";
+        ofs.close();
     }
 
     int32_t init(const std::string& outputFile) {
+        ioReader = MemoryUtil::safeNewClass<FileReader>(tempFile);
+        ioReader->openIO();
         ioWriter = MemoryUtil::safeNewClass<FileWriter>(outputFile);
         ioWriter->openIO();
         ((MockBlockingQueue*)freeOutputPool.get())->setIOWriter(ioWriter);
@@ -30,18 +36,27 @@ public:
     }
 
     void finish() {
-        ioWriter->closeIO();
+        if (ioReader) {
+            ioReader->closeIO();
+        }
+        if (ioWriter) {
+            ioWriter->closeIO();
+        }
+        std::filesystem::remove(tempFile);
     }
 
     virtual ~MockIndexEngine(){
+        MemoryUtil::safeDeleteClass(ioReader);
         MemoryUtil::safeDeleteClass(ioWriter);
     }
+
+    std::string tempFile;
 };
 
 class IndexEngineTest : public ::testing::Test {
 public:
     void SetUp() override {
-        tempOutputFile = "/tmp/test_index_output.txt";
+        tempOutputFile = "./test_index_output.txt";
         SamInfo::getInstance().clearChromosomeInfo();
         SamInfo::getInstance().addChromosomeInfo("chr1", 1000000);
         SamInfo::getInstance().addChromosomeInfo("chr2", 1000000);
@@ -78,7 +93,9 @@ TEST_F(IndexEngineTest, StartEnginePostProc_WithSingleBlock_Succeeds) {
     para.threadNum = 1;
 
     MockIndexEngine engine(para);
-    engine.init(tempOutputFile);
+    int32_t initResult = engine.init(tempOutputFile);
+    EXPECT_EQ(0, initResult);
+    
     engine.blockCount = 1;
 
     // Add index data for block 0
@@ -103,8 +120,8 @@ TEST_F(IndexEngineTest, StartEnginePostProc_WithSingleBlock_Succeeds) {
 
     EXPECT_EQ(2, lines.size());
     // Lines should be sorted by blockId first (all block 0), then chrIndex, then position
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("2\t2000\t3\t0", lines[1]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("2\t2000\t3\t0\t0", lines[1]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_WithMultipleBlocks_Succeeds) {
@@ -141,11 +158,11 @@ TEST_F(IndexEngineTest, StartEnginePostProc_WithMultipleBlocks_Succeeds) {
 
     EXPECT_EQ(5, lines.size());
     // Sorted: blockId, then chrIndex, then referenceMapPos
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("2\t2000\t3\t0", lines[1]);
-    EXPECT_EQ("1\t5000\t8\t1", lines[2]);
-    EXPECT_EQ("2\t6000\t2\t1", lines[3]);
-    EXPECT_EQ("3\t7000\t15\t2", lines[4]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("2\t2000\t3\t0\t0", lines[1]);
+    EXPECT_EQ("1\t5000\t8\t1\t0", lines[2]);
+    EXPECT_EQ("2\t6000\t2\t1\t0", lines[3]);
+    EXPECT_EQ("3\t7000\t15\t2\t0", lines[4]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockDifferentChromosomes_SortingWorks) {
@@ -179,9 +196,9 @@ TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockDifferentChromosomes_Sortin
     file.close();
 
     EXPECT_EQ(3, lines.size());
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("2\t2000\t3\t0", lines[1]);
-    EXPECT_EQ("3\t3000\t4\t0", lines[2]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("2\t2000\t3\t0\t0", lines[1]);
+    EXPECT_EQ("3\t3000\t4\t0\t0", lines[2]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockSameChromosome_SortingWorks) {
@@ -215,9 +232,9 @@ TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockSameChromosome_SortingWorks
     file.close();
 
     EXPECT_EQ(3, lines.size());
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("1\t2000\t3\t0", lines[1]);
-    EXPECT_EQ("1\t3000\t4\t0", lines[2]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("1\t2000\t3\t0\t0", lines[1]);
+    EXPECT_EQ("1\t3000\t4\t0\t0", lines[2]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_OutputWrittenToFile_Success) {
@@ -252,7 +269,7 @@ TEST_F(IndexEngineTest, StartEnginePostProc_OutputWrittenToFile_Success) {
     file.close();
 
     // Content should contain the expected format with tabs and newlines
-    EXPECT_NE(std::string::npos, content.find("1\t1000\t5\t0"));
-    EXPECT_NE(std::string::npos, content.find("2\t2000\t3\t0"));
-}
+    EXPECT_NE(std::string::npos, content.find("1\t1000\t5\t0\t0"));
+    EXPECT_NE(std::string::npos, content.find("2\t2000\t3\t0\t0"));
+ }
 
