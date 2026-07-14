@@ -417,3 +417,13 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
 
     return pActuator;
 }
+
+int32_t DecompressEngine::startEnginePostProc() {
+    if (parameter.isRemoveOriginFile) {
+        std::string indexFileName = parameter.inputFile + ".pbgzi";
+        LOG_DEBUG("Remove origin file : %s.", indexFileName.c_str());
+        PathUtil::removeFile(indexFileName);
+    }
+
+    return CodecEngine::startEnginePostProc();
+}
