@@ -65,7 +65,7 @@ private:
 
     bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
 
-    void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
+    void printFastaFileNotMatchInfo(const Json::Value& metaRefe); 
 
     virtual Reference* getReference() override { return pRefGene; }
 

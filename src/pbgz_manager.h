@@ -65,6 +65,12 @@ public:
 
     void printTailInfo(Timer costTime, bool isPrintRatio);
 
+    // Add output file to manage list, will be cleaned up on failure
+    void addOutputFile(const std::string& fileName);
+    
+    // Clean up all output files that were marked for cleanup
+    void cleanupOutputFiles();
+
     void printBufferContent(uint8_t* buffer, uint32_t bufferLen) {
         char temp[2048 + 1] = {0};
         bufferLen = std::min<uint32_t>(bufferLen, 2048);
