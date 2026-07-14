@@ -76,7 +76,7 @@ void ConfigManager::init(PbgzParameter& para) {
         break;
     }
     
-    if (logFile.empty()) {
+    if (para.logFile.empty()) {
         logAppender = LogAppender::CONSOLE;
     } else {
         logAppender = LogAppender::FILE;
