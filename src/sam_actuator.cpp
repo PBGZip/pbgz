@@ -239,16 +239,66 @@ int32_t SamCodecActuator::preAnalysis() {
                     size_t pos = line.find("UR:");
                     if (pos != std::string::npos) {
                         pos += 3;
-                        size_t endPos = line.find("\t", pos);
+                        size_t endPos = std::string::npos;
+                        
+                        // Find the next known field tag to determine the end of UR field
+                        // Common SQ field tags: sp, AS, M5, | |
+                        // We search for patterns like \tA: or \tM: or similar to identify the next field
+                        static const char* knownTags[] = {"\tAS:", "\tM5:", "\tSP:", "\tUR:", "\tMD:"};
+                        
+                        for (const char* tag : knownTags) {
+                            size_t tagPos = line.find(tag, pos);
+                            if (tagPos != std::string::npos) {
+                                // This might be the next field
+                                size_t separatorPos = line.find_last_of(" \t", tagPos);
+                                if (separatorPos != std::string::npos && separatorPos > pos) {
+                                    // Check if between separator and tag there's only whitespace
+                                    bool isRealSeparator = true;
+                                    for (size_t i = separatorPos + 1; i < tagPos; i++) {
+                                        if (line[i] != ' ' && line[i] != '\t') {
+                                            isRealSeparator = false;
+                                            break;
+                                        }
+                                    }
+                                    if (isRealSeparator) {
+                                        // This is a valid separator for the UR field
+                                        if (endPos == std::string::npos || separatorPos < endPos) {
+                                            endPos = separatorPos;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
                         if (endPos == std::string::npos) {
+                            // No valid separator found, use end of line
                             endPos = line.length();
                         }
+                        
                         std::string refFilePath = line.substr(pos, endPos - pos);
+                        // Trim leading spaces
+                        size_t startSpace = refFilePath.find_first_not_of(" \t");
+                        if (startSpace != std::string::npos) {
+                            refFilePath = refFilePath.substr(startSpace);
+                        }
+                        // Trim trailing spaces
+                        size_t endSpace = refFilePath.find_last_not_of(" \t");
+                        if (endSpace != std::string::npos) {
+                            refFilePath = refFilePath.substr(0, endSpace + 1);
+                        } else {
+                            refFilePath = refFilePath.substr(0, refFilePath.length()); // clear if empty
+                        }
+                        
                         // Parse filename from refFilePath, compatible with local and network paths
                         std::string refFileName;
                         size_t lastSlash = refFilePath.find_last_of("/\\");
                         if (lastSlash != std::string::npos) {
                             refFileName = refFilePath.substr(lastSlash + 1);
+                            // Also trim trailing characters from the filename in case of mixed separators
+                            size_t fileNameEnd = refFileName.find_first_of(" \t");
+                            if (fileNameEnd != std::string::npos) {
+                                refFileName = refFileName.substr(0, fileNameEnd);
+                            }
                         } else {
                             refFileName = refFilePath;
                         }
@@ -256,7 +306,7 @@ int32_t SamCodecActuator::preAnalysis() {
                         LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
                         if (pRefeGene != nullptr) {
                             std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
-                            if (refFileName != inputFastq) {
+                            if (refFileName.find(inputFastq) != 0) {
                                 fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s. \n", refFileName.c_str(), inputFastq.c_str());
                                 isCheckUR = true;
                             }
@@ -307,7 +357,7 @@ int32_t SamCodecActuator::preAnalysis() {
                                     if (PathUtil::isGzFile(pRefeGene->getFastaFileName())) {
                                         inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
                                     }
-                                    if (refGeneName != inputFastq) {
+                                    if (refGeneName.find(inputFastq) != 0) {
                                         fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s \n", refGeneName.c_str(), inputFastq.c_str());
                                         isCheckPG = true;
                                     }
