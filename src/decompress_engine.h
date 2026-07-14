@@ -56,6 +56,8 @@ protected:
 
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
+    virtual int32_t startEnginePostProc() override;
+
 private:
     bool initRefGene(PbgzBlockReader* blockReader);
 

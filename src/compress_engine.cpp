@@ -335,7 +335,7 @@ int32_t CompressEngine::startEnginePostProc() {
         }
     }
     
-    return CodecEngine::engineStartAfterProc();
+    return CodecEngine::startEnginePostProc();
 }
 
 void CompressEngine::setDataBlockPosition(uint32_t blockId) {

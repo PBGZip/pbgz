@@ -71,8 +71,9 @@ protected:
         return actuator;
     }
 
-    virtual int32_t engineStartAfterProc() {
+    virtual int32_t startEnginePostProc() override {
         if (parameter.isRemoveOriginFile) {
+            LOG_DEBUG("Remove origin file : %s.", parameter.inputFile.c_str());
             PathUtil::removeFile(parameter.inputFile);
         }
 
