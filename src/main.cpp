@@ -307,6 +307,10 @@ public:
         }
 
         int32_t ret = engine->start();
+        if (ret != 0) {
+            // Engine start failed, clean up created files
+            PbgzManager::getInstance().exitProc(ret, "pbgz start failed");
+        }
         return ret;
     }
 };
@@ -372,6 +376,10 @@ public:
         }
         
         int32_t ret = engine->start();
+        if (ret != 0) {
+            // Engine start failed, clean up created files
+            PbgzManager::getInstance().exitProc(ret, "pbgz start failed");
+        }
         return ret;
     }
 };
@@ -439,7 +447,12 @@ public:
         if (engine->init() != 0) {
             return -1;
         }
-        return engine->start();
+        int32_t ret = engine->start();
+        if (ret != 0) {
+            // Engine start failed, clean up created files
+            PbgzManager::getInstance().exitProc(ret, "pbgz start failed");
+        }
+        return ret;
     }
 };
 
@@ -498,7 +511,12 @@ public:
         if (engine->init() != 0) {
             return -1;
         }
-        return engine->start();
+        int32_t ret = engine->start();
+        if (ret != 0) {
+            // Engine start failed, clean up created files
+            PbgzManager::getInstance().exitProc(ret, "pbgz start failed");
+        }
+        return ret;
     }
 } ;
 
