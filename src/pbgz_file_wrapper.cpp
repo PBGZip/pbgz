@@ -91,7 +91,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return -1; // File read error
     }   
     // Unserialize version
-    fileHeader.setVersion(pReadBuffer + PBGZ_FILE_MAGIC_LENGTH, PBGZ_FILE_VERSION_LENGTH);
+    fileHeader.setVersion(pReadBuffer, PBGZ_FILE_VERSION_LENGTH);
     
     // Read file header extension part
     readLen = ioReader->readIO(pReadBuffer, sizeof(uint32_t));
@@ -191,6 +191,10 @@ int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic) 
     coder_json fileMetaCoder;
     fileMetaCoder.decoder(pReadBuffer, metaLength, fileMeta.getMetaData());
 
+    Json::StreamWriterBuilder writer;
+    std::string jsonStr = Json::writeString(writer, fileMeta.getMetaData());
+    LOG_DEBUG("MetaType: %d, metacontent: %s", fileMeta.getMetaType(), jsonStr.c_str());
+
     readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_CHECKSUM_LENGTH);
     if (readLen != PBGZ_FILE_META_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read file meta data from IO.");
@@ -279,12 +283,14 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
             // continue to read the data block from new file
             return readDataBlock(dataBlock); 
         } else if (memcmp(pReadBuffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
+            LOG_INFO("Detected a PBGZ Meta, ignore file meta.");
             PbgzFileMeta tmpMete;
             if (0 != readFileMeta(tmpMete, false)) {
                 LOG_INFO("Failed to read file dynamic file meta.");
             }
             return readDataBlock(dataBlock);
         }
+
         return -1; // Unexpect block, maybe meta, should ignore
     }
 
@@ -347,8 +353,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
     }
     dataBlock.setDataCheckSum(*(uint64_t*)pReadBuffer);
     return 0;
-}   
-
+}
 
 uint8_t* PbgzFileWriter::getFileWriteBuffer() {
     // Thread-local smart pointer: automatically manages memory, destructs and releases when thread exits

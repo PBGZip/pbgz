@@ -81,6 +81,7 @@ int32_t BinaryCodecActuator::decompress() {
     // First parse out meta information
     coder_json metaCoder;
     metaCoder.decoder(inBlockPtr->getMetaBuffer(), inBlockPtr->getMetaLen(), meta);
+    
     uint32_t decoderLen = 0;
     uint32_t decSrcLen = meta["streams"]["srclen"].asUInt();
     uint32_t decDstLen = meta["streams"]["dstlen"].asUInt();
