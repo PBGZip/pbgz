@@ -182,6 +182,11 @@ int32_t PbgzEngine::init() {
     }
     ioWriter->openIO();
 
+    // Register output file with PbgzManager for cleanup on failure
+    if (parameter.outputFile != STDOUT && parameter.outputFile != "-") {
+        PbgzManager::getInstance().addOutputFile(parameter.outputFile);
+    }
+
     return 0;
 }
 
@@ -309,7 +314,11 @@ int32_t PbgzEngine::startWriteTask() {
         pthread_setname_np(pthread_self(), "writetask");
         BlockWriter* blockWriter = createBlockWriter();
         if (blockWriter == nullptr) {
-            PbgzManager::getInstance().exitProc(-1, "Inner error");
+            LOG_ERROR("Failed to create block writer");
+            // Close the file that was already created
+            if (ioWriter != nullptr) {
+                ioWriter->closeIO();
+            }
             return -1;
         }
 

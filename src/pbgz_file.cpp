@@ -53,16 +53,16 @@ int32_t PbgzDataBlock::setBlockData(uint8_t* data, uint32_t length) {
 }
 
 void PbgzDataBlock::calcChecksum() {
-    dataBlockChecksum = util::Hash64((char*)pBlockData, (size_t)blockDataLength);
+    dataBlockChecksum = util::Fingerprint64((char*)pBlockData, (size_t)blockDataLength);
     Json::StreamWriterBuilder writer;
     std::string jsonStr = Json::writeString(writer, dataMetaInfo);
-    metaChecksum = util::Hash64(jsonStr);
+    metaChecksum = util::Fingerprint64(jsonStr);
 }
 
-int32_t PbgzDataBlock::verifyCheckSum() {
+int32_t PbgzDataBlock::verifyCheckSum() {    
     if (blockDataLength > 0 && dataBlockChecksum != 0) {
-        if (dataBlockChecksum != util::Hash64((char*)pBlockData, (size_t)blockDataLength)) {
-            LOG_ERROR("Meta checksum verify failed.");
+        if (dataBlockChecksum != util::Fingerprint64((char*)pBlockData, (size_t)blockDataLength)) {
+            LOG_ERROR("Data checksum verify failed.");
             return -1;
         }
     }
@@ -70,8 +70,8 @@ int32_t PbgzDataBlock::verifyCheckSum() {
     if (metaChecksum != 0) {
         Json::StreamWriterBuilder writer;
         std::string jsonStr = Json::writeString(writer, dataMetaInfo);
-        if (metaChecksum != util::Hash64(jsonStr)) {
-            LOG_ERROR("Data checksum verify failed.");
+        if (metaChecksum != util::Fingerprint64(jsonStr)) {
+            LOG_ERROR("Meta checksum verify failed.");
             return -1;
         }
     }

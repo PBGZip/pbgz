@@ -38,12 +38,7 @@ PbgzManager& PbgzManager::getInstance() {
 
 void PbgzManager::exitProc(int errorCode, const char* errorMessage){
     if (errorCode < pbgz::PBGZ_ERR_OK) {
-        for (auto &currFile : outfiles) {
-            const std::string& fileName = currFile.first;
-            if (!currFile.second && PathUtil::fileExists(fileName)) {
-                unlink(fileName.c_str());
-            }
-        }
+        cleanupOutputFiles();
     } 
 
     if (errorMessage != nullptr && strlen(errorMessage) > 0) {
@@ -124,6 +119,22 @@ void PbgzManager::printTailInfo(Timer costTime, bool isPrintRatio) {
     } else {
         fprintf(stderr, "\nDecompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
     }
+}
+
+void PbgzManager::addOutputFile(const std::string& fileName) {
+    outfiles.push_back(std::make_pair(fileName, true));
+}
+
+void PbgzManager::cleanupOutputFiles() {
+    for (auto &file : outfiles) {
+        bool removed = PathUtil::removeFile(file.first);
+        if (removed) {
+            LOG_INFO("Cleaned up output file: %s", file.first.c_str());
+        } else {
+            LOG_WARNING("Failed to clean up output file: %s", file.first.c_str());
+        }
+    }
+    outfiles.clear();
 }
 
 /* Convert n to the nearest integer power of 2 */

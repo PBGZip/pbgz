@@ -170,6 +170,9 @@ void CompressEngine::writeFilePostProc(BlockWriter* blockWriter) {
     // make index
     if (parameter.isMakeIndex) {
         std::string indexFileName = parameter.outputFile + ".pbgzi";
+        // Register index file with PbgzManager for cleanup on failure
+        PbgzManager::getInstance().addOutputFile(indexFileName);
+        
         if (PathUtil::fileExists(indexFileName)) {
             PathUtil::removeFile(indexFileName);
         }
@@ -177,6 +180,7 @@ void CompressEngine::writeFilePostProc(BlockWriter* blockWriter) {
         SamIndex::getInstance().dumpToFile(indexFileName);
     }
 }
+
 
 
 int32_t CompressEngine::startEnginePreProc() {
@@ -331,7 +335,7 @@ int32_t CompressEngine::startEnginePostProc() {
         }
     }
     
-    return CodecEngine::engineStartAfterProc();
+    return CodecEngine::startEnginePostProc();
 }
 
 void CompressEngine::setDataBlockPosition(uint32_t blockId) {

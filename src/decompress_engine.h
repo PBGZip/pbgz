@@ -56,6 +56,8 @@ protected:
 
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
+    virtual int32_t startEnginePostProc() override;
+
 private:
     bool initRefGene(PbgzBlockReader* blockReader);
 
@@ -65,7 +67,7 @@ private:
 
     bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
 
-    void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
+    void printFastaFileNotMatchInfo(const Json::Value& metaRefe); 
 
     virtual Reference* getReference() override { return pRefGene; }
 

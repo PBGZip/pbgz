@@ -118,7 +118,7 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
 
     std::string fastaNameInput = parameter.referenceGenic;
     if (fastaNameInput.empty()) { /* No reference file specified */
-        printFastqFileNotMatchInfo(metaRefe);
+        printFastaFileNotMatchInfo(metaRefe);
         LOG_ERROR("reference file needs to be specified to complete decompression");
         return false;
     }
@@ -128,12 +128,12 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     /* check whether fasta is matched */
     if (PathUtil::getFileName(fastaNameInput) != fastaName) {
         fastaNameInput = PathUtil::getAbsPath(fastaNameInput);
-        printFastqFileNotMatchInfo(metaRefe);
+        printFastaFileNotMatchInfo(metaRefe);
         LOG_ERROR("initialize reference failed: used fasta %s, should be %s", fastaNameInput.c_str(), fastaName.c_str());
         return false;
     }
     if (fastaLength != fastqFileLenInput) {
-        printFastqFileNotMatchInfo(metaRefe);
+        printFastaFileNotMatchInfo(metaRefe);
         LOG_ERROR("initialize reference failed: used fasta file len %ld, should be %ld", fastqFileLenInput, fastaLength);
         return false;
     }
@@ -159,7 +159,7 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     return true;
 }
 
-void DecompressEngine::printFastqFileNotMatchInfo(const Json::Value& metaRefe) {
+void DecompressEngine::printFastaFileNotMatchInfo(const Json::Value& metaRefe) {
     fprintf(stderr, "need to specify the following FASTA file:\n\n");
     fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
     fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
@@ -416,4 +416,14 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
     }
 
     return pActuator;
+}
+
+int32_t DecompressEngine::startEnginePostProc() {
+    if (parameter.isRemoveOriginFile) {
+        std::string indexFileName = parameter.inputFile + ".pbgzi";
+        LOG_DEBUG("Remove origin file : %s.", indexFileName.c_str());
+        PathUtil::removeFile(indexFileName);
+    }
+
+    return CodecEngine::startEnginePostProc();
 }
