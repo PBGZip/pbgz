@@ -347,7 +347,12 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
         return -1;
     }
 
-    if (0 != pbgzDataBlock.verifyCheckSum()) {
+    bool isNeedVerifyCheckSum = false;
+    if (getFileHeader().getVerion()[0] >= 2 &&  getFileHeader().getVerion()[1] >= 2) {
+        isNeedVerifyCheckSum = true;
+    }
+
+    if (isNeedVerifyCheckSum && 0 != pbgzDataBlock.verifyCheckSum()) {
         LOG_ERROR("Verify pbgz block checksum failed, block id = %ld", pbgzDataBlock.getMetaData("blockid").asInt64());
         return -1;
     }
