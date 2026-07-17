@@ -93,11 +93,17 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     if (blockReader == nullptr) {
         return false;
     }
-    if (!baseFileMeta.getMetaData("refe").isObject()) {
-        LOG_DEBUG("No reference");
+
+    if (!baseFileMeta.getMetaData("refe").isObject() && ! dynamicFileMeta.getMetaData("refe").isObject()) {
+        LOG_INFO("No reference");
         return true;
     }
-    Json::Value& metaRefe = baseFileMeta.getMetaData("refe");
+
+    Json::Value metaRefe;
+    if (baseFileMeta.getMetaData("refe").isObject()) {
+       metaRefe = baseFileMeta.getMetaData("refe");
+    }
+
     if (dynamicFileMeta.getMetaData().isMember("refe")) {
         LOG_DEBUG("Read meta data from dynamic file meta");
         metaRefe = dynamicFileMeta.getMetaData("refe");
