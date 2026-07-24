@@ -127,28 +127,149 @@ private:
     // ID stream compression
     template <typename TCoder>
     int32_t compressIdStream(coder_io* idIo, TCoder* idCoder, Json::Value& streamMeta, uint32_t& srcDataLen, int32_t splitSymIdx);
+ 
+    // Regular field compression (template function for smart compression)
+    template<typename CoderType>
+    int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+        std::vector<uint32_t>& npos = this->inBlockPtr->getNpos();
+        uint32_t lineNum = npos.size();
+        uint8_t* buffer = this->inBlockPtr->getBuffer();
+        
+        // Create encoder for regular field compression with specified CoderType
+        std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(this->outBlockPtr->getCurrent(), this->outBlockPtr->getRemain());
+        std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
+        
+        fieldSrcLen = 0;
+        
+        // Process each line and extract the current field
+        for (uint32_t lineIdx = this->headEndLine; lineIdx < lineNum; ++lineIdx) {
+            uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+            uint32_t lineEnd = npos[lineIdx] - lineStart;
+            
+            uint8_t* line = buffer + lineStart;
+            // Skip header lines (starting with @)
+            if (*line == '@') {
+                continue;
+            }
 
-    // Regular field compression
-    int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
+            uint32_t contentIdx = lineIdx - this->headEndLine;
+            // Middle fields: between tabs
+            if (fieldIdx > contentPos[contentIdx].size()) {
+                uint8_t ch = '\n';
+                fieldCoder->encode_line(&ch, 1);
+                fieldSrcLen += 1;
+                continue;
+            }
+            uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+            uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+            uint8_t* fieldStart = line + prevTabPos + 1;
+            uint32_t  fieldLength = currTabPos - prevTabPos;
+            
+            // Encode the field data
+            if (fieldLength > 0) {
+                fieldCoder->encode_line(fieldStart, fieldLength);
+                fieldSrcLen += fieldLength;
+            }
+        }
+        
+        // Flush the encoder for this field
+        fieldCoder->encode_flush();
+        
+        // Update output block data length
+        this->outBlockPtr->setDataLen(this->outBlockPtr->getDataLen() + fieldIo->data_len);
+        
+        // Set field metadata
+        fieldMeta["srclen"] = fieldSrcLen;
+        fieldMeta["dstlen"] = fieldIo->data_len;
+        fieldMeta["coder"] = fieldIo->meta;
+        fieldMeta["field"] = fieldIdx;
 
-    int32_t compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+                fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
+
+        return fieldIo->data_len;
+    }
+
 
     uint32_t parseCigar(uint8_t* cigarString, uint32_t cigarLength);
+ 
+    // CIGAR compression (template function for smart compression)
+    template<typename CoderType>
+    int32_t compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+        std::vector<uint32_t>& npos = this->inBlockPtr->getNpos();
+        uint32_t lineNum = npos.size();
+        uint8_t* buffer = this->inBlockPtr->getBuffer();
+        
+        // Create encoder for regular field compression with specified CoderType
+        std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(this->outBlockPtr->getCurrent(), this->outBlockPtr->getRemain());
+        std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
+        
+        fieldSrcLen = 0;
 
-    template<typename T>
+        uint32_t lineCount = lineNum - this->headEndLine;
+        this->baseLengthBuffer = MemoryUtil::safeAlloc<uint32_t>(lineCount);
+        
+        // Process each line and extract the current field
+        for (uint32_t lineIdx = this->headEndLine; lineIdx < lineNum; ++lineIdx) {
+            uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+            uint32_t lineEnd = npos[lineIdx] - lineStart;
+            
+            uint8_t* line = buffer + lineStart;
+            // Skip header lines (starting with @)
+            if (*line == '@') {
+                continue;
+            }
+
+            uint32_t contentIdx = lineIdx - this->headEndLine;
+            uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+            uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+            uint8_t* fieldStart = line + prevTabPos + 1;
+            uint32_t fieldLength = currTabPos - prevTabPos;
+
+            // Parse CIGAR field, remove hard clipping sequence length
+            if (fieldLength == 2 && *fieldStart == '*' ) {
+                this->baseLengthBuffer[lineIdx - this->headEndLine] = 0;
+            } else {
+                uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
+                this->baseLengthBuffer[lineIdx - this->headEndLine] = sequeceLength;
+            }
+            
+            // Encode the field data
+            if (fieldLength > 0) {
+                fieldCoder->encode_line(fieldStart, fieldLength);
+                fieldSrcLen += fieldLength;
+            }
+        }
+        
+        // Flush the encoder for this field
+        fieldCoder->encode_flush();
+        
+        // Update output block data length
+        this->outBlockPtr->setDataLen(this->outBlockPtr->getDataLen() + fieldIo->data_len);
+        
+        // Set field metadata
+        fieldMeta["srclen"] = fieldSrcLen;
+        fieldMeta["dstlen"] = fieldIo->data_len;
+        fieldMeta["coder"] = fieldIo->meta;
+        fieldMeta["field"] = fieldIdx;
+
+        return fieldIo->data_len;
+    }
+
+    template<typename T, typename CoderType>
     int32_t compressNumber(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
         std::vector<uint32_t>& npos = inBlockPtr->getNpos();
         uint32_t lineNum = npos.size();
         uint8_t* buffer = inBlockPtr->getBuffer();
         
-        // Create encoder for regular field compression
-        std::shared_ptr<coder_io> numberIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-        std::shared_ptr<coder_bwt_cm> numberCoder = std::make_shared<coder_bwt_cm>(numberIo.get());
+        // Create encoder for regular field compression with specified CoderType
+        std::shared_ptr<coder_io> numberIo = std::make_shared<coder_io>(this->outBlockPtr->getCurrent(), this->outBlockPtr->getRemain());
+        std::shared_ptr<CoderType> numberCoder = std::make_shared<CoderType>(numberIo.get());
         
         fieldSrcLen = 0;
         uint32_t srcLen = 0;
         // Process each line and extract the current field
-        for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        for (uint32_t lineIdx = this->headEndLine; lineIdx < lineNum; ++lineIdx) {
             uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
             uint32_t lineEnd = npos[lineIdx] - lineStart;
 
@@ -159,7 +280,7 @@ private:
             }
             
             // Middle fields: between tabs
-            uint32_t contentIdx = lineIdx - headEndLine;
+            uint32_t contentIdx = lineIdx - this->headEndLine;
             uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
             uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
             uint8_t* fieldStart = line + prevTabPos + 1;
@@ -173,11 +294,11 @@ private:
             srcLen += sizeof(T);
             
             if (fieldIdx == 3) {
-                mappedPos[lineIdx] = value;
+                this->mappedPos[lineIdx] = value;
             } else if (fieldIdx == 1) {
-                mappedFlag[lineIdx] = value;
+                this->mappedFlag[lineIdx] = value;
             } else if (fieldIdx == 7) {
-                nextMappedPos[lineIdx] = value;
+                this->nextMappedPos[lineIdx] = value;
             } 
         }
         
@@ -185,7 +306,7 @@ private:
         numberCoder->encode_flush();
         
         // Update output block data length
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + numberIo->data_len);
+        this->outBlockPtr->setDataLen(this->outBlockPtr->getDataLen() + numberIo->data_len);
         
         // Set field metadata
         fieldMeta["srclen"] = srcLen;

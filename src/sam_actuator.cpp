@@ -635,28 +635,28 @@ int32_t SamCodecActuator::compressSamByFields() {
                 }
                 break;
             case 1: // FLAG
-                fieldDstLen = compressNumber<uint16_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressNumber<uint16_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 2: // RNAME
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 3: // POS
-                fieldDstLen = compressNumber<uint32_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressNumber<uint32_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 4: // MAPQ
-                fieldDstLen = compressNumber<uint8_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressNumber<uint8_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 5: // CIGAR 
-                fieldDstLen = compressCigar(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressCigar<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 6: // RNEXT
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 7: // PNEXT
-                fieldDstLen = compressNumber<uint32_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressNumber<uint32_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 8: // TLEN 
-                fieldDstLen = compressNumber<int32_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressNumber<int32_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 9: // SEQ
                 if (pRefeGene == nullptr) {
@@ -671,7 +671,7 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 11: // Optional fields
-                fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
         }
 
@@ -971,129 +971,6 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
     return chrIo->data_len;
  }
 
-int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
-    uint32_t lineNum = npos.size();
-    uint8_t* buffer = inBlockPtr->getBuffer();
-    
-    // Create encoder for regular field compression
-    std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_bwt_cm> fieldCoder = std::make_shared<coder_bwt_cm>(fieldIo.get());
-    
-    fieldSrcLen = 0;
-    
-    // Process each line and extract the current field
-    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
-        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
-        uint32_t lineEnd = npos[lineIdx] - lineStart;
-        
-        uint8_t* line = buffer + lineStart;
-        // Skip header lines (starting with @)
-        if (*line == '@') {
-            continue;
-        }
-
-        uint32_t contentIdx = lineIdx - headEndLine;
-        // Middle fields: between tabs
-        if (fieldIdx > contentPos[contentIdx].size()) {
-            uint8_t ch = '\n';
-            fieldCoder->encode_line(&ch, 1);
-            fieldSrcLen += 1;
-            continue;
-        }
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t  fieldLength = currTabPos - prevTabPos;
-        
-        // Encode the field data
-        if (fieldLength > 0) {
-            fieldCoder->encode_line(fieldStart, fieldLength);
-            fieldSrcLen += fieldLength;
-        }
-    }
-    
-    // Flush the encoder for this field
-    fieldCoder->encode_flush();
-    
-    // Update output block data length
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
-    
-    // Set field metadata
-    fieldMeta["srclen"] = fieldSrcLen;
-    fieldMeta["dstlen"] = fieldIo->data_len;
-    fieldMeta["coder"] = fieldIo->meta;
-    fieldMeta["field"] = fieldIdx;
-
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
-        fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
-
-    return fieldIo->data_len;
-}
-
-int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
-    uint32_t lineNum = npos.size();
-    uint8_t* buffer = inBlockPtr->getBuffer();
-    
-    // Create encoder for regular field compression
-    std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_bwt_cm> fieldCoder = std::make_shared<coder_bwt_cm>(fieldIo.get());
-    
-    fieldSrcLen = 0;
-
-    uint32_t lineCount = lineNum - headEndLine;
-    baseLengthBuffer =  MemoryUtil::safeAlloc<uint32_t>(lineCount);
-    
-    // Process each line and extract the current field
-    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
-        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
-        uint32_t lineEnd = npos[lineIdx] - lineStart;
-        
-        uint8_t* line = buffer + lineStart;
-        // Skip header lines (starting with @)
-        if (*line == '@') {
-            continue;
-        }
-
-        uint32_t contentIdx = lineIdx - headEndLine;
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t  fieldLength = currTabPos - prevTabPos;
-
-        // Parse CIGAR field, remove hard clipping sequence length
-        if (fieldLength == 2 && *fieldStart == '*' ) {
-            baseLengthBuffer[lineIdx - headEndLine] = 0;
-        } else {
-            uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
-            baseLengthBuffer[lineIdx - headEndLine] = sequeceLength;
-        }
-        
-        // Encode the field data
-        if (fieldLength > 0) {
-            fieldCoder->encode_line(fieldStart, fieldLength);
-            fieldSrcLen += fieldLength;
-        }
-    }
-    
-    // Flush the encoder for this field
-    fieldCoder->encode_flush();
-    
-    // Update output block data length
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
-    
-    // Set field metadata
-    fieldMeta["srclen"] = fieldSrcLen;
-    fieldMeta["dstlen"] = fieldIo->data_len;
-    fieldMeta["coder"] = fieldIo->meta;
-    fieldMeta["field"] = fieldIdx;
-
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
-        fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
-
-    return fieldIo->data_len;
-}
 
 int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();

@@ -455,7 +455,7 @@ TEST_F(SamActuatorTest, testCompressRegularField) {
     // Test compressRegularField method with field index 6 (PNEXT field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
-    result = actuator.compressRegularField(6, fieldSrcLen, fieldMeta);
+    result = actuator.compressRegularField<coder_bwt_cm>(6, fieldSrcLen, fieldMeta);
     EXPECT_GT(result, 0);
 }
 
