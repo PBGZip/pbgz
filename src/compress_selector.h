@@ -90,21 +90,37 @@ public:
         }
     };
     
-    std::vector<CompressionStats> getStatsForField(uint32_t fieldIdx) const;
-    void addStatsForField(uint32_t fieldIdx, const CompressionStats& stats);
+    std::vector<CompressionStats> getStatsForField(CompressionField field) const;
+    void addStatsForField(CompressionField field, const CompressionStats& stats);
     
     // Get the best compression model for a field based on compression ratio
+    CompressionModel getBestModelForField(CompressionField field) const;
+    
+    // Convenience methods for getting best model using original field indices
+    CompressionModel getSamBestModelForField(uint32_t samFieldIdx) const;
+    CompressionModel getFastqBestModelForField(uint32_t fastqFieldIdx) const;
+    
+    // Legacy methods for backward compatibility (deprecated)
+    std::vector<CompressionStats> getStatsForField(uint32_t fieldIdx) const;
+    void addStatsForField(uint32_t fieldIdx, const CompressionStats& stats);
+    [[deprecated("Use getSamBestModelForField() or getFastqBestModelForField() instead")]]
     CompressionModel getBestModelForField(uint32_t fieldIdx) const;
     
     // Print compression statistics for all fields with selected encoders
     void printCompressionStats() const;
+    
+    // Get field name as string for logging purposes
+    static const char* getFieldName(CompressionField field);
 
 private:
     CompressionSelectorManager() = default;
     ~CompressionSelectorManager() = default;
     
+    // Helper function to convert SAM field index to CompressionField
+    CompressionField getSamFieldFromIndex(uint32_t samFieldIdx) const;
+    
     mutable std::mutex mutex_;
-    std::map<uint32_t, std::set<CompressionStats>> fieldStats;
+    std::map<CompressionField, std::set<CompressionStats>> fieldStats;
 };
 
 inline const char* modelName(CompressionModel model) {
@@ -117,6 +133,13 @@ inline const char* modelName(CompressionModel model) {
 }
 
 inline std::map<CompressionField, std::vector<CompressionModel>> compressFieldConfg = {
+    // FASTQ fields configuration
+    {CompressionField::FASTQ_ID, {CompressionModel::MODEL_BWT_CM, CompressionModel::MODEL_AFFIX_MATCH}},
+    {CompressionField::FASTQ_BASE, {CompressionModel::MODEL_BWT_CM, CompressionModel::MODEL_AFFIX_MATCH}},
+    {CompressionField::FASTQ_COMMENT, {CompressionModel::MODEL_BWT_CM, CompressionModel::MODEL_AFFIX_MATCH}},
+    {CompressionField::FASTQ_QUALITY, {CompressionModel::MODEL_BWT_CM, CompressionModel::MODEL_QUAL_GEN2}},
+    
+    // SAM fields configuration - only fields that participate in compression model selection
     {CompressionField::SAM_FLAG, {CompressionModel::MODEL_BWT_CM, CompressionModel::MODEL_AFFIX_MATCH}},
     {CompressionField::SAM_POS, {CompressionModel::MODEL_BWT_CM, CompressionModel::MODEL_AFFIX_MATCH}},
     {CompressionField::SAM_MAPQ, {CompressionModel::MODEL_BWT_CM, CompressionModel::MODEL_AFFIX_MATCH}},
@@ -135,4 +158,16 @@ public:
     static void testSamRegularFiled(uint32_t samFieldIdx, RoughIOBlock* blockPtr);
 
     static void testSamRegularFiled(RoughIOBlock* inBlockPtr);
+};
+
+class FastqCompressionSelector {
+public:
+    // Get CompressionField enum from FASTQ field index (0-based)
+    static CompressionField getSelectorField(uint32_t fastqFieldIdx);
+
+    // Test a specific FASTQ field compression performance
+    static void testFastqField(uint32_t fastqFieldIdx, RoughIOBlock* blockPtr);
+
+    // Test all FASTQ fields
+    static void testFastqFields(RoughIOBlock* inBlockPtr);
 };

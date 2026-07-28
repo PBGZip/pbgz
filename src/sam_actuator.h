@@ -59,7 +59,7 @@ public:
 
     int32_t initDecoder(RoughIOBlock* outputBlock);
 
-    int32_t decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag, RoughIOBlock* outputBlock);
+    int32_t decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
     int32_t decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta, RoughIOBlock* outputBlock);
 
@@ -380,7 +380,6 @@ private:
     std::vector<std::shared_ptr<coder>> idDecoders;
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     std::shared_ptr<coder_qual> qualCoder;
-    std::shared_ptr<coder> qualStringCoder;
 
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;

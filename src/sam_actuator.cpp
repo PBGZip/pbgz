@@ -623,7 +623,7 @@ int32_t SamCodecActuator::compressSamByFields() {
         uint32_t fieldSrcLen = 0;
         Json::Value fieldMeta;
         uint32_t fieldDstLen = 0;
-        CompressionModel coderType = CompressionSelectorManager::getInstance().getBestModelForField(fieldIdx);
+        CompressionModel coderType = CompressionSelectorManager::getInstance().getSamBestModelForField(fieldIdx);
         switch (fieldIdx) {
             case 0: // QNAME as FQ:ID
                 // ID field: compress based on analysis result
@@ -700,10 +700,10 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 10: // QUAL
                 LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
-                if (CompressionModel::MODEL_QUAL_GEN2 == coderType) {
-                    fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
-                } else {
+                if (CompressionModel::MODEL_BWT_CM == coderType) {
                     fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
                 }
                 break;
             case 11: // Optional fields
@@ -1524,7 +1524,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                 decoderLen = decompressIdField(fieldIdx, streams[fieldIdx], outputBlock);
             } else if (fieldIdx == 1) {  /// FLAG
                 if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
                 } else {
                     decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo, outputBlock);
                 }
@@ -1532,13 +1532,13 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 3) {  /// POS
                 if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
                 } else {
                     decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
                 }
             } else if (fieldIdx == 4) {  /// MAPQ
                 if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
                 } else {
                     decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo, outputBlock);
                 }
@@ -1548,13 +1548,13 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 7) {  /// PNEXT
                 if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
                 } else {
                     decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
                 }
             } else if (fieldIdx == 8) {  /// TLEN
                 if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
                 } else {
                     decoderLen = decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
                 }
@@ -1564,19 +1564,24 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                 actualBaseLen = decoderLen;
             } else if (fieldIdx == 10 ) {  /// QUAL
                  if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    if (fieldIdx + 1 == fieldCount) {
+                        decoderLen = decompressRegularField(fieldIdx, lineNo, '\n', outputBlock);
+                    }else {
+                        decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
+                    }
                 } else {
                     decoderLen = decompressQuality(basePtr, actualBaseLen, outputBlock);
+                    // No optional fields scenario, replace appended \t with \n
+                    if (fieldIdx + 1 == fieldCount) {
+                        uint8_t* pEnd = outputBlock->getCurrent();
+                        *(pEnd - 1) = '\n';
+                    }
                 }
-                // No optional fields scenario, replace appended \t with \n
-                if (fieldIdx + 1 == fieldCount) {
-                    uint8_t* pEnd = outputBlock->getCurrent();
-                    *(pEnd - 1) = '\n';
-                }
+                
             } else {   /// Optional fields
                 // Decode field until tab or end
                 if (fieldIdx + 1 == fieldCount) {
-                    decoderLen = decompressRegularField(fieldIdx, '\n', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\n', outputBlock);
                     // Single newline means it's appended, need to change \t after quality to \n and remove appended \n
                     if (decoderLen == 1) {
                         uint8_t* pEnd = outputBlock->getCurrent();
@@ -1584,7 +1589,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                         outputBlock->setDataLen(outputBlock->getDataLen() - 1);
                     }
                 } else {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
                 }
             }
             if (decoderLen < 0) {
@@ -1594,8 +1599,11 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         }
 
         if (refPosChrIndex != 65535) {
-            if (mappedChr[lineNo] == refPosChrIndex) {
-                if ((refPosBegin == 0 && refPosEnd == 0) || (mappedPos[lineNo]  >= refPosBegin && mappedPos[lineNo] <= refPosEnd)) {
+            auto chrIt = mappedChr.find(lineNo);
+            auto posIt = mappedPos.find(lineNo);
+            if (chrIt != mappedChr.end() && chrIt->second == refPosChrIndex) {
+                if ((refPosBegin == 0 && refPosEnd == 0) || 
+                    (posIt != mappedPos.end() && posIt->second >= refPosBegin && posIt->second <= refPosEnd)) {
                     memcpy(outBlockPtr->getCurrent(), outputBlock->getBuffer(), outputBlock->getDataLen());
                     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + outputBlock->getDataLen());  
                 }
@@ -1882,9 +1890,22 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     return 0;
 }
 
-int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag, RoughIOBlock* outputBlock) {
+int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
     uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
+    
+    // Ref: decompressNumber pattern - populate tracking maps when mode is "string"
+    if (fieldLen > 1 && refPosChrIndex != 65535) {
+        uint8_t* vs = outputBlock->getBuffer() + outputBlock->getDataLen() - fieldLen;
+        if (fieldIdx == 1) {
+            mappedFlag[lineNo] = static_cast<uint16_t>(std::stoull(std::string((char*)vs, fieldLen - 1)));
+        } else if (fieldIdx == 3) {
+            mappedPos[lineNo] = std::stoull(std::string((char*)vs, fieldLen - 1));
+        } else if (fieldIdx == 7) {
+            nextMappedPos[lineNo] = std::stoull(std::string((char*)vs, fieldLen - 1));
+        }
+    }
+    
     return fieldLen;
 }
 

@@ -211,7 +211,7 @@ TEST_F(CompressSelectorTest, TestGetBestModel) {
     SamCompressionSlector::testSamRegularFiled(3, pBlock);  // POS
 
     auto& mgr = CompressionSelectorManager::getInstance();
-    CompressionModel best = mgr.getBestModelForField(3);
+    CompressionModel best = mgr.getSamBestModelForField(3);
     // Should return a valid model (BWT_CM or AFFIX_MATCH), not crash
     EXPECT_TRUE(best == CompressionModel::MODEL_BWT_CM || best == CompressionModel::MODEL_AFFIX_MATCH);
 }
