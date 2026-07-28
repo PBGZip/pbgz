@@ -106,7 +106,7 @@ public:
     }
 
     void initMetaInfo();
-
+    
 private:
     int32_t preAnalysisIdLine(uint8_t* buffer, uint32_t length);
 
@@ -183,6 +183,7 @@ private:
         fieldMeta["dstlen"] = fieldIo->data_len;
         fieldMeta["coder"] = fieldIo->meta;
         fieldMeta["field"] = fieldIdx;
+        fieldMeta["mode"] = "string";
 
         LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
                 fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
@@ -253,6 +254,9 @@ private:
         fieldMeta["coder"] = fieldIo->meta;
         fieldMeta["field"] = fieldIdx;
 
+        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+                fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
+
         return fieldIo->data_len;
     }
 
@@ -313,6 +317,7 @@ private:
         fieldMeta["dstlen"] = numberIo->data_len;
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
+        fieldMeta["mode"] = "number";
 
         LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
             fieldIdx, fieldSrcLen, numberIo->data_len, (double)(numberIo->data_len * 100)/(double)fieldSrcLen);
@@ -375,6 +380,7 @@ private:
     std::vector<std::shared_ptr<coder>> idDecoders;
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     std::shared_ptr<coder_qual> qualCoder;
+    std::shared_ptr<coder> qualStringCoder;
 
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;

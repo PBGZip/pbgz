@@ -160,6 +160,11 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
             binaryActuator->initial();
             return binaryActuator;
         }
+
+        if (inBlockPtr->getBlockId() == 0) {
+            SamCompressionSlector::testSamRegularFiled(inBlockPtr);
+            CompressionSelectorManager::getInstance().printCompressionStats();
+        }
     }
 
     return actuator;

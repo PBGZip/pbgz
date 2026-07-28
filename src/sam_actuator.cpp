@@ -623,6 +623,7 @@ int32_t SamCodecActuator::compressSamByFields() {
         uint32_t fieldSrcLen = 0;
         Json::Value fieldMeta;
         uint32_t fieldDstLen = 0;
+        CompressionModel coderType = CompressionSelectorManager::getInstance().getBestModelForField(fieldIdx);
         switch (fieldIdx) {
             case 0: // QNAME as FQ:ID
                 // ID field: compress based on analysis result
@@ -635,28 +636,58 @@ int32_t SamCodecActuator::compressSamByFields() {
                 }
                 break;
             case 1: // FLAG
-                fieldDstLen = compressNumber<uint16_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) {
+                    fieldDstLen = compressRegularField<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 2: // RNAME
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 3: // POS
-                fieldDstLen = compressNumber<uint32_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) { 
+                    fieldDstLen = compressRegularField<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 4: // MAPQ
-                fieldDstLen = compressNumber<uint8_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) { 
+                    fieldDstLen = compressRegularField<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 5: // CIGAR 
-                fieldDstLen = compressCigar<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) {
+                    fieldDstLen = compressCigar<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressCigar<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 6: // RNEXT
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 7: // PNEXT
-                fieldDstLen = compressNumber<uint32_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) { 
+                    fieldDstLen = compressRegularField<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 8: // TLEN 
-                fieldDstLen = compressNumber<int32_t, coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) { 
+                    fieldDstLen = compressRegularField<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 9: // SEQ
                 if (pRefeGene == nullptr) {
@@ -668,10 +699,20 @@ int32_t SamCodecActuator::compressSamByFields() {
                 }
                 break;
             case 10: // QUAL
-                fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_QUAL_GEN2 == coderType) {
+                    fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 11: // Optional fields
-                fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                LOG_INFO("Sam filed %d, best coder: %s.", fieldIdx, modelName(coderType));
+                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) {
+                    fieldDstLen = compressRegularField<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
         }
 
@@ -1248,7 +1289,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
 }
 
 int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+   std::vector<uint32_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
     
@@ -1341,6 +1382,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     fieldMeta["totaldstlen"] = totalDstLength;
     fieldMeta["streams"] = streamMeta;
     fieldMeta["field"] = fieldIdx;
+    fieldMeta["mode"] = "qualily";
     
     fieldSrcLen = totalSrcLength;
 
@@ -1473,31 +1515,59 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         uint32_t actualBaseLen = 0;
         // Decode each field for this line
         for (uint32_t fieldIdx = 0; fieldIdx < fieldCount; ++fieldIdx) {
+             std::string mode = "";
+            if (streams[fieldIdx].isMember("mode")) {
+                mode = streams[fieldIdx]["mode"].asString();
+            }
             int32_t decoderLen = 0;
             if (fieldIdx == 0) {    /// ID
                 decoderLen = decompressIdField(fieldIdx, streams[fieldIdx], outputBlock);
             } else if (fieldIdx == 1) {  /// FLAG
-                decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo, outputBlock);
+                if (mode == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo, outputBlock);
+                }
             } else if (fieldIdx == 2) {  /// RNAME
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 3) {  /// POS
-                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                if (mode == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                }
             } else if (fieldIdx == 4) {  /// MAPQ
-                decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo, outputBlock);
+                if (mode == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo, outputBlock);
+                }
             } else if (fieldIdx == 5) {  /// CIGAR
                 decoderLen = decompressCigar(fieldIdx, '\t', lineNo, outputBlock);
             } else if (fieldIdx == 6) {  /// RNEXT
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 7) {  /// PNEXT
-                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                if (mode == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                }
             } else if (fieldIdx == 8) {  /// TLEN
-                decoderLen = decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
+                if (mode == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
+                }
             } else if (fieldIdx == 9) {  /// SEQ
                 basePtr = outputBlock->getCurrent();
                 decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen, outputBlock);
                 actualBaseLen = decoderLen;
             } else if (fieldIdx == 10 ) {  /// QUAL
-                decompressQuality(basePtr, actualBaseLen, outputBlock);
+                 if (mode == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressQuality(basePtr, actualBaseLen, outputBlock);
+                }
                 // No optional fields scenario, replace appended \t with \n
                 if (fieldIdx + 1 == fieldCount) {
                     uint8_t* pEnd = outputBlock->getCurrent();
@@ -1735,43 +1805,61 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             }
         } else if (idx == 10) {
             Json::Value& qualMeta = streamMeta[idx];
-            Json::Value& qualStreamMeta = qualMeta["streams"];
-            if (qualStreamMeta.size() != 2) {
-                LOG_ERROR("quality streams check failded, size = %d", qualStreamMeta.size());
-                return -1;
+            std::string mode = "";
+            if (qualMeta.isMember("mode")) {
+                mode = qualMeta["mode"].asString();
             }
-            if (qualStreamMeta[1]["coder"]["magic"] == "coder_bwt_cm") {
-                uint32_t qualDstLength = qualStreamMeta[0]["dstlen"].asUInt();
-                uint32_t freqDstLength = qualStreamMeta[1]["dstlen"].asUInt();
-
-                coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength);
-                coder_bwt_cm qualFreqCoder(&qualFreqIo);
-                uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
-                uint8_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
-                uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
-                uint32_t qualFreq = qualFreqCoder.decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
-                if (qualFreq != qualFreqSrcLength) {
-                    LOG_ERROR("Decode quality frequncy failed");
-                    delete [] qualFreqArr;
-                    return -1;
-                }
-                for (uint32_t i = 0; i < qualFreqArrLength; i += 2) {
-                    qualFreqTable.push_back(std::make_pair(qualFreqArr[i], qualFreqArr[i + 1]));
-                }
-                delete [] qualFreqArr;
-
-                if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_qual") {
-                    std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
-                    ioVector.push_back(qualIo);
-                    qualCoder = std::make_shared<coder_qual>(qualIo.get(), true, qualFreqTable);
+            if (mode == "string") {
+                std::string coderName = qualMeta["coder"]["magic"].asString();
+                uint32_t dstLen = qualMeta["dstlen"].asUInt();
+                if (coderName == "coder_bwt_cm") {
+                    std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+                    ioVector.push_back(io);
+                    fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
                 } else {
-                    LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
+                    LOG_ERROR("Unsupport coder type: %s", qualMeta["coder"]["magic"].asString().c_str());
                     return -1;
                 }
-                readOffset += (qualDstLength + freqDstLength);
+                readOffset += dstLen;
             } else {
-                LOG_ERROR("Unsupport coder type: %s", streamMeta[1]["coder"]["magic"].asString().c_str());
-                return -1;
+                Json::Value& qualStreamMeta = qualMeta["streams"];
+                if (qualStreamMeta.size() != 2) {
+                    LOG_ERROR("quality streams check failded, size = %d", qualStreamMeta.size());
+                    return -1;
+                }
+                if (qualStreamMeta[1]["coder"]["magic"] == "coder_bwt_cm") {
+                    uint32_t qualDstLength = qualStreamMeta[0]["dstlen"].asUInt();
+                    uint32_t freqDstLength = qualStreamMeta[1]["dstlen"].asUInt();
+
+                    coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength);
+                    coder_bwt_cm qualFreqCoder(&qualFreqIo);
+                    uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
+                    uint8_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
+                    uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
+                    uint32_t qualFreq = qualFreqCoder.decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
+                    if (qualFreq != qualFreqSrcLength) {
+                        LOG_ERROR("Decode quality frequncy failed");
+                        delete [] qualFreqArr;
+                        return -1;
+                    }
+                    for (uint32_t i = 0; i < qualFreqArrLength; i += 2) {
+                        qualFreqTable.push_back(std::make_pair(qualFreqArr[i], qualFreqArr[i + 1]));
+                    }
+                    delete [] qualFreqArr;
+
+                    if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_qual") {
+                        std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
+                        ioVector.push_back(qualIo);
+                        qualCoder = std::make_shared<coder_qual>(qualIo.get(), true, qualFreqTable);
+                    } else {
+                        LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
+                        return -1;
+                    }
+                    readOffset += (qualDstLength + freqDstLength);
+                } else {
+                    LOG_ERROR("Unsupport coder type: %s", streamMeta[1]["coder"]["magic"].asString().c_str());
+                    return -1;
+                }
             }
         } else {
             std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
@@ -1780,8 +1868,12 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
                 ioVector.push_back(io);
                 fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
+            } else if (coderName == "coder_affix_match") {
+                std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+                ioVector.push_back(io);
+                fieldDecoders[idx] = std::make_shared<coder_affix_match>(io.get());
             } else {
-                LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
+                LOG_ERROR("Unsupport coder type: %s", streamMeta[idx]["coder"]["magic"].asString().c_str());
                 return -1;
             }
             readOffset += dstLen;

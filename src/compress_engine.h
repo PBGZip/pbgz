@@ -28,6 +28,7 @@
 #include <mutex>
 #include "pbgz_stat.h"
 #include "block_wrapper.h"
+#include "compress_selector.h"
 
 class CompressEngine : public CodecEngine {
 public:
