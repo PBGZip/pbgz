@@ -256,6 +256,18 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
         if (ret <= 0) {
             break;
         }
+        if (BlockUtil::isAuxiliaryBlock(inBlockPtr->getBlockType())) {
+            /*
+             * 头部预读同样要守"辅助块不是数据块"这条规则。先验块现在位于文件首块之前，
+             * 拿它去当 SAM 头解析会得到 headLineNumber == 0 而提前跳出循环，
+             * 染色体信息就永远注册不上，区域查询直接返回空。
+             * 顺手把它交给认领者：这条路径读到的先验与顺序流读到的是同一个块。
+             */
+            PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
+            (void)offerAuxBlock(inBlockPtr.get(),
+                                pbgzReader ? (int64_t)pbgzReader->getCurrentBlockStart() : 0);
+            continue;
+        }
         outBlockPtr->reset();
         actuator = std::make_unique<SamCodecActuator>(inBlockPtr.get(), outBlockPtr.get(), this, pRefGene);
         actuator->initMetaInfo();
