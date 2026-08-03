@@ -35,6 +35,7 @@
 #include "safe_line_reader.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_fc.h"
+#include "coder/coder_fcv2.h"
 
 namespace {
 
@@ -45,6 +46,13 @@ namespace {
  * to separate the candidate coders.
  */
 const uint32_t SAMPLE_TARGET = 4u << 20;   /* 4 MB */
+
+/*
+ * 先验训练最多使用 45 MB QUAL。实测到此处收益约为 1.84 个百分点，继续加到 90 MB
+ * 只多约 0.10 个百分点；多出的时间却发生在切换到并行压缩之前的串行阶段，会直接
+ * 推迟后续工作线程启动，所以必须在收益曲线变平前截断。
+ */
+const uint32_t QUAL_PRIOR_TRAIN_MAX = 45u * 1024u * 1024u;
 
 /*
  * Minimum per-field sample required before we trust a codec comparison.
@@ -198,13 +206,15 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
 }
 
 void CodecSelector::extractQualSamples(RoughIOBlock* block,
-                                      std::vector<QualSampleRecord>& records,
-                                      std::vector<uint32_t>& freqByByte,
-                                      uint32_t sampleBudget)
+                                       std::vector<QualSampleRecord>& records,
+                                       std::vector<uint32_t>& freqByByte,
+                                       uint32_t sampleBudget,
+                                       uint64_t qualBudget)
 {
     records.clear();
     freqByByte.assign(256, 0);
     SafeLineReader reader(block);
+    uint64_t collectedQualBytes = 0;
 
     const uint8_t* line = nullptr;
     uint32_t lineLen = 0;
@@ -244,8 +254,18 @@ void CodecSelector::extractQualSamples(RoughIOBlock* block,
             continue;
         }
 
+        uint32_t qualLen = qEnd - qBeg;
+        /*
+         * 只接收完整记录，不能为了凑满上限截断 QUAL：fcv2 依赖真实读长来还原循环位置，
+         * 截断会悄悄训练出错误的上下文。超过上限后不再保留记录，但仍扫描到块尾，保证
+         * 训练路径处理的是完整首块而非选择阶段的 4 MB 原始样本。
+         */
+        if (collectedQualBytes + qualLen > qualBudget) {
+            continue;
+        }
+
         QualSampleRecord rec;
-        rec.qual.assign((const char*)(line + qBeg), qEnd - qBeg);
+        rec.qual.assign((const char*)(line + qBeg), qualLen);
         rec.seq.assign((const char*)(line + beg[SAM_SEQ]), end[SAM_SEQ] - beg[SAM_SEQ]);
 
         /* 手工解析 FLAG，取 0x10 位。字段没有以 \0 结尾，不能直接用 strtol。 */
@@ -263,6 +283,54 @@ void CodecSelector::extractQualSamples(RoughIOBlock* block,
             freqByByte[line[p]]++;
         }
         records.push_back(rec);
+        collectedQualBytes += qualLen;
+    }
+}
+
+/*
+ * 在首块的完整 QUAL 上训练 fcv2 先验。编码器选择仍只用小样本；小样本足以稳定比较
+ * 候选，而模型学习需要更多质量值，复用它会把约 1.18 MB 的选择样本误当成训练集，损失
+ * 大部分先验收益。这里故意只修改 PreprocessInfo：它是流水线与编码器决策的唯一接口，
+ * 让 coder/ 层继续不知道块和文件偏移，维持既有分层。
+ */
+void CodecSelector::trainQualPrior(RoughIOBlock* block, PreprocessInfo& info)
+{
+    if (block == nullptr || block->getDataLen() <= 0) {
+        return;
+    }
+
+    try {
+        std::vector<QualSampleRecord> records;
+        std::vector<uint32_t> freqByByte;
+        extractQualSamples(block, records, freqByByte, UINT32_MAX, QUAL_PRIOR_TRAIN_MAX);
+
+        uint64_t trainedBytes = 0;
+        for (size_t i = 0; i < records.size(); ++i) {
+            trainedBytes += records[i].qual.size();
+        }
+        if (trainedBytes == 0) {
+            return;
+        }
+
+        std::vector<uint8_t> scratch((size_t)trainedBytes * 2 + (1u << 16), 0);
+        coder_io io(scratch.data(), (int32_t)scratch.size());
+        coder_fcv2 coder(&io, freqByByte);
+        for (size_t i = 0; i < records.size(); ++i) {
+            const QualSampleRecord& record = records[i];
+            coder.encode_record((const uint8_t*)record.qual.data(),
+                                (uint32_t)record.qual.size(), record.rev);
+        }
+        if (coder.encode_flush() <= 0) {
+            return;
+        }
+
+        std::vector<uint8_t> snapshot;
+        if (!coder.export_model(snapshot) || snapshot.empty()) {
+            return;
+        }
+        info.setQualPrior(std::move(snapshot), trainedBytes);
+    } catch (...) {
+        /* 训练只是可选优化；任意分配或未知数据失败都必须回到无先验的既有压缩路径。 */
     }
 }
 
@@ -359,6 +427,10 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, PreprocessInfo& info)
             std::vector<uint32_t> qualFreq;
             extractQualSamples(block, qualRecs, qualFreq, SAMPLE_TARGET);
             info.fields[f] = QualSelector::select(qualRecs, qualFreq);
+            if (info.fields[f].status == FieldStatus::SELECTED &&
+                info.fields[f].selectedCoder == CoderType::FCV2) {
+                trainQualPrior(block, info);
+            }
             continue;
         }
         info.fields[f] = selectCoder((const uint8_t*)buf.data(), (uint32_t)buf.size());

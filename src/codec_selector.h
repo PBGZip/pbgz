@@ -66,6 +66,7 @@ public:
 private:
     static int32_t analyzeSam(RoughIOBlock* block, PreprocessInfo& info);
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
+    static void trainQualPrior(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
     /*
@@ -78,7 +79,8 @@ private:
     static void extractQualSamples(RoughIOBlock* block,
                                    std::vector<QualSampleRecord>& records,
                                    std::vector<uint32_t>& freqByByte,
-                                   uint32_t sampleBudget);
+                                   uint32_t sampleBudget,
+                                   uint64_t qualBudget = UINT64_MAX);
 
     static uint32_t extractSamFieldSamples(RoughIOBlock* block,
                                        std::vector<std::string>& fieldBufs,

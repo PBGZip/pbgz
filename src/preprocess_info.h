@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <atomic>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "io_block.h"
@@ -170,7 +171,19 @@ struct PreprocessInfo {
 
     std::vector<FieldCodecSelection> fields;
 
-    PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0) {}
+    /*
+     * fcv2 由首块完整 QUAL 训练出的模型快照及其训练量。
+     *
+     * 先验跟随预处理结果保存，而不是交给某个编码器实例：PreprocessInfo 是流水线和
+     * 编码器决策之间唯一的交接点，编码器层因此无需知道数据块或文件偏移，继续保持
+     * coder/ 不反向依赖 src/ 的分层。空快照明确表示本次没有可用先验，调用方可无条件
+     * 退回既有的冷启动行为。
+     */
+    std::vector<uint8_t> qualPriorSnapshot;
+    uint64_t qualPriorTrainingBytes;
+
+    PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
+                       qualPriorTrainingBytes(0) {}
 
     void reset(BlockType type)
     {
@@ -179,6 +192,8 @@ struct PreprocessInfo {
         sampleBytes = 0;
         scannedBytes = 0;
         fields.clear();
+        qualPriorSnapshot.clear();
+        qualPriorTrainingBytes = 0;
     }
 
     bool isDone() const
@@ -224,5 +239,21 @@ struct PreprocessInfo {
             return sel->selectedCoder;
         }
         return fallback;
+    }
+
+    const std::vector<uint8_t>& qualPrior() const
+    {
+        return qualPriorSnapshot;
+    }
+
+    uint64_t qualPriorTrainedBytes() const
+    {
+        return qualPriorTrainingBytes;
+    }
+
+    void setQualPrior(std::vector<uint8_t>&& snapshot, uint64_t trainedBytes)
+    {
+        qualPriorSnapshot = std::move(snapshot);
+        qualPriorTrainingBytes = qualPriorSnapshot.empty() ? 0 : trainedBytes;
     }
 };
