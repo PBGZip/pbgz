@@ -88,6 +88,16 @@ struct FieldCodecSelection {
     uint32_t    trialBwtCmUs = 0;
     uint32_t    trialFcUs = 0;
 
+    /*
+     * 实际用于定案的样本字节数，以及为此跑了几轮。
+     *
+     * 评估不再是"把整个采样压一遍"，而是从小样本起步逐轮加倍，一旦领先者拉开足够
+     * 差距就立刻收手。多数字段在头一两轮就能分出胜负，剩下的预算留给真正难分的字段。
+     * decidedLen 小于 sampleLen 就说明这个字段提前定案了。
+     */
+    uint32_t    decidedLen = 0;
+    uint32_t    rounds = 0;
+
     FieldCodecSelection()
         : status(FieldStatus::SKIPPED),
           selectedCoder(CoderType::BWT_CM),

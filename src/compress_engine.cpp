@@ -207,14 +207,16 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
                                  (sel.status == FieldStatus::SKIPPED) ? "skipped" : "failed";
             if (sel.status == FieldStatus::SELECTED) {
                 /* 吞吐按 样本字节 / 试压耗时 折算成 MB/s；耗时为 0 时不显示速度 */
-                double bwtMBps = sel.trialBwtCmUs ? (double)sel.sampleLen / sel.trialBwtCmUs : 0.0;
-                double fcMBps  = sel.trialFcUs    ? (double)sel.sampleLen / sel.trialFcUs    : 0.0;
+                double bwtMBps = sel.trialBwtCmUs ? (double)sel.decidedLen / sel.trialBwtCmUs : 0.0;
+                double fcMBps  = sel.trialFcUs    ? (double)sel.decidedLen / sel.trialFcUs    : 0.0;
                 fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)"
-                        "  [bwt_cm %.2f%% @%.0fMB/s | fc %.2f%% @%.0fMB/s]\n",
+                        "  [bwt_cm %.2f%% @%.0fMB/s | fc %.2f%% @%.0fMB/s] %u轮\n",
                         names[i], coderTypeToMagic(sel.selectedCoder),
-                        sel.sampleLen, sel.bestCompLen, sel.ratio() * 100.0,
-                        sel.sampleLen ? 100.0*sel.trialBwtCmLen/sel.sampleLen : 0, bwtMBps,
-                        sel.sampleLen ? 100.0*sel.trialFcLen/sel.sampleLen : 0, fcMBps);
+                        sel.decidedLen, sel.bestCompLen,
+                        sel.decidedLen ? 100.0 * sel.bestCompLen / sel.decidedLen : 0.0,
+                        sel.decidedLen ? 100.0*sel.trialBwtCmLen/sel.decidedLen : 0, bwtMBps,
+                        sel.decidedLen ? 100.0*sel.trialFcLen/sel.decidedLen : 0, fcMBps,
+                        sel.rounds);
             } else {
                 fprintf(stderr, "  %-6s -> %-14s  (sample %u bytes)\n",
                         names[i], status, sel.sampleLen);

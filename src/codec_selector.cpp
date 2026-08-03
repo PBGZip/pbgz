@@ -105,6 +105,17 @@ int CodecSelector::pickBwtLevel(uint32_t sampleLen)
     return 9;
 }
 
+/*
+ * 领先者需要领先多少才算胜负已分。
+ *
+ * 取压缩后大小的相对差：领先者比次优者小 3% 以上就定案。差距小于这个数时，
+ * 换更多样本重测有可能反转，值得再跑一轮；大于这个数基本不会反转。
+ */
+const double SETTLE_MARGIN = 0.03;
+
+/* 评估的起步样本量。太小容易被局部数据带偏，取和最小可信样本一致。 */
+const uint32_t PROBE_START = MIN_SELECT_SAMPLE;
+
 FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len)
 {
     FieldCodecSelection sel;
@@ -114,32 +125,62 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
         return sel;
     }
 
+    /*
+     * 从小样本起步，每轮加倍，一旦领先者拉开足够差距就收手。
+     *
+     * 每一轮都是拿新实例重压 [0, probe)，而不是在上一轮的基础上增量喂。这样做有两个
+     * 原因：coder_fc 只支持整块压缩，第二次调用 encode_line 会直接报错；而且重压
+     * 恰好模拟了实际压缩时"一个数据块从头压到尾"的情形，量出来的数字更贴近真实表现。
+     *
+     * 重压带来的额外开销是有界的：样本量按 2 倍递增，所有轮次加起来不超过最后一轮的
+     * 两倍。而多数字段在头一两轮就定案了，实际反而比一次性压满整个采样更省。
+     */
+    uint32_t bwtCmLen = 0, fcLen = 0;
+    uint32_t bwtCmUs = 0, fcUs = 0, outUs = 0, outLen = 0;
     uint32_t bestLen = UINT32_MAX;
     CoderType bestCoder = CoderType::BWT_CM;
     bool anyOk = false;
-    uint32_t outLen = 0;
+    uint32_t probe = (PROBE_START < len) ? PROBE_START : len;
 
-    /* coder_bwt_cm: use a block size that fits the sample in one block. */
-    /*
-     * coder_simple_rc 已从候选中移除：实测它是有损的，往返校验全部失败。
-     * 试压只比较压缩后的大小、不验证能否原样解回来，留着它迟早会选出一个解不出
-     * 原始数据的编码器。simpleRcLen 保留为 0，只是为了不改动 -v 的打印结构。
-     */
-    uint32_t bwtCmLen = 0, fcLen = 0;
-    uint32_t bwtCmUs = 0, fcUs = 0, outUs = 0;
+    while (true) {
+        bwtCmLen = fcLen = 0;
+        bestLen = UINT32_MAX;
+        bestCoder = CoderType::BWT_CM;
+        anyOk = false;
+        uint32_t runnerUp = UINT32_MAX;
+        sel.rounds++;
 
-    if (trialEncode<coder_bwt_cm>(data, len, pickBwtLevel(len), outLen, outUs)) {
-        bwtCmLen = outLen; bwtCmUs = outUs;
-        if (outLen < bestLen) { bestLen = outLen; bestCoder = CoderType::BWT_CM; }
-        anyOk = true;
+        if (trialEncode<coder_bwt_cm>(data, probe, pickBwtLevel(probe), outLen, outUs)) {
+            bwtCmLen = outLen; bwtCmUs = outUs;
+            bestLen = outLen; bestCoder = CoderType::BWT_CM;
+            anyOk = true;
+        }
+        if (trialEncode<coder_fc>(data, probe, 0, outLen, outUs)) {
+            fcLen = outLen; fcUs = outUs;
+            if (outLen < bestLen) { runnerUp = bestLen; bestLen = outLen; bestCoder = CoderType::FC; }
+            else { runnerUp = outLen; }
+            anyOk = true;
+        }
+
+        if (!anyOk) {
+            break;
+        }
+        /* 样本已经用尽，没有更多数据可加，只能就此定案。 */
+        if (probe >= len) {
+            break;
+        }
+        /* 只有一个候选能跑通，再加数据也没有比较对象。 */
+        if (runnerUp == UINT32_MAX) {
+            break;
+        }
+        /* 领先者已经拉开足够差距，再加数据不会反转。 */
+        if ((double)(runnerUp - bestLen) / (double)runnerUp >= SETTLE_MARGIN) {
+            break;
+        }
+        probe = (probe > len / 2) ? len : (probe * 2);
     }
 
-    if (trialEncode<coder_fc>(data, len, 0, outLen, outUs)) {
-        fcLen = outLen; fcUs = outUs;
-        if (outLen < bestLen) { bestLen = outLen; bestCoder = CoderType::FC; }
-        anyOk = true;
-    }
-
+    sel.decidedLen = probe;
     sel.trialBwtCmLen = bwtCmLen;
     sel.trialFcLen = fcLen;
     sel.trialBwtCmUs = bwtCmUs;
