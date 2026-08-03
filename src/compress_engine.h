@@ -29,6 +29,7 @@
 #include "pbgz_stat.h"
 #include "block_wrapper.h"
 #include "preprocess_info.h"
+#include <atomic>
 
 class CompressEngine : public CodecEngine {
 public:
@@ -66,17 +67,19 @@ protected:
 
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
 
-    virtual void writeFilePostProc(BlockWriter* blockWriter) override ;
 
     /*
-     * 把首块训练出的 QUAL 先验写成一个 QUAL_PRIOR 块，并记下它的文件级偏移。
+     * 把首块训练出的 QUAL 先验发射成一个 QUAL_PRIOR 辅助块，并记下其容器头绝对偏移。
      *
-     * 走的是 refe.offset 那个已经验证过的形状：解压侧靠偏移 seek，不靠块号定位。
-     * 之所以必须由写线程在数据块全部落盘之后调用，是因为先验只有读完第 0 块才存在，
-     * 没法像参考基因组那样在开工前就打进文件头；而写线程此刻已是单线程，
-     * getCurrentPos() 取到的就是这个块的真实起点，不存在竞争，也无需跨线程回填。
+     * 调用点在串行首块窗口内（runFilePreprocessOnce 之后、第 0 块编码之前），
+     * 而不是文件收尾：数据块的分片头要写下先验的绝对地址，地址就必须先于一切数据块存在。
+     * 放在这里还有个直接好处——连第 0 块自己都能用上先验，不必为它开特例。
+     *
+     * 实际落盘由写线程经 emitSyncAuxBlock 完成，本函数只负责构块与登记元信息。
      */
-    void packQualPrior(BlockWriter* blockWriter);
+    void emitQualPrior();
+
+    virtual void writeFilePostProc(BlockWriter* blockWriter) override;
 
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, true);
@@ -127,4 +130,14 @@ private:
     bool statsInitialized = false;
 
     PreprocessInfo preprocessInfo;
+
+    /*
+     * QUAL 先验块容器头的绝对文件偏移，-1 表示本次压缩没有可用先验。
+     * 由 0 号工作线程在串行窗口内写入，随后被所有并行工作线程读取，故用原子量发布：
+     * conditionVar 的 notify_all 只保证唤醒，不足以为非原子共享量建立可见性。
+     */
+    std::atomic<int64_t> qualPriorOffset{-1};
+
+public:
+    int64_t getQualPriorOffset() const { return qualPriorOffset.load(std::memory_order_acquire); }
 };

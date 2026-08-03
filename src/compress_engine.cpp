@@ -259,12 +259,19 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
         }
         fprintf(stderr, "\n");
     }
-    preprocessInfo.markDone();;
+    /*
+     * 先验必须在这里发射，而不是等到文件收尾：数据块的分片头要写下它的绝对地址。
+     * 此刻仍在串行首块窗口内——其余工作线程阻塞在 conditionVar，写线程也还没收到
+     * 任何数据块——所以这个块一定落在全部数据块之前，地址一经确定即对后续所有块可见。
+     */
+    emitQualPrior();
+
+    preprocessInfo.markDone();
 }
 
-void CompressEngine::packQualPrior(BlockWriter* blockWriter) {
+void CompressEngine::emitQualPrior() {
     const std::vector<uint8_t>& prior = preprocessInfo.qualPrior();
-    if (blockWriter == nullptr || prior.empty()) {
+    if (prior.empty()) {
         return;
     }
 
@@ -312,11 +319,20 @@ void CompressEngine::packQualPrior(BlockWriter* blockWriter) {
     memcpy(outBlock->getCurrent(), metaString.c_str(), metaString.length());
     outBlock->setMetaLen(metaString.length());
     outBlock->setBlockType(QUAL_PRIOR);
-    outBlock->setBlockId(blockId2Write++);
+    /*
+     * 不给辅助块分配数据块 id：它位置寻址，写线程见到即写。
+     * 早先这里做的是 blockId2Write++，那是把写线程的游标当作发号器用，
+     * 在数据块开写之前发射就会直接顶掉第 0 块的位置。
+     */
+    outBlock->setBlockId(-1);
 
-    const int64_t offset = (int64_t)fileWriter->getCurrentPos();
-    blockWriter->writeBlock(outBlock);
-    freeOutputPool->push(outBlock);
+    /* 落盘与取址都发生在写线程内，返回后 outBlock 已被归还，不可再触碰。 */
+    const int64_t offset = emitSyncAuxBlock(outBlock);
+    if (offset < 0) {
+        LOG_ERROR("Emit qual prior block failed");
+        return;
+    }
+    qualPriorOffset.store(offset, std::memory_order_release);
 
     Json::Value priorMeta;
     priorMeta["offset"] = (Json::Value::Int64)offset;
@@ -334,8 +350,6 @@ void CompressEngine::packQualPrior(BlockWriter* blockWriter) {
 }
 
 void CompressEngine::writeFilePostProc(BlockWriter* blockWriter) {
-    /* 必须排在基类之前：基类会把 dynamicFileMeta 落盘，晚于它填 qual_prior 就丢了。 */
-    packQualPrior(blockWriter);
     CodecEngine::writeFilePostProc(blockWriter);
     // make index
     if (parameter.isMakeIndex) {
