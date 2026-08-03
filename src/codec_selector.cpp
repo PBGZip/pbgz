@@ -197,6 +197,75 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     return sel;
 }
 
+void CodecSelector::extractQualSamples(RoughIOBlock* block,
+                                      std::vector<QualSampleRecord>& records,
+                                      std::vector<uint32_t>& freqByByte,
+                                      uint32_t sampleBudget)
+{
+    records.clear();
+    freqByByte.assign(256, 0);
+    SafeLineReader reader(block);
+
+    const uint8_t* line = nullptr;
+    uint32_t lineLen = 0;
+    while (reader.nextLine(line, lineLen)) {
+        if (reader.scannedBytes() >= sampleBudget) {
+            break;
+        }
+        if (lineLen == 0 || line[0] == '@') {
+            continue;
+        }
+
+        /* 逐个 tab 切出前 11 个必需字段的起止位置。 */
+        uint32_t beg[SAM_FIELD_COUNT] = {0};
+        uint32_t end[SAM_FIELD_COUNT] = {0};
+        uint32_t fieldIdx = 0;
+        uint32_t pos = 0;
+        while (pos <= lineLen && fieldIdx < SAM_FIELD_COUNT) {
+            uint32_t tabPos = pos;
+            while (tabPos < lineLen && line[tabPos] != '\t') {
+                ++tabPos;
+            }
+            beg[fieldIdx] = pos;
+            end[fieldIdx] = tabPos;
+            ++fieldIdx;
+            pos = tabPos + 1;
+        }
+        if (fieldIdx < SAM_FIELD_COUNT) {
+            continue;   /* 字段不全的行跳过，不参与评估 */
+        }
+
+        uint32_t qBeg = beg[SAM_QUAL], qEnd = end[SAM_QUAL];
+        if (qEnd <= qBeg) {
+            continue;
+        }
+        /* QUAL 为单个 '*' 表示缺失，这类记录没有质量值可压。 */
+        if (qEnd - qBeg == 1 && line[qBeg] == '*') {
+            continue;
+        }
+
+        QualSampleRecord rec;
+        rec.qual.assign((const char*)(line + qBeg), qEnd - qBeg);
+        rec.seq.assign((const char*)(line + beg[SAM_SEQ]), end[SAM_SEQ] - beg[SAM_SEQ]);
+
+        /* 手工解析 FLAG，取 0x10 位。字段没有以 \0 结尾，不能直接用 strtol。 */
+        long flagVal = 0;
+        for (uint32_t p = beg[SAM_FLAG]; p < end[SAM_FLAG]; ++p) {
+            uint8_t ch = line[p];
+            if (ch < '0' || ch > '9') {
+                break;
+            }
+            flagVal = flagVal * 10 + (ch - '0');
+        }
+        rec.rev = (flagVal & 16) != 0;
+
+        for (uint32_t p = qBeg; p < qEnd; ++p) {
+            freqByByte[line[p]]++;
+        }
+        records.push_back(rec);
+    }
+}
+
 uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
                                            std::vector<std::string>& fieldBufs,
                                            uint32_t sampleBudget)
@@ -278,6 +347,18 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, PreprocessInfo& info)
         if (buf.size() < MIN_SELECT_SAMPLE) {
             info.fields[f].status = FieldStatus::SKIPPED;
             info.fields[f].sampleLen = (uint32_t)buf.size();
+            continue;
+        }
+        if (f == (uint32_t)SAM_QUAL) {
+            /*
+             * 质量值列走专用评估：候选是 coder_qual 和 fcv2，而不是通用的字节流
+             * 压缩器。此前这里比较的是 coder_bwt_cm 和 coder_fc，而压缩时用的是
+             * 另外两个，选出来的结果实际上没有被使用。
+             */
+            std::vector<QualSampleRecord> qualRecs;
+            std::vector<uint32_t> qualFreq;
+            extractQualSamples(block, qualRecs, qualFreq, SAMPLE_TARGET);
+            info.fields[f] = QualSelector::select(qualRecs, qualFreq);
             continue;
         }
         info.fields[f] = selectCoder((const uint8_t*)buf.data(), (uint32_t)buf.size());

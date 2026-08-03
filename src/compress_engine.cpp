@@ -209,13 +209,21 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
                 /* 吞吐按 样本字节 / 试压耗时 折算成 MB/s；耗时为 0 时不显示速度 */
                 double bwtMBps = sel.trialBwtCmUs ? (double)sel.decidedLen / sel.trialBwtCmUs : 0.0;
                 double fcMBps  = sel.trialFcUs    ? (double)sel.decidedLen / sel.trialFcUs    : 0.0;
+                /*
+                 * 质量值列走的是专用评估路径，两个试压字段承载的是 coder_qual 和
+                 * fcv2 的结果，而不是通用路径的 bwt_cm 和 fc。标签必须跟着换，
+                 * 否则读的人会把 coder_qual 的数字当成 coder_bwt_cm 的。
+                 */
+                const bool isQualRow = isSam && (i == (uint32_t)SAM_QUAL);
+                const char* candA = isQualRow ? "coder_qual" : "bwt_cm";
+                const char* candB = isQualRow ? "fcv2"       : "fc";
                 fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)"
-                        "  [bwt_cm %.2f%% @%.0fMB/s | fc %.2f%% @%.0fMB/s] %u轮\n",
+                        "  [%s %.2f%% @%.0fMB/s | %s %.2f%% @%.0fMB/s] %u轮\n",
                         names[i], coderTypeToMagic(sel.selectedCoder),
                         sel.decidedLen, sel.bestCompLen,
                         sel.decidedLen ? 100.0 * sel.bestCompLen / sel.decidedLen : 0.0,
-                        sel.decidedLen ? 100.0*sel.trialBwtCmLen/sel.decidedLen : 0, bwtMBps,
-                        sel.decidedLen ? 100.0*sel.trialFcLen/sel.decidedLen : 0, fcMBps,
+                        candA, sel.decidedLen ? 100.0*sel.trialBwtCmLen/sel.decidedLen : 0, bwtMBps,
+                        candB, sel.decidedLen ? 100.0*sel.trialFcLen/sel.decidedLen : 0, fcMBps,
                         sel.rounds);
             } else {
                 fprintf(stderr, "  %-6s -> %-14s  (sample %u bytes)\n",

@@ -1283,11 +1283,19 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
      * 质量值可以用两种编码器。coder_qual 是原有的，以 SEQ 为上下文；fcv2 是上下文
      * 混合编码器，以前一个和前两个质量值、记录内的测序循环序号、链方向为上下文。
      *
-     * 目前用环境变量切换，等预处理阶段能对 fcv2 试压之后再改为按选择结果决定。
-     * 之所以还不能接预处理：试压拿到的是把整列拼起来的一段样本，记录边界和链方向
-     * 都已经丢失，而 fcv2 恰好需要这两样。
+     * 用哪一个由预处理阶段的试压结果决定。质量值列走的是专用评估路径
+     * （QualSelector），候选就是这两个，样本按记录采集因而保留了记录边界和链方向。
+     *
+     * 预处理没跑成、样本太小被跳过、或者当前引擎不提供预处理信息时，coderFor 返回
+     * 传入的兜底类型 QUAL，也就是沿用原有的 coder_qual，行为与接通选择之前一致。
      */
-    const bool useFcv2 = (getenv("PBGZ_QUAL_FCV2") != nullptr);
+    CoderType pickedQualCoder = CoderType::QUAL;
+    const PreprocessInfo* qualPreInfo =
+        (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
+    if (qualPreInfo != nullptr) {
+        pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, CoderType::QUAL);
+    }
+    const bool useFcv2 = (pickedQualCoder == CoderType::FCV2);
     std::shared_ptr<coder_qual> qualityCoder;
     std::shared_ptr<coder_fcv2> fcv2Coder;
     if (useFcv2) {

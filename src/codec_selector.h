@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "preprocess_info.h"
+#include "qual_selector.h"
 
 class RoughIOBlock;
 
@@ -67,6 +68,18 @@ private:
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
+    /*
+     * 单独采集质量值列的样本。
+     *
+     * 通用采样把整列拼成连续字节，记录边界就没了；而质量值的两个候选都需要记录级
+     * 信息——fcv2 要每条记录的长度来还原测序循环序号，coder_qual 要对应的碱基序列
+     * 作上下文，链方向则取自 FLAG 的 0x10 位。所以这里按记录收集，不做拼接。
+     */
+    static void extractQualSamples(RoughIOBlock* block,
+                                   std::vector<QualSampleRecord>& records,
+                                   std::vector<uint32_t>& freqByByte,
+                                   uint32_t sampleBudget);
+
     static uint32_t extractSamFieldSamples(RoughIOBlock* block,
                                        std::vector<std::string>& fieldBufs,
                                        uint32_t sampleBudget);
