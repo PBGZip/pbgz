@@ -40,7 +40,23 @@ public:
      * 的代价只取决于预测概率，把一个符号拆成几步条件判断，代价总和是一样的。
      */
     coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable);
+
+    /*
+     * 从先前导出的模型快照创建编码器。modelLoaded 非空时会写入实际加载结果：只有快照
+     * 的版本、编译期尺寸参数、字母表和全部模型数组都通过校验时才为 true。任何损坏或不
+     * 兼容的快照都会保留 freqTable 所构造的固定初值模型，绝不留下半恢复的状态；这让
+     * 调用方可以把快照当作可选的性能优化，而不把错误处理扩散到压缩主流程。
+     */
+    coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable,
+               const std::vector<uint8_t>& modelBlob, bool* modelLoaded);
     ~coder_fcv2();
+
+    /*
+     * 导出当前学习到的模型。快照同时携带字母表和量化频率，而不是只保存计数器：计数器
+     * 的下标是哈夫曼内部节点号，节点号只能由完全相同的字母表和频率重建。返回 false
+     * 表示当前编码器没有可导出的有效字母表，或输出缓冲区无法分配。
+     */
+    bool export_model(std::vector<uint8_t>& out) const;
 
     /*
      * 本编码器需要每条记录的长度和链方向，这两样只有比对后的 SAM 的 QUAL 列能提供。

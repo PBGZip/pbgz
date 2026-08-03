@@ -16,6 +16,8 @@
 #include <string.h>
 #include <math.h>
 
+#include <limits>
+
 #include "coder.h"
 #include "fc/rangecoder.h"
 
@@ -35,6 +37,74 @@ const int WEIGHT_LR_SHIFT = 12;
 
 /* 参与混合的模型个数。 */
 const int MODEL_COUNT = 4;
+
+/*
+ * 模型快照与码流刻意分离：码流格式不能因先验模型功能而改变。下面的固定头让快照能在
+ * 读入前判定是否仍对应当前的数组布局；只要任一尺寸常量变化，旧快照中的节点下标就不再
+ * 有定义，必须拒绝，而不是以看似可用但实际错误的概率继续编码。
+ */
+const uint8_t MODEL_MAGIC[] = { 'f', 'c', 'v', '2', 'p', 'r', 'i', 'o', 'r' };
+const uint16_t MODEL_FORMAT_VERSION = 1;
+
+inline void appendU16(std::vector<uint8_t>& out, uint16_t value)
+{
+    out.push_back((uint8_t)(value & 0xFF));
+    out.push_back((uint8_t)(value >> 8));
+}
+
+inline void appendU32(std::vector<uint8_t>& out, uint32_t value)
+{
+    for (int shift = 0; shift < 32; shift += 8) {
+        out.push_back((uint8_t)(value >> shift));
+    }
+}
+
+inline void appendI32(std::vector<uint8_t>& out, int32_t value)
+{
+    appendU32(out, (uint32_t)value);
+}
+
+/*
+ * 字节读取器只在输入还剩足够空间时推进位置，因而截断快照不会越界读取，也不会让调用者
+ * 看到只恢复了一半的模型。所有数字都逐字节按小端解析，避免宿主端序和结构体填充参与
+ * 快照格式。
+ */
+class ModelBlobReader {
+public:
+    explicit ModelBlobReader(const std::vector<uint8_t>& blob) : data(blob), pos(0) {}
+
+    bool readU8(uint8_t& value)
+    {
+        if (pos == data.size()) return false;
+        value = data[pos++];
+        return true;
+    }
+
+    bool readU16(uint16_t& value)
+    {
+        uint8_t lo = 0, hi = 0;
+        if (!readU8(lo) || !readU8(hi)) return false;
+        value = (uint16_t)((uint16_t)lo | ((uint16_t)hi << 8));
+        return true;
+    }
+
+    bool readU32(uint32_t& value)
+    {
+        value = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            uint8_t byte = 0;
+            if (!readU8(byte)) return false;
+            value |= (uint32_t)byte << shift;
+        }
+        return true;
+    }
+
+    bool atEnd() const { return pos == data.size(); }
+
+private:
+    const std::vector<uint8_t>& data;
+    size_t pos;
+};
 
 /*
  * 概率与计数打包进一个 uint16_t：低 12 位是概率（0..4095），高 4 位是更新次数（0..15）。
@@ -277,9 +347,11 @@ public:
     uint16_t quantFreq[TREE_CAP]; /* 量化后的频率，随码流写出供解码端重建同一棵树 */
     bool encodeStarted;
     bool flushed;
+    bool modelLoaded;
 
     explicit fcv2_impl(coder_io* ioPtr)
-        : io(ioPtr), revCounter(COUNTER_INIT), alphaSize(0), encodeStarted(false), flushed(false)
+        : io(ioPtr), revCounter(COUNTER_INIT), alphaSize(0), encodeStarted(false), flushed(false),
+          modelLoaded(false)
     {
         initTables();
         memset(symbolOf, -1, sizeof(symbolOf));
@@ -332,6 +404,160 @@ public:
         uint32_t c = rev ? (len - 1 - i) : i;
         return (c >= (uint32_t)CYCLE_MAX) ? (CYCLE_MAX - 1) : (int)c;
     }
+
+    bool exportModel(std::vector<uint8_t>& out) const
+    {
+        if (alphaSize <= 0 || alphaSize > TREE_CAP || cm.alphaSize != alphaSize) {
+            return false;
+        }
+
+        std::vector<uint8_t> snapshot;
+        try {
+            snapshot.reserve(modelBlobSize(alphaSize));
+            snapshot.insert(snapshot.end(), MODEL_MAGIC, MODEL_MAGIC + sizeof(MODEL_MAGIC));
+            appendU16(snapshot, MODEL_FORMAT_VERSION);
+            appendU16(snapshot, (uint16_t)CYCLE_MAX);
+            appendU16(snapshot, (uint16_t)CYCLE_BUCKET);
+            appendU16(snapshot, (uint16_t)TREE_CAP);
+            appendU16(snapshot, (uint16_t)MODEL_COUNT);
+            appendU16(snapshot, (uint16_t)alphaSize);
+            appendU32(snapshot, (uint32_t)cm.m0.size());
+            appendU32(snapshot, (uint32_t)cm.m1.size());
+            appendU32(snapshot, (uint32_t)cm.m2.size());
+            appendU32(snapshot, (uint32_t)cm.m3.size());
+            appendU32(snapshot, (uint32_t)cm.weight.size());
+            for (int s = 0; s < alphaSize; s++) appendU8(snapshot, (uint8_t)byteOf[s]);
+            for (int s = 0; s < alphaSize; s++) appendU16(snapshot, quantFreq[s]);
+            appendU16(snapshot, revCounter);
+            appendCounters(snapshot, cm.m0);
+            appendCounters(snapshot, cm.m1);
+            appendCounters(snapshot, cm.m2);
+            appendCounters(snapshot, cm.m3);
+            for (size_t i = 0; i < cm.weight.size(); i++) appendI32(snapshot, cm.weight[i]);
+        } catch (...) {
+            return false;
+        }
+        out.swap(snapshot);
+        return true;
+    }
+
+    bool loadModel(const std::vector<uint8_t>& blob)
+    {
+        ModelBlobReader reader(blob);
+        for (size_t i = 0; i < sizeof(MODEL_MAGIC); i++) {
+            uint8_t byte = 0;
+            if (!reader.readU8(byte) || byte != MODEL_MAGIC[i]) return false;
+        }
+
+        uint16_t version = 0, cycleMax = 0, cycleBucket = 0, treeCap = 0, modelCount = 0;
+        uint16_t storedAlpha = 0;
+        uint32_t m0Length = 0, m1Length = 0, m2Length = 0, m3Length = 0, weightLength = 0;
+        if (!reader.readU16(version) || !reader.readU16(cycleMax) ||
+            !reader.readU16(cycleBucket) || !reader.readU16(treeCap) ||
+            !reader.readU16(modelCount) || !reader.readU16(storedAlpha) ||
+            !reader.readU32(m0Length) || !reader.readU32(m1Length) ||
+            !reader.readU32(m2Length) || !reader.readU32(m3Length) ||
+            !reader.readU32(weightLength)) {
+            return false;
+        }
+        if (version != MODEL_FORMAT_VERSION || cycleMax != CYCLE_MAX ||
+            cycleBucket != CYCLE_BUCKET || treeCap != TREE_CAP || modelCount != MODEL_COUNT ||
+            storedAlpha == 0 || storedAlpha > TREE_CAP) {
+            return false;
+        }
+
+        ContextModel restored;
+        try {
+            restored.init((int)storedAlpha);
+        } catch (...) {
+            return false;
+        }
+        if (m0Length != restored.m0.size() || m1Length != restored.m1.size() ||
+            m2Length != restored.m2.size() || m3Length != restored.m3.size() ||
+            weightLength != restored.weight.size()) {
+            return false;
+        }
+
+        int restoredByteOf[TREE_CAP];
+        int restoredSymbolOf[256];
+        uint16_t restoredQuantFreq[TREE_CAP];
+        memset(restoredByteOf, 0, sizeof(restoredByteOf));
+        memset(restoredSymbolOf, -1, sizeof(restoredSymbolOf));
+        memset(restoredQuantFreq, 0, sizeof(restoredQuantFreq));
+        for (int s = 0; s < storedAlpha; s++) {
+            uint8_t byte = 0;
+            if (!reader.readU8(byte) || restoredSymbolOf[byte] >= 0) return false;
+            restoredByteOf[s] = byte;
+            restoredSymbolOf[byte] = s;
+        }
+        uint32_t frequency[TREE_CAP];
+        for (int s = 0; s < storedAlpha; s++) {
+            if (!reader.readU16(restoredQuantFreq[s]) || restoredQuantFreq[s] == 0) return false;
+            frequency[s] = restoredQuantFreq[s];
+        }
+
+        Counter restoredRevCounter = 0;
+        if (!reader.readU16(restoredRevCounter) ||
+            !readCounters(reader, restored.m0) || !readCounters(reader, restored.m1) ||
+            !readCounters(reader, restored.m2) || !readCounters(reader, restored.m3) ||
+            !readWeights(reader, restored.weight) || !reader.atEnd()) {
+            return false;
+        }
+
+        HuffTree restoredTree;
+        restoredTree.build(frequency, (int)storedAlpha);
+        cm = std::move(restored);
+        tree = restoredTree;
+        revCounter = restoredRevCounter;
+        alphaSize = (int)storedAlpha;
+        memcpy(byteOf, restoredByteOf, sizeof(byteOf));
+        memcpy(symbolOf, restoredSymbolOf, sizeof(symbolOf));
+        memcpy(quantFreq, restoredQuantFreq, sizeof(quantFreq));
+        modelLoaded = true;
+        return true;
+    }
+
+private:
+    static void appendU8(std::vector<uint8_t>& out, uint8_t value)
+    {
+        out.push_back(value);
+    }
+
+    static void appendCounters(std::vector<uint8_t>& out, const std::vector<Counter>& values)
+    {
+        for (size_t i = 0; i < values.size(); i++) appendU16(out, values[i]);
+    }
+
+    static bool readCounters(ModelBlobReader& reader, std::vector<Counter>& values)
+    {
+        for (size_t i = 0; i < values.size(); i++) {
+            if (!reader.readU16(values[i])) return false;
+        }
+        return true;
+    }
+
+    static bool readWeights(ModelBlobReader& reader, std::vector<int>& values)
+    {
+        for (size_t i = 0; i < values.size(); i++) {
+            uint32_t bits = 0;
+            if (!reader.readU32(bits)) return false;
+            values[i] = bits <= (uint32_t)std::numeric_limits<int32_t>::max()
+                ? (int32_t)bits
+                : (int32_t)((int64_t)bits - ((int64_t)1 << 32));
+        }
+        return true;
+    }
+
+    static size_t modelBlobSize(int alpha)
+    {
+        size_t prevStates = (size_t)alpha + 1;
+        size_t counters = (size_t)TREE_CAP + (size_t)CYCLE_MAX * TREE_CAP +
+            prevStates * CYCLE_MAX * TREE_CAP +
+            prevStates * prevStates * CYCLE_BUCKET * 2 * TREE_CAP;
+        return sizeof(MODEL_MAGIC) + 2 + 4 * 2 + 2 + 5 * 4 + (size_t)alpha +
+            (size_t)alpha * 2 + 2 + counters * 2 +
+            (size_t)CYCLE_BUCKET * TREE_CAP * MODEL_COUNT * 4;
+    }
 };
 
 coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable)
@@ -379,7 +605,22 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable)
     }
 }
 
+coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable,
+                       const std::vector<uint8_t>& modelBlob, bool* modelLoaded)
+    : coder_fcv2(io, freqTable)
+{
+    bool loaded = impl->loadModel(modelBlob);
+    if (modelLoaded != nullptr) {
+        *modelLoaded = loaded;
+    }
+}
+
 coder_fcv2::~coder_fcv2() = default;
+
+bool coder_fcv2::export_model(std::vector<uint8_t>& out) const
+{
+    return impl->exportModel(out);
+}
 
 void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev)
 {
@@ -474,15 +715,40 @@ int32_t coder_fcv2::begin_decode()
     if (alpha <= 0 || alpha > TREE_CAP) {
         return -1;
     }
-    memset(d->symbolOf, -1, sizeof(d->symbolOf));
+    int streamByteOf[TREE_CAP];
+    uint16_t streamQuantFreq[TREE_CAP];
+    memset(streamByteOf, 0, sizeof(streamByteOf));
+    memset(streamQuantFreq, 0, sizeof(streamQuantFreq));
     uint32_t freq[TREE_CAP];
     for (int s = 0; s < alpha; s++) {
         int b = (int)d->rc.DecodeByte();
         int hi = (int)d->rc.DecodeByte();
         int lo = (int)d->rc.DecodeByte();
-        d->byteOf[s] = b;
-        d->symbolOf[b] = s;
+        streamByteOf[s] = b;
         freq[s] = (uint32_t)((hi << 8) | lo);
+        streamQuantFreq[s] = (uint16_t)freq[s];
+    }
+
+    /*
+     * 先验中的计数器按树节点编号索引，不能拿它去解另一棵树的码流。即使两个字母表含有
+     * 同一批字节，只要频率改变导致合并顺序变化，节点编号也可能已经代表另一个判断；因此
+     * 载入先验后必须逐项核对码流头，并保留已载入的学习状态，而非再次 init 覆盖它。
+     */
+    if (d->modelLoaded) {
+        if (d->alphaSize != alpha) return -1;
+        for (int s = 0; s < alpha; s++) {
+            if (d->byteOf[s] != streamByteOf[s] || d->quantFreq[s] != streamQuantFreq[s]) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    memset(d->symbolOf, -1, sizeof(d->symbolOf));
+    for (int s = 0; s < alpha; s++) {
+        d->byteOf[s] = streamByteOf[s];
+        d->symbolOf[streamByteOf[s]] = s;
+        d->quantFreq[s] = streamQuantFreq[s];
     }
     d->alphaSize = alpha;
     /* 用码流里带来的量化频率重建，保证与编码端是同一棵树。 */
