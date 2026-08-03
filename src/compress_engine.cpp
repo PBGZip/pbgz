@@ -198,19 +198,23 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
         uint32_t fieldCount = isSam ? SAM_FIELD_COUNT : FQ_FIELD_COUNT;
         const char* const* names = isSam ? samFieldNames : fqFieldNames;
 
-        fprintf(stderr, "\n[preprocess] codec selection (sample %u bytes):\n", preprocessInfo.sampleBytes);
+        fprintf(stderr, "\n[preprocess] codec selection"
+                " (scanned %u raw bytes, field samples total %u):\n",
+                preprocessInfo.scannedBytes, preprocessInfo.sampleBytes);
         for (uint32_t i = 0; i < fieldCount && i < preprocessInfo.fields.size(); ++i) {
             const auto& sel = preprocessInfo.fields[i];
             const char* status = (sel.status == FieldStatus::SELECTED) ? "selected" :
                                  (sel.status == FieldStatus::SKIPPED) ? "skipped" : "failed";
             if (sel.status == FieldStatus::SELECTED) {
+                /* 吞吐按 样本字节 / 试压耗时 折算成 MB/s；耗时为 0 时不显示速度 */
+                double bwtMBps = sel.trialBwtCmUs ? (double)sel.sampleLen / sel.trialBwtCmUs : 0.0;
+                double fcMBps  = sel.trialFcUs    ? (double)sel.sampleLen / sel.trialFcUs    : 0.0;
                 fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)"
-                        "  [bwt_cm=%.2f%% fc=%.2f%% simple_rc=%.2f%%]\n",
+                        "  [bwt_cm %.2f%% @%.0fMB/s | fc %.2f%% @%.0fMB/s]\n",
                         names[i], coderTypeToMagic(sel.selectedCoder),
                         sel.sampleLen, sel.bestCompLen, sel.ratio() * 100.0,
-                        sel.sampleLen ? 100.0*sel.trialBwtCmLen/sel.sampleLen : 0,
-                        sel.sampleLen ? 100.0*sel.trialFcLen/sel.sampleLen : 0,
-                        sel.sampleLen ? 100.0*sel.trialSimpleRcLen/sel.sampleLen : 0);
+                        sel.sampleLen ? 100.0*sel.trialBwtCmLen/sel.sampleLen : 0, bwtMBps,
+                        sel.sampleLen ? 100.0*sel.trialFcLen/sel.sampleLen : 0, fcMBps);
             } else {
                 fprintf(stderr, "  %-6s -> %-14s  (sample %u bytes)\n",
                         names[i], status, sel.sampleLen);

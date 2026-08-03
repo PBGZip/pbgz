@@ -67,10 +67,10 @@ private:
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
-    static void extractSamFieldSamples(RoughIOBlock* block,
+    static uint32_t extractSamFieldSamples(RoughIOBlock* block,
                                        std::vector<std::string>& fieldBufs,
                                        uint32_t sampleBudget);
-    static void extractFastqFieldSamples(RoughIOBlock* block,
+    static uint32_t extractFastqFieldSamples(RoughIOBlock* block,
                                          std::vector<std::string>& fieldBufs,
                                          uint32_t sampleBudget);
 

@@ -23,6 +23,8 @@
 
 #include "codec_selector.h"
 
+#include <chrono>
+
 #include <climits>
 #include <string>
 #include <vector>
@@ -70,8 +72,9 @@ const uint32_t BWT_LEVEL_SIZE[10] = {
  * coder_io sink is not bounds-checked.
  */
 template <typename CoderT>
-bool trialEncode(const uint8_t* data, uint32_t len, int bwtLevel, uint32_t& outLen)
+bool trialEncode(const uint8_t* data, uint32_t len, int bwtLevel, uint32_t& outLen, uint32_t& usec)
 {
+    const auto t0 = std::chrono::steady_clock::now();
     uint32_t cap = (len << 1) + 65536;
     std::vector<uint8_t> outBuf(cap, 0);
     coder_io io(outBuf.data(), (int32_t)cap);
@@ -84,6 +87,8 @@ bool trialEncode(const uint8_t* data, uint32_t len, int bwtLevel, uint32_t& outL
         coder.encode_flush();
     }
     outLen = (uint32_t)io.data_len;
+    usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0).count();
     return (outLen > 0 && outLen < cap);
 }
 
@@ -120,23 +125,25 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
      * 试压只比较压缩后的大小、不验证能否原样解回来，留着它迟早会选出一个解不出
      * 原始数据的编码器。simpleRcLen 保留为 0，只是为了不改动 -v 的打印结构。
      */
-    uint32_t bwtCmLen = 0, fcLen = 0, simpleRcLen = 0;
+    uint32_t bwtCmLen = 0, fcLen = 0;
+    uint32_t bwtCmUs = 0, fcUs = 0, outUs = 0;
 
-    if (trialEncode<coder_bwt_cm>(data, len, pickBwtLevel(len), outLen)) {
-        bwtCmLen = outLen;
+    if (trialEncode<coder_bwt_cm>(data, len, pickBwtLevel(len), outLen, outUs)) {
+        bwtCmLen = outLen; bwtCmUs = outUs;
         if (outLen < bestLen) { bestLen = outLen; bestCoder = CoderType::BWT_CM; }
         anyOk = true;
     }
 
-    if (trialEncode<coder_fc>(data, len, 0, outLen)) {
-        fcLen = outLen;
+    if (trialEncode<coder_fc>(data, len, 0, outLen, outUs)) {
+        fcLen = outLen; fcUs = outUs;
         if (outLen < bestLen) { bestLen = outLen; bestCoder = CoderType::FC; }
         anyOk = true;
     }
 
     sel.trialBwtCmLen = bwtCmLen;
     sel.trialFcLen = fcLen;
-    sel.trialSimpleRcLen = simpleRcLen;
+    sel.trialBwtCmUs = bwtCmUs;
+    sel.trialFcUs = fcUs;
 
     if (!anyOk) {
         sel.status = FieldStatus::FAILED;
@@ -149,7 +156,7 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     return sel;
 }
 
-void CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
+uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
                                            std::vector<std::string>& fieldBufs,
                                            uint32_t sampleBudget)
 {
@@ -178,9 +185,10 @@ void CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
             pos = tabPos + 1;
         }
     }
+    return reader.scannedBytes();
 }
 
-void CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
+uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
                                              std::vector<std::string>& fieldBufs,
                                              uint32_t sampleBudget)
 {
@@ -213,12 +221,13 @@ void CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
 
         slot = 0;
     }
+    return reader.scannedBytes();
 }
 
 int32_t CodecSelector::analyzeSam(RoughIOBlock* block, PreprocessInfo& info)
 {
     std::vector<std::string> fieldBufs;
-    extractSamFieldSamples(block, fieldBufs, SAMPLE_TARGET);
+    info.scannedBytes = extractSamFieldSamples(block, fieldBufs, SAMPLE_TARGET);
 
     info.fields.resize(SAM_FIELD_COUNT);
     uint64_t totalSample = 0;
@@ -242,7 +251,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, PreprocessInfo& info)
 int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, PreprocessInfo& info)
 {
     std::vector<std::string> fieldBufs;
-    extractFastqFieldSamples(block, fieldBufs, SAMPLE_TARGET);
+    info.scannedBytes = extractFastqFieldSamples(block, fieldBufs, SAMPLE_TARGET);
 
     info.fields.resize(FQ_FIELD_COUNT);
     uint64_t totalSample = 0;

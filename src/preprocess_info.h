@@ -71,7 +71,20 @@ struct FieldCodecSelection {
 
     uint32_t    trialBwtCmLen = 0;
     uint32_t    trialFcLen = 0;
-    uint32_t    trialSimpleRcLen = 0;
+
+    /*
+     * 试压耗时，微秒。
+     *
+     * 只看压缩率来选编码器是不够的：两个编码器压缩率相差不到一个百分点、吞吐却差
+     * 好几倍的情况很常见，这时候慢的那个未必划算。把耗时一并记下来，选择策略以后
+     * 就能在压缩率和速度之间做取舍，而不是无条件取最小。
+     *
+     * 注意样本只有几百 KB 到一两 MB，单次计时的相对误差不小（同一二进制重复测量的
+     * 波动在百分之几的量级），所以这个数字适合用来看数量级差异，不适合拿来比较
+     * 两个相差百分之几的编码器。
+     */
+    uint32_t    trialBwtCmUs = 0;
+    uint32_t    trialFcUs = 0;
 
     FieldCodecSelection()
         : status(FieldStatus::SKIPPED),
@@ -136,17 +149,23 @@ enum class PreprocessState : uint8_t {
 struct PreprocessInfo {
     BlockType fileType;
     std::atomic<PreprocessState> state;
+
+    /* 各字段样本长度之和，不含 tab 分隔符、换行符和头部行。 */
     uint32_t  sampleBytes;
+
+    /* 为做分析实际扫过的原始数据字节数，也就是从数据块头部截下来的那一段的大小。 */
+    uint32_t  scannedBytes;
 
     std::vector<FieldCodecSelection> fields;
 
-    PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0) {}
+    PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0) {}
 
     void reset(BlockType type)
     {
         fileType = type;
         state.store(PreprocessState::IDLE, std::memory_order_relaxed);
         sampleBytes = 0;
+        scannedBytes = 0;
         fields.clear();
     }
 
