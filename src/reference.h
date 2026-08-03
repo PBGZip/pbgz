@@ -109,6 +109,11 @@ public:
     /// @return true for success, false for failure
     bool initSquashByNiFile();
 
+    /// @brief Build squash buffer in-memory directly from FASTA file
+    /// No disk cache, no files written to user space.
+    /// @return true for success, false for failure
+    bool initSquashFromFasta();
+
     /// @brief Initialize reference genome compressed data through streaming
     /// Allocate buffer of specified size for storing compressed data
     /// @param squashLength Expected length of compressed data

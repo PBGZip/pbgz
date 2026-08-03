@@ -176,6 +176,81 @@ bool Reference::initSquashByNiFile() {
     return true;
 }
 
+bool Reference::initSquashFromFasta() {
+    std::string refGeneMd5;
+    int64_t refGeneLen;
+    calculateReferenceMd5(refGeneFile, refGeneMd5, refGeneLen);
+    fastaChecksum = refGeneMd5;
+
+    std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
+    if (reader == nullptr || reader->openIO() != 0) {
+        LOG_ERROR("Failed to open reference FASTA: %s", refGeneFile.c_str());
+        return false;
+    }
+
+    /* Build squash in-memory: 4 ACGT bases -> 1 byte (2-bit each).
+       Buffer grows dynamically; no pre-scan needed. */
+    std::vector<uint8_t> squash;
+    squash.reserve(refGeneLen / 4 + 1024);
+
+    uint8_t cacheActg[4];
+    uint32_t cacheLen = 0;
+    uint8_t squashBuf[1024];
+    std::string line;
+
+    while (reader->readLine(line) > 0) {
+        if (line.empty() || line[0] == '>') continue;
+
+        uint32_t lineLen = (uint32_t)line.length();
+        uint32_t pos = 0;
+
+        if (cacheLen > 0) {
+            uint32_t need = 4 - cacheLen;
+            uint32_t take = (lineLen < need) ? lineLen : need;
+            memcpy(cacheActg + cacheLen, line.c_str(), take);
+            cacheLen += take;
+            pos += take;
+            if (cacheLen == 4) {
+                uint8_t ch;
+                actgSquash(cacheActg, 4, &ch);
+                squash.push_back(ch);
+                cacheLen = 0;
+            }
+        }
+
+        uint32_t remaining = lineLen - pos;
+        uint32_t aligned = remaining >> 2 << 2;
+        if (aligned > 0) {
+            uint32_t out = actgSquash((const uint8_t*)(line.c_str() + pos), aligned, squashBuf);
+            squash.insert(squash.end(), squashBuf, squashBuf + out);
+            pos += aligned;
+        }
+
+        uint32_t tail = remaining - aligned;
+        if (tail > 0) {
+            memcpy(cacheActg, line.c_str() + pos, tail);
+            cacheLen = tail;
+        }
+    }
+
+    if (cacheLen > 0) {
+        uint8_t ch = 0;
+        for (uint32_t n = 0; n < cacheLen; n++) {
+            ch |= ((cacheActg[n] & 0x06) >> 1) << (6 - (n << 1));
+        }
+        squash.push_back(ch);
+    }
+
+    refGeneSquashlen = (int64_t)squash.size();
+    refGeneSquash = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashlen);
+    if (refGeneSquash == nullptr) {
+        return false;
+    }
+    memcpy(refGeneSquash, squash.data(), refGeneSquashlen);
+    reader->closeIO();
+    return true;
+}
+
 uint8_t* Reference::initSquashByStream(int64_t squashLength) {
     refGeneSquashlen = squashLength;
     refGeneSquash = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashlen);
@@ -751,7 +826,7 @@ bool Reference::makeIndex() {
     uint32_t *hashBucketCurpos;
 
     hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
-    if (!initSquashByNiFile()) {
+    if (!initSquashFromFasta()) {
         LOG_ERROR("initialize reference failed");
         MemoryUtil::safeFree(hashBucketCurpos);
         return false;

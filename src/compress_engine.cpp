@@ -347,7 +347,7 @@ int32_t CompressEngine::startEnginePostProc() {
         refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
         refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
         refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
-        refeMeta["ni_name"] = PathUtil::getFileName(pRefGene->getNiFilePath());
+        refeMeta["ni_name"] = "";
         refeMeta["offset"]= 0;
         dynamicFileMeta.setMetaData("refe", refeMeta);
         FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
@@ -378,7 +378,7 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
         refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
         refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
         refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
-        refeMeta["ni_name"] = PathUtil::getFileName(pRefGene->getNiFilePath()); /* Contains md5 information, used for decompression verification */
+        refeMeta["ni_name"] = "";
         refeMeta["max_block_len"] = 16 << 20;
         bool isPackRefeInHeader = !parameter.isUnpackRef && parameter.outputFile == STDOUT;
         if (isPackRefeInHeader) {

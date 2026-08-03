@@ -105,7 +105,6 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
 
     std::string fastaName = metaRefe["fasta_name"].asString();
     int64_t fastaLength = metaRefe["fasta_len"].asInt64();
-    std::string niName = metaRefe["ni_name"].asString();
 
     LOG_DEBUG("Reference blocks = %d", metaRefe["blocks"].asInt64());
 
@@ -138,24 +137,16 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
         return false;
     }
 
-    Reference refeCheck(parameter.referenceGenic, parameter.threadNum);
-    std::string niNameInput;
-    refeCheck.getNiFileFromReference(niNameInput);
-    niNameInput = PathUtil::getAbsPath(niNameInput);
-    if (PathUtil::getFileName(niNameInput) != niName)  {
-        LOG_ERROR("initialize reference failed: used ni file %s, should be %s", niNameInput.c_str(), niName.c_str());
-        return false;
-    }
-    /* matched, do make index */
     pRefGene = MemoryUtil::safeNewClass<Reference>(parameter.referenceGenic, parameter.threadNum);
     if (pRefGene == nullptr) {
         return false;
     }
-    if (!pRefGene->initSquashByNiFile()) {
+    if (!pRefGene->makeIndex()) {
         LOG_ERROR("initialize reference failed");
+        MemoryUtil::safeDeleteClass(pRefGene);
         return false;
     }
-    
+
     return true;
 }
 
