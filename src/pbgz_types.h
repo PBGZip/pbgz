@@ -44,6 +44,7 @@ typedef struct PbgzParameter{
     bool isMakeIndex;
     bool showHelp;
     bool showStat;
+    bool verbose;
 
     PbgzParameter() {
         isDecToGZ = false;
@@ -56,6 +57,7 @@ typedef struct PbgzParameter{
         isMakeIndex = false;
         showHelp = false;
         showStat = false;
+        verbose = false;
     }
 } PbgzParameter;
 

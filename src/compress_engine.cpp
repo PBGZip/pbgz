@@ -185,11 +185,36 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
 
     if (0 != CodecSelector::analyze(inBlockPtr, preprocessInfo)) {
         LOG_INFO("File preprocessing (codec selection) failed, using default coders");
-    } else {
-        LOG_INFO("File preprocessing done: fileType=%d, sampleBytes=%u, fields=%zu",
-                 (int)preprocessInfo.fileType, preprocessInfo.sampleBytes, preprocessInfo.fields.size());
+    } else if (parameter.verbose) {
+        static const char* samFieldNames[] = {
+            "QNAME", "FLAG", "RNAME", "POS", "MAPQ", "CIGAR",
+            "RNEXT", "PNEXT", "TLEN", "SEQ", "QUAL"
+        };
+        static const char* fqFieldNames[] = {
+            "ID", "SEQ", "QUAL", "COMMENT"
+        };
+
+        bool isSam = (preprocessInfo.fileType == SAM);
+        uint32_t fieldCount = isSam ? SAM_FIELD_COUNT : FQ_FIELD_COUNT;
+        const char* const* names = isSam ? samFieldNames : fqFieldNames;
+
+        fprintf(stderr, "\n[preprocess] codec selection (sample %u bytes):\n", preprocessInfo.sampleBytes);
+        for (uint32_t i = 0; i < fieldCount && i < preprocessInfo.fields.size(); ++i) {
+            const auto& sel = preprocessInfo.fields[i];
+            const char* status = (sel.status == FieldStatus::SELECTED) ? "selected" :
+                                 (sel.status == FieldStatus::SKIPPED) ? "skipped" : "failed";
+            if (sel.status == FieldStatus::SELECTED) {
+                fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)\n",
+                        names[i], coderTypeToMagic(sel.selectedCoder),
+                        sel.sampleLen, sel.bestCompLen, sel.ratio() * 100.0);
+            } else {
+                fprintf(stderr, "  %-6s -> %-14s  (sample %u bytes)\n",
+                        names[i], status, sel.sampleLen);
+            }
+        }
+        fprintf(stderr, "\n");
     }
-    preprocessInfo.markDone();
+    preprocessInfo.markDone();;
 }
 
 void CompressEngine::writeFilePostProc(BlockWriter* blockWriter) {

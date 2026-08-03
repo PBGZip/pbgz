@@ -70,6 +70,17 @@ protected:
 
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, true);
+        if (parameter.verbose) {
+            double secs = costTimer.elapsedSeconds();
+            int64_t readLen = PbgzManager::getInstance().getTotalReadLen();
+            int64_t writeLen = PbgzManager::getInstance().getTotalWriteLen();
+            if (secs > 0) {
+                fprintf(stderr, "Compress speed: %.2f MB/s in (%.2f MB/s out), %.3f s\n",
+                        (readLen / (1024.0 * 1024.0)) / secs,
+                        (writeLen / (1024.0 * 1024.0)) / secs,
+                        secs);
+            }
+        }
         if (parameter.showStat && stats) {
             stats->printStats();
         }

@@ -55,6 +55,17 @@ public:
         );
     }
 
+    double elapsedMicros() const {
+        auto now = std::chrono::high_resolution_clock::now();
+        return static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - _start).count()
+        );
+    }
+
+    double elapsedSeconds() const {
+        return elapsedMicros() / 1000000.0;
+    }
+
 private:
     std::chrono::time_point<std::chrono::high_resolution_clock> _start;
 };

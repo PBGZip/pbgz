@@ -98,11 +98,15 @@ public:
 private:
     void updateDataInfo();
 
-    std::vector<std::pair<std::string, bool>> outfiles; 
+    std::vector<std::pair<std::string, bool>> outfiles;
 
     uint64_t totalReadLen;
 
     uint64_t totalWriteLen;
+
+public:
+    uint64_t getTotalReadLen() const { return totalReadLen; }
+    uint64_t getTotalWriteLen() const { return totalWriteLen; }
 };
 
 void pbgzExitProc(int errorCode, const char* errorMessage);

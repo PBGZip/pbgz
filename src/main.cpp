@@ -66,6 +66,7 @@ static PbgzArg pbgzArgs =
     {'p', "position", required_argument, "sepecify the reference gene posision"},
     {'i', "index", no_argument, "make index"},
     {'s', "stat ", no_argument, "show statistics data"},
+    {'v', "verbose", no_argument, "show codec selection per field and compression speed (MB/s)"},
 };
 
 class CommandProc {
@@ -772,6 +773,9 @@ int main(int argc, char** argv) {
             break;
         case 's':
             parameter.showStat = true;
+            break;
+        case 'v':
+            parameter.verbose = true;
             break;
         default:
             fprintf(stdout, "Use pbgz help %s to show usage.\n\n", selectedSubCommand->name.c_str());
