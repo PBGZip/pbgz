@@ -29,6 +29,7 @@
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_affix_match.h"
 #include "coder/coder_qual.h"
+#include "coder/coder_fcv2.h"
 #include "utils/md5_util.h"
 #include "coder/coder_json.h"
 #include "log/logger.h"
@@ -1276,7 +1277,32 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     
     // Create quality encoder similar to FastqActuator
     std::shared_ptr<coder_io> qualityIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_qual> qualityCoder = std::make_shared<coder_qual>(qualityIo.get(), true, qualFreqTable);
+
+    /*
+     * 质量值可以用两种编码器。coder_qual 是原有的，以 SEQ 为上下文；fcv2 是上下文
+     * 混合编码器，以前一个和前两个质量值、记录内的测序循环序号、链方向为上下文。
+     *
+     * 目前用环境变量切换，等预处理阶段能对 fcv2 试压之后再改为按选择结果决定。
+     * 之所以还不能接预处理：试压拿到的是把整列拼起来的一段样本，记录边界和链方向
+     * 都已经丢失，而 fcv2 恰好需要这两样。
+     */
+    const bool useFcv2 = (getenv("PBGZ_QUAL_FCV2") != nullptr);
+    std::shared_ptr<coder_qual> qualityCoder;
+    std::shared_ptr<coder_fcv2> fcv2Coder;
+    if (useFcv2) {
+        std::vector<uint32_t> freqByByte(256, 0);
+        for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
+            uint32_t b = (uint32_t)qualFreqTable[i].first + (uint32_t)'!';
+            if (b < 256) {
+                /* qualFreqTable 只保留了按频率降序的字母表，实际计数没有留下来，
+                   这里用排名折算出一个单调递减的权重，仅用于确定哈夫曼树形状。 */
+                freqByByte[b] = (uint32_t)(qualFreqTable.size() - i);
+            }
+        }
+        fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte);
+    } else {
+        qualityCoder = std::make_shared<coder_qual>(qualityIo.get(), true, qualFreqTable);
+    }
 
     uint32_t totalSrcLength = 0;
     uint32_t totalDstLength = 0;
@@ -1316,12 +1342,38 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
             seqStart = line + contentPos[contentIdx][fieldIdx - 2] + 1;
         }
         
-        // Encode quality with sequence context
-        qualityCoder->encode_qual_gen2(seqStart, qualStart, qualLength);
+        if (useFcv2) {
+            /*
+             * 从 FLAG 字段取链方向。按 SAM 规范，0x10 置位表示 SEQ 和 QUAL 在文件里
+             * 是相对参考正链存放的，也就是相对测序仪读出顺序已经反转，编码器需要据此
+             * 还原真实的循环序号。这里手工解析而不是用 strtol，是因为字段没有以 \0
+             * 结尾，且这是每条记录都会走到的热路径。
+             */
+            bool rev = false;
+            if (contentPos[contentIdx].size() > 1) {
+                uint32_t flagBeg = contentPos[contentIdx][0] + 1;
+                uint32_t flagEnd = contentPos[contentIdx][1];
+                long flagVal = 0;
+                for (uint32_t fp = flagBeg; fp < flagEnd; ++fp) {
+                    uint8_t ch = line[fp];
+                    if (ch < '0' || ch > '9') break;
+                    flagVal = flagVal * 10 + (ch - '0');
+                }
+                rev = (flagVal & 16) != 0;
+            }
+            fcv2Coder->encode_record(qualStart, qualLength, rev);
+        } else {
+            // Encode quality with sequence context
+            qualityCoder->encode_qual_gen2(seqStart, qualStart, qualLength);
+        }
         streamSrcLen += qualLength;
     }
     
-    qualityCoder->encode_flush();
+    if (useFcv2) {
+        fcv2Coder->encode_flush();
+    } else {
+        qualityCoder->encode_flush();
+    }
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + qualityIo->data_len);
     
     Json::Value subMeta;

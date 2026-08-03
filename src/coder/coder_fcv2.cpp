@@ -18,8 +18,6 @@
 
 #include "coder.h"
 #include "fc/rangecoder.h"
-#include "io_block.h"
-#include "../preprocess_info.h"
 
 namespace {
 
@@ -366,11 +364,6 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable)
 }
 
 coder_fcv2::~coder_fcv2() = default;
-
-bool coder_fcv2::supports(uint32_t fileType, uint32_t fieldIdx)
-{
-    return fileType == (uint32_t)SAM && fieldIdx == (uint32_t)SAM_QUAL;
-}
 
 void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev)
 {

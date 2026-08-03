@@ -43,10 +43,12 @@ public:
     ~coder_fcv2();
 
     /*
-     * 声明适用范围。只在 SAM 的 QUAL 列上返回 true。
-     * fileType 取 BlockType 的值，fieldIdx 对 SAM 而言取 SamField。
+     * 本编码器需要每条记录的长度和链方向，这两样只有比对后的 SAM 的 QUAL 列能提供。
+     *
+     * 适用范围的判断放在 CoderFactory::coderSupports 里，而不是做成本类的成员。
+     * 原因是那个判断要比较 BlockType 和 SamField，它们定义在 src 层；coder 层的
+     * 编译目标只包含 coder/ 目录，反向依赖上层会破坏现有的分层。
      */
-    static bool supports(uint32_t fileType, uint32_t fieldIdx);
 
     /*
      * 编码一条记录的质量值。

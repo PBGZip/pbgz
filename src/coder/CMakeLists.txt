@@ -5,6 +5,7 @@ set(CODER_SOURCES
     coder_json.cpp
     bcm_libsais.cpp
     coder.cpp
+    coder_fcv2.cpp
 )
 
 # Add subdirectories

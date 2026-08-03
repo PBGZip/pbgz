@@ -38,7 +38,8 @@
 enum class CoderType : uint8_t {
     BWT_CM = 0,   /* coder_bwt_cm: BWT + context model (current default)   */
     FC,           /* coder_fc:     LZP + BWT + MTF + context range coder   */
-    SIMPLE_RC,    /* coder_simple_rc: BWT + MTF + adaptive bit-level RC    */
+    SIMPLE_RC,    /* coder_simple_rc: 有损，已从编解码路径移除，仅保留枚举占位 */
+    FCV2,         /* coder_fcv2:   质量值上下文混合编码器，仅适用于 SAM 的 QUAL 列 */
     QUAL,         /* coder_qual:   quality-specific context model coder    */
     COUNT
 };
@@ -50,6 +51,7 @@ static inline const char* coderTypeToMagic(CoderType type)
     case CoderType::BWT_CM:    return "coder_bwt_cm";
     case CoderType::FC:        return "coder_fc";
     case CoderType::SIMPLE_RC: return "coder_simple_rc";
+    case CoderType::FCV2:      return "coder_fcv2";
     case CoderType::QUAL:      return "coder_qual";
     default:                   return "unknown";
     }

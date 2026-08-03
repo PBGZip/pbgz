@@ -52,6 +52,14 @@ std::shared_ptr<coder> CoderFactory::makeDecoder(const std::string& magic, coder
     return nullptr;
 }
 
+bool CoderFactory::coderSupports(CoderType type, uint32_t fileType, uint32_t fieldIdx)
+{
+    if (type == CoderType::FCV2) {
+        return fileType == (uint32_t)SAM && fieldIdx == (uint32_t)SAM_QUAL;
+    }
+    return true;
+}
+
 bool CoderFactory::canMake(CoderType type)
 {
     return type == CoderType::BWT_CM || type == CoderType::FC;

@@ -58,4 +58,17 @@ public:
      * 在压缩时被真正使用，不如一开始就别参与比较。
      */
     static bool canMake(CoderType type);
+
+    /*
+     * 某个编码器能否用于指定文件类型的指定字段。
+     *
+     * 绝大多数编码器是通用字节流压缩器，放哪个字段上都能跑。少数有额外前置依赖：
+     * fcv2 需要每条记录的长度和链方向，只有比对后的 SAM 的 QUAL 列能提供，用在别处
+     * 拿不到这些信息。预处理试压前先问一句，不适用就不参与比较，免得选出一个实际
+     * 用不了的编码器。
+     *
+     * 这个判断放在这里而不是各编码器自己身上，是因为它要比较 BlockType 和 SamField，
+     * 而 coder 层的编译目标不包含 src 目录，不能反向依赖。
+     */
+    static bool coderSupports(CoderType type, uint32_t fileType, uint32_t fieldIdx);
 };
