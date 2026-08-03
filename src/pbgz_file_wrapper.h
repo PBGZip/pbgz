@@ -41,6 +41,19 @@ public:
 
     PbgzFileMeta& getDynamicFileMeta();
 
+    /*
+     * 当前正在读的那个 pbgz 包在整个输入流里的起始字节位置。
+     *
+     * 存在的理由是 cat 拼接：多个独立压缩包首尾相接成一个文件之后，从第二个包开始，
+     * 包内记录的所有偏移都不再等于它在拼接文件里的实际位置。压缩时输出总是从 0 开始
+     * 写，所以包里存的偏移本质上是"相对本包头部的距离"；单包读取时包起点恰好是 0，
+     * 相对值与绝对值相等，问题被掩盖，只有拼接才会暴露。
+     *
+     * 读侧拿到这个起点，用「包起点 + 包内偏移」还原真实位置即可，写出的格式一个字节
+     * 都不用改，也不影响已有文件的兼容性。
+     */
+    uint64_t getCurrentFileStart() const;
+
     int32_t readDataBlock(PbgzDataBlock& dataBlock);
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
@@ -62,6 +75,7 @@ private:
     std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers, a file may consist of multiple compressed packages concatenated together
     std::map<int32_t, PbgzFileMeta> baseFileMetaMap;      // Base file metadata
     std::map<int32_t, PbgzFileMeta> dynamicFileMetaMap;   // Dynamic file meta data, only exits in file reader
+    std::map<int32_t, uint64_t> fileStartMap;             // 每个拼接包在输入流里的起始位置，用于把包内相对偏移还原成真实位置
     int32_t currentFileIndex; // Current file sequence number, indicating which file is currently being read
     IOReader* ioReader;
 };

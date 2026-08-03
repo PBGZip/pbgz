@@ -298,7 +298,17 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
             return false;
         }
         readPos = fileReader->getCurrentPos();
-        fileReader->seekIO(offset);
+        /*
+         * refe 里存的 offset 是相对本压缩包头部的距离，不是拼接文件里的绝对位置。
+         *
+         * 压缩时输出总是从 0 开始写，所以两者在单包情况下恰好相等，长期以来直接当绝对
+         * 位置用也没出过问题。但多个包 cat 拼接之后，第二个包整体后移了前面所有包的
+         * 长度，再按绝对位置 seek 就会落进前一个包的数据区，参考解不出来，解压在第一个
+         * 包结束处就停住——这正是带参考基因组时 cat 拼接失效的原因。
+         *
+         * 加上本包起点即可还原。单包时起点为 0，行为与改动前逐字节一致。
+         */
+        fileReader->seekIO((int64_t)blockReader->getCurrentFileStart() + offset);
     }
     int64_t pcnt = parameter.threadNum;
     RoughIOBlock* block[pcnt];

@@ -89,6 +89,10 @@ public:
          return pbgzFileReader->getFileHeader();
     }
 
+    uint64_t getCurrentFileStart() const {
+        return pbgzFileReader->getCurrentFileStart();
+    }
+
 private:
     PbgzFileReader* pbgzFileReader;
 };

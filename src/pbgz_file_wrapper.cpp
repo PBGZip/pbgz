@@ -59,6 +59,21 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         LOG_ERROR("IO reader is NULL.");
         return -1;
     }
+
+    /*
+     * 先把本包在输入流里的起始位置记下来，后面用它把包内的相对偏移还原成真实位置。
+     *
+     * isCheckMagic 为真时表示调用方已经把 4 字节文件魔数读走了（见 readDataBlock 里
+     * 发现新包头的那条分支），此时当前位置已经越过包头，要退回魔数长度才是真正的起点。
+     */
+    uint64_t fileStartPos = 0;
+    FileReader* posReader = dynamic_cast<FileReader*>(ioReader);
+    if (posReader != nullptr) {
+        const uint64_t curPos = (uint64_t)posReader->getCurrentPos();
+        const uint64_t consumed = isCheckMagic ? PBGZ_FILE_MAGIC_LENGTH : 0;
+        fileStartPos = (curPos >= consumed) ? (curPos - consumed) : 0;
+    }
+
     // Read the file header
     uint8_t* pReadBuffer = getFileReadBuffer();
     if (pReadBuffer == nullptr) {
@@ -106,6 +121,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     }
     
     fileHeaderMap[++currentFileIndex] = fileHeader; 
+    fileStartMap[currentFileIndex] = fileStartPos;
 
     // Read file meta information
     PbgzFileMeta baseFileMeta;
@@ -127,7 +143,11 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     }
 
     size_t readOffset = fileReader->getCurrentPos(); // Backup current read position
-    fileReader->seekIO(dynamicOffset);
+    /*
+     * 包里存的是相对本包头部的距离，加上本包起点才是拼接文件里的真实位置。
+     * 单包时起点为 0，行为与改动前完全一致；拼接时第二个包之后才会用到这个修正。
+     */
+    fileReader->seekIO((int64_t)(fileStartPos + dynamicOffset));
 
     PbgzFileMeta dyncFileMeta;
     dyncFileMeta.setMetaType(DYNAMIC_FILE_META);
@@ -232,8 +252,15 @@ PbgzFileMeta& PbgzFileReader::getBaseFileMeta() {
     return baseFileMetaMap[currentFileIndex];
 }
 
-PbgzFileMeta& PbgzFileReader::getDynamicFileMeta() {
-     // if currentFileIndex is -1, it means no file has been read yet
+uint64_t PbgzFileReader::getCurrentFileStart() const {
+    if (currentFileIndex < 0) {
+        return 0;
+    }
+    std::map<int32_t, uint64_t>::const_iterator it = fileStartMap.find(currentFileIndex);
+    return (it == fileStartMap.end()) ? 0 : it->second;
+}
+
+PbgzFileMeta& PbgzFileReader::getDynamicFileMeta() {     // if currentFileIndex is -1, it means no file has been read yet
     if (currentFileIndex < 0) {
         LOG_ERROR("No file has been read yet.");
         throw std::runtime_error("No file has been read yet.");
