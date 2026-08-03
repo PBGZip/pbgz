@@ -29,6 +29,7 @@
 #include "io_block.h"
 #include "pbgz_types.h"
 #include "pbgz_engine.h"
+#include "coder_factory.h"
 
 class CodecActuator {
 
@@ -53,6 +54,39 @@ public:
 #endif
 
 protected:
+    /*
+     * 为某个字段创建编码器，类型取自预处理阶段的试压结果。
+     *
+     * fallback 传本字段原先写死的那个编码器。以下三种情况都会原样退回 fallback，
+     * 使行为和接通预处理选择之前完全一致：
+     *   1. 引擎不提供预处理信息（解压引擎、测试引擎都返回空指针）
+     *   2. 预处理还没跑完，或者跑失败了
+     *   3. 该字段样本太小被跳过，没有可信的试压结果
+     *
+     * 也就是说这条路径只会让编码器变得更好，不会因为预处理出问题而压不出东西。
+     */
+    std::shared_ptr<coder> makeFieldEncoder(uint32_t fieldIdx, CoderType fallback,
+                                            coder_io* io, bool lineMode)
+    {
+        CoderType picked = fallback;
+        const PreprocessInfo* preInfo = (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
+        if (preInfo != nullptr) {
+            picked = preInfo->coderFor(fieldIdx, fallback);
+        }
+
+        std::shared_ptr<coder> enc = CoderFactory::makeEncoder(picked, io);
+
+        /*
+         * 预处理试压一律按整块方式测量，选出来的编码器未必能按逐行方式使用。
+         * 本字段要逐行喂数据、而选中的编码器不支持时，退回该字段原本写死的那个，
+         * 它的用法是经过验证的。宁可压缩率差一点，也不能压出解不开的数据。
+         */
+        if (lineMode && !enc->supportsLineMode()) {
+            enc = CoderFactory::makeEncoder(fallback, io);
+        }
+        return enc;
+    }
+
     RoughIOBlock* inBlockPtr;
     RoughIOBlock* outBlockPtr;
     Json::Value meta;

@@ -21,6 +21,8 @@
  * SOFTWARE.
  */
 
+#pragma once
+
 #include "coder_io.h"
 #include "coder.h"
 #include "fc/pp.h"
@@ -68,7 +70,13 @@ public:
             encode_flush();
     }
 
-    void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold __attribute__ ((unused)) = false)
+    /*
+     * coder_fc 只支持整块压缩：encode_line 内部一次性做完 LZP、BWT 和熵编码，
+     * 首行的 check_exit 会拦住第二次调用，输入长度也必须大于 FC_MIN_LEN。
+     */
+    bool supportsLineMode() const override { return false; }
+
+    void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold __attribute__ ((unused)) = false) override
     {
         check_exit(io->m != coder_io::MENC, coder_ns::CODER_ERR_INNER, "only support block compress, not support line method"); // Not yet extended to line method
         check_exit(in_len > FC_MIN_LEN && in_len < FC_MAX_LEN,  coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, in_len);
@@ -126,7 +134,7 @@ public:
         // fprintf(stderr, "done\n");
     }
 
-    void encode_flush()
+    void encode_flush() override
     {
         if (io->m != coder_io::MENC || flushed)
             return;

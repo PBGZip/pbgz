@@ -64,7 +64,7 @@ public:
             encode_flush();
     }
 
-    void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold __attribute__((unused)) = false)
+    void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold __attribute__((unused)) = false) override
     {
         check_exit(io->m != coder_io::MENC, coder_ns::CODER_ERR_INNER, "only support block compress, not support line method");
         check_exit(in_len > SIMPLE_RC_MIN_LEN && in_len < SIMPLE_RC_MAX_LEN, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, in_len);
@@ -105,7 +105,7 @@ public:
         free(rc_buf);
     }
 
-    void encode_flush()
+    void encode_flush() override
     {
         if (io->m != coder_io::MENC || flushed)
             return;

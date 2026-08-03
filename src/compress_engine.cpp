@@ -204,9 +204,13 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
             const char* status = (sel.status == FieldStatus::SELECTED) ? "selected" :
                                  (sel.status == FieldStatus::SKIPPED) ? "skipped" : "failed";
             if (sel.status == FieldStatus::SELECTED) {
-                fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)\n",
+                fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)"
+                        "  [bwt_cm=%.2f%% fc=%.2f%% simple_rc=%.2f%%]\n",
                         names[i], coderTypeToMagic(sel.selectedCoder),
-                        sel.sampleLen, sel.bestCompLen, sel.ratio() * 100.0);
+                        sel.sampleLen, sel.bestCompLen, sel.ratio() * 100.0,
+                        sel.sampleLen ? 100.0*sel.trialBwtCmLen/sel.sampleLen : 0,
+                        sel.sampleLen ? 100.0*sel.trialFcLen/sel.sampleLen : 0,
+                        sel.sampleLen ? 100.0*sel.trialSimpleRcLen/sel.sampleLen : 0);
             } else {
                 fprintf(stderr, "  %-6s -> %-14s  (sample %u bytes)\n",
                         names[i], status, sel.sampleLen);

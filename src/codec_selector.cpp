@@ -33,7 +33,6 @@
 #include "safe_line_reader.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_fc.h"
-#include "coder/coder_simple_rc.h"
 
 namespace {
 
@@ -116,21 +115,28 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     uint32_t outLen = 0;
 
     /* coder_bwt_cm: use a block size that fits the sample in one block. */
+    /*
+     * coder_simple_rc 已从候选中移除：实测它是有损的，往返校验全部失败。
+     * 试压只比较压缩后的大小、不验证能否原样解回来，留着它迟早会选出一个解不出
+     * 原始数据的编码器。simpleRcLen 保留为 0，只是为了不改动 -v 的打印结构。
+     */
+    uint32_t bwtCmLen = 0, fcLen = 0, simpleRcLen = 0;
+
     if (trialEncode<coder_bwt_cm>(data, len, pickBwtLevel(len), outLen)) {
+        bwtCmLen = outLen;
         if (outLen < bestLen) { bestLen = outLen; bestCoder = CoderType::BWT_CM; }
         anyOk = true;
     }
 
-    /* coder_fc and coder_simple_rc are block coders; len is already >= the
-       MIN_SELECT_SAMPLE floor, well above their FC_MIN_LEN minimum. */
     if (trialEncode<coder_fc>(data, len, 0, outLen)) {
+        fcLen = outLen;
         if (outLen < bestLen) { bestLen = outLen; bestCoder = CoderType::FC; }
         anyOk = true;
     }
-    if (trialEncode<coder_simple_rc>(data, len, 0, outLen)) {
-        if (outLen < bestLen) { bestLen = outLen; bestCoder = CoderType::SIMPLE_RC; }
-        anyOk = true;
-    }
+
+    sel.trialBwtCmLen = bwtCmLen;
+    sel.trialFcLen = fcLen;
+    sel.trialSimpleRcLen = simpleRcLen;
 
     if (!anyOk) {
         sel.status = FieldStatus::FAILED;

@@ -66,8 +66,12 @@ enum class FieldStatus : uint8_t {
 struct FieldCodecSelection {
     FieldStatus status;
     CoderType   selectedCoder;
-    uint32_t    sampleLen;    /* sample bytes that were trial-compressed */
-    uint32_t    bestCompLen;  /* compressed size achieved by selectedCoder */
+    uint32_t    sampleLen;
+    uint32_t    bestCompLen;
+
+    uint32_t    trialBwtCmLen = 0;
+    uint32_t    trialFcLen = 0;
+    uint32_t    trialSimpleRcLen = 0;
 
     FieldCodecSelection()
         : status(FieldStatus::SKIPPED),

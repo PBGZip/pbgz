@@ -195,7 +195,8 @@ public:
     }
 
     /* External compression interface */
-    void encode_line(const uint8_t *in, const uint32_t in_len)
+    void encode_line(const uint8_t *in, const uint32_t in_len,
+                     [[maybe_unused]] bool need2hold = false) override
     {
         int32_t i;
         if (io->m != coder_io::MENC)
@@ -263,7 +264,7 @@ public:
     }
 
     /* Call this after encoding to compress cached data */
-    void encode_flush()
+    void encode_flush() override
     {
         int32_t i;
         if (io->m != coder_io::MENC || flushed) {

@@ -751,7 +751,7 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
     
     // Create encoder for ID field whole compression
     std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_bwt_cm> fieldCoder = std::make_shared<coder_bwt_cm>(fieldIo.get());
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(SAM_QNAME, CoderType::BWT_CM, fieldIo.get(), true);
     
     fieldSrcLen = 0;
     
@@ -808,7 +808,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
 
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> chrIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_bwt_cm> chrCoder = std::make_shared<coder_bwt_cm>(chrIo.get());
+    std::shared_ptr<coder> chrCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, chrIo.get(), true);
 
     fieldSrcLen = 0;
     uint32_t srcLen = 0;
@@ -877,7 +877,7 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
     
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_bwt_cm> fieldCoder = std::make_shared<coder_bwt_cm>(fieldIo.get());
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
     
     fieldSrcLen = 0;
     
@@ -937,7 +937,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
     
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_bwt_cm> fieldCoder = std::make_shared<coder_bwt_cm>(fieldIo.get());
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
     
     fieldSrcLen = 0;
 
@@ -1031,7 +1031,7 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
 
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-    std::shared_ptr<coder_fc> fieldCoder = std::make_shared<coder_fc>(fieldIo.get());
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::FC, fieldIo.get(), false);
 
     fieldCoder->encode_line(tmpBuffer.get(), fieldSrcLen);
     fieldCoder->encode_flush();
