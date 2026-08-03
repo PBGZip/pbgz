@@ -104,6 +104,10 @@ public:
         return pbgzFileReader->getCurrentBlockStart();
     }
 
+    int32_t getCurrentFileIndex() const {
+        return pbgzFileReader->getCurrentFileIndex();
+    }
+
 private:
     PbgzFileReader* pbgzFileReader;
 };

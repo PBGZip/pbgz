@@ -62,6 +62,13 @@ public:
      */
     uint64_t getCurrentBlockStart() const { return currentBlockStart; }
 
+    /*
+     * 当前正在读的是第几个 pbgz 包（cat 拼接后依次递增）。
+     * 与 getCurrentFileStart 不同，这个序号在管道输入下同样有效——
+     * 它只依赖已解析过的包头个数，不依赖任何文件位置。
+     */
+    int32_t getCurrentFileIndex() const { return currentFileIndex; }
+
     int32_t readDataBlock(PbgzDataBlock& dataBlock);
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {

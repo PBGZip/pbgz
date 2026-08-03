@@ -39,22 +39,22 @@
  */
 class QualPriorConsumer : public AuxBlockConsumer {
 public:
-    bool claim(RoughIOBlock* blockPtr, int64_t blockAddress) override;
+    bool claim(RoughIOBlock* blockPtr, int32_t packageIndex) override;
 
     /*
-     * 按辅助块绝对地址取先验，未缓存过则返回空——调用方据此决定是否 seek 去读。
+     * 按包序号取该包的先验，没有则返回空。
      * 返回 shared_ptr 是为了让取用者把这份数据一直握到自己解完，
      * 不受认领者后续动作影响。
      */
-    AuxPayloadPtr forAddress(int64_t blockAddress) const {
+    AuxPayloadPtr forPackage(int32_t packageIndex) const {
         std::lock_guard<std::mutex> lock(mutex);
-        std::map<int64_t, AuxPayloadPtr>::const_iterator it = byAddress.find(blockAddress);
-        return (it == byAddress.end()) ? AuxPayloadPtr() : it->second;
+        std::map<int32_t, AuxPayloadPtr>::const_iterator it = byPackage.find(packageIndex);
+        return (it == byPackage.end()) ? AuxPayloadPtr() : it->second;
     }
 
 private:
     mutable std::mutex mutex;
-    std::map<int64_t, AuxPayloadPtr> byAddress;
+    std::map<int32_t, AuxPayloadPtr> byPackage;
 };
 
 class DecompressEngine : public CodecEngine {
@@ -66,8 +66,8 @@ public:
 
     virtual ~DecompressEngine() { }
 
-    AuxPayloadPtr getQualPrior(int64_t blockAddress) override {
-        return qualPriorConsumer.forAddress(blockAddress);
+    AuxPayloadPtr getQualPrior(int32_t packageIndex) override {
+        return qualPriorConsumer.forPackage(packageIndex);
     }
 
     void setReadHeadFlag(bool flag) {

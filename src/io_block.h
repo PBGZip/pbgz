@@ -76,6 +76,19 @@ public:
         metaLen = 0;
         syncAux = false;
         packageStart = 0;
+        packageIndex = -1;
+    }
+
+    /*
+     * 本块属于第几个 pbgz 包。辅助块的身份用的就是它——
+     * 绝对文件偏移在管道输入下退化为 0，根本不成立，不能当身份。
+     */
+    int32_t getPackageIndex() const {
+        return packageIndex;
+    }
+
+    void setPackageIndex(int32_t index) {
+        packageIndex = index;
     }
 
     /*
@@ -188,6 +201,7 @@ private:
     int64_t blockId;
     bool syncAux = false;
     int64_t packageStart = 0;
+    int32_t packageIndex = -1;
     int64_t dataLen;
     uint32_t maxLineLen;
     uint32_t metaLen;

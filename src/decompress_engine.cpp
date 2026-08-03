@@ -120,7 +120,9 @@ bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value
     const int64_t offset = priorMeta["offset"].asInt64();
     const int64_t packageStart = (int64_t)blockReader->getCurrentFileStart();
     const int64_t blockAddress = packageStart + offset;
-    if (qualPriorConsumer.forAddress(blockAddress) != nullptr) {
+    const int32_t packageIndex = blockReader->getCurrentFileIndex();
+    /* 偏移只用来 seek 取块，登记与查表一律用包序号。 */
+    if (qualPriorConsumer.forPackage(packageIndex) != nullptr) {
         return true;
     }
 
@@ -133,7 +135,7 @@ bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value
     const size_t readPos = fileReader->getCurrentPos();
     fileReader->seekIO(blockAddress);
     bool ok = (blockReader->readBlock(block) > 0) &&
-              qualPriorConsumer.claim(block, blockAddress);
+              qualPriorConsumer.claim(block, packageIndex);
     fileReader->seekIO((int64_t)readPos);
     MemoryUtil::safeDeleteClass(block);
 
@@ -265,7 +267,7 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
              */
             PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
             (void)offerAuxBlock(inBlockPtr.get(),
-                                pbgzReader ? (int64_t)pbgzReader->getCurrentBlockStart() : 0);
+                                pbgzReader ? pbgzReader->getCurrentFileIndex() : 0);
             continue;
         }
         outBlockPtr->reset();
@@ -317,7 +319,7 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
 
                 if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
                     PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
-                    (void)offerAuxBlock(blockPtr, pbgzReader ? (int64_t)pbgzReader->getCurrentBlockStart() : 0);
+                    (void)offerAuxBlock(blockPtr, pbgzReader ? pbgzReader->getCurrentFileIndex() : 0);
                     freeInputPool->push(blockPtr);
                     continue;
                 }
@@ -343,7 +345,7 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
     return;
 }
 
-bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int64_t blockAddress) {
+bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int32_t packageIndex) {
     if (blockPtr == nullptr || blockPtr->getBlockType() != QUAL_PRIOR) {
         return false;
     }
@@ -352,7 +354,7 @@ bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int64_t blockAddress) {
         /* 缓存已有就直接认领，不重复解压：同一个先验既可能被随机读提前 seek 取回，
            也会在顺序流里被再次路过，两条路径指向的是同一个绝对地址。 */
         std::lock_guard<std::mutex> lock(mutex);
-        if (byAddress.find(blockAddress) != byAddress.end()) {
+        if (byPackage.find(packageIndex) != byPackage.end()) {
             return true;
         }
     }
@@ -384,9 +386,9 @@ bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int64_t blockAddress) {
 
     {
         std::lock_guard<std::mutex> lock(mutex);
-        byAddress[blockAddress] = std::make_shared<const std::vector<uint8_t> >(std::move(plain));
+        byPackage[packageIndex] = std::make_shared<const std::vector<uint8_t> >(std::move(plain));
     }
-    LOG_INFO("Qual prior loaded @%ld: %u -> %u bytes", (long)blockAddress, dstLen, srcLen);
+    LOG_INFO("Qual prior loaded for package %d: %u -> %u bytes", packageIndex, dstLen, srcLen);
     return true;
 }
 

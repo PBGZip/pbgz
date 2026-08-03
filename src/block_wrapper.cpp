@@ -365,6 +365,7 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
      * 该路径上的块就会拿 0 当包起点，把辅助块的相对地址错译成别包的地址。
      */
     blockPtr->setPackageStart((int64_t)pbgzFileReader->getCurrentFileStart());
+    blockPtr->setPackageIndex(pbgzFileReader->getCurrentFileIndex());
     std::string blockType = pbgzDataBlock.getMetaData("blocktype").asString();
     if (blockType == "fastq_gen2") {
         blockPtr->setBlockType(FASTQ_GEN2);

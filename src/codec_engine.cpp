@@ -59,7 +59,7 @@ int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
 
     if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
         PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
-        (void)offerAuxBlock(blockPtr, pbgzReader ? (int64_t)pbgzReader->getCurrentBlockStart() : 0);
+        (void)offerAuxBlock(blockPtr, pbgzReader ? pbgzReader->getCurrentFileIndex() : 0);
         freeInputPool->push(blockPtr);
         return -2;
     }

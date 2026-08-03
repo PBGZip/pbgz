@@ -1322,7 +1322,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
          */
         qualPriorAddress = (pbgzEngine != nullptr) ? pbgzEngine->getQualPriorAddress() : -1;
         AuxPayloadPtr priorBlob =
-            (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(qualPriorAddress) : AuxPayloadPtr();
+            (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(0) : AuxPayloadPtr();
         bool priorLoaded = false;
         if (priorBlob && !priorBlob->empty()) {
             fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte,
@@ -1927,12 +1927,15 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                      * 先验的地址来自块 meta 而非顺序推断，随机读因此同样成立。
                      */
                     if (qualStreamMeta[0].isMember("prior")) {
-                        /* meta 里是包内相对地址，加上本块所属包起点才是认领者的索引键。 */
-                        const int64_t priorAddress =
-                            inBlockPtr->getPackageStart() + qualStreamMeta[0]["prior"].asInt64();
+                        /*
+                         * meta 里的偏移只是 seek 手段与校验值，索引键用包序号：
+                         * 绝对偏移在管道输入下退化为 0，按它查表会全部落空。
+                         */
+                        const int64_t priorAddress = qualStreamMeta[0]["prior"].asInt64();
                         AuxPayloadPtr priorBlob =
-                            (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(priorAddress)
-                                                    : AuxPayloadPtr();
+                            (pbgzEngine != nullptr)
+                                ? pbgzEngine->getQualPrior(inBlockPtr->getPackageIndex())
+                                : AuxPayloadPtr();
                         if (!priorBlob || priorBlob->empty()) {
                             LOG_ERROR("Qual prior at offset %lld required but unavailable",
                                       (long long)priorAddress);

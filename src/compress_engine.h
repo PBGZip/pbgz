@@ -146,7 +146,7 @@ public:
         return qualPriorOffset.load(std::memory_order_acquire);
     }
 
-    AuxPayloadPtr getQualPrior(int64_t /*blockAddress*/) override {
+    AuxPayloadPtr getQualPrior(int32_t /*packageIndex*/) override {
         /* 在串行首块窗口内写入，随后只读；地址原子量的 acquire 同时为它建立可见性。 */
         return (getQualPriorAddress() < 0) ? AuxPayloadPtr() : qualPriorBlob;
     }

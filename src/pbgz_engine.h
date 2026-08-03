@@ -127,7 +127,7 @@ protected:
      * 路过一个辅助块时逐个询问认领者。返回值仅用于日志：没人认领的辅助块被安静跳过，
      * 这是老版本读到新格式时需要的前向兼容行为，不构成错误。
      */
-    bool offerAuxBlock(RoughIOBlock* blockPtr, int64_t blockAddress);
+    bool offerAuxBlock(RoughIOBlock* blockPtr, int32_t packageIndex);
 
     /*
      * 同步发射一个辅助块：推给写线程，阻塞等它落盘，返回该块**容器头**的绝对文件偏移
@@ -177,7 +177,7 @@ public:
      * 顺序流一定先路过它再遇到数据块；区域查询路径则在引擎初始化时按文件元信息预取。
      * 两条路径都保证工作线程取用时缓存已就位。
      */
-    virtual AuxPayloadPtr getQualPrior(int64_t /*blockAddress*/) { return AuxPayloadPtr(); }
+    virtual AuxPayloadPtr getQualPrior(int32_t /*packageIndex*/) { return AuxPayloadPtr(); }
 
     /* 先验块容器头的绝对偏移；压缩侧据此写进块 meta，解压侧据此回查。-1 表示无先验。 */
     virtual int64_t getQualPriorAddress() const { return -1; }
