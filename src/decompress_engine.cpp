@@ -31,11 +31,17 @@
 #include "pbgz_types.h"
 #include "codec_actuator_adapter.h"
 
+#include <bzlib.h>
+
 BlockReader* DecompressEngine::createBlockReader() {
     PbgzBlockReader* pbgzReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
     pbgzReader->init();
     baseFileMeta = pbgzReader->getBaseFileMeta();
     dynamicFileMeta = pbgzReader->getDynamicFileMeta();
+    if (dynamicFileMeta.getMetaData().isMember("qual_prior")) {
+        (void)unpackQualPrior(pbgzReader, dynamicFileMeta.getMetaData("qual_prior"));
+    }
+
     if (!initRefGene(pbgzReader)) {
         LOG_INFO("Init reference for decompress failed");
         MemoryUtil::safeDeleteClass(pbgzReader);
@@ -87,6 +93,54 @@ void DecompressEngine::releaseBlockReader(BlockReader* &blockReader) {
 
 void DecompressEngine::releaseBlockWriter(BlockWriter* &BlockWriter) {
     MemoryUtil::safeDeleteClass(BlockWriter);
+}
+
+/*
+ * 随机读取用先验：按文件级偏移 seek 过去，再交给块读者解析。
+ *
+ * 顺序解压靠注册表在路过时认领即可，但随机读会直接跳到任意数据块，它所属包的
+ * 先验块可能根本没被读到过，必须能按需取回。偏移记的是块容器头（魔数所在处），
+ * 所以这里 seek 完只需要 readBlock，容器的魔数、长度、校验和仍由块读者负责，
+ * 不在这里手工解析字节。
+ *
+ * 与 unpackReference 一样，偏移是相对本包起点的距离而不是绝对位置，cat 之后
+ * 必须加上包起点；读完要把读位置还原，否则主循环会从先验块之后接着读。
+ */
+bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value& priorMeta) {
+    if (blockReader == nullptr || !priorMeta.isMember("offset")) {
+        return false;
+    }
+
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    if (fileReader == nullptr) {
+        LOG_DEBUG("Input is not seekable, qual prior stays on the streaming path");
+        return false;
+    }
+
+    const int64_t offset = priorMeta["offset"].asInt64();
+    const int64_t packageStart = (int64_t)blockReader->getCurrentFileStart();
+    const int64_t blockAddress = packageStart + offset;
+    if (qualPriorConsumer.forAddress(blockAddress) != nullptr) {
+        return true;
+    }
+
+    const uint32_t dstLen = (uint32_t)priorMeta["dstlen"].asUInt();
+    RoughIOBlock* block = MemoryUtil::safeNewClass<RoughIOBlock>(dstLen + (1u << 16));
+    if (block == nullptr) {
+        return false;
+    }
+
+    const size_t readPos = fileReader->getCurrentPos();
+    fileReader->seekIO(blockAddress);
+    bool ok = (blockReader->readBlock(block) > 0) &&
+              qualPriorConsumer.claim(block, blockAddress);
+    fileReader->seekIO((int64_t)readPos);
+    MemoryUtil::safeDeleteClass(block);
+
+    if (!ok) {
+        LOG_ERROR("Read qual prior at offset %ld failed", (long)blockAddress);
+    }
+    return ok;
 }
 
 bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
@@ -250,6 +304,8 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
                 }
 
                 if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
+                    PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
+                    (void)offerAuxBlock(blockPtr, pbgzReader ? (int64_t)pbgzReader->getCurrentBlockStart() : 0);
                     freeInputPool->push(blockPtr);
                     continue;
                 }
@@ -273,6 +329,53 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
         }
     }
     return;
+}
+
+bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int64_t blockAddress) {
+    if (blockPtr == nullptr || blockPtr->getBlockType() != QUAL_PRIOR) {
+        return false;
+    }
+
+    {
+        /* 缓存已有就直接认领，不重复解压：同一个先验既可能被随机读提前 seek 取回，
+           也会在顺序流里被再次路过，两条路径指向的是同一个绝对地址。 */
+        std::lock_guard<std::mutex> lock(mutex);
+        if (byAddress.find(blockAddress) != byAddress.end()) {
+            return true;
+        }
+    }
+
+    coder_json cmeta;
+    Json::Value meta;
+    cmeta.decoder(blockPtr->getMetaBuffer(), blockPtr->getMetaLen(), meta);
+    if (meta["coder"]["magic"].asString() != "bzip2") {
+        LOG_ERROR("Unknown qual prior coder: %s", meta["coder"]["magic"].asString().c_str());
+        return true;
+    }
+
+    const unsigned int srcLen = (unsigned int)meta["srclen"].asUInt64();
+    const unsigned int dstLen = (unsigned int)meta["dstlen"].asUInt();
+    if (srcLen == 0 || dstLen == 0 || blockPtr->getDataLen() < dstLen) {
+        LOG_ERROR("Qual prior block malformed: srclen=%u dstlen=%u datalen=%u",
+                  srcLen, dstLen, blockPtr->getDataLen());
+        return true;
+    }
+
+    std::vector<uint8_t> plain(srcLen);
+    unsigned int outLen = srcLen;
+    int rc = BZ2_bzBuffToBuffDecompress((char*)plain.data(), &outLen,
+                                        (char*)(void*)blockPtr->getBuffer(), dstLen, 0, 0);
+    if (rc != BZ_OK || outLen != srcLen) {
+        LOG_ERROR("Decompress qual prior failed, rc=%d, outLen=%u, expect=%u", rc, outLen, srcLen);
+        return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        byAddress[blockAddress] = std::make_shared<const std::vector<uint8_t> >(std::move(plain));
+    }
+    LOG_INFO("Qual prior loaded @%ld: %u -> %u bytes", (long)blockAddress, dstLen, srcLen);
+    return true;
 }
 
 bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta) {

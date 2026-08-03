@@ -23,14 +23,45 @@
 
 #pragma once
 
+#include <map>
+#include <mutex>
+#include <vector>
+
 #include "codec_engine.h"
 #include "actuator.h"
 
+
+/*
+ * QUAL 先验的认领者。读线程路过 QUAL_PRIOR 块时把它解出来存下，工作线程随后取用。
+ *
+ * blob 由读线程写、工作线程读，两者之间没有其它同步点，所以这里自带一把锁；
+ * 读只发生在解码器构造时，不在热路径上。
+ */
+class QualPriorConsumer : public AuxBlockConsumer {
+public:
+    bool claim(RoughIOBlock* blockPtr, int64_t blockAddress) override;
+
+    /*
+     * 按辅助块绝对地址取先验，未缓存过则返回空——调用方据此决定是否 seek 去读。
+     * 返回 shared_ptr 是为了让取用者把这份数据一直握到自己解完，
+     * 不受认领者后续动作影响。
+     */
+    AuxPayloadPtr forAddress(int64_t blockAddress) const {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::map<int64_t, AuxPayloadPtr>::const_iterator it = byAddress.find(blockAddress);
+        return (it == byAddress.end()) ? AuxPayloadPtr() : it->second;
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::map<int64_t, AuxPayloadPtr> byAddress;
+};
 
 class DecompressEngine : public CodecEngine {
 public:
     DecompressEngine(PbgzParameter& para) : CodecEngine(para) {
         readHeadBlockFlag = true;
+        registerAuxConsumer(&qualPriorConsumer);
      }
 
     virtual ~DecompressEngine() { }
@@ -76,12 +107,15 @@ private:
 
     bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
 
+    bool unpackQualPrior(PbgzBlockReader* blockReader, Json::Value& priorMeta);
+
     void printFastqFileNotMatchInfo(const Json::Value& metaRefe); 
 
     virtual Reference* getReference() override { return pRefGene; }
 
 private:
     bool readHeadBlockFlag;
+    QualPriorConsumer qualPriorConsumer;
     std::string refPosChrName;
     uint32_t refPosBegin;
     uint32_t refPosEnd;

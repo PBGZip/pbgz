@@ -308,6 +308,16 @@ int32_t PbgzEngine::startReadTask() {
     return 0;
 }
 
+bool PbgzEngine::offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageStart) {
+    for (size_t i = 0; i < auxConsumers.size(); ++i) {
+        if (auxConsumers[i]->claim(blockPtr, packageStart)) {
+            return true;
+        }
+    }
+    LOG_DEBUG("No consumer claimed auxiliary block, type=%d", blockPtr->getBlockType());
+    return false;
+}
+
 int32_t PbgzEngine::startWriteTask() {
     auto writerTask = [this]() -> int32_t {
         pthread_setname_np("writetask");

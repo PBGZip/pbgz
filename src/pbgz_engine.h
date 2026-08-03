@@ -34,6 +34,7 @@
 #include "actuator.h"
 #include "utils/timer.h"
 #include "reference.h"
+#include "aux_block_consumer.h"
 
 struct PreprocessInfo;
 
@@ -119,6 +120,18 @@ protected:
 
     virtual void writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockPtr);
 
+    /*
+     * 路过一个辅助块时逐个询问认领者。返回值仅用于日志：没人认领的辅助块被安静跳过，
+     * 这是老版本读到新格式时需要的前向兼容行为，不构成错误。
+     */
+    bool offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageStart);
+
+    void registerAuxConsumer(AuxBlockConsumer* consumer) {
+        if (consumer != nullptr) {
+            auxConsumers.push_back(consumer);
+        }
+    }
+
 private:
     bool isNeedNotify(bool flag);
 
@@ -137,6 +150,8 @@ public:
     /* File preprocessing result (codec pre-selection). Only the compression
        engine populates this; other engines return nullptr. */
     virtual const PreprocessInfo* getPreprocessInfo() { return nullptr; }
+
+    std::vector<AuxBlockConsumer*> auxConsumers;
 
     std::vector<std::thread> workThreads;
     std::thread writeThread;

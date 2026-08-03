@@ -281,6 +281,9 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
         return -1; // Memory allocation error
     }
 
+    FileReader* seekableReader = dynamic_cast<FileReader*>(ioReader);
+    currentBlockStart = (seekableReader != nullptr) ? (uint64_t)seekableReader->getCurrentPos() : 0;
+
     // Read the data block magic value, 4byte
     size_t readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
     if (readLen == 0) { // Indicates read completion

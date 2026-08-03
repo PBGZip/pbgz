@@ -54,10 +54,19 @@ public:
      */
     uint64_t getCurrentFileStart() const;
 
+    /*
+     * 最近一次 readDataBlock 所读那个块的绝对起点（魔数所在字节）。
+     *
+     * 辅助块的身份就是它的绝对地址：包起点只在"每个包恰好一份"时够用，先验一旦分片
+     * 就不成立。缓存按这个地址做键，重复遇到同一个块时可以直接命中而不必重读。
+     */
+    uint64_t getCurrentBlockStart() const { return currentBlockStart; }
+
     int32_t readDataBlock(PbgzDataBlock& dataBlock);
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
         currentFileIndex = -1;  // Initialize file index to -1, indicating no file has been read yet
+        currentBlockStart = 0;
     }
 
     void close();
@@ -65,6 +74,8 @@ public:
     virtual ~PbgzFileReader() { }
 
 private:
+    uint64_t currentBlockStart;
+
     int32_t initFileHeadAndMeta(bool isCheckMagic = false);
 
     static uint8_t* getFileReadBuffer();
