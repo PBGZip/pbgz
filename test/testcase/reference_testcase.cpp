@@ -154,8 +154,12 @@ TEST_F(ReferenceTest, ReferenceMakeIndex) {
     // Check that squash buffer is created and has expected length
     EXPECT_NE(refe.getSquash(), nullptr);
 
-    // 1038/4 =  259 
-    EXPECT_EQ(refe.getSquashLength(), 259);
+    /*
+     * 每碱基 2 bit, 1038 个碱基需要 ceil(1038/4) = 260 字节。
+     * 原值 259 是把 1038/4 的整除结果当成了答案, 丢掉了余数 2——
+     * 259 字节只装得下 1036 个碱基, 最后两个会丢。
+     */
+    EXPECT_EQ(refe.getSquashLength(), 260);
     
     // The squash content should be different from our initialized pattern
     EXPECT_NE(memcmp(refe.getSquash(), quash, quashLen), 0);
