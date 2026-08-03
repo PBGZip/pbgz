@@ -29,6 +29,8 @@
 #include "codec_actuator_adapter.h"
 #include "codec_selector.h"
 
+#include <bzlib.h>
+
 int64_t CompressEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
     int64_t ret = CodecEngine::readOneBlock(blockReader, fileType);
     
@@ -260,7 +262,80 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
     preprocessInfo.markDone();;
 }
 
+void CompressEngine::packQualPrior(BlockWriter* blockWriter) {
+    const std::vector<uint8_t>& prior = preprocessInfo.qualPrior();
+    if (blockWriter == nullptr || prior.empty()) {
+        return;
+    }
+
+    /* 管道输出无法 seek，解压侧取不到先验，写了也是净损失。 */
+    FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+    if (fileWriter == nullptr) {
+        return;
+    }
+
+    /* bzip2 的最坏膨胀是 1% + 600 字节，官方接口要求调用方按此备足。 */
+    unsigned int dstLen = (unsigned int)(prior.size() + prior.size() / 100 + 600);
+    std::vector<uint8_t> comp(dstLen);
+    int rc = BZ2_bzBuffToBuffCompress((char*)comp.data(), &dstLen,
+                                      (char*)(void*)prior.data(),
+                                      (unsigned int)prior.size(),
+                                      9, 0, 30);
+    if (rc != BZ_OK) {
+        LOG_ERROR("Compress qual prior failed, bzip2 rc = %d", rc);
+        return;
+    }
+
+    RoughIOBlock* outBlock = freeOutputPool->get();
+    if (outBlock == nullptr) {
+        LOG_ERROR("Get free block for qual prior failed");
+        return;
+    }
+    outBlock->reset();
+
+    Json::Value meta;
+    meta["srclen"] = (Json::Value::UInt64)prior.size();
+    meta["dstlen"] = (Json::Value::UInt)dstLen;
+    meta["coder"]["magic"] = "bzip2";
+    coder_json cmeta;
+    std::string metaString;
+    cmeta.encoder(meta, metaString);
+
+    if ((uint32_t)(dstLen + metaString.length()) >= outBlock->getRemain()) {
+        LOG_ERROR("Qual prior block too large: %u + %zu", dstLen, metaString.length());
+        freeOutputPool->push(outBlock);
+        return;
+    }
+
+    memcpy(outBlock->getCurrent(), comp.data(), dstLen);
+    outBlock->setDataLen(dstLen);
+    memcpy(outBlock->getCurrent(), metaString.c_str(), metaString.length());
+    outBlock->setMetaLen(metaString.length());
+    outBlock->setBlockType(QUAL_PRIOR);
+    outBlock->setBlockId(blockId2Write++);
+
+    const int64_t offset = (int64_t)fileWriter->getCurrentPos();
+    blockWriter->writeBlock(outBlock);
+    freeOutputPool->push(outBlock);
+
+    Json::Value priorMeta;
+    priorMeta["offset"] = (Json::Value::Int64)offset;
+    priorMeta["srclen"] = (Json::Value::UInt64)prior.size();
+    priorMeta["dstlen"] = (Json::Value::UInt)dstLen;
+    priorMeta["trained_bytes"] = (Json::Value::UInt64)preprocessInfo.qualPriorTrainedBytes();
+    {
+        std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
+        dynamicFileMeta.setMetaData("qual_prior", priorMeta);
+    }
+
+    LOG_INFO("Qual prior packed: %zu -> %u bytes (%.2f%%) at offset %ld",
+             prior.size(), dstLen,
+             (double)dstLen * 100.0 / (double)prior.size(), (long)offset);
+}
+
 void CompressEngine::writeFilePostProc(BlockWriter* blockWriter) {
+    /* 必须排在基类之前：基类会把 dynamicFileMeta 落盘，晚于它填 qual_prior 就丢了。 */
+    packQualPrior(blockWriter);
     CodecEngine::writeFilePostProc(blockWriter);
     // make index
     if (parameter.isMakeIndex) {
@@ -516,12 +591,8 @@ Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock*
     }
 
     if (pActuator == nullptr) {
-        LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
-        freeInputPool->push(inBlockPtr);
-        outBlockPtr->reset();
-        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
-        // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
-        outputDataPool->push(outBlockPtr);
+        /* 失败时一律不释放任何块，收尾统一由 startWorkTask 负责，避免两处各归还一次。 */
+        LOG_ERROR("Not support block type: %d, blockId=%ld", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
         return nullptr;
     }
 

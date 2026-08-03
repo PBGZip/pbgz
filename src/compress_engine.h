@@ -68,6 +68,16 @@ protected:
 
     virtual void writeFilePostProc(BlockWriter* blockWriter) override ;
 
+    /*
+     * 把首块训练出的 QUAL 先验写成一个 QUAL_PRIOR 块，并记下它的文件级偏移。
+     *
+     * 走的是 refe.offset 那个已经验证过的形状：解压侧靠偏移 seek，不靠块号定位。
+     * 之所以必须由写线程在数据块全部落盘之后调用，是因为先验只有读完第 0 块才存在，
+     * 没法像参考基因组那样在开工前就打进文件头；而写线程此刻已是单线程，
+     * getCurrentPos() 取到的就是这个块的真实起点，不存在竞争，也无需跨线程回填。
+     */
+    void packQualPrior(BlockWriter* blockWriter);
+
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, true);
         if (parameter.verbose) {
