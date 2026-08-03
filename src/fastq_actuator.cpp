@@ -163,7 +163,7 @@ int32_t FastqCodecActuator::compress() {
     std::string md5;
     calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
     meta["md5"] = md5;
-    meta["idlines"] = inBlockPtr->getNpos().size() >> 2;
+    meta["idlines"] = static_cast<uint32_t>(inBlockPtr->getNpos().size() >> 2);
 
     // Compress meta information
     coder_json metaCoder;

@@ -27,8 +27,10 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <emmintrin.h>
 #include <exception>
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <emmintrin.h>
 
 #define CPUID_REGION_SHIFT_POS 0
 #define CPUID_REGION_SHIFT_REG 10
@@ -146,3 +148,16 @@ private:
         return 0;
     }
 };
+
+#else
+/* ARM / other architectures: no x86 SIMD */
+class Hardware
+{
+public:
+    Hardware() {}
+    static bool isSupportSimd()
+    {
+        return false;
+    }
+};
+#endif

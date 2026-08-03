@@ -289,7 +289,7 @@ void PbgzEngine::readBlocks(BlockReader* blockReader) {
 }
 
 int32_t PbgzEngine::startReadTask() {
-    pthread_setname_np(pthread_self(), "readtask");
+    pthread_setname_np("readtask");
     BlockReader* blockReader = createBlockReader();
     if (blockReader == nullptr) {
         return -1;
@@ -304,7 +304,7 @@ int32_t PbgzEngine::startReadTask() {
 
 int32_t PbgzEngine::startWriteTask() {
     auto writerTask = [this]() -> int32_t {
-        pthread_setname_np(pthread_self(), "writetask");
+        pthread_setname_np("writetask");
         BlockWriter* blockWriter = createBlockWriter();
         if (blockWriter == nullptr) {
             PbgzManager::getInstance().exitProc(-1, "Inner error");
@@ -357,7 +357,7 @@ void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockP
 
 int32_t PbgzEngine::startWorkTask() {
     auto coderTask = [this](int32_t id) {
-        pthread_setname_np(pthread_self(), std::string("codertask_").append(std::to_string(id)).c_str());
+        pthread_setname_np(std::string("codertask_").append(std::to_string(id)).c_str());
         if (id > 0 ) {
             std::unique_lock<std::mutex> lock(mutex);
             conditionVar.wait(lock);

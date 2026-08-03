@@ -62,6 +62,9 @@ target_link_libraries(pbgz PRIVATE
     ${THIRDPARTY_DIR}/release/bzip2/lib/libbz2.a
     ${THIRDPARTY_DIR}/release/zlib/lib/libz.a
     pthread
+    curl
+    lzma
+    "-framework CoreServices"
 )
 
 install(TARGETS pbgz DESTINATION bin)

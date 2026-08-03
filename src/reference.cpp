@@ -239,7 +239,7 @@ bool Reference::isNiFileValid(const std::string& niFileName) {
     int64_t fileSize = niReader.getFileSize();
     std::string niName = PathUtil::getFileName(niFileName);
     if (niName.empty()) {
-        LOG_ERROR("Get file name from %s failed.", niFileName);
+        LOG_ERROR("Get file name from %s failed.", niFileName.c_str());
         return false;
     }
     niReader.closeIO();
@@ -248,11 +248,11 @@ bool Reference::isNiFileValid(const std::string& niFileName) {
         Json::Value niConf = ref2niCache[refFileName.c_str()][n]; 
         if (!niConf["ni_name"].isNull() && niConf["ni_name"] == niName) {
             if (PathUtil::getFileMtime(niFileName) != niConf["ni_mtime"].asInt64()) {
-                LOG_ERROR("Get file %s mtime failed.", niFileName);
+                LOG_ERROR("Get file %s mtime failed.", niFileName.c_str());
                 return false;
             }
             if (fileSize != niConf["ni_fsize"].asInt64()) {
-                LOG_ERROR("file %s size not match, filesize = %d, expect = %d.", niFileName, fileSize, niConf["ni_fsize"].asInt64());
+                LOG_ERROR("file %s size not match, filesize = %d, expect = %d.", niFileName.c_str(), fileSize, niConf["ni_fsize"].asInt64());
                 return false;
             }
             return true;
@@ -689,13 +689,13 @@ void Reference::getNiFileFromReference(std::string& niFile) {
         return;
     }
     
-    if (fseeko64(fp, 0, SEEK_END) != 0) { 
+    if (fseeko(fp, 0, SEEK_END) != 0) { 
         LOG_ERROR("fseek failed: %s", refGeneFile.c_str());
         fclose(fp);
         return;
     }
     
-    int64_t fileSize = ftello64(fp);
+    int64_t fileSize = ftello(fp);
     rewind(fp);
 
     int64_t readEach = 1024;
@@ -714,7 +714,7 @@ void Reference::getNiFileFromReference(std::string& niFile) {
         uint8_t buffer[(readEach << 2) + sizeof(fileSize)];
         int64_t offset = 0, len = 0;
         for (int64_t n = 0; n < 4; n++) {
-            if (fseeko64(fp, offset, SEEK_SET) != 0) {
+            if (fseeko(fp, offset, SEEK_SET) != 0) {
                 LOG_ERROR("reference file fseek failed: %s", refGeneFile.c_str());
                 fclose(fp);
                 return;

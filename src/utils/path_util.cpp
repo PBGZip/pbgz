@@ -158,7 +158,7 @@ namespace PathUtil {
 
     bool isGzFile(const std::string& fileName) {
         // Open file in binary mode for reading
-        FILE* fp = fopen64(fileName.c_str(), "rb");
+        FILE* fp = fopen(fileName.c_str(), "rb");
         if (fp == nullptr) {
             LOG_ERROR("File %s open failed.", fileName.c_str());
             return false;
