@@ -87,6 +87,14 @@ target_link_libraries(fcv2_prior_gain PRIVATE
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
+# QUAL 列编码器横向实测：补上 coder_bwt_cm 这个当前不在 QualSelector 候选集里的对照。
+# 仅用于评估，不加入 add_test，也不参与产品功能。
+add_executable(qual_coder_bench qual_coder_bench.cpp)
+target_link_libraries(qual_coder_bench PRIVATE
+    pbgz_coder
+    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
+)
+
 add_subdirectory(googletest)
 
 # Optional: Add gtest support
