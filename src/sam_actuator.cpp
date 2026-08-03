@@ -1290,6 +1290,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
      * 预处理没跑成、样本太小被跳过、或者当前引擎不提供预处理信息时，coderFor 返回
      * 传入的兜底类型 QUAL，也就是沿用原有的 coder_qual，行为与接通选择之前一致。
      */
+    int64_t qualPriorAddress = -1;
     CoderType pickedQualCoder = CoderType::QUAL;
     const PreprocessInfo* qualPreInfo =
         (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
@@ -1311,7 +1312,27 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
                 freqByByte[b] = (uint32_t)(qualFreqTable.size() - i);
             }
         }
-        fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte);
+        /*
+         * 有先验就从先验起步：模型不必从固定初值重新学，块越小收益越明显。
+         * 先验的绝对地址要一并写进块 meta——解码方只有拿到同一份快照才能对上，
+         * 而它在随机读场景下无法沿着顺序流推断出这个地址。
+         *
+         * 加载失败在压缩侧是良性回退（保留固定初值模型，仅损失压缩率），
+         * 所以只有 loaded 为真时才登记地址，避免给解码方一个它无法兑现的承诺。
+         */
+        qualPriorAddress = (pbgzEngine != nullptr) ? pbgzEngine->getQualPriorAddress() : -1;
+        AuxPayloadPtr priorBlob =
+            (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(qualPriorAddress) : AuxPayloadPtr();
+        bool priorLoaded = false;
+        if (priorBlob && !priorBlob->empty()) {
+            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte,
+                                                     *priorBlob, &priorLoaded);
+        } else {
+            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte);
+        }
+        if (!priorLoaded) {
+            qualPriorAddress = -1;
+        }
     } else if (useBwtCm) {
         /*
          * bwt_cm 不需要字母表，也不需要 SEQ 或链方向，逐条喂质量值即可。
@@ -1402,6 +1423,10 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     subMeta["srclen"] = streamSrcLen;
     subMeta["dstlen"] = qualityIo->data_len;
     subMeta["coder"] = qualityIo->meta;
+    if (qualPriorAddress >= 0) {
+        /* 先验块容器头的绝对文件偏移，解码方凭它取回同一份快照。 */
+        subMeta["prior"] = (Json::Value::Int64)qualPriorAddress;
+    }
     streamMeta.append(subMeta);
 
     totalSrcLength += streamSrcLen;
@@ -1894,7 +1919,36 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
                     ioVector.push_back(qualIo);
                     std::vector<uint32_t> emptyFreq(256, 0);
-                    qualFcv2Decoder = std::make_shared<coder_fcv2>(qualIo.get(), emptyFreq);
+                    /*
+                     * 编码方若从先验起步，解码方必须用同一份快照起步，否则模型立刻发散。
+                     * 与压缩侧的良性回退不同，这里加载失败必须致命：静默回退到固定初值
+                     * 会解出一片看似合法的错误数据，比直接失败危险得多。
+                     *
+                     * 先验的地址来自块 meta 而非顺序推断，随机读因此同样成立。
+                     */
+                    if (qualStreamMeta[0].isMember("prior")) {
+                        /* meta 里是包内相对地址，加上本块所属包起点才是认领者的索引键。 */
+                        const int64_t priorAddress =
+                            inBlockPtr->getPackageStart() + qualStreamMeta[0]["prior"].asInt64();
+                        AuxPayloadPtr priorBlob =
+                            (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(priorAddress)
+                                                    : AuxPayloadPtr();
+                        if (!priorBlob || priorBlob->empty()) {
+                            LOG_ERROR("Qual prior at offset %lld required but unavailable",
+                                      (long long)priorAddress);
+                            return -1;
+                        }
+                        bool priorLoaded = false;
+                        qualFcv2Decoder = std::make_shared<coder_fcv2>(qualIo.get(), emptyFreq,
+                                                                       *priorBlob, &priorLoaded);
+                        if (!priorLoaded) {
+                            LOG_ERROR("Qual prior at offset %lld failed to load",
+                                      (long long)priorAddress);
+                            return -1;
+                        }
+                    } else {
+                        qualFcv2Decoder = std::make_shared<coder_fcv2>(qualIo.get(), emptyFreq);
+                    }
                     if (qualFcv2Decoder->begin_decode() != 0) {
                         LOG_ERROR("fcv2 begin_decode failed");
                         return -1;

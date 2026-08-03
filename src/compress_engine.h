@@ -138,6 +138,16 @@ private:
      */
     std::atomic<int64_t> qualPriorOffset{-1};
 
+    /* 训练出的先验快照，构块时做一次拷贝后只读共享，供全部工作线程零拷贝取用。 */
+    AuxPayloadPtr qualPriorBlob;
+
 public:
-    int64_t getQualPriorOffset() const { return qualPriorOffset.load(std::memory_order_acquire); }
+    int64_t getQualPriorAddress() const override {
+        return qualPriorOffset.load(std::memory_order_acquire);
+    }
+
+    AuxPayloadPtr getQualPrior(int64_t /*blockAddress*/) override {
+        /* 在串行首块窗口内写入，随后只读；地址原子量的 acquire 同时为它建立可见性。 */
+        return (getQualPriorAddress() < 0) ? AuxPayloadPtr() : qualPriorBlob;
+    }
 };

@@ -308,9 +308,9 @@ int32_t PbgzEngine::startReadTask() {
     return 0;
 }
 
-bool PbgzEngine::offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageStart) {
+bool PbgzEngine::offerAuxBlock(RoughIOBlock* blockPtr, int64_t blockAddress) {
     for (size_t i = 0; i < auxConsumers.size(); ++i) {
-        if (auxConsumers[i]->claim(blockPtr, packageStart)) {
+        if (auxConsumers[i]->claim(blockPtr, blockAddress)) {
             return true;
         }
     }

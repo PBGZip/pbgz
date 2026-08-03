@@ -127,7 +127,7 @@ protected:
      * 路过一个辅助块时逐个询问认领者。返回值仅用于日志：没人认领的辅助块被安静跳过，
      * 这是老版本读到新格式时需要的前向兼容行为，不构成错误。
      */
-    bool offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageStart);
+    bool offerAuxBlock(RoughIOBlock* blockPtr, int64_t blockAddress);
 
     /*
      * 同步发射一个辅助块：推给写线程，阻塞等它落盘，返回该块**容器头**的绝对文件偏移
@@ -167,6 +167,21 @@ public:
     /* File preprocessing result (codec pre-selection). Only the compression
        engine populates this; other engines return nullptr. */
     virtual const PreprocessInfo* getPreprocessInfo() { return nullptr; }
+
+    /*
+     * 取 QUAL 先验模型快照。两侧来源不同但接口一致：
+     * 压缩侧返回首块预处理训练出的那份；解压侧按辅助块绝对地址取回已认领的那份。
+     * 返回空表示本次没有可用先验，调用方必须回退到固定初值模型。
+     *
+     * 解压侧不做 seek 回读：先验块现在物理上位于全部数据块之前，
+     * 顺序流一定先路过它再遇到数据块；区域查询路径则在引擎初始化时按文件元信息预取。
+     * 两条路径都保证工作线程取用时缓存已就位。
+     */
+    virtual AuxPayloadPtr getQualPrior(int64_t /*blockAddress*/) { return AuxPayloadPtr(); }
+
+    /* 先验块容器头的绝对偏移；压缩侧据此写进块 meta，解压侧据此回查。-1 表示无先验。 */
+    virtual int64_t getQualPriorAddress() const { return -1; }
+
 
     std::vector<AuxBlockConsumer*> auxConsumers;
 

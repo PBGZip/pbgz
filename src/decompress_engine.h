@@ -66,6 +66,10 @@ public:
 
     virtual ~DecompressEngine() { }
 
+    AuxPayloadPtr getQualPrior(int64_t blockAddress) override {
+        return qualPriorConsumer.forAddress(blockAddress);
+    }
+
     void setReadHeadFlag(bool flag) {
         readHeadBlockFlag = flag;
     }

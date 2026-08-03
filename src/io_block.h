@@ -75,6 +75,22 @@ public:
         dataLen = 0;
         metaLen = 0;
         syncAux = false;
+        packageStart = 0;
+    }
+
+    /*
+     * 本块所属 pbgz 包在文件中的起点。
+     *
+     * 块 meta 里记录的辅助块地址是**包内相对**的——压缩时无从预知自己将来被 cat 到
+     * 哪个位置。解压侧必须加上本块所属包的起点才还原成绝对地址，与参考基因组走的
+     * getCurrentFileStart() + offset 是同一套语义。单包场景该值为 0，退化成相对即绝对。
+     */
+    int64_t getPackageStart() const {
+        return packageStart;
+    }
+
+    void setPackageStart(int64_t start) {
+        packageStart = start;
     }
 
     /*
@@ -171,6 +187,7 @@ private:
     std::vector<uint32_t> npos;      /* Positions of newline characters in buffer, starting from 0 */
     int64_t blockId;
     bool syncAux = false;
+    int64_t packageStart = 0;
     int64_t dataLen;
     uint32_t maxLineLen;
     uint32_t metaLen;

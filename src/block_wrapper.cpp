@@ -359,6 +359,12 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
     blockPtr->setDataLen(pbgzDataBlock.getMetaData("datalen").asInt64());
     blockPtr->setMetaLen(pbgzDataBlock.getMetaData("metalen").asInt64());
     blockPtr->setBlockId(pbgzDataBlock.getMetaData("blockid").asInt64());
+    /*
+     * "本块属于哪个包"是块的固有属性，必须由唯一的生产者写入。
+     * 放在各调用点去设，只要漏掉一处（区域查询、头部预读等），
+     * 该路径上的块就会拿 0 当包起点，把辅助块的相对地址错译成别包的地址。
+     */
+    blockPtr->setPackageStart((int64_t)pbgzFileReader->getCurrentFileStart());
     std::string blockType = pbgzDataBlock.getMetaData("blocktype").asString();
     if (blockType == "fastq_gen2") {
         blockPtr->setBlockType(FASTQ_GEN2);

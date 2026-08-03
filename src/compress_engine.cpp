@@ -332,6 +332,8 @@ void CompressEngine::emitQualPrior() {
         LOG_ERROR("Emit qual prior block failed");
         return;
     }
+    /* 先发布内容再发布地址：取用方以地址原子量的 acquire 作为两者的可见性关口。 */
+    qualPriorBlob = std::make_shared<const std::vector<uint8_t> >(prior);
     qualPriorOffset.store(offset, std::memory_order_release);
 
     Json::Value priorMeta;
