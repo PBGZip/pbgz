@@ -1427,6 +1427,32 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     
     fieldSrcLen = totalSrcLength;
 
+    /*
+     * verbose 模式下逐块打印本块 QUAL 到底走了哪一路编码器、以及本块自己的压缩率。
+     *
+     * 为什么必须在这里做：QUAL 的选择是"预处理阶段一次决定、后续所有块沿用"的模式，
+     * 但一次压缩里有 ~10 个线程并发压不同的块，最终日志只有一行汇总，光看那一行没
+     * 办法确认每个块真的都走了预期的编码器，也没法看到块与块之间压缩率的抖动。
+     *
+     * 三点约束：
+     *   1. 只在 verbose=true 时输出，非 verbose 时保持默认输出字节级一致；
+     *   2. 必须整行一次 fprintf 打完，因为多线程并发写 stderr，拆成多次调用会互相
+     *      穿插，肉眼没法读；单次 fprintf 写入内核缓冲区通常是原子的；
+     *   3. totalSrcLength 为 0 时直接把比例置 0，避免除零。
+     */
+    if (pbgzEngine != nullptr && pbgzEngine->getParameter().verbose) {
+        const double qualRatio = (totalSrcLength == 0)
+            ? 0.0
+            : (double)(totalDstLength * 100) / (double)totalSrcLength;
+        fprintf(stderr,
+                "[block %lu] QUAL -> %-12s  %u -> %u (%.2f%%)\n",
+                (unsigned long)inBlockPtr->getBlockId(),
+                coderTypeToMagic(pickedQualCoder),
+                totalSrcLength,
+                totalDstLength,
+                qualRatio);
+    }
+
     LOG_INFO("SAM quality field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
         totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
     
