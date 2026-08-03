@@ -113,6 +113,7 @@ SamCodecActuator::~SamCodecActuator() {
     
     // Release qualCoder
     qualCoder.reset();
+    qualFcv2Decoder.reset();
 
     ioVector.clear();
 }
@@ -1838,6 +1839,19 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
                     ioVector.push_back(qualIo);
                     qualCoder = std::make_shared<coder_qual>(qualIo.get(), true, qualFreqTable);
+                } else if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_fcv2") {
+                    /*
+                     * fcv2 的字母表和各符号频率都写在它自己的码流头部，begin_decode
+                     * 会读回来重建哈夫曼树，所以这里构造时传空频率表即可。
+                     */
+                    std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
+                    ioVector.push_back(qualIo);
+                    std::vector<uint32_t> emptyFreq(256, 0);
+                    qualFcv2Decoder = std::make_shared<coder_fcv2>(qualIo.get(), emptyFreq);
+                    if (qualFcv2Decoder->begin_decode() != 0) {
+                        LOG_ERROR("fcv2 begin_decode failed");
+                        return -1;
+                    }
                 } else {
                     LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
                     return -1;
@@ -2056,7 +2070,12 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 }
 
 int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
-    qualCoder->decode_qual_gen2(basePtr, outputBlock->getCurrent(), actualBaseLen);
+    if (qualFcv2Decoder != nullptr) {
+        /* fcv2 不需要 SEQ 作为上下文，链方向也由它自己的码流带着，只要长度。 */
+        qualFcv2Decoder->decode_record(outputBlock->getCurrent(), actualBaseLen);
+    } else {
+        qualCoder->decode_qual_gen2(basePtr, outputBlock->getCurrent(), actualBaseLen);
+    }
     outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
     *(outputBlock->getCurrent()) = '\t';
     outputBlock->setDataLen(outputBlock->getDataLen() + 1);

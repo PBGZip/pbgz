@@ -69,7 +69,7 @@ int main(int argc, char** argv)
     size_t bad = 0;
     for (size_t i = 0; i < recs.size(); i++) {
         uint32_t n = (uint32_t)recs[i].qual.size();
-        dec.decode_record(buf.data(), n, recs[i].rev);
+        dec.decode_record(buf.data(), n);
         if (memcmp(buf.data(), recs[i].qual.data(), n) != 0) {
             if (bad < 3) printf("  记录 %zu 不一致\n", i);
             bad++;

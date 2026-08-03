@@ -30,6 +30,7 @@
 #include "coder.h"
 #include "coder_io.h"
 #include "coder_qual.h"
+#include "coder_fcv2.h"
 #include "reference.h"
 #include "sam_info.h"
 #include "coder_bwt_cm.h"
@@ -250,6 +251,8 @@ private:
     std::vector<std::shared_ptr<coder>> idDecoders;
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     std::shared_ptr<coder_qual> qualCoder;
+    /* QUAL 用 fcv2 压缩时的解码器；用 coder_qual 压缩时保持为空。 */
+    std::shared_ptr<coder_fcv2> qualFcv2Decoder;
 
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;

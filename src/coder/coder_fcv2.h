@@ -67,8 +67,11 @@ public:
     /* 编码收尾，返回写入 io 的字节数。 */
     int32_t encode_flush();
 
-    /* 解码一条记录的质量值到 dst，len 与 rev 必须与编码时一致。 */
-    int32_t decode_record(uint8_t* dst, uint32_t len, bool rev);
+    /*
+     * 解码一条记录的质量值到 dst。只需要长度，不需要再传链方向——它已经随码流写出，
+     * 解码时自行读回。这样解压侧不必为了解 QUAL 去跟踪 FLAG 字段。
+     */
+    int32_t decode_record(uint8_t* dst, uint32_t len);
 
     /* 解码前调用一次，读取码流头部的字母表等信息。 */
     int32_t begin_decode();
