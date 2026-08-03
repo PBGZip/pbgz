@@ -189,10 +189,9 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     }
 
     sel.decidedLen = probe;
-    sel.trialBwtCmLen = bwtCmLen;
-    sel.trialFcLen = fcLen;
-    sel.trialBwtCmUs = bwtCmUs;
-    sel.trialFcUs = fcUs;
+    sel.trialCount = 0;
+    sel.addTrial(CoderType::BWT_CM, bwtCmLen, bwtCmUs);
+    sel.addTrial(CoderType::FC, fcLen, fcUs);
 
     if (!anyOk) {
         sel.status = FieldStatus::FAILED;

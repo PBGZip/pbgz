@@ -114,6 +114,7 @@ SamCodecActuator::~SamCodecActuator() {
     // Release qualCoder
     qualCoder.reset();
     qualFcv2Decoder.reset();
+    qualCmDecoder.reset();
 
     ioVector.clear();
 }
@@ -1296,8 +1297,10 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
         pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, CoderType::QUAL);
     }
     const bool useFcv2 = (pickedQualCoder == CoderType::FCV2);
+    const bool useBwtCm = (pickedQualCoder == CoderType::BWT_CM);
     std::shared_ptr<coder_qual> qualityCoder;
     std::shared_ptr<coder_fcv2> fcv2Coder;
+    std::shared_ptr<coder_bwt_cm> qualCmCoder;
     if (useFcv2) {
         std::vector<uint32_t> freqByByte(256, 0);
         for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
@@ -1309,6 +1312,12 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
             }
         }
         fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte);
+    } else if (useBwtCm) {
+        /*
+         * bwt_cm 不需要字母表，也不需要 SEQ 或链方向，逐条喂质量值即可。
+         * 它是 fcv2 不适用时的第二顺位：实测比 coder_qual 好 7.4 个百分点。
+         */
+        qualCmCoder = std::make_shared<coder_bwt_cm>(qualityIo.get());
     } else {
         qualityCoder = std::make_shared<coder_qual>(qualityIo.get(), true, qualFreqTable);
     }
@@ -1371,6 +1380,8 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
                 rev = (flagVal & 16) != 0;
             }
             fcv2Coder->encode_record(qualStart, qualLength, rev);
+        } else if (useBwtCm) {
+            qualCmCoder->encode_line(qualStart, qualLength);
         } else {
             // Encode quality with sequence context
             qualityCoder->encode_qual_gen2(seqStart, qualStart, qualLength);
@@ -1380,6 +1391,8 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     
     if (useFcv2) {
         fcv2Coder->encode_flush();
+    } else if (useBwtCm) {
+        qualCmCoder->encode_flush();
     } else {
         qualityCoder->encode_flush();
     }
@@ -1886,6 +1899,10 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                         LOG_ERROR("fcv2 begin_decode failed");
                         return -1;
                     }
+                } else if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_bwt_cm") {
+                    std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
+                    ioVector.push_back(qualIo);
+                    qualCmDecoder = std::make_shared<coder_bwt_cm>(qualIo.get());
                 } else {
                     LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
                     return -1;
@@ -2107,6 +2124,12 @@ int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBas
     if (qualFcv2Decoder != nullptr) {
         /* fcv2 不需要 SEQ 作为上下文，链方向也由它自己的码流带着，只要长度。 */
         qualFcv2Decoder->decode_record(outputBlock->getCurrent(), actualBaseLen);
+    } else if (qualCmDecoder != nullptr) {
+        /*
+         * bwt_cm 同样不需要 SEQ 上下文。压缩侧是按记录逐条 encode_line 喂进去的，
+         * 这里也按同样的长度逐条取回；不传分隔符，长度由调用方给定。
+         */
+        qualCmDecoder->decode_line(outputBlock->getCurrent(), actualBaseLen);
     } else {
         qualCoder->decode_qual_gen2(basePtr, outputBlock->getCurrent(), actualBaseLen);
     }

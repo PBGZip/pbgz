@@ -72,22 +72,37 @@ struct FieldCodecSelection {
     uint32_t    sampleLen;
     uint32_t    bestCompLen;
 
-    uint32_t    trialBwtCmLen = 0;
-    uint32_t    trialFcLen = 0;
-
     /*
-     * 试压耗时，微秒。
+     * 各候选编码器的试压结果：分别是哪个编码器、压出多少字节、花了多少微秒。
      *
-     * 只看压缩率来选编码器是不够的：两个编码器压缩率相差不到一个百分点、吞吐却差
-     * 好几倍的情况很常见，这时候慢的那个未必划算。把耗时一并记下来，选择策略以后
-     * 就能在压缩率和速度之间做取舍，而不是无条件取最小。
+     * 原先是两个写死的字段对（trialBwtCmLen / trialFcLen），因为通用路径恰好只有
+     * bwt_cm 和 fc 两个候选。质量值列的候选不同，只好把同一对字段拿去装别的编码器，
+     * 再靠打印时换标签来纠正——候选一旦超过两个，这种复用就自相矛盾了。
+     * 改成数组之后，各字段的候选各是谁由它自己声明，打印端照着念即可。
      *
-     * 注意样本只有几百 KB 到一两 MB，单次计时的相对误差不小（同一二进制重复测量的
-     * 波动在百分之几的量级），所以这个数字适合用来看数量级差异，不适合拿来比较
+     * 试压耗时的用途是让选择策略能在压缩率和速度之间做取舍，而不是无条件取最小：
+     * 两个编码器压缩率差不到一个百分点、吞吐却差好几倍的情况很常见。
+     * 但要注意样本只有几百 KB 到一两 MB，单次计时的相对误差不小（同一二进制重复
+     * 测量的波动在百分之几的量级），所以这个数字适合看数量级差异，不适合拿来比较
      * 两个相差百分之几的编码器。
      */
-    uint32_t    trialBwtCmUs = 0;
-    uint32_t    trialFcUs = 0;
+    static const uint32_t TRIAL_MAX = 3;
+    CoderType   trialCoder[TRIAL_MAX] = { CoderType::BWT_CM, CoderType::BWT_CM, CoderType::BWT_CM };
+    uint32_t    trialLen[TRIAL_MAX] = { 0, 0, 0 };
+    uint32_t    trialUs[TRIAL_MAX] = { 0, 0, 0 };
+    uint32_t    trialCount = 0;
+
+    /* 记下一个候选的试压结果；超出 TRIAL_MAX 直接丢弃，不影响选择本身。 */
+    void addTrial(CoderType coder, uint32_t len, uint32_t usec)
+    {
+        if (trialCount >= TRIAL_MAX) {
+            return;
+        }
+        trialCoder[trialCount] = coder;
+        trialLen[trialCount] = len;
+        trialUs[trialCount] = usec;
+        trialCount++;
+    }
 
     /*
      * 实际用于定案的样本字节数，以及为此跑了几轮。

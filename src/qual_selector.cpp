@@ -15,6 +15,7 @@
 #include "coder/coder_io.h"
 #include "coder/coder_qual.h"
 #include "coder/coder_fcv2.h"
+#include "coder/coder_bwt_cm.h"
 #include "log/logger.h"
 
 namespace {
@@ -117,6 +118,51 @@ bool trialFcv2(const std::vector<QualSampleRecord>& records,
     return outLen > 0 && outLen < buf.size();
 }
 
+/*
+ * 用 coder_bwt_cm 试压。
+ *
+ * 这个候选原先不在质量值列的候选集里——通用字段走 CodecSelector 才会试 bwt_cm，
+ * 质量值列只在 coder_qual 和 fcv2 之间二选一。实测发现这是个真实缺口：4 MB 真实
+ * 质量值上 fcv2 25.81%、bwt_cm 26.31%、coder_qual 33.74%，fcv2 依然胜出，
+ * 但 bwt_cm 比 coder_qual 好 7.4 个百分点，而 coder_qual 恰恰是当前的兜底选择。
+ *
+ * fcv2 有明确的不适用场景：它需要每条记录的长度和链方向，只有比对后 SAM 的 QUAL
+ * 列能提供（见 CoderFactory::coderSupports）。那些场景下回退到 bwt_cm 而不是
+ * coder_qual，代价从 7.4 个百分点降到 0.49 个百分点。
+ *
+ * 按记录逐条 encode_line，与 sam_actuator 里的实际调用方式保持一致。
+ */
+bool trialBwtCm(const std::vector<QualSampleRecord>& records,
+                uint32_t& outLen, uint32_t& usec)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < records.size(); i++) {
+        total += records[i].qual.size();
+    }
+    if (total == 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> buf(trialCapacity(total), 0);
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        coder_io io(buf.data(), (int32_t)buf.size());
+        coder_bwt_cm coder(&io);
+        for (size_t i = 0; i < records.size(); i++) {
+            const QualSampleRecord& r = records[i];
+            if (r.qual.empty()) {
+                continue;
+            }
+            coder.encode_line((const uint8_t*)r.qual.data(), (uint32_t)r.qual.size());
+        }
+        coder.encode_flush();
+        outLen = (io.data_len > 0) ? (uint32_t)io.data_len : 0;
+    }
+    usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    return outLen > 0 && outLen < buf.size();
+}
+
 } /* namespace */
 
 FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& records,
@@ -139,35 +185,45 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
 
     uint32_t qualLen = 0, qualUs = 0;
     uint32_t fcv2Len = 0, fcv2Us = 0;
+    uint32_t cmLen = 0, cmUs = 0;
     bool qualOk = trialQual(records, freqByByte, qualLen, qualUs);
     bool fcv2Ok = trialFcv2(records, freqByByte, fcv2Len, fcv2Us);
+    bool cmOk = trialBwtCm(records, cmLen, cmUs);
 
-    /*
-     * 复用既有的两个试压结果字段来携带这两个候选的数字：这里的 trialBwtCmLen 存
-     * coder_qual 的结果，trialFcLen 存 fcv2 的结果。字段名沿用通用路径的命名，
-     * 是为了不改动 -v 的打印结构；质量值这一行的含义以本函数为准。
-     */
-    sel.trialBwtCmLen = qualLen;
-    sel.trialBwtCmUs = qualUs;
-    sel.trialFcLen = fcv2Len;
-    sel.trialFcUs = fcv2Us;
+    sel.trialCount = 0;
+    sel.addTrial(CoderType::QUAL, qualLen, qualUs);
+    sel.addTrial(CoderType::FCV2, fcv2Len, fcv2Us);
+    sel.addTrial(CoderType::BWT_CM, cmLen, cmUs);
 
-    if (!qualOk && !fcv2Ok) {
-        /* 两个候选都跑不通，退回默认编码器，绝不因为评估失败而让压缩无法进行。 */
+    if (!qualOk && !fcv2Ok && !cmOk) {
+        /* 候选全都跑不通，退回默认编码器，绝不因为评估失败而让压缩无法进行。 */
         sel.status = FieldStatus::FAILED;
         return sel;
     }
 
-    if (fcv2Ok && (!qualOk || fcv2Len < qualLen)) {
-        sel.selectedCoder = CoderType::FCV2;
-        sel.bestCompLen = fcv2Len;
-    } else {
-        sel.selectedCoder = CoderType::QUAL;
-        sel.bestCompLen = qualLen;
+    /*
+     * 取压缩后最小的那个。三个候选的速度差异不足以改变结论：实测 fcv2 与
+     * coder_qual 都在 30 MB/s 上下，bwt_cm 约 5.7 MB/s，而 bwt_cm 只在 fcv2
+     * 跑不通时才可能被选中，那种场景下慢一些也比多付 7.4 个百分点划算。
+     */
+    sel.selectedCoder = CoderType::QUAL;
+    sel.bestCompLen = 0;
+    bool picked = false;
+    for (uint32_t i = 0; i < sel.trialCount; ++i) {
+        const bool ok = (sel.trialCoder[i] == CoderType::QUAL)   ? qualOk :
+                        (sel.trialCoder[i] == CoderType::FCV2)   ? fcv2Ok : cmOk;
+        if (!ok) {
+            continue;
+        }
+        if (!picked || sel.trialLen[i] < sel.bestCompLen) {
+            sel.selectedCoder = sel.trialCoder[i];
+            sel.bestCompLen = sel.trialLen[i];
+            picked = true;
+        }
     }
     sel.status = FieldStatus::SELECTED;
 
-    LOG_DEBUG("Qual codec trial: coder_qual=%u (%u us), fcv2=%u (%u us), picked=%s",
-              qualLen, qualUs, fcv2Len, fcv2Us, coderTypeToMagic(sel.selectedCoder));
+    LOG_DEBUG("Qual codec trial: coder_qual=%u (%u us), fcv2=%u (%u us), bwt_cm=%u (%u us), picked=%s",
+              qualLen, qualUs, fcv2Len, fcv2Us, cmLen, cmUs, coderTypeToMagic(sel.selectedCoder));
     return sel;
 }

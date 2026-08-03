@@ -222,24 +222,28 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
             const char* status = (sel.status == FieldStatus::SELECTED) ? "selected" :
                                  (sel.status == FieldStatus::SKIPPED) ? "skipped" : "failed";
             if (sel.status == FieldStatus::SELECTED) {
-                /* 吞吐按 样本字节 / 试压耗时 折算成 MB/s；耗时为 0 时不显示速度 */
-                double bwtMBps = sel.trialBwtCmUs ? (double)sel.decidedLen / sel.trialBwtCmUs : 0.0;
-                double fcMBps  = sel.trialFcUs    ? (double)sel.decidedLen / sel.trialFcUs    : 0.0;
                 /*
-                 * 质量值列走的是专用评估路径，两个试压字段承载的是 coder_qual 和
-                 * fcv2 的结果，而不是通用路径的 bwt_cm 和 fc。标签必须跟着换，
-                 * 否则读的人会把 coder_qual 的数字当成 coder_bwt_cm 的。
+                 * 候选是谁由 FieldCodecSelection 自己声明，这里照着念即可。
+                 * 早先是两个写死的槽位加上"质量值行换标签"的补丁，候选超过两个之后
+                 * 那种写法就不成立了。吞吐按 样本字节 / 试压耗时 折算成 MB/s。
                  */
-                const bool isQualRow = isSam && (i == (uint32_t)SAM_QUAL);
-                const char* candA = isQualRow ? "coder_qual" : "bwt_cm";
-                const char* candB = isQualRow ? "fcv2"       : "fc";
-                fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)"
-                        "  [%s %.2f%% @%.0fMB/s | %s %.2f%% @%.0fMB/s] %u轮\n",
+                std::string trials;
+                for (uint32_t t = 0; t < sel.trialCount; ++t) {
+                    char one[128];
+                    const double mbps = sel.trialUs[t]
+                        ? (double)sel.decidedLen / sel.trialUs[t] : 0.0;
+                    snprintf(one, sizeof(one), "%s%s %.2f%% @%.0fMB/s",
+                             (t == 0) ? "" : " | ",
+                             coderTypeToMagic(sel.trialCoder[t]),
+                             sel.decidedLen ? 100.0 * sel.trialLen[t] / sel.decidedLen : 0.0,
+                             mbps);
+                    trials += one;
+                }
+                fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)  [%s] %u轮\n",
                         names[i], coderTypeToMagic(sel.selectedCoder),
                         sel.decidedLen, sel.bestCompLen,
                         sel.decidedLen ? 100.0 * sel.bestCompLen / sel.decidedLen : 0.0,
-                        candA, sel.decidedLen ? 100.0*sel.trialBwtCmLen/sel.decidedLen : 0, bwtMBps,
-                        candB, sel.decidedLen ? 100.0*sel.trialFcLen/sel.decidedLen : 0, fcMBps,
+                        trials.c_str(),
                         sel.rounds);
             } else {
                 fprintf(stderr, "  %-6s -> %-14s  (sample %u bytes)\n",

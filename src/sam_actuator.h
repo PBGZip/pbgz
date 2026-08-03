@@ -251,8 +251,10 @@ private:
     std::vector<std::shared_ptr<coder>> idDecoders;
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     std::shared_ptr<coder_qual> qualCoder;
-    /* QUAL 用 fcv2 压缩时的解码器；用 coder_qual 压缩时保持为空。 */
+    /* QUAL 用 fcv2 压缩时的解码器；用其他编码器压缩时保持为空。 */
     std::shared_ptr<coder_fcv2> qualFcv2Decoder;
+    /* QUAL 用 bwt_cm 压缩时的解码器；用其他编码器压缩时保持为空。 */
+    std::shared_ptr<coder_bwt_cm> qualCmDecoder;
 
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;
