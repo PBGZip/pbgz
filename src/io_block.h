@@ -48,6 +48,7 @@ typedef enum
     REFERENCE = (1 << 5),           // 
     REFERENCE_INDEX = 1 << 6,       //
     SAM = 1 << 7, 
+    QUAL_PRIOR = 1 << 8,            // Pre-trained QUAL model snapshot (256)
     PBGZFILE = UINT32_MAX           // Special value for PBGZ file type (4294967295)
 } BlockType;
 

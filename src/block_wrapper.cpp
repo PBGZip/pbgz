@@ -368,6 +368,8 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
         blockPtr->setBlockType(REFERENCE_INDEX);
     } else if (blockType == "sam") {
         blockPtr->setBlockType(SAM);
+    } else if (blockType == "qual_prior") {
+        blockPtr->setBlockType(QUAL_PRIOR);
     }
     // Copy entire block information
     memcpy(blockPtr->getBuffer(), pbgzDataBlock.getDataPtr(), pbgzDataBlock.getDataLength());
@@ -474,6 +476,8 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
         dataBlock.setMetaData("blocktype", "refe_gene_index");
     } else if (blockPtr->getBlockType() == SAM) {
         dataBlock.setMetaData("blocktype", "sam");
+    } else if (blockPtr->getBlockType() == QUAL_PRIOR) {
+        dataBlock.setMetaData("blocktype", "qual_prior");
     }
 
     /// Calculate checksum of Meta and data
