@@ -1604,6 +1604,37 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
     Json::Value& streams = samMeta["streams"];
     uint32_t fieldCount = samMeta["fieldcount"].asUInt();
     uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
+
+    /*
+     * 还原数据必须放得进本块缓冲。
+     *
+     * 只判"还原数据本身放不下"，不把 SEQ 暂存区算进来：暂存区贴着缓冲尾部往回摆，
+     * 是边读边消费的，输出在后面追，两者全程重叠也无妨——实测 -l6 的块
+     * (data 65MB + seq 19MB > 64MB 缓冲) 一直是正确往返的，把它算进来会误杀。
+     *
+     * 这个前提在解压侧无法自证：块缓冲大小取自 parameter.compressLevel（见
+     * PbgzEngine::getBlockSize + RoughIOBlock 的 bufferSize = blockSize * 2），
+     * 而 decompress 命令根本没有 -l 选项，压缩时用的块大小也没写进文件。
+     * 于是解压缓冲恒为 2 * 32MB = 64MB，凡是 -l7/-l8/-l9 压出来的块都塞不下。
+     *
+     * 塞不下时不会有任何征兆：coder_io 的读端耗尽后静默返回 '\0'，
+     * 解码继续跑完并产出一个字节错误却"成功"的文件。宁可在这里明确失败。
+     *
+     * 根治要把数据块大小写进文件头并由解压侧回读来决定缓冲大小，
+     * 那需要把 ioReader 的创建提到缓冲池分配之前，属于引擎初始化顺序的调整。
+     */
+    {
+        const uint64_t needOut = (uint64_t)samMeta["totalsrclen"].asUInt();
+        const uint64_t capacity = (uint64_t)outputBlock->getBufferSize();
+        if (needOut > capacity) {
+            LOG_ERROR("Output buffer too small for block %lld: need %llu bytes but buffer is %llu."
+                      " The file was compressed with a larger block size (-l7/-l8/-l9)"
+                      " than this decompressor can hold.",
+                      (long long)inBlockPtr->getBlockId(),
+                      (unsigned long long)needOut, (unsigned long long)capacity);
+            return -1;
+        }
+    }
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     baseDiffSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     refeStrecchBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
