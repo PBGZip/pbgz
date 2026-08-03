@@ -193,6 +193,12 @@ int32_t PbgzEngine::start() {
         return ret;
     }
 
+    ret = prepareFileMeta();
+    if (ret != 0) {
+        LOG_ERROR("call prepareFileMeta failed, ret = %d", ret);
+        return ret;
+    }
+
     ret = startWriteTask();
     if (ret != 0) {
         LOG_ERROR("call startWriteTask failed, ret = %d", ret);
@@ -361,6 +367,17 @@ int32_t PbgzEngine::startWorkTask() {
         if (id > 0 ) {
             std::unique_lock<std::mutex> lock(mutex);
             conditionVar.wait(lock);
+        } else if (parameter.verbose) {
+            /*
+             * 只有 id == 0 的线程会不经等待地跳过上面的 wait，直接进入
+             * while 循环处理第一个数据块；此时其余 id > 0 的工作线程都还
+             * 阻塞在 conditionVar 上。也就是说本分支在整次运行里天然
+             * 只会被执行一次，无须再额外加去重标志。
+             * 这里输出一行提示，让 -v 的使用者看得见"第一块串行、编码器
+             * 决策尚未拍板"这个短暂但关键的阶段——它是首块试压结果决定
+             * 全文件后续 coder 选择、进而保证压缩产物可复现的窗口期。
+             */
+            fprintf(stderr, "[流水线] 串行压缩开始，编码器决策未完成，其余线程等待中\n");
         }
 
         LOG_INFO("Coder task (%d) begin to running!", id);
@@ -406,6 +423,18 @@ int32_t PbgzEngine::startWorkTask() {
             outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
             if (isNeedNotify(pActuator->getNotifyFlag())) {
+                /*
+                 * 走到这里意味着：首块已经完整跑完（含 CodecSelector 的
+                 * 试压/挑选），编码器决策终于"拍板"，可以叫醒其余工作线程
+                 * 进入并行阶段。isNeedNotify 内部由 syncFlag 自锁——首次
+                 * 传入 true 才返回 true，之后永久返回 false——所以这段
+                 * 分支在整次运行里天然只会走一次，无须外层再加一层去重。
+                 * 打印必须是单次 fprintf 保证原子性，因为此刻其他线程即将
+                 * 被唤醒并可能立刻向 stderr 写日志。
+                 */
+                if (parameter.verbose) {
+                    fprintf(stderr, "[流水线] 拍板完成，并行压缩启动（%u 线程）\n", parameter.threadNum);
+                }
                 conditionVar.notify_all();
             }
     

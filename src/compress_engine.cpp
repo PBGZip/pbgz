@@ -170,14 +170,30 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
 
 void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
     /*
-     * Lock-free, non-blocking claim: the first worker to arrive (state==IDLE)
-     * atomically transitions to RUNNING and performs the trial-compression.
-     * All other workers see RUNNING/DONE and proceed immediately with their
-     * default coder -- the compression pipeline never stalls on preprocessing.
+     * runFilePreprocessOnce —— 整个文件生命周期内只跑一次的编码器试压/挑选。
      *
-     * Preprocessing's natural concurrency is "test different coders on one
-     * sample" (independent, parallelizable), which is logically distinct from
-     * the pipeline's "different blocks on different workers" concurrency.
+     * 这里的 tryClaim（IDLE→RUNNING 的无锁 CAS）**不是**真正决定"只跑一次"
+     * 的地方，它只是最后一道兜底：万一未来有代码路径绕过流水线并发调进
+     * 本函数，也能保证 CodecSelector::analyze 不会被重复触发。
+     *
+     * 真正让首块预处理天然串行的机制在 PbgzEngine::startWorkTask ——
+     * 所有 id > 0 的工作线程刚启动就 conditionVar.wait 挂起，只有 id == 0
+     * 的线程会走到 createActuator，进而调到本函数，为第一个数据块完成
+     * 整套编码器筛选。首块处理完毕后 isNeedNotify 恰好在此刻返回 true，
+     * 随后 notify_all 才放行其余线程。也就是说，正常路径上执行到这里时，
+     * 其他工作线程都还阻塞在条件变量上；tryClaim 在正常路径永远命中，
+     * 抢占逻辑只作为防御性存在。
+     *
+     * 之所以要把首块预处理死死钉在串行阶段，核心目的是让编码器决策
+     * **确定且可复现**：给定同一份输入，被采样的永远是同一段字节，
+     * 各字段试压得到的信号也一致，全文件后续所有块选到的 coder 都稳定
+     * 不变，压缩产物达到字节级可复现。反之若放任多线程同时抢首块预处理，
+     * 各线程看到的样本会随 OS 调度抖动而不同，最终 coder 选择就变成
+     * "依赖调度"的非确定行为，回归对比与压测都无从谈起。
+     *
+     * 预处理内部另有一个**正交**的并发维度："同一份样本、不同 coder 并行
+     * 试压"（各 coder 之间相互独立、无副作用），这与流水线"不同数据块、
+     * 不同工作线程"的并发维度不是一回事，不要与外层的串并转换混为一谈。
      */
     if (!preprocessInfo.tryClaim()) {
         return;
@@ -229,6 +245,11 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
                 fprintf(stderr, "  %-6s -> %-14s  (sample %u bytes)\n",
                         names[i], status, sel.sampleLen);
             }
+        }
+        if (!preprocessInfo.qualPrior().empty()) {
+            fprintf(stderr, "  QUAL 先验：训练 %llu 字节，快照 %zu 字节\n",
+                    (unsigned long long)preprocessInfo.qualPriorTrainedBytes(),
+                    preprocessInfo.qualPrior().size());
         }
         fprintf(stderr, "\n");
     }
@@ -394,10 +415,14 @@ int32_t CompressEngine::startEnginePostProc() {
         refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
         refeMeta["ni_name"] = "";
         refeMeta["offset"]= 0;
-        dynamicFileMeta.setMetaData("refe", refeMeta);
+        {
+            std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
+            dynamicFileMeta.setMetaData("refe", refeMeta);
+        }
         FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
         if (fileWriter != nullptr) {
             int64_t refBlockCount = packReference(maxRefLen, totolEncLen);
+            std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
             dynamicFileMeta.getMetaData("refe")["max_block_len"] = maxRefLen;
             dynamicFileMeta.getMetaData("refe")["blocks"] = refBlockCount;
         }
@@ -415,28 +440,59 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     return;
  }
 
- int32_t CompressEngine::startWorkPreProc() {
-    // Refresh file meta
-    if (pRefGene) {
-        Json::Value refeMeta;
-        refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
-        refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
-        refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
-        refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
-        refeMeta["ni_name"] = "";
-        refeMeta["max_block_len"] = 16 << 20;
-        bool isPackRefeInHeader = !parameter.isUnpackRef && parameter.outputFile == STDOUT;
-        if (isPackRefeInHeader) {
-            refeMeta["blocks"] = calcPackRefeBlockSize();
-            baseFileMeta.setMetaData("refe",refeMeta);
-            int64_t maxRefLen = 0;
-            int64_t totolEncLen = 0;
-            (void)packReference(maxRefLen, totolEncLen, false);
-        } else {
-            refeMeta["blocks"] = 0;
-            baseFileMeta.setMetaData("refe",refeMeta);
-        }
+ /*
+  * 只负责把参考基因组的描述填进基础文件元信息，不产生任何 IO。
+  *
+  * 这段内容原先和下面 startWorkPreProc 里的 packReference 写在一起，而
+  * startWorkPreProc 是在写线程启动之后才执行的。写线程一起来就会把 baseFileMeta
+  * 落盘，于是"主线程填 refe"和"写线程写 baseFileMeta"变成了两个线程对同一份
+  * JSON 的赛跑：写线程赢，文件头里就没有 refe；主线程赢，就有。
+  *
+  * 后果是同一份输入压两次得到的字节不同（实测两个稳定变体相差 128 字节，正好是
+  * refe 这个 JSON 成员压缩后的长度），后续所有内容整体偏移。两个结果都能正确解压，
+  * 因为解压侧对 refe 缺失做了兼容（见 decompress_engine.cpp 里关于 refe 可能落在
+  * baseFileMeta 或 dynamicFileMeta 的说明），所以这个问题一直没有暴露出来。
+  *
+  * 现在把纯元信息的构造提前到写线程启动之前，竞争消失；真正需要写线程就绪才能做的
+  * packReference 留在 startWorkPreProc 不动。
+  */
+ int32_t CompressEngine::prepareFileMeta() {
+    if (pRefGene == nullptr) {
+        return 0;
     }
+
+    Json::Value refeMeta;
+    refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
+    refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
+    refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
+    refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
+    refeMeta["ni_name"] = "";
+    refeMeta["max_block_len"] = 16 << 20;
+    if (isPackRefeInHeader()) {
+        refeMeta["blocks"] = calcPackRefeBlockSize();
+    } else {
+        refeMeta["blocks"] = 0;
+    }
+    baseFileMeta.setMetaData("refe", refeMeta);
+
+    return 0;
+ }
+
+ /*
+  * 参考基因组打包在文件头的场景下，把参考块写往下游。
+  *
+  * 这一步必须留在写线程启动之后，因为 packReference 会把参考块推进输出队列。
+  * 元信息本身已经在 prepareFileMeta 里填好，这里不再触碰 baseFileMeta——
+  * 一旦在这里改它，就会重新引入上面描述的那个竞争。
+  */
+ int32_t CompressEngine::startWorkPreProc() {
+    if (pRefGene == nullptr || !isPackRefeInHeader()) {
+        return 0;
+    }
+
+    int64_t maxRefLen = 0;
+    int64_t totolEncLen = 0;
+    (void)packReference(maxRefLen, totolEncLen, false);
 
     return 0;
  }

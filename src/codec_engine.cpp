@@ -79,10 +79,16 @@ int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
 
 void CodecEngine::writeFilePostProc(BlockWriter* blockWriter) {
     PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
-    if (pbgzWriter != nullptr && !dynamicFileMeta.getMetaData().empty()) {
-        pbgzWriter->updateHeadExt();
-        pbgzWriter->setDynamicFileMeta(dynamicFileMeta);
-        pbgzWriter->writeDynamicFileMeta();
+    if (pbgzWriter != nullptr) {
+        {
+            std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
+            if (dynamicFileMeta.getMetaData().empty()) {
+                return;
+            }
+            pbgzWriter->updateHeadExt();
+            pbgzWriter->setDynamicFileMeta(dynamicFileMeta);
+            pbgzWriter->writeDynamicFileMeta();
+        }
         resetReferenceOffset();
     }
     return;
@@ -95,7 +101,11 @@ void CodecEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outBlock
 
 void CodecEngine::writeBlockPreProc(BlockWriter*, RoughIOBlock* outBlockPtr) {
     if (outBlockPtr->getBlockType() == REFERENCE) {
-        /// Writing reference blocks is one-time, release after writing
+        /*
+         * 该钩子必须由写线程在 blockId 排序之后、writeBlock 之前调用。
+         * 若在 outputDataPool 入队时取偏移，前序正文块可能尚未落盘，
+         * refe.offset 就会随工作线程调度改变，进而改变动态元数据。
+         */
         FileWriter* fileWriter =  dynamic_cast<FileWriter*>(ioWriter);
         if (fileWriter != nullptr) {
             updateReferenceOffset(fileWriter->getCurrentPos());
@@ -105,6 +115,7 @@ void CodecEngine::writeBlockPreProc(BlockWriter*, RoughIOBlock* outBlockPtr) {
 }
 
 void CodecEngine::updateReferenceOffset(int64_t offset) {
+    std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
     if (refeOffsetFLag) {
         return;
     }
@@ -115,5 +126,6 @@ void CodecEngine::updateReferenceOffset(int64_t offset) {
 }
 
 void CodecEngine::resetReferenceOffset() {
+    std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
     refeOffsetFLag = false;
 }

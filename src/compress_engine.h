@@ -88,6 +88,8 @@ protected:
 
     virtual void setDataBlockPosition(uint32_t blockId) override;
 
+    virtual int32_t prepareFileMeta() override;
+
     virtual int32_t startWorkPreProc() override;
 
     virtual Reference* getReference() override { return pRefGene; }
@@ -100,6 +102,11 @@ private:
     int64_t packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef = true);
 
     uint32_t calcPackRefeBlockSize();
+
+    /* 参考基因组是否随文件头一起打包：输出到管道且未要求外挂参考时为真。 */
+    bool isPackRefeInHeader() const {
+        return !parameter.isUnpackRef && parameter.outputFile == STDOUT;
+    }
 
 private:
     std::map<uint32_t, std::vector<int64_t>> blockRefePos;

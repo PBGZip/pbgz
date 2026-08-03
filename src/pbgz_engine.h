@@ -58,6 +58,25 @@ protected:
 
     virtual int32_t startEnginePreProc() { return 0; }
 
+    /*
+     * 准备基础文件元信息，必须在 startWriteTask 之前调用。
+     *
+     * 为什么要单独开这个钩子：写线程一启动就会执行 createBlockWriter，里面立刻
+     * 调用 writeBaseFileMeta 把 baseFileMeta 落盘。如果此时主线程还在往
+     * baseFileMeta 里塞内容，两边就在同一份 JSON 上赛跑——谁先跑完决定了写进
+     * 文件头的元信息里有没有那部分内容。
+     *
+     * 这个竞争的实际后果是压缩结果不可复现：同一份输入压两次，文件头元信息可能
+     * 相差一整个 JSON 成员，后续所有内容随之整体偏移，两次输出的字节完全不同。
+     * 两个结果都能正确解压（解压侧对成员缺失做了兼容），所以问题长期没有暴露，
+     * 但它让"同一输入必得同一输出"这条基本性质不成立，也让任何字节级回归对比
+     * 都无法进行。
+     *
+     * 因此约定：凡是要写进基础文件元信息的内容，都必须在本钩子里填好；
+     * 需要写线程就绪之后才能做的事（例如往下游写参考块）留在 startWorkPreProc。
+     */
+    virtual int32_t prepareFileMeta() { return 0; }
+
     virtual int32_t startWriteTask();
 
     virtual int32_t startWorkPreProc() { return 0; }
