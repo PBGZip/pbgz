@@ -40,6 +40,8 @@
 #include <random>
 #include <compress_engine.h>
 #include <decompress_engine.h>
+#include <sam_info.h>
+#include <pbgz_index.h>
 
 namespace SamDecompressData {
     const std::string testSamFile = "test.sam";
@@ -93,6 +95,10 @@ public:
         std::remove("test_field_missing.sam");
         std::remove("test_mixed.sam");
         std::remove("test_large.sam");
+
+        SamInfo::getInstance().clearChromosomeInfo();
+        SamInfo::getInstance().resetChrIdCounter();
+        SamIndex::getInstance().clear();
 	}
 
     void loadSamData(const std::string& filename) {
