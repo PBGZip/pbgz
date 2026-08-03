@@ -220,7 +220,9 @@ bool CompressEngine::initReference() {
     }
     if (pRefGene) {
         if (!pRefGene->makeIndex()) {
+            LOG_ERROR("makeIndex failed, reference will not be used");
             MemoryUtil::safeDeleteClass(pRefGene);
+            pRefGene = nullptr;
         }
     }
     return true;

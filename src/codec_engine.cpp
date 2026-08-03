@@ -78,7 +78,6 @@ int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
 
 
 void CodecEngine::writeFilePostProc(BlockWriter* blockWriter) {
-    // Update extended header and write dynamic file meta after all data is written
     PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);
     if (pbgzWriter != nullptr && !dynamicFileMeta.getMetaData().empty()) {
         pbgzWriter->updateHeadExt();

@@ -93,15 +93,22 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     if (blockReader == nullptr) {
         return false;
     }
-    if (!baseFileMeta.getMetaData("refe").isObject()) {
+
+    /* refe metadata may be in either baseFileMeta or dynamicFileMeta.
+       baseFileMeta is written before startWorkPreProc adds refe, so on
+       file-to-file compression the refe is only in dynamicFileMeta. */
+    bool hasRefe = baseFileMeta.getMetaData("refe").isObject();
+    if (!hasRefe) {
+        hasRefe = dynamicFileMeta.getMetaData().isMember("refe");
+    }
+    if (!hasRefe) {
         LOG_DEBUG("No reference");
         return true;
     }
-    Json::Value& metaRefe = baseFileMeta.getMetaData("refe");
-    if (dynamicFileMeta.getMetaData().isMember("refe")) {
-        LOG_DEBUG("Read meta data from dynamic file meta");
-        metaRefe = dynamicFileMeta.getMetaData("refe");
-    }
+
+    Json::Value& metaRefe = dynamicFileMeta.getMetaData().isMember("refe")
+        ? dynamicFileMeta.getMetaData("refe")
+        : baseFileMeta.getMetaData("refe");
 
     std::string fastaName = metaRefe["fasta_name"].asString();
     int64_t fastaLength = metaRefe["fasta_len"].asInt64();
