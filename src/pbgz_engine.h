@@ -120,11 +120,28 @@ protected:
 
     virtual void writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockPtr);
 
+    /* 写线程侧：落盘一个同步辅助块并把它的容器头偏移回交给发射者。 */
+    void completeSyncAuxBlock(BlockWriter* blockWriter, RoughIOBlock* block);
+
     /*
      * 路过一个辅助块时逐个询问认领者。返回值仅用于日志：没人认领的辅助块被安静跳过，
      * 这是老版本读到新格式时需要的前向兼容行为，不构成错误。
      */
     bool offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageStart);
+
+    /*
+     * 同步发射一个辅助块：推给写线程，阻塞等它落盘，返回该块**容器头**的绝对文件偏移
+     * （即块读管理器能从该处解析出块 json 的位置，不是块内负载的起点）。
+     *
+     * 辅助块是位置寻址的：它不占用数据块的 blockId，也不参与写线程的顺序重排，
+     * 写线程见到即写。之所以必须由写线程亲自执行写动作，是因为只有它持有 BlockWriter
+     * 并独占文件写指针——调用方在别的线程上取 getCurrentPos() 拿到的都是竞态值。
+     *
+     * 仅允许在串行首块窗口内调用：此刻其余工作线程仍阻塞在 conditionVar 上，
+     * 写线程也尚未收到任何数据块，全局至多一个发射在途，故下面用单个槽位承接结果，
+     * 无需按块建映射。返回后块已被写线程归还到 freeOutputPool，调用方不得再触碰它。
+     */
+    int64_t emitSyncAuxBlock(RoughIOBlock* block);
 
     void registerAuxConsumer(AuxBlockConsumer* consumer) {
         if (consumer != nullptr) {
@@ -162,4 +179,10 @@ public:
     mutable std::mutex mutex;
     mutable std::condition_variable conditionVar;
     bool syncFlag;
+
+    /* 同步辅助块发射的交接槽位，由发射者与写线程共用，受 auxEmitMutex 保护。 */
+    mutable std::mutex auxEmitMutex;
+    mutable std::condition_variable auxEmitCond;
+    int64_t auxEmitOffset = -1;
+    bool auxEmitDone = false;
 };

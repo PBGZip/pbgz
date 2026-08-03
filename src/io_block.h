@@ -74,6 +74,21 @@ public:
         npos.clear();
         dataLen = 0;
         metaLen = 0;
+        syncAux = false;
+    }
+
+    /*
+     * 位置寻址标记：本块是"同步发射的辅助块"，写线程见到即写，
+     * 不参与 blockId 顺序重排，也不消耗数据块的 id 序列。
+     * 块取自公共池并被反复复用，故必须在 reset() 里清掉，
+     * 否则上一轮的标记会让一个普通数据块被当成辅助块提前写出。
+     */
+    bool isSyncAux() const {
+        return syncAux;
+    }
+
+    void setSyncAux(bool flag) {
+        syncAux = flag;
     }
 
     uint8_t* getBuffer() const {
@@ -155,6 +170,7 @@ private:
     uint32_t blockSize;              /* Block size */
     std::vector<uint32_t> npos;      /* Positions of newline characters in buffer, starting from 0 */
     int64_t blockId;
+    bool syncAux = false;
     int64_t dataLen;
     uint32_t maxLineLen;
     uint32_t metaLen;

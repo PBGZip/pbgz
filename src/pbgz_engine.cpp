@@ -338,6 +338,13 @@ int32_t PbgzEngine::startWriteTask() {
                 }
                 writeFilePostProc(blockWriter);
                 break;
+            } else if (outBlockPtr->isSyncAux()) {
+                /*
+                 * 辅助块位置寻址，必须抢在 writeBlockPreProc / 顺序重排 / blockId2Write
+                 * 之前处理：它不属于数据块 id 序列，一旦落进下面那套排序逻辑，
+                 * 就会顶掉一个数据块的位置并让写指针永久错位。
+                 */
+                completeSyncAuxBlock(blockWriter, outBlockPtr);
             } else {
                 writeBlockPreProc(blockWriter, outBlockPtr);
                 outputSortedCache.push_back(outBlockPtr);
@@ -369,6 +376,45 @@ void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockP
     freeOutputPool->push(outblockPtr);
     outputSortedCache.pop_front();
     return;
+}
+
+void PbgzEngine::completeSyncAuxBlock(BlockWriter* blockWriter, RoughIOBlock* block) {
+    /*
+     * 取位置必须紧贴 writeBlock 之前：writeBlock 写出的第一个字节就是容器魔数，
+     * 所以此刻的写指针正是解压侧 readBlock 需要的那个偏移。
+     */
+    FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+    const int64_t offset = (fileWriter != nullptr) ? (int64_t)fileWriter->getCurrentPos() : -1;
+
+    blockWriter->writeBlock(block);
+    updateOutputStatics(block);
+    /* 归还必须早于唤醒：发射者被唤醒后可能立刻再申请空闲块。 */
+    freeOutputPool->push(block);
+
+    {
+        std::lock_guard<std::mutex> lock(auxEmitMutex);
+        auxEmitOffset = offset;
+        auxEmitDone = true;
+    }
+    auxEmitCond.notify_all();
+}
+
+int64_t PbgzEngine::emitSyncAuxBlock(RoughIOBlock* block) {
+    if (block == nullptr) {
+        return -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(auxEmitMutex);
+        auxEmitDone = false;
+        auxEmitOffset = -1;
+    }
+
+    block->setSyncAux(true);
+    outputDataPool->push(block);
+
+    std::unique_lock<std::mutex> lock(auxEmitMutex);
+    auxEmitCond.wait(lock, [this]() { return auxEmitDone; });
+    return auxEmitOffset;
 }
 
 int32_t PbgzEngine::startWorkTask() {
