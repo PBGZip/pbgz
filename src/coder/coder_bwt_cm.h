@@ -229,6 +229,10 @@ public:
             len_bwt = bsize;
             len_arr = bsize << 2; /* int32_t type */
             coder_buff = static_cast<uint8_t*>(safe_alloc(len_buf + len_bwt + len_arr));
+            check_exit(coder_buff, coder_ns::CODER_ERR_MEM_ALLOC_FAIL,
+                       "Error: Insufficient memory: need %" PRIu64 " MB\n",
+                       (static_cast<uint64_t>(sizeof(uint8_t)) *
+                        ((uint64_t)len_buf + len_bwt + len_arr)) >> 20);
 
             buf_bwt = coder_buff + len_buf;
             buf_arr = (uint32_t *)(buf_bwt + len_bwt);
@@ -296,7 +300,10 @@ public:
         if (io->m != coder_io::MDEC)
         {
             decode_init();
-            if (decode_one_block() == 0)
+            /* decode_one_block 返回负值代表码流损坏或内存不足，此时 coder_buff 可能
+               仍是空指针，必须与正常的 EOF（返回 0）一样立即中止，否则下面按 bsize
+               遍历 coder_buff 会直接段错误。 */
+            if (decode_one_block() <= 0)
                 return 0;
             io->m = coder_io::MDEC;
         }
@@ -307,7 +314,7 @@ public:
             {
                 if (curr_out_offset == bsize)
                 { /* Current block decompression completed, need to decompress again */
-                    if (decode_one_block() == 0)
+                    if (decode_one_block() <= 0)
                         return len;
                 }
                 for (n = curr_out_offset; n < bsize; n++) {
@@ -329,7 +336,7 @@ public:
             {
                 if (curr_out_offset == bsize)
                 { /* Current block decompression completed, need to decompress again */
-                    if (decode_one_block() == 0)
+                    if (decode_one_block() <= 0)
                         return len;
                 }
                 for (n = curr_out_offset; n < bsize; n++) {

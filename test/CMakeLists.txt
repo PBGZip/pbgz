@@ -95,6 +95,13 @@ target_link_libraries(qual_coder_bench PRIVATE
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
+# coder_bwt_cm 逐记录定长往返验证：用于定位 QUAL 走 bwt_cm 时的解压失败根因。
+add_executable(bwtcm_record_roundtrip bwtcm_record_roundtrip.cpp)
+target_link_libraries(bwtcm_record_roundtrip PRIVATE
+    pbgz_coder
+    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
+)
+
 add_subdirectory(googletest)
 
 # Optional: Add gtest support
