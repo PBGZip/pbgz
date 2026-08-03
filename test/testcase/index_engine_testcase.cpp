@@ -3,6 +3,8 @@
 #include "pbgz_index.h"
 #include "pbgz_testcase_util.h"
 #include "sam_info.h"
+#include <fstream>
+#include <filesystem>
 
 
 #define protected public
@@ -22,6 +24,18 @@ public:
     }
 
     int32_t init(const std::string& outputFile) {
+        /*
+         * IndexEngine::startEnginePostProc 一进门就要求 ioReader 是个 FileReader
+         * ——索引只对可 seek 的输入才有意义。这个门是后加的，而本 mock 从来只设
+         * ioWriter，于是 postProc 在空指针检查处直接 return 0：
+         * 断言 result == 0 照样成立，却什么都没写，检查输出的用例才会失败。
+         * 这里补一个真实存在的输入文件，让用例走到它真正要验证的那段逻辑。
+         */
+        inputFileName = outputFile + ".in";
+        { std::ofstream seed(inputFileName); seed << "seed"; }
+        ioReader = MemoryUtil::safeNewClass<FileReader>(inputFileName);
+        ioReader->openIO();
+
         ioWriter = MemoryUtil::safeNewClass<FileWriter>(outputFile);
         ioWriter->openIO();
         ((MockBlockingQueue*)freeOutputPool.get())->setIOWriter(ioWriter);
@@ -35,7 +49,14 @@ public:
 
     virtual ~MockIndexEngine(){
         MemoryUtil::safeDeleteClass(ioWriter);
+        MemoryUtil::safeDeleteClass(ioReader);
+        if (!inputFileName.empty()) {
+            std::filesystem::remove(inputFileName);
+        }
     }
+
+private:
+    std::string inputFileName;
 };
 
 class IndexEngineTest : public ::testing::Test {
@@ -103,8 +124,8 @@ TEST_F(IndexEngineTest, StartEnginePostProc_WithSingleBlock_Succeeds) {
 
     EXPECT_EQ(2, lines.size());
     // Lines should be sorted by blockId first (all block 0), then chrIndex, then position
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("2\t2000\t3\t0", lines[1]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("2\t2000\t3\t0\t0", lines[1]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_WithMultipleBlocks_Succeeds) {
@@ -141,11 +162,11 @@ TEST_F(IndexEngineTest, StartEnginePostProc_WithMultipleBlocks_Succeeds) {
 
     EXPECT_EQ(5, lines.size());
     // Sorted: blockId, then chrIndex, then referenceMapPos
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("2\t2000\t3\t0", lines[1]);
-    EXPECT_EQ("1\t5000\t8\t1", lines[2]);
-    EXPECT_EQ("2\t6000\t2\t1", lines[3]);
-    EXPECT_EQ("3\t7000\t15\t2", lines[4]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("2\t2000\t3\t0\t0", lines[1]);
+    EXPECT_EQ("1\t5000\t8\t1\t0", lines[2]);
+    EXPECT_EQ("2\t6000\t2\t1\t0", lines[3]);
+    EXPECT_EQ("3\t7000\t15\t2\t0", lines[4]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockDifferentChromosomes_SortingWorks) {
@@ -179,9 +200,9 @@ TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockDifferentChromosomes_Sortin
     file.close();
 
     EXPECT_EQ(3, lines.size());
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("2\t2000\t3\t0", lines[1]);
-    EXPECT_EQ("3\t3000\t4\t0", lines[2]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("2\t2000\t3\t0\t0", lines[1]);
+    EXPECT_EQ("3\t3000\t4\t0\t0", lines[2]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockSameChromosome_SortingWorks) {
@@ -215,9 +236,9 @@ TEST_F(IndexEngineTest, StartEnginePostProc_SameBlockSameChromosome_SortingWorks
     file.close();
 
     EXPECT_EQ(3, lines.size());
-    EXPECT_EQ("1\t1000\t5\t0", lines[0]);
-    EXPECT_EQ("1\t2000\t3\t0", lines[1]);
-    EXPECT_EQ("1\t3000\t4\t0", lines[2]);
+    EXPECT_EQ("1\t1000\t5\t0\t0", lines[0]);
+    EXPECT_EQ("1\t2000\t3\t0\t0", lines[1]);
+    EXPECT_EQ("1\t3000\t4\t0\t0", lines[2]);
 }
 
 TEST_F(IndexEngineTest, StartEnginePostProc_OutputWrittenToFile_Success) {
