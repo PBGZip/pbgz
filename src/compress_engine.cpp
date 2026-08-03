@@ -27,6 +27,7 @@
 #include "coder_ppmd.h"
 #include "coder_json.h"
 #include "codec_actuator_adapter.h"
+#include "codec_selector.h"
 
 int64_t CompressEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
     int64_t ret = CodecEngine::readOneBlock(blockReader, fileType);
@@ -162,7 +163,33 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
         }
     }
 
+    runFilePreprocessOnce(inBlockPtr);
+
     return actuator;
+}
+
+void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
+    /*
+     * Lock-free, non-blocking claim: the first worker to arrive (state==IDLE)
+     * atomically transitions to RUNNING and performs the trial-compression.
+     * All other workers see RUNNING/DONE and proceed immediately with their
+     * default coder -- the compression pipeline never stalls on preprocessing.
+     *
+     * Preprocessing's natural concurrency is "test different coders on one
+     * sample" (independent, parallelizable), which is logically distinct from
+     * the pipeline's "different blocks on different workers" concurrency.
+     */
+    if (!preprocessInfo.tryClaim()) {
+        return;
+    }
+
+    if (0 != CodecSelector::analyze(inBlockPtr, preprocessInfo)) {
+        LOG_INFO("File preprocessing (codec selection) failed, using default coders");
+    } else {
+        LOG_INFO("File preprocessing done: fileType=%d, sampleBytes=%u, fields=%zu",
+                 (int)preprocessInfo.fileType, preprocessInfo.sampleBytes, preprocessInfo.fields.size());
+    }
+    preprocessInfo.markDone();
 }
 
 void CompressEngine::writeFilePostProc(BlockWriter* blockWriter) {

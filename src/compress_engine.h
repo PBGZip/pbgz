@@ -28,6 +28,7 @@
 #include <mutex>
 #include "pbgz_stat.h"
 #include "block_wrapper.h"
+#include "preprocess_info.h"
 
 class CompressEngine : public CodecEngine {
 public:
@@ -41,6 +42,8 @@ public:
     virtual int32_t init();
 
     PbgzStat* getStats() { return stats.get(); }
+
+    virtual const PreprocessInfo* getPreprocessInfo() override { return &preprocessInfo; }
     
     void initStatsBasedOnFileType(BlockType fileType);
     
@@ -81,6 +84,8 @@ protected:
 private:
     bool initReference();
 
+    void runFilePreprocessOnce(RoughIOBlock* inBlockPtr);
+
     int64_t packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef = true);
 
     uint32_t calcPackRefeBlockSize();
@@ -92,4 +97,6 @@ private:
     std::unique_ptr<BlockingQueueType> freeIndexBlockQueue;
     std::unique_ptr<PbgzStat> stats;
     bool statsInitialized = false;
+
+    PreprocessInfo preprocessInfo;
 };

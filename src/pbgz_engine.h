@@ -35,6 +35,8 @@
 #include "utils/timer.h"
 #include "reference.h"
 
+struct PreprocessInfo;
+
 using BlockingQueueType = BlockingQueue<RoughIOBlock*>;
 
 class PbgzEngine {
@@ -112,6 +114,10 @@ public:
     std::list<RoughIOBlock*> outputSortedCache;
     const PbgzParameter& getParameter() const { return parameter; }
     virtual Reference* getReference() { return nullptr; }
+
+    /* File preprocessing result (codec pre-selection). Only the compression
+       engine populates this; other engines return nullptr. */
+    virtual const PreprocessInfo* getPreprocessInfo() { return nullptr; }
 
     std::vector<std::thread> workThreads;
     std::thread writeThread;
