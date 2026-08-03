@@ -34,6 +34,13 @@ namespace BlockUtil {
     bool isFastqBlock(BlockType type);
     bool isSAMBlock(BlockType type);
 
+    /*
+     * 辅助块：不携带用户数据，不进"读→并行压缩→按序写"这条流水线，
+     * 由文件级偏移按需 seek 加载（参考基因组、其索引、QUAL 先验都属此类）。
+     * 流水线入口只问这一个谓词，新增辅助块类型不必再去每个入口补分支。
+     */
+    bool isAuxiliaryBlock(BlockType type);
+
     std::string getBlockTypeName(BlockType type);
 }
 

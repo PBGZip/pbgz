@@ -401,10 +401,18 @@ int32_t PbgzEngine::startWorkTask() {
 
             Actuator* pActuator = createActuator(inBlockPtr, outBlockPtr);
             if (pActuator == nullptr) {
-                LOG_ERROR("Create actuator failed.");
+                /*
+                 * 单个块建不出执行器，绝不能退出循环：工作线程一旦提前结束，
+                 * 剩余线程要独自消化整条输入队列，全部退出则读线程会永远阻塞在
+                 * 有界队列上。这里与下面 actuatorProc 失败走完全相同的收尾——
+                 * 归还输入块、推一个同 id 的零长块让写线程继续推进，然后继续取下一块。
+                 */
+                LOG_ERROR("Create actuator failed for block(%ld)", inBlockPtr->getBlockId());
                 freeInputPool->push(inBlockPtr);
-                freeOutputPool->push(outBlockPtr);
-                break;
+                outBlockPtr->reset();
+                outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+                outputDataPool->push(outBlockPtr);
+                continue;
             }
 
             int32_t ret = actuatorProc(pActuator, inBlockPtr, outBlockPtr);

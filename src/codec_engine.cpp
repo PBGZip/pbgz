@@ -57,7 +57,7 @@ int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType)
         return ret;
     }
 
-    if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
+    if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
         freeInputPool->push(blockPtr);
         return -2;
     }

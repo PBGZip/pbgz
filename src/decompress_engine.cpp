@@ -249,7 +249,7 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
                     return;
                 }
 
-                if (blockPtr->getBlockType() == REFERENCE || blockPtr->getBlockType() == REFERENCE_INDEX) {
+                if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
                     freeInputPool->push(blockPtr);
                     continue;
                 }
@@ -408,12 +408,8 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
     }
 
     if (pActuator == nullptr) {
-        LOG_ERROR("Not support block type: %d, blockId=%d", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
-        freeInputPool->push(inBlockPtr);
-        outBlockPtr->reset();
-        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
-        // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
-        outputDataPool->push(outBlockPtr);
+        /* 失败时一律不释放任何块，收尾统一由 startWorkTask 负责，避免两处各归还一次。 */
+        LOG_ERROR("Not support block type: %d, blockId=%ld", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
         return nullptr;
     }
 

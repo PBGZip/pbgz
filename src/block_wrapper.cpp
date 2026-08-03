@@ -305,6 +305,10 @@ namespace BlockUtil {
         return (type == SAM);
     }
 
+    bool isAuxiliaryBlock(BlockType type) {
+        return (type == REFERENCE || type == REFERENCE_INDEX || type == QUAL_PRIOR);
+    }
+
     std::string getBlockTypeName(BlockType type) {
         switch(type) {
             case TYPE_UNKNOW:
