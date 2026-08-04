@@ -1462,7 +1462,12 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
 
         uint32_t qualFreqSrcLen = streamsMeta[1]["srclen"].asUInt();
-        uint8_t qualFreqArrLen = qualFreqSrcLen / sizeof(uint16_t);
+        /*
+         * 元素个数必须用 uint32_t: 数组按这个数分配, 而 decode_line 按未截断的
+         * qualFreqSrcLen 字节写入。原来是 uint8_t, 一旦质量值字母表超过 127 个符号
+         * (qualFreqSrcLen > 510) 计数就回绕, 分配变小而写入不变, 直接堆越界。
+         */
+        uint32_t qualFreqArrLen = qualFreqSrcLen / sizeof(uint16_t);
         uint16_t* qualFreqArray = new uint16_t[qualFreqArrLen];
         uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArray, qualFreqSrcLen, UINT8_MAX, false);
         if (qualFreq != qualFreqSrcLen) {

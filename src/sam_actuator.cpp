@@ -1925,7 +1925,8 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength);
                 auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
                 uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
-                uint8_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
+                /* 同 fastq_actuator: 计数用 uint8_t 会在字母表超过 127 个符号时回绕, 导致堆越界。 */
+                uint32_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
                 uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
                 uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
                 if (qualFreq != qualFreqSrcLength) {
