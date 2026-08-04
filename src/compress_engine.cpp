@@ -187,7 +187,15 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         return;
     }
 
-    if (0 != CodecSelector::analyze(inBlockPtr, preprocessInfo)) {
+    /*
+     * 文件总长只有读线程手上有，也只有在这里才谈得上"按全文件摊销划不划算"。
+     * 管道输入拿不到长度，返回 0 表示不可知，由判决器自己决定怎么处理。
+     */
+    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    const uint64_t inputTotalBytes = (fileReader != nullptr && fileReader->getFileSize() > 0)
+                                     ? (uint64_t)fileReader->getFileSize() : 0;
+
+    if (0 != CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo)) {
         LOG_INFO("File preprocessing (codec selection) failed, using default coders");
     } else if (parameter.verbose) {
         static const char* samFieldNames[] = {

@@ -54,8 +54,12 @@ public:
      * Analyze a sample of the given block and fill info.
      * Returns 0 on success (including the "some fields skipped" case),
      * -1 only on a fatal error such as a null block.
+     *
+     * inputTotalBytes 是整个输入的字节数，0 表示不可知（管道输入）。它只用于
+     * 判断按全文件数据量摊销才划算的决策——目前是 QUAL 先验要不要训练和写出。
+     * 做成入参而不是塞进 PreprocessInfo：后者是决策的产物，不该同时兼作输入。
      */
-    static int32_t analyze(RoughIOBlock* block, PreprocessInfo& info);
+    static int32_t analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info);
 
     /*
      * Trial-compress one byte stream with every candidate coder and return the
@@ -64,7 +68,7 @@ public:
     static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len);
 
 private:
-    static int32_t analyzeSam(RoughIOBlock* block, PreprocessInfo& info);
+    static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info);
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
     static void trainQualPrior(RoughIOBlock* block, PreprocessInfo& info);
 

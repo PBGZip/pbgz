@@ -401,7 +401,44 @@ uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
     return reader.scannedBytes();
 }
 
-int32_t CodecSelector::analyzeSam(RoughIOBlock* block, PreprocessInfo& info)
+/*
+ * 先验值不值得写。
+ *
+ * 先验的成本是固定的：一个辅助块，本文件实测打包后约 0.6 MB，与输入多大无关。
+ * 收益则是每个块的 QUAL 都省下大致固定的比例，随 QUAL 总量线性增长。一条常数
+ * 成本线和一条过原点的收益线必然相交，交点就是盈亏平衡点，低于它写先验一定亏。
+ *
+ * 阈值取自 benchmark/HANDSOFF.md 20.14 的实测：QUAL 约 150 MB（对应 SAM 约
+ * 540 MB）。此前没有这个判断，等于假定所有文件都在平衡点右侧。
+ *
+ * 总量按首块样本里 QUAL 占已扫描原始字节的比例外推。这个比例是记录格式决定的
+ * （读长、字段构成），同一文件内部相当稳定，实测外推误差约 1%，而判据是与一个
+ * 数量级的阈值比大小，这个精度足够。
+ *
+ * 输入长度不可知（管道输入）时按"写"处理：成本有上界且很小，漏写造成的损失却
+ * 随文件增大没有上界，两类误判并不对称。
+ */
+static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, uint64_t inputTotalBytes)
+{
+    /* QUAL 总量的盈亏平衡点。 */
+    const uint64_t QUAL_PRIOR_MIN_TOTAL = 150ull * 1024ull * 1024ull;
+
+    if (inputTotalBytes == 0 || scannedBytes == 0) {
+        LOG_INFO("Input size unknown, keep QUAL prior.");
+        return true;
+    }
+
+    const double qualShare = (double)qualSampleBytes / (double)scannedBytes;
+    const uint64_t estimatedQual = (uint64_t)(qualShare * (double)inputTotalBytes);
+
+    LOG_INFO("Estimated total QUAL %llu bytes (share %.4f of %llu), prior threshold %llu.",
+             (unsigned long long)estimatedQual, qualShare,
+             (unsigned long long)inputTotalBytes, (unsigned long long)QUAL_PRIOR_MIN_TOTAL);
+
+    return estimatedQual >= QUAL_PRIOR_MIN_TOTAL;
+}
+
+int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info)
 {
     std::vector<std::string> fieldBufs;
     info.scannedBytes = extractSamFieldSamples(block, fieldBufs, SAMPLE_TARGET);
@@ -427,7 +464,8 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, PreprocessInfo& info)
             extractQualSamples(block, qualRecs, qualFreq, SAMPLE_TARGET);
             info.fields[f] = QualSelector::select(qualRecs, qualFreq);
             if (info.fields[f].status == FieldStatus::SELECTED &&
-                info.fields[f].selectedCoder == CoderType::FCV2) {
+                info.fields[f].selectedCoder == CoderType::FCV2 &&
+                qualPriorPaysOff(buf.size(), info.scannedBytes, inputTotalBytes)) {
                 trainQualPrior(block, info);
             }
             continue;
@@ -465,7 +503,7 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, PreprocessInfo& info)
     return 0;
 }
 
-int32_t CodecSelector::analyze(RoughIOBlock* block, PreprocessInfo& info)
+int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info)
 {
     if (block == nullptr) {
         return -1;
@@ -474,7 +512,7 @@ int32_t CodecSelector::analyze(RoughIOBlock* block, PreprocessInfo& info)
     info.reset(type);
 
     if (BlockUtil::isSAMBlock(type)) {
-        return analyzeSam(block, info);
+        return analyzeSam(block, inputTotalBytes, info);
     }
     if (BlockUtil::isFastqBlock(type)) {
         return analyzeFastq(block, info);

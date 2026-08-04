@@ -240,7 +240,7 @@ TEST_F(CodecSelectorTest, RealQualityPrefersBwtCm)
 TEST_F(CodecSelectorTest, AnalyzeNullBlockFails)
 {
     PreprocessInfo info;
-    EXPECT_EQ(CodecSelector::analyze(nullptr, info), -1);
+    EXPECT_EQ(CodecSelector::analyze(nullptr, 0, info), -1);
 }
 
 TEST_F(CodecSelectorTest, AnalyzeUnsupportedTypeIsNoOp)
@@ -248,7 +248,7 @@ TEST_F(CodecSelectorTest, AnalyzeUnsupportedTypeIsNoOp)
     RoughIOBlock block(1 << 20);
     block.setBlockType(BINARY);
     PreprocessInfo info;
-    EXPECT_EQ(CodecSelector::analyze(&block, info), 0);
+    EXPECT_EQ(CodecSelector::analyze(&block, 0, info), 0);
     EXPECT_FALSE(info.isDone());
     EXPECT_TRUE(info.fields.empty());
 }
@@ -259,7 +259,7 @@ TEST_F(CodecSelectorTest, AnalyzeSamBlockSelectsLargeFields)
     buildSamBlock(&block, 1000, 90);
 
     PreprocessInfo info;
-    ASSERT_EQ(CodecSelector::analyze(&block, info), 0);
+    ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
     info.markDone();
     EXPECT_TRUE(info.isDone());
     EXPECT_EQ(info.fileType, SAM);
@@ -279,7 +279,7 @@ TEST_F(CodecSelectorTest, AnalyzeFastqBlockSelectsSeqAndQual)
     buildFastqBlock(&block, 1000, 90);
 
     PreprocessInfo info;
-    ASSERT_EQ(CodecSelector::analyze(&block, info), 0);
+    ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
     info.markDone();
     EXPECT_TRUE(info.isDone());
     ASSERT_EQ(info.fields.size(), (size_t)FQ_FIELD_COUNT);
@@ -287,6 +287,40 @@ TEST_F(CodecSelectorTest, AnalyzeFastqBlockSelectsSeqAndQual)
     EXPECT_EQ(info.fields[FQ_SEQ].status, FieldStatus::SELECTED);
     EXPECT_EQ(info.fields[FQ_QUAL].status, FieldStatus::SELECTED);
     EXPECT_LT(info.fields[FQ_QUAL].bestCompLen, info.fields[FQ_QUAL].sampleLen);
+}
+
+/*
+ * 先验是一次固定支出，只有 QUAL 总量足够大时才摊得回来。小输入必须不训练，
+ * 否则每个小文件都白白多背一个辅助块。
+ */
+TEST_F(CodecSelectorTest, QualPriorSkippedForSmallInput)
+{
+    RoughIOBlock block(1 << 20);
+    buildSamBlock(&block, 1000, 90);
+
+    PreprocessInfo info;
+    ASSERT_EQ(CodecSelector::analyze(&block, 1ull << 20, info), 0);
+    EXPECT_TRUE(info.qualPrior().empty());
+    EXPECT_EQ(info.qualPriorTrainedBytes(), 0u);
+}
+
+/* 输入长度不可知（管道）时按"写"处理：漏写的损失没有上界，误写的成本有。 */
+TEST_F(CodecSelectorTest, QualPriorKeptWhenInputSizeUnknown)
+{
+    RoughIOBlock blockSmall(1 << 20);
+    buildSamBlock(&blockSmall, 1000, 90);
+    PreprocessInfo gated;
+    ASSERT_EQ(CodecSelector::analyze(&blockSmall, 1ull << 20, gated), 0);
+
+    RoughIOBlock block(1 << 20);
+    buildSamBlock(&block, 1000, 90);
+    PreprocessInfo info;
+    ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
+
+    if (info.fields[SAM_QUAL].selectedCoder == CoderType::FCV2) {
+        EXPECT_FALSE(info.qualPrior().empty());
+        EXPECT_TRUE(gated.qualPrior().empty());
+    }
 }
 
 TEST_F(CodecSelectorTest, CoderForFallsBackWhenNotSelected)
