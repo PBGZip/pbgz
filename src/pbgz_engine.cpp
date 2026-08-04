@@ -22,6 +22,7 @@
  */
 
 #include "pbgz_engine.h"
+#include <cstring>
 #include "utils/timer.h"
 #include "log/logger.h"
 #include "utils/path_util.h"
@@ -251,7 +252,32 @@ int32_t PbgzEngine::start() {
     // Write end marker
     outputDataPool->push(nullptr);
     writeThread.join();
-    
+
+    /*
+     * 落盘必须在这里完成并检查。closeIO 里的 msync 是 mmap 写出真正回写磁盘的时机，
+     * 原来只在析构里做，比 start() 返回还晚，失败无处可报。重复调用无害：
+     * closeIO 会把 mappedAddress 和 fd 置空。
+     */
+    if (ioWriter != nullptr) {
+        ioWriter->closeIO();
+        int32_t writeErr = ioWriter->getWriteError();
+        if (writeErr != 0) {
+            LOG_ERROR("Flush output failed: %s", strerror(writeErr));
+            fprintf(stderr, "Error: flushing output failed (%s), output is incomplete.\n", strerror(writeErr));
+            return -1;
+        }
+    }
+
+    /*
+     * 块级错误的最终处理：任何一块压/解失败，整体结果都不可信。
+     * 零长块只是保流水线不死锁的过渡，绝不能让进程以成功退出、留下残缺文件。
+     */
+    if (taskFailed.load()) {
+        LOG_ERROR("Some blocks failed during processing; result is incomplete.");
+        fprintf(stderr, "Error: some blocks failed, output is incomplete.\n");
+        return -1;
+    }
+
     printTailInfo(costTimer);
 
     return 0;
@@ -284,14 +310,19 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     return ret;
 }
 
-void PbgzEngine::readBlocks(BlockReader* blockReader) {
+/*
+ * 返回最后一次 readOneBlock 的结果：> 0 或 -2 不会出现（循环会继续），
+ * 0 是干净 EOF，-1 是读错误。调用方必须据此区分"读完"与"读坏"——
+ * 截断/损坏的输入绝不允许被当成正常 EOF 静默收尾。
+ */
+int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
     BlockType fileType = TYPE_UNKNOW;
     int64_t ret = 0;
     do {
         ret = readOneBlock(blockReader, fileType);
     } while(ret > 0 || ret == -2);
 
-    return;
+    return ret;
 }
 
 int32_t PbgzEngine::startReadTask() {
@@ -300,15 +331,19 @@ int32_t PbgzEngine::startReadTask() {
     if (blockReader == nullptr) {
         return -1;
     }
-    readBlocks(blockReader);
+    int64_t readRet = readBlocks(blockReader);
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
         inputDataPool->push(nullptr);
     }
     releaseBlockReader(blockReader);
+    if (readRet < 0 && readRet != -2) {
+        LOG_ERROR("Read task ended with an IO error: %ld", readRet);
+        return -1;
+    }
     return 0;
 }
 
-bool PbgzEngine::offerAuxBlock(RoughIOBlock* blockPtr, int32_t packageIndex) {
+bool PbgzEngine::offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageIndex) {
     for (size_t i = 0; i < auxConsumers.size(); ++i) {
         if (auxConsumers[i]->claim(blockPtr, packageIndex)) {
             return true;
@@ -361,6 +396,9 @@ int32_t PbgzEngine::startWriteTask() {
                 } 
             }
         }
+        if (blockWriter->getWriteError() != 0) {
+            taskFailed.store(true);
+        }
         releaseBlockWriter(blockWriter);
         return 0;
     };
@@ -370,7 +408,10 @@ int32_t PbgzEngine::startWriteTask() {
 }
 
 void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockPtr) {
-    blockWriter->writeBlock(outblockPtr);
+    if (blockWriter->writeBlock(outblockPtr) < 0) {
+        LOG_ERROR("Write block %u failed.", outblockPtr->getBlockId());
+        taskFailed.store(true);
+    }
     blockId2Write++;
     updateOutputStatics(outblockPtr);
     freeOutputPool->push(outblockPtr);
@@ -464,6 +505,7 @@ int32_t PbgzEngine::startWorkTask() {
                  * 归还输入块、推一个同 id 的零长块让写线程继续推进，然后继续取下一块。
                  */
                 LOG_ERROR("Create actuator failed for block(%ld)", inBlockPtr->getBlockId());
+                taskFailed.store(true);
                 freeInputPool->push(inBlockPtr);
                 outBlockPtr->reset();
                 outBlockPtr->setBlockId(inBlockPtr->getBlockId());
@@ -475,6 +517,7 @@ int32_t PbgzEngine::startWorkTask() {
             if (ret != 0) {
                 LOG_ERROR("Coder task failed for block(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
+                taskFailed.store(true);
                 freeInputPool->push(inBlockPtr);
                 outBlockPtr->reset();
                 outBlockPtr->setBlockId(inBlockPtr->getBlockId());

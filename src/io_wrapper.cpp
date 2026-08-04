@@ -319,36 +319,72 @@ size_t FileReader::readLine(std::string& line) {
     return lineLength;
 }
 
+/*
+ * msync 的长度为 0 时返回 EINVAL（exfat / APFS 上实测一致），这只是“没东西要刷”
+ * 的退化情况，不是写出失败，不能记进错误链。
+ */
+static int32_t msyncMapped(uint8_t* addr, size_t len, int flags)
+{
+    if (addr == nullptr || len == 0) {
+        return 0;
+    }
+    return msync(addr, len, flags);
+}
+
 int32_t FileWriter::openIO() {
     if (0 != fo.openIO()) {
         LOG_ERROR("File writer open failed.");
         return -1;
     }
     mapSize = calculateNextMapSize();
-    ftruncate(fo.fd, mapSize);
+    if (0 != ftruncate(fo.fd, mapSize)) {
+        LOG_ERROR("File writer ftruncate to %zu failed: %s", mapSize, strerror(errno));
+        latchWriteError(errno);
+        return -1;
+    }
     if (0 != fo.mmapFile(mapSize)) {
         LOG_ERROR("File writer mmap failed.");
+        latchWriteError(errno);
         return -1;
     }
     return 0;
 }
 
 void FileWriter::closeIO() {
-    // Force flush data before exit
+    /*
+     * 写出走的是 mmap。早前 msync/ftruncate/munmap/close 的返回值全被丢掉，写回失败时
+     * 文件长度是对的、内容却是零，进程还以 0 退出——实测在外置卷上产出过 5MiB 之后
+     * 全为零的 12MB “正常”压缩文件。现在逐个检查并把错误粘到 writeErr 上。
+     */
     if (fo.mappedAddress != nullptr) {
-        msync(fo.mappedAddress, fo.fileSize, MS_SYNC);
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
+            LOG_ERROR("msync %zu bytes failed: %s", fo.fileSize, strerror(errno));
+            latchWriteError(errno);
+        }
         // Truncate file to actual size before unmapping
-        if (fo.fd != -1) {
-            ftruncate(fo.fd, fo.fileSize);
+        if (fo.fd != -1 && 0 != ftruncate(fo.fd, fo.fileSize)) {
+            LOG_ERROR("ftruncate to %zu failed: %s", fo.fileSize, strerror(errno));
+            latchWriteError(errno);
         }
         // Unmap with the actual mapped size, not fileSize
-        munmap(fo.mappedAddress, mapSize);
+        if (0 != munmap(fo.mappedAddress, mapSize)) {
+            LOG_ERROR("munmap failed: %s", strerror(errno));
+            latchWriteError(errno);
+        }
         fo.mappedAddress = nullptr;
     }
-    
+
     // Close file descriptor
     if (fo.fd != -1) {
-        close(fo.fd);
+        // munmap 之后 fsync 才是数据真正落盘的唯一保证，msync 在部分文件系统上不可用
+        if (0 != fsync(fo.fd)) {
+            LOG_ERROR("fsync output file failed: %s", strerror(errno));
+            latchWriteError(errno);
+        }
+        if (0 != close(fo.fd)) {
+            LOG_ERROR("close output file failed: %s", strerror(errno));
+            latchWriteError(errno);
+        }
         fo.fd = -1;
     }
 }
@@ -383,7 +419,10 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     if (newSize > mapSize) {
         // If file size exceeds mapping size, need to remap
         // Flush content to disk first - use ASYNC for better performance
-        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
+            LOG_ERROR("msync before remap failed: %s", strerror(errno));
+            latchWriteError(errno);
+        }
         // Unmap
         munmap(fo.mappedAddress, mapSize);
         // Calculate new mapping size using exponential growth strategy
@@ -391,10 +430,16 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
             mapSize = calculateNextMapSize();
         }
         // Extend file
-        ftruncate(fo.fd, mapSize);
+        if (0 != ftruncate(fo.fd, mapSize)) {
+            LOG_ERROR("ftruncate to %zu failed: %s", mapSize, strerror(errno));
+            latchWriteError(errno);
+            fo.mappedAddress = nullptr;
+            return 0;
+        }
         // Remap file
         if (0 != fo.mmapFile(mapSize)) {
             LOG_ERROR("File not mapped");
+            latchWriteError(errno);
             return 0;
         }
     }
@@ -482,11 +527,14 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
 
     size_t newFileSize = fo.fileSize;
     size_t requiredSize = seekOffset + writeLen;
-    
+
     if (requiredSize > mapSize) {
          // If file size exceeds mapping size, need to remap
         // Flush content to disk first - use ASYNC for better performance
-        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
+            LOG_ERROR("msync before remap failed: %s", strerror(errno));
+            latchWriteError(errno);
+        }
         // Unmap
         munmap(fo.mappedAddress, mapSize);
         // New file size
@@ -495,9 +543,15 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
         while (mapSize < requiredSize) {
             mapSize = calculateNextMapSize();
         }
-        ftruncate(fo.fd, mapSize);
+        if (0 != ftruncate(fo.fd, mapSize)) {
+            LOG_ERROR("ftruncate to %zu failed: %s", mapSize, strerror(errno));
+            latchWriteError(errno);
+            fo.mappedAddress = nullptr;
+            return 0;
+        }
         if (0 != fo.mmapFile(mapSize)) {
             LOG_ERROR("File not mapped");
+            latchWriteError(errno);
             return 0;
         }
     }

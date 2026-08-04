@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <stdint.h>
+#include <cerrno>
 #include <htslib/bgzf.h>
 #include <isa-l/igzip_lib.h>
 #include <zlib.h>
@@ -78,6 +79,20 @@ public:
     virtual size_t writeIO(const void* pBuffer, size_t writeLen) = 0;
 
     virtual ~IOWriter() {}
+
+    /*
+     * 粘性写出错误。closeIO() 返回 void、写出又发生在独立线程里，失败没有返回值可
+     * 沿调用栈上抛；所以照 fqz range coder 的 rc->err 那样把错误粘在对象上，由写线程
+     * 退出前取走、交给引擎的 taskFailed 做最终处理。
+     *
+     * 只记第一次错误：后续失败多半是它的连锁反应，首个才是现场。
+     */
+    void latchWriteError(int32_t e) { if (writeErr == 0) writeErr = e; }
+
+    int32_t getWriteError() const { return writeErr; }
+
+protected:
+    int32_t writeErr = 0;
 };
 
 class FileOperator {
@@ -175,7 +190,9 @@ public:
     int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen);
 
     void flushIO() {
-        msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);
+        if (fo.mappedAddress != nullptr && fo.fileSize > 0) {
+            (void)msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);  // 提前回写的优化，失败由 closeIO 的 fsync 兜底
+        }
     }
 
     ~FileWriter() {

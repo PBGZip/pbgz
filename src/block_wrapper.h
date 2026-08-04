@@ -125,6 +125,9 @@ public:
         ioWriter = nullptr;
     }
 
+    // 底层写出的粘性错误，供写线程退出前取走交给引擎做最终处理
+    int32_t getWriteError() const { return ioWriter != nullptr ? ioWriter->getWriteError() : 0; }
+
 protected:
     IOWriter* ioWriter;
 };
