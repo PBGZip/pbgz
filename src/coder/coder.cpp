@@ -24,10 +24,38 @@
 #include "coder.h"
 #include "coder_fc.h"
 
-coder_alloc_func alloc_proc = nullptr;
-coder_realloc_func realloc_proc = nullptr ;
+/*
+ * 四个回调原先默认是空指针, 只在构造引擎时才绑定。于是任何不经引擎的入口(例如显式
+ * 建参考索引)一走到编解码层就拿到空实现: safe_alloc 返回 nullptr 当场抛异常,
+ * safe_free 更是直接静默泄漏。依赖不该由调用顺序来保证, 这里给出自足的默认实现,
+ * 注册随之退化为可选的覆盖。
+ */
+static uint8_t* defaultAllocProc(size_t size) {
+    return size > 0 ? static_cast<uint8_t*>(calloc(size, 1)) : nullptr;
+}
+
+static uint8_t* defaultReallocProc(size_t& size, uint8_t* ptr, size_t newSize) {
+    if (newSize <= size) {
+        return ptr;
+    }
+    uint8_t* newPtr = static_cast<uint8_t*>(realloc(ptr, newSize));
+    if (newPtr == nullptr) {
+        return ptr;
+    }
+    memset(newPtr + size, 0, newSize - size);
+    size = newSize;
+    return newPtr;
+}
+
+static void defaultFreeProc(void*& ptr) {
+    free(ptr);
+    ptr = nullptr;
+}
+
+coder_alloc_func alloc_proc = defaultAllocProc;
+coder_realloc_func realloc_proc = defaultReallocProc;
 coder_logger_func logger_proc = nullptr;
-coder_free_func free_proc = nullptr;
+coder_free_func free_proc = defaultFreeProc;
 
 namespace coder_ns {
     void register_alloc_proc(coder_alloc_func proc) {
