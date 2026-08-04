@@ -44,10 +44,15 @@ protected:
 
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
-    virtual int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType) override;
+    virtual void readBlockPreProc(BlockReader* blockReader) override;
+
+    virtual BlockIntake intakeBlock(BlockReader* blockReader, RoughIOBlock* blockPtr) override;
 
     virtual int32_t startEnginePostProc() override;
 
 private:
     std::map<uint32_t, int64_t> blockFileOffset;
+
+    /* 当前这一块在源文件里的起始位置，只能在读之前取得；只由读线程访问。 */
+    int64_t pendingBlockOffset = 0;
 };

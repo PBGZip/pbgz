@@ -24,7 +24,6 @@
 #include "coder.h"
 #include "coder_fc.h"
 
-coder_exit_func exit_proc = nullptr;
 coder_alloc_func alloc_proc = nullptr;
 coder_realloc_func realloc_proc = nullptr ;
 coder_logger_func logger_proc = nullptr;
@@ -37,11 +36,6 @@ namespace coder_ns {
 
     void register_realloc_proc(coder_realloc_func proc) {
         realloc_proc = proc;
-    }
-
-    void register_exit_proc(coder_exit_func proc) {
-        exit_proc = proc;
-        return;
     }
 
     void resister_logger_proc(coder_logger_func proc) {
@@ -94,7 +88,7 @@ void* safe_alloc_init(size_t size, char ch) {
     if (alloc_proc == nullptr) {
         return nullptr;
     }
-    
+
     void* temp_ptr =  alloc_proc(size);
     if (temp_ptr == nullptr) {
         return nullptr;
@@ -113,7 +107,7 @@ void safe_free(void** ptr) {
         return free_proc(*ptr);
     }
     return;
-} 
+}
 
 void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...) {
     char log_message[2048];
@@ -130,39 +124,32 @@ void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...) 
     return;
 }
 
-// The following functions will trigger process exit, not recommended for use within the coder library
+/*
+ * 不再调用 exit_proc / exit()：错误改为异常上抛，由调用方（PbgzEngine 的单块
+ * 处理边界）捕获后走正常的失败返回路径，保证每一个错误最终都有人处理。
+ */
 void coder_exit(int16_t exit_code, const char* exit_msg_format, ...) {
     char exit_message[2048];
     va_list args;
     va_start(args, exit_msg_format);
     vsnprintf(exit_message, sizeof(exit_message), exit_msg_format, args);
     va_end(args);
-    
-    if (exit_proc != nullptr) {
-        return exit_proc(exit_code, exit_message);
-    }
 
-    fprintf(stderr, "%s\n", exit_message);
-    return exit(exit_code);
+    coder_logger(coder_ns::ERROR, "%s", exit_message);
+    throw coder_exception(exit_code, exit_message);
 }
 
 void check_exit(bool condition, int16_t exit_code, const char* exit_msg_format, ...) {
-    if (!condition) {
-        char exit_message[2048];
-        va_list args;
-        va_start(args, exit_msg_format);
-        vsnprintf(exit_message, sizeof(exit_message), exit_msg_format, args);
-        va_end(args);
-        
-        if (exit_proc != nullptr) {
-            return exit_proc(exit_code, exit_message);
-        }
-
-        fprintf(stderr, "%d %s\n", exit_code, exit_message);
-        return exit(exit_code);
+    if (condition) {
+        return;
     }
 
-    return;
+    char exit_message[2048];
+    va_list args;
+    va_start(args, exit_msg_format);
+    vsnprintf(exit_message, sizeof(exit_message), exit_msg_format, args);
+    va_end(args);
+
+    coder_logger(coder_ns::ERROR, "%s", exit_message);
+    throw coder_exception(exit_code, exit_message);
 }
-
-

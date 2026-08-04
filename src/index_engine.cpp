@@ -84,52 +84,22 @@ Actuator* IndexEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* ou
 }
 
 
-int64_t IndexEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
-    RoughIOBlock* blockPtr = freeInputPool->get();
-    if (blockPtr == nullptr) {
-        LOG_ERROR("Get free block failed.");
-        return -1;
-    }
-    blockPtr->reset();
-
-    int64_t offset = 0;
+void IndexEngine::readBlockPreProc(BlockReader* /*blockReader*/) {
     FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
-    if (fileReader != nullptr) {
-        offset = fileReader->getCurrentPos();
-    }
+    pendingBlockOffset = (fileReader != nullptr) ? fileReader->getCurrentPos() : 0;
+}
 
-    int64_t ret = blockReader->readBlock(blockPtr, fileType);
-    if (ret <= 0) {
-        freeInputPool->push(blockPtr);
-        return ret;
-    }
-
-    if (blockPtr->getBlockType() == REFERENCE) {
-        freeInputPool->push(blockPtr);
-        return -2;
-    }
-    
+PbgzEngine::BlockIntake IndexEngine::intakeBlock(BlockReader* /*blockReader*/, RoughIOBlock* blockPtr) {
     if (blockPtr->getBlockType() != SAM) {
         fprintf(stderr, "The index command is only valid for SAM  pbgz files.");
-        freeInputPool->push(blockPtr);
-        return -1;
+        return BlockIntake::ABORT;
     }
 
-    if (blockPtr->getBlockId() == 0 && blockPtr->getTotalDataLen() > 0){ 
-        fileType = blockPtr->getBlockType();
+    if (pendingBlockOffset != 0) {
+        BlockPosition::getInstance().setBlockPosition(blockPtr->getBlockId(), pendingBlockOffset);
     }
 
-    if (offset != 0) {
-        BlockPosition::getInstance().setBlockPosition(blockPtr->getBlockId(), offset);
-    }
-
-    updateInputStatics(blockPtr);
-    inputDataPool->push(blockPtr);
-    if (ret > 0) {
-        blockCount++;
-    }
-
-    return ret;
+    return BlockIntake::DISPATCH;
 }
 
 int32_t IndexEngine::startEnginePostProc() {

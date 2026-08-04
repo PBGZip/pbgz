@@ -41,7 +41,6 @@
 IndexActuator::IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine)
     : Actuator(inPtr, outPtr, engine), flagDecoder(nullptr), chrDecoder(nullptr), posDecoder(nullptr) {
     headEndLine = 0;
-    notifyFlag = false;
 }
 
 IndexActuator::~IndexActuator() {
@@ -337,10 +336,6 @@ int32_t IndexActuator::decodeAndBuildIndex(uint32_t lineNum) {
         }
     }
 
-    if (lineNum > 0) {
-        notifyFlag = true;
-    }
-
     return 0;
 }
 
@@ -351,8 +346,4 @@ int32_t IndexActuator::process() {
 
     sortKeys.clear();
     return 0;
-}
-
-bool IndexActuator::getNotifyFlag() {
-    return notifyFlag;
 }

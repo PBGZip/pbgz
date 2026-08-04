@@ -37,6 +37,10 @@ BlockReader* DecompressEngine::createBlockReader() {
     PbgzBlockReader* pbgzReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
     pbgzReader->init();
     baseFileMeta = pbgzReader->getBaseFileMeta();
+    // 读回压缩时写入的块大小上界，供 actuator 预分配输出缓冲（见 PbgzEngine::fileBlockSize）
+    if (baseFileMeta.getMetaData().isMember("block_size")) {
+        fileBlockSize = baseFileMeta.getMetaData("block_size").asUInt();
+    }
     dynamicFileMeta = pbgzReader->getDynamicFileMeta();
     if (dynamicFileMeta.getMetaData().isMember("qual_prior")) {
         (void)unpackQualPrior(pbgzReader, dynamicFileMeta.getMetaData("qual_prior"));
@@ -120,7 +124,7 @@ bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value
     const int64_t offset = priorMeta["offset"].asInt64();
     const int64_t packageStart = (int64_t)blockReader->getCurrentFileStart();
     const int64_t blockAddress = packageStart + offset;
-    const int32_t packageIndex = blockReader->getCurrentFileIndex();
+    const int64_t packageIndex = blockReader->getCurrentFileIndex();
     /* 偏移只用来 seek 取块，登记与查表一律用包序号。 */
     if (qualPriorConsumer.forPackage(packageIndex) != nullptr) {
         return true;
@@ -226,7 +230,7 @@ bool DecompressEngine::initRefeIndex() {
     return true;
 }
 
-void DecompressEngine::readBlocks(BlockReader* blockReader)  {
+int64_t DecompressEngine::readBlocks(BlockReader* blockReader)  {
     if (!parameter.refeGenePos.empty()) {
         return readBlockByPostition(blockReader);
     } else {
@@ -234,21 +238,21 @@ void DecompressEngine::readBlocks(BlockReader* blockReader)  {
     }
 }
 
-void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
+int64_t DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
     if (blockReader == nullptr) {
-        return;
+        return -1;
     }
 
     // Read the beginning block of the Pbgz file to complete the file header parsing
     std::unique_ptr<RoughIOBlock> inBlockPtr = std::make_unique<RoughIOBlock>(getBlockSize());
     if (inBlockPtr == nullptr) {
         LOG_ERROR("Get free block failed.");
-        return;
+        return -1;
     }
     std::unique_ptr<RoughIOBlock> outBlockPtr = std::make_unique<RoughIOBlock>(getBlockSize());
     if (outBlockPtr == nullptr) {
         LOG_ERROR("Get free block failed.");
-        return;
+        return -1;
     }
 
     std::unique_ptr<SamCodecActuator> actuator;
@@ -283,7 +287,7 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
 
     uint16_t chrIndex = SamInfo::getInstance().getChrNameIndex(refPosChrName);
     if (chrIndex == 65535) {
-        return;
+        return 0;
     }
     std::set<std::pair<uint32_t, int64_t>> blockList;
     SamIndex::getInstance().getSamBlockByRef(chrIndex, refPosBegin, refPosEnd, blockList);
@@ -307,14 +311,14 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
                 RoughIOBlock* blockPtr = freeInputPool->get();
                 if (blockPtr == nullptr) {
                     LOG_ERROR("Get free block failed.");
-                    return;
+                    return -1;
                 }
                 blockPtr->reset();
 
                 int64_t ret = blockReader->readBlock(blockPtr, fileType);
                 if (ret <= 0) {
                     freeInputPool->push(blockPtr);
-                    return;
+                    return ret;
                 }
 
                 if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
@@ -342,10 +346,10 @@ void DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
             } while (ret > 0 || ret == -2);
         }
     }
-    return;
+    return 0;
 }
 
-bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int32_t packageIndex) {
+bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int64_t packageIndex) {
     if (blockPtr == nullptr || blockPtr->getBlockType() != QUAL_PRIOR) {
         return false;
     }
@@ -388,7 +392,7 @@ bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int32_t packageIndex) {
         std::lock_guard<std::mutex> lock(mutex);
         byPackage[packageIndex] = std::make_shared<const std::vector<uint8_t> >(std::move(plain));
     }
-    LOG_INFO("Qual prior loaded for package %d: %u -> %u bytes", packageIndex, dstLen, srcLen);
+    LOG_INFO("Qual prior loaded for package %lld: %u -> %u bytes", (long long)packageIndex, dstLen, srcLen);
     return true;
 }
 

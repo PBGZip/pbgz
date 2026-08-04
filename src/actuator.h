@@ -45,13 +45,8 @@ public:
         outBlockPtr = nullptr;
     }
 
-    virtual bool getNotifyFlag() {
-        return true;
-    }
-
 protected:
     RoughIOBlock* inBlockPtr;
     RoughIOBlock* outBlockPtr;
     PbgzEngine* pbgzEngine;
 };
-

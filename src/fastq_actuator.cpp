@@ -42,6 +42,7 @@
 #include "city.h"
 #include "pbgz_manager.h"
 #include "pbgz_stat.h"
+#include "config_manager.h"
 
 namespace {
     void recordFastqFieldStats(PbgzEngine* engine, uint16_t objectId, uint32_t srcLen, uint32_t dstLen) {
@@ -1508,6 +1509,25 @@ int32_t FastqCodecActuator::decompress() {
     std::string idSplit = meta["id"]["splitsym"].asString();
     for (uint32_t i = 0; i < idSplit.length(); ++i) {
         idSplitSymbols.push_back(idSplit.c_str()[i]);
+    }
+
+    /*
+     * 块入口预分配：按文件头的 block_size（压缩时确定的上界）×2——确定值，不是估算。
+     * 与 SAM 侧同一套（见 SamCodecActuator::decompress）：头部输出 ≤ block_size，
+     * coder_fc 的 SEQ 尾部暂存 ≤ block_size，正好 2 倍。
+     * block_size 为 0（老文件没写）时落回按压缩级别的默认块大小。
+     * ensureCapacity 必须在 initDecoder 之前：initDecoder 里 coder_fc 会把 SEQ
+     * 数据写到缓冲尾部，realloc 之后成悬空。
+     */
+    {
+        size_t bs = pbgzEngine->getFileBlockSize();
+        if (bs == 0) {
+            bs = ConfigManager::getInstance().getBlockSizeByCompressLevel(pbgzEngine->getParameter().compressLevel);
+        }
+        if (outBlockPtr->ensureCapacity(bs * 2) != 0) {
+            LOG_ERROR("preallocate output buffer failed, block_size=%zu", bs);
+            return -1;
+        }
     }
 
     if (0 != initDecoder(outBlockPtr)) {

@@ -1,17 +1,17 @@
 /*
  * sam_sort_actuator.cpp - SAM file sorting actuator implementation file
  * Copyright (C) 2025 PBGZip
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -29,7 +29,7 @@
 #include "io_wrapper.h"
 
 SAMSortActuator::~SAMSortActuator() {
-    
+
 }
 
 int32_t SAMSortActuator::initial() {
@@ -37,7 +37,7 @@ int32_t SAMSortActuator::initial() {
         return -1;
     }
 
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
 
@@ -64,13 +64,13 @@ int32_t SAMSortActuator::initial() {
             uint32_t lastTabPosInlie = 0;
             uint32_t tabCount = 0;
             uint16_t flag = 0xFFFF;
-            
+
             int64_t chrStart = -1;
             for (uint32_t i = 0; i < line.length(); ++i) {
                 if (line.at(i) == '\t' || line.at(i) == '\n') {
                     if (tabCount == 1) {
                         flag = std::stoul(line.substr(lastTabPosInlie + 1, i - lastTabPosInlie - 1));
-                    } else if (tabCount == 2) {   /// Chromonome Name 
+                    } else if (tabCount == 2) {   /// Chromonome Name
                         std::string chrName = line.substr(lastTabPosInlie + 1, i - lastTabPosInlie - 1);
                         if (chrName != "*") {
                             uint16_t chrIndex = SamInfo::getInstance().getChrNameIndex(chrName);
@@ -78,7 +78,7 @@ int32_t SAMSortActuator::initial() {
                                 chrStart =  SamInfo::getInstance().getPositionByIndex(chrIndex);
                             }
                         }
-                    } else if (tabCount == 3) {  /// 
+                    } else if (tabCount == 3) {  ///
                         SamSortItem samItem;
                         if ((flag & 0x04) == 0 && chrStart != -1) {
                             int64_t mapPos = std::stoull(line.substr(lastTabPosInlie + 1, i - lastTabPosInlie - 1));
@@ -92,12 +92,8 @@ int32_t SAMSortActuator::initial() {
                     }
                     tabCount++;
                     lastTabPosInlie = i;
-                } 
+                }
             }
-        }
-
-        if (inBlockPtr->getNpos().size() > (size_t)headLineNum) {
-           notifyFlag = true;
         }
     }
 
@@ -107,7 +103,7 @@ int32_t SAMSortActuator::initial() {
 int32_t SAMSortActuator::process() {
     std::stable_sort(mappedSamItem.begin(), mappedSamItem.end());
 
-    std::vector<uint32_t>& npos =  inBlockPtr->getNpos();
+    std::vector<size_t>& npos =  inBlockPtr->getNpos();
     // Write the header separately to the file first
     if (headLineNum > 0) {
         std::string headName = getSortedHeadFileName();

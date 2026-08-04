@@ -1,17 +1,17 @@
 /*
  * sam_actuator.h - Header file for sam_actuator
  * Copyright (C) 2025 PBGZip
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -45,13 +45,9 @@ public:
     virtual ~SamCodecActuator() override;
 
     int32_t preAnalysis();
-    
+
     int32_t compress() override;
     int32_t decompress() override;
-
-    virtual bool getNotifyFlag() override {
-        return notifyFlag;
-    }
 
     int32_t decompressHeader(RoughIOBlock* outputBlock);
 
@@ -74,8 +70,8 @@ public:
     template<typename T>
     int32_t decompressNumber(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock) {
         uint32_t outLen = sizeof(T);
-        uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outLen, UINT8_MAX, false);
-        if (outLen != fieldLen) {
+        int32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outLen, UINT8_MAX, false);
+        if (fieldLen < 0 || (uint32_t)fieldLen != outLen) {
             LOG_ERROR("Decode failed, filed = %u, lineNo = %u", fieldIdx, lineNo);
             return -1;
         }
@@ -96,7 +92,7 @@ public:
         return strVal.length() + 1;
     }
 
-    int32_t decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx, RoughIOBlock* outputBlock); 
+    int32_t decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx, RoughIOBlock* outputBlock);
 
     int64_t getHeadLineNumber() {
         return headEndLine;
@@ -117,16 +113,16 @@ private:
     int32_t compressSamHeader();
 
     // Field-by-field compression
-    int32_t compressSamByFields(); 
+    int32_t compressSamByFields();
 
     // ID field split compression
-    int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
+    int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     // ID field whole compression
-    int32_t compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
+    int32_t compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     // Regular field compression
-    int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta); 
+    int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     int32_t compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
@@ -134,14 +130,14 @@ private:
 
     template<typename T>
     int32_t compressNumber(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-        std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+        std::vector<size_t>& npos = inBlockPtr->getNpos();
         uint32_t lineNum = npos.size();
         uint8_t* buffer = inBlockPtr->getBuffer();
-        
+
         // Create encoder for regular field compression
         std::shared_ptr<coder_io> numberIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
         std::shared_ptr<coder_bwt_cm> numberCoder = std::make_shared<coder_bwt_cm>(numberIo.get());
-        
+
         fieldSrcLen = 0;
         uint32_t srcLen = 0;
         // Process each line and extract the current field
@@ -154,7 +150,7 @@ private:
             if (*line == '@') {
                 continue;
             }
-            
+
             // Middle fields: between tabs
             uint32_t contentIdx = lineIdx - headEndLine;
             uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
@@ -168,31 +164,31 @@ private:
             // Encode the field data
             numberCoder->encode_line(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
             srcLen += sizeof(T);
-            
+
             if (fieldIdx == 3) {
                 mappedPos[lineIdx] = value;
             } else if (fieldIdx == 1) {
                 mappedFlag[lineIdx] = value;
             } else if (fieldIdx == 7) {
                 nextMappedPos[lineIdx] = value;
-            } 
+            }
         }
-        
+
         // Flush the encoder for this field
         numberCoder->encode_flush();
-        
+
         // Update output block data length
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + numberIo->data_len);
-        
+
         // Set field metadata
         fieldMeta["srclen"] = srcLen;
         fieldMeta["dstlen"] = numberIo->data_len;
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
 
-        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
             fieldIdx, fieldSrcLen, numberIo->data_len, (double)(numberIo->data_len * 100)/(double)fieldSrcLen);
-        
+
         return numberIo->data_len;
     }
 
@@ -201,10 +197,10 @@ private:
     int32_t compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     int32_t compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
-    
+
     // Helper methods
     void setReference(Reference* ref) { pRefeGene = ref; }
-    
+
     int32_t compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     int32_t buildSamIndex();
@@ -213,9 +209,9 @@ private:
     int64_t headEndLine;
     uint32_t samLine;
     std::vector<std::vector<int64_t>> contentPos;
-    
+
     Reference* pRefeGene;
-    
+
     // ID analysis related members (similar to FastqActuator)
     uint32_t idPosLength;
     std::vector<uint8_t> idSplitSymbols;
@@ -233,17 +229,17 @@ private:
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
     uint32_t baseNCount;
-    uint32_t* baseNPosBuffer; 
+    uint32_t* baseNPosBuffer;
     uint32_t* baseLengthBuffer;
     uint32_t minBaseLength = UINT32_MAX;
     uint32_t maxBaseLength = 0;
-    
+
     // SAM header compression related members
     uint32_t headerSrcLen; // Original length of SAM file header
     uint32_t headerDstLen; // Compressed length of SAM file header
-    
+
     // Quality compression related members
-    std::vector<std::pair<uint16_t, uint16_t>> qualFreqTable;   
+    std::vector<std::pair<uint16_t, uint16_t>> qualFreqTable;
 
     uint32_t readOffset;
 
@@ -260,8 +256,8 @@ private:
     uint8_t* baseDiffSquashBuffer;
     uint8_t* refeStrecchBuffer;
 
-    const uint8_t atcg4[4] = {'A', 'C', 'T', 'G'}; 
-    bool notifyFlag;
+
+    const uint8_t atcg4[4] = {'A', 'C', 'T', 'G'};
 
     uint16_t refPosChrIndex;
     uint32_t refPosBegin;

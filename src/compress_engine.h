@@ -45,11 +45,11 @@ public:
     PbgzStat* getStats() { return stats.get(); }
 
     virtual const PreprocessInfo* getPreprocessInfo() override { return &preprocessInfo; }
-    
+
     void initStatsBasedOnFileType(BlockType fileType);
-    
-    virtual int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType) override;
-    
+
+    virtual void fileDecisionProc(RoughIOBlock* firstBlock) override;
+
 protected:
     virtual BlockReader* createBlockReader() override;
 
@@ -71,8 +71,8 @@ protected:
     /*
      * 把首块训练出的 QUAL 先验发射成一个 QUAL_PRIOR 辅助块，并记下其容器头绝对偏移。
      *
-     * 调用点在串行首块窗口内（runFilePreprocessOnce 之后、第 0 块编码之前），
-     * 而不是文件收尾：数据块的分片头要写下先验的绝对地址，地址就必须先于一切数据块存在。
+     * 调用点在 fileDecisionProc 内（读线程派发第 0 块之前），而不是文件收尾：
+     * 数据块要引用先验，先验就必须先于一切数据块存在。
      * 放在这里还有个直接好处——连第 0 块自己都能用上先验，不必为它开特例。
      *
      * 实际落盘由写线程经 emitSyncAuxBlock 完成，本函数只负责构块与登记元信息。
@@ -110,8 +110,6 @@ protected:
 private:
     bool initReference();
 
-    void runFilePreprocessOnce(RoughIOBlock* inBlockPtr);
-
     int64_t packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef = true);
 
     uint32_t calcPackRefeBlockSize();
@@ -133,8 +131,8 @@ private:
 
     /*
      * QUAL 先验块容器头的绝对文件偏移，-1 表示本次压缩没有可用先验。
-     * 由 0 号工作线程在串行窗口内写入，随后被所有并行工作线程读取，故用原子量发布：
-     * conditionVar 的 notify_all 只保证唤醒，不足以为非原子共享量建立可见性。
+     * 读线程在派发首块前写入，随后被全部工作线程读取。队列的入队/出队已经建立了
+     * happens-before，这里用原子量只是为了让这条发布关系在类型上自明。
      */
     std::atomic<int64_t> qualPriorOffset{-1};
 
@@ -146,8 +144,8 @@ public:
         return qualPriorOffset.load(std::memory_order_acquire);
     }
 
-    AuxPayloadPtr getQualPrior(int32_t /*packageIndex*/) override {
-        /* 在串行首块窗口内写入，随后只读；地址原子量的 acquire 同时为它建立可见性。 */
+    AuxPayloadPtr getQualPrior(int64_t /*packageIndex*/) override {
+        /* 首块派发前写入，随后只读；地址原子量的 acquire 同时为它建立可见性。 */
         return (getQualPriorAddress() < 0) ? AuxPayloadPtr() : qualPriorBlob;
     }
 };

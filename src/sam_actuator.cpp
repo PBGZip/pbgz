@@ -41,6 +41,7 @@
 #include "decompress_engine.h"
 #include "compress_engine.h"
 #include "pbgz_stat.h"
+#include "config_manager.h"
 
 namespace {
     uint16_t mapFieldIdxToStatUnitId(uint16_t fieldIdx) {
@@ -59,16 +60,16 @@ namespace {
             default: return 0;
         }
     }
-    
+
     void recordFieldStats(PbgzEngine* engine, uint32_t fieldIdx, uint32_t fieldSrcLen, uint32_t fieldDstLen) {
         if (!engine) return;
-        
+
         auto compressEngine = dynamic_cast<CompressEngine*>(engine);
         if (!compressEngine || !compressEngine->getStats()) return;
-        
+
         auto samStat = dynamic_cast<SamStat*>(compressEngine->getStats());
         if (!samStat) return;
-        
+
         uint16_t statObjectId = mapFieldIdxToStatUnitId(fieldIdx);
         if (statObjectId != 0) {
             samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::ORIGINAL_SIZE, fieldSrcLen);
@@ -91,7 +92,6 @@ SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Pb
     baseSquashBuffer = nullptr;
     baseDiffSquashBuffer = nullptr;
     refeStrecchBuffer = nullptr;
-    notifyFlag = false;
     samLine = 0;
     refPosChrIndex = 65535;
     refPosBegin = 0;
@@ -107,10 +107,10 @@ SamCodecActuator::~SamCodecActuator() {
 
     // Release idDecoders
     idDecoders.clear();
-    
+
     // Release fieldDecoders
     fieldDecoders.clear();
-    
+
     // Release qualCoder
     qualCoder.reset();
     qualFcv2Decoder.reset();
@@ -142,18 +142,18 @@ int32_t SamCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufL
     // Store first line ID analysis information to idSplitPos
     uint32_t lastPos = 0;
     for (size_t idx = 0; idx < currentLinePos.size(); ++idx) {
-        uint32_t pos = currentLinePos[idx]; 
+        uint32_t pos = currentLinePos[idx];
         uint32_t curLen = pos - lastPos + (0 == idx ? 1 : 0);   // First line no needs offset
         if (curLen < idSplitMinLen[idx]) {
             idSplitMinLen[idx] = curLen;
         }
         if (curLen > idSplitMaxLen[idx]) {
-            idSplitMaxLen[idx] = curLen; 
+            idSplitMaxLen[idx] = curLen;
         }
         idPosLength++;
         lastPos = pos;
     }
-    
+
     // Add the current line positions to idSplitPos
     idSplitPos.push_back(currentLinePos);
     return 0;
@@ -173,7 +173,7 @@ int32_t SamCodecActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen
                     idSplitMinLen[idx] = curLen;
                 }
                 if (curLen > idSplitMaxLen[idx]) {
-                    idSplitMaxLen[idx] = curLen; 
+                    idSplitMaxLen[idx] = curLen;
                 }
                 currentLinePos.push_back(static_cast<int32_t>(pos));
                 idPosLength++;
@@ -189,7 +189,7 @@ int32_t SamCodecActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen
             break;
         }
     }
-    
+
     // Add the current line positions to idSplitPos
     idSplitPos.push_back(currentLinePos);
     return 0;
@@ -201,17 +201,17 @@ int32_t SamCodecActuator::preAnalysis() {
         return -1;
     }
 
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    
+
     // Initialize quality frequency analysis similar to FastqActuator
     std::pair<uint8_t, uint32_t> qualityFrequnce[256];
     for (int32_t i = 0; i < 256; ++i) {
         qualityFrequnce[i].first = i;
         qualityFrequnce[i].second = 0;
     }
-    
+
     // Parse SAM file header
     for (uint32_t idx = 0; idx < lineNum; ++idx) {
         uint32_t begin = (idx == 0 ? idx : npos[idx - 1]  + 1);
@@ -233,7 +233,7 @@ int32_t SamCodecActuator::preAnalysis() {
                     LOG_ERROR("Failed to parse chromosome info from line: %s", line.c_str());
                     return -1;
                 }
-                
+
                 // Extract reference file path from @SQ line
                 // Format: @SQ SN:ref_name LN:length UR:file_path
                 static bool isCheckUR = false;
@@ -300,7 +300,7 @@ int32_t SamCodecActuator::preAnalysis() {
                                         }
                                     }
                                 }
-                            } 
+                            }
 
                             if (!refGeneName.empty()) {
                                 LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
@@ -362,7 +362,7 @@ int32_t SamCodecActuator::preAnalysis() {
                         baseLen = i - linePos.at(8) - 1;
                         if (baseLen > maxBaseLength) {
                             maxBaseLength = baseLen;
-                        } 
+                        }
                         if (!lineCigarMatchFlag) {
                             if (baseLen < minBaseLength) {
                                 minBaseLength =  baseLen;
@@ -426,7 +426,7 @@ int32_t SamCodecActuator::preAnalysis() {
 
     inBlockPtr->setMaxLineLen(maxBaseLength);
 
-    std::sort(qualityFrequnce, qualityFrequnce + 256, 
+    std::sort(qualityFrequnce, qualityFrequnce + 256,
         [](const std::pair<uint8_t, uint32_t> &a, const std::pair<uint8_t, uint32_t> &b) { return  a.second > b.second;});
     for (int i = 0; i < 256; i++) {
         if (qualityFrequnce[i].second == 0) {
@@ -434,7 +434,7 @@ int32_t SamCodecActuator::preAnalysis() {
         }
         qualFreqTable.push_back(std::make_pair(qualityFrequnce[i].first - '!', 1));
     }
-    
+
     // Compression strategy judgment logic - refer to FastqActuator implementation
     if (idPosLength != UINT32_MAX) {
         for (uint32_t idx = 0; idx < idSplitSymbols.size(); ++idx) {
@@ -444,7 +444,7 @@ int32_t SamCodecActuator::preAnalysis() {
             }
         }
     }
-    
+
     return 0;
 }
 
@@ -485,8 +485,6 @@ int32_t SamCodecActuator::compress() {
         return 0;
     }
 
-    notifyFlag = true;
-
     // Check if preAnalysis was successful
     if (contentPos.empty()) {
         LOG_ERROR("preAnalysis() must be called before compress()");
@@ -511,16 +509,16 @@ int32_t SamCodecActuator::compressSamHeader() {
         return -1;
     }
 
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    
+
     // Clear previous chromosome information but keep chromosome ID counter for multi-block compatibility
     // Note: Do not clear chromosome information as multiple blocks may need to process chromosome info
     headerSrcLen = 0;
     // Create SAM file header compressor
     std::shared_ptr<coder_io> headerIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder_bwt_cm> headerCoder = std::make_shared<coder_bwt_cm>(headerIo.get());
-    
+
     // Process SAM file header line by line
     for (uint32_t lineId = 0; lineId < headEndLine; ++lineId) {
         uint32_t begin = (lineId == 0 ? 0 : npos[lineId - 1] + 1);
@@ -528,20 +526,24 @@ int32_t SamCodecActuator::compressSamHeader() {
         if (begin >= end) {
             continue;
         }
-        
+
         uint32_t lineLength = end - begin + 1;
         // Compress current line (including newline character)
         headerCoder->encode_line(buffer + begin, lineLength);
         headerSrcLen += lineLength;
     }
-    
+
     // Complete compression
     headerCoder->encode_flush();
-    
+    if (headerIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode SAM header overflow: output buffer too small");
+        return -1;
+    }
+
     // Update output block data length
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + headerIo->data_len);
     headerDstLen = headerIo->data_len;
-    
+
     // Set SAM file header metadata
     Json::Value headerMeta;
     headerMeta["srclen"] = headerSrcLen;
@@ -549,17 +551,17 @@ int32_t SamCodecActuator::compressSamHeader() {
     headerMeta["lines"] = headEndLine;
     headerMeta["coder"] = headerIo->meta;
     meta["header"] = headerMeta;
-    
-    LOG_INFO("SAM header compression completed: %u lines, %u bytes -> %u bytes, compress ratio = %.2f%%", 
+
+    LOG_INFO("SAM header compression completed: %u lines, %u bytes -> %u bytes, compress ratio = %.2f%%",
              headEndLine, headerSrcLen, headerDstLen, (double)(headerDstLen* 100)/(double)headerSrcLen);
-    
+
     return 0;
 }
 
 int32_t SamCodecActuator::compressSamByFields() {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size() - headEndLine;
-    
+
     // Initialize metadata
     Json::Value samMeta;
     Json::Value streamMeta;
@@ -569,7 +571,7 @@ int32_t SamCodecActuator::compressSamByFields() {
     // Compress each field (column) of SAM format separately
     // SAM format has at least 11 required fields, we'll compress each column
     uint32_t fieldCount = maxFieldSize + 1; // +1 for the last field after last tab
-    
+
     // Compress each field separately
     for (uint32_t fieldIdx = 0; fieldIdx < fieldCount; ++fieldIdx) {
         uint32_t fieldSrcLen = 0;
@@ -598,7 +600,7 @@ int32_t SamCodecActuator::compressSamByFields() {
             case 4: // MAPQ
                 fieldDstLen = compressNumber<uint8_t>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
-            case 5: // CIGAR 
+            case 5: // CIGAR
                 fieldDstLen = compressCigar(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 6: // RNEXT
@@ -607,7 +609,7 @@ int32_t SamCodecActuator::compressSamByFields() {
             case 7: // PNEXT
                 fieldDstLen = compressNumber<uint32_t>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
-            case 8: // TLEN 
+            case 8: // TLEN
                 fieldDstLen = compressNumber<int32_t>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 9: // SEQ
@@ -632,12 +634,12 @@ int32_t SamCodecActuator::compressSamByFields() {
 
         // LOG_INFO("Compress Rate for block(%d fieldId=%d): src = %d, dst = %d, ratio = %.2f%%.",
         //     outBlockPtr->getBlockId(), fieldIdx, fieldSrcLen, fieldDstLen, ((fieldDstLen * 1.0) * 100) / fieldSrcLen);
-        
+
         streamMeta.append(fieldMeta);
         totalSrcLen += fieldSrcLen;
         totalDstLen += fieldDstLen;
     }
-    
+
     // Set SAM metadata
     samMeta["lines"] = lineNum;
     samMeta["fieldcount"] = fieldCount;
@@ -645,12 +647,12 @@ int32_t SamCodecActuator::compressSamByFields() {
     samMeta["totaldstlen"] = totalDstLen;
     samMeta["streams"] = streamMeta;
     meta["sam"] = samMeta;
-    
+
     // Calculate MD5 of original data
     std::string md5;
     calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
     meta["md5"] = md5;
-    
+
     // Compress metadata
     coder_json metaCoder;
     int32_t metaLen = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
@@ -659,11 +661,11 @@ int32_t SamCodecActuator::compressSamByFields() {
         return -1;
     }
     outBlockPtr->setMetaLen(metaLen);
-    
+
     // Set block information
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
     outBlockPtr->setBlockType(inBlockPtr->getBlockType());
-        
+
     return 0;
 }
 
@@ -679,31 +681,31 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
         std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
         uint32_t srcLength = 0;
         // Process each line and compress the specific split segment
-        std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+        std::vector<size_t>& npos = inBlockPtr->getNpos();
         uint32_t lineNum = npos.size();
         uint8_t* buffer = inBlockPtr->getBuffer();
-        
+
         for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
             uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
             uint8_t* line = buffer + lineStart;
-            
+
             // Skip header lines (starting with @)
             if (*line == '@') {
                 continue;
             }
-            
+
             // Extract the specific split segment for this symbol
             uint8_t* segmentStart = nullptr;
             uint32_t segmentLength = 0;
             uint32_t contentId = lineIdx - headEndLine;
-            
+
             if (i == 0) {
                 segmentStart = line;
-                segmentLength = idSplitPos[contentId][0] + 1; 
+                segmentLength = idSplitPos[contentId][0] + 1;
             } else {
                 uint32_t prevPos = idSplitPos[contentId][i-1];
                 uint32_t currPos = idSplitPos[contentId][i];
-                segmentStart = line + prevPos + 1; 
+                segmentStart = line + prevPos + 1;
                 segmentLength = currPos - prevPos;
             }
 
@@ -713,51 +715,55 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
                 srcLength += segmentLength;
             }
         }
-        
+
         // Flush the encoder for this segment
         idCoder->encode_flush();
-        
+        if (idIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode id segment overflow: output buffer too small");
+            return -1;
+        }
+
         // Update output block data length
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idIo->data_len);
-        
+
         // Create metadata for this stream (similar to FastqActuator)
         Json::Value tmpMeta;
         tmpMeta["srclen"] = srcLength;
         tmpMeta["dstlen"] = idIo->data_len;
         tmpMeta["coder"] = idIo->meta;
         tmpMeta["splitidx"] = i; // Index of split symbol
-        
+
         streamMeta.append(tmpMeta);
         totalSrcLength += srcLength;
         totalDstLength += idIo->data_len;
     }
-    
+
     // Set field metadata with streams (similar to FastqActuator)
     fieldMeta["totalsrclen"] = totalSrcLength;
     fieldMeta["totaldstlen"] = totalDstLength;
     fieldMeta["splitsym"] = std::string((char*)idSplitSymbols.data(), idSplitSymbols.size());
     fieldMeta["streams"] = streamMeta;
     fieldMeta["field"] = 0;
-    
+
     fieldSrcLen = totalSrcLength;
 
-    LOG_DEBUG("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_DEBUG("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
             totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
 
     return totalDstLength;
 }
 
 int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    
+
     // Create encoder for ID field whole compression
     std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder> fieldCoder = makeFieldEncoder(SAM_QNAME, CoderType::BWT_CM, fieldIo.get(), true);
-    
+
     fieldSrcLen = 0;
-    
+
     // Process each line and compress ID field as whole
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -766,21 +772,25 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
         if (buffer[lineStart] == '@') {
             continue;
         }
-        
+
         // Extract ID field (from line start to first tab)
         uint8_t* idStart = buffer + lineStart;
         uint32_t idLength = contentPos[lineIdx - headEndLine][0] + 1;
-        
+
         // Encode the ID field data
         if (idLength > 0) {
             fieldCoder->encode_line(idStart, idLength);
             fieldSrcLen += idLength;
         }
     }
-    
+
     // Flush the encoder for ID field
     fieldCoder->encode_flush();
-    
+    if (fieldIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode id field overflow: output buffer too small");
+        return -1;
+    }
+
     // Update output block data length
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
 
@@ -788,7 +798,7 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
     tempIdMeta["srclen"] = fieldSrcLen;
     tempIdMeta["dstlen"] = fieldIo->data_len;
     tempIdMeta["coder"] = fieldIo->meta;
-    
+
     Json::Value streamMeta;
     streamMeta.append(tempIdMeta);
     // Set field metadata
@@ -798,14 +808,14 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
     fieldMeta["splitsym"] = "\t";
     fieldMeta["field"] = 0;
 
-    LOG_INFO("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
             fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
-    
+
     return fieldIo->data_len;
 }
 
 int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
 
@@ -821,12 +831,12 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
         uint32_t lineEnd = npos[lineIdx] - lineStart;
 
         uint8_t* line = buffer + lineStart;
-        
+
         // Skip header lines (starting with @)
         if (*line == '@') {
             continue;
         }
-        
+
         // Middle fields: between tabs
         uint32_t contentId = lineIdx - headEndLine;
         uint32_t prevTabPos = contentPos[contentId][fieldIdx - 1];
@@ -834,7 +844,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
         uint8_t* fieldStart = line + prevTabPos + 1;
         uint32_t fieldLength = currTabPos - prevTabPos - 1;
 
-        std::string str = std::string((char*)fieldStart, fieldLength);        
+        std::string str = std::string((char*)fieldStart, fieldLength);
         uint16_t chrIndex = 0xFFFF;
         if (str == "*") {
             chrIndex = 0xFFFF;
@@ -842,7 +852,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
             chrIndex = 0xFFFE;
         } else {
             chrIndex = SamInfo::getInstance().getChrNameIndex(str);
-        } 
+        }
 
         if (fieldIdx == 2) {
             mappedChr[lineIdx] = chrIndex;
@@ -854,41 +864,45 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
         srcLen += sizeof(chrIndex);
         fieldSrcLen += str.length();
     }
-    
+
     // Flush the encoder
     chrCoder->encode_flush();
-    
+    if (chrIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode chr name overflow: output buffer too small");
+        return -1;
+    }
+
     // Update output block data length
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + chrIo->data_len);
-    
+
     // Set field metadata
     fieldMeta["srclen"] = srcLen;
     fieldMeta["dstlen"] = chrIo->data_len;
     fieldMeta["coder"] = chrIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
             fieldIdx, fieldSrcLen, chrIo->data_len, (double)(chrIo->data_len * 100)/(double)fieldSrcLen);
 
     return chrIo->data_len;
  }
 
 int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    
+
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
-    
+
     fieldSrcLen = 0;
-    
+
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
-        
+
         uint8_t* line = buffer + lineStart;
         // Skip header lines (starting with @)
         if (*line == '@') {
@@ -907,51 +921,55 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
         uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
         uint8_t* fieldStart = line + prevTabPos + 1;
         uint32_t  fieldLength = currTabPos - prevTabPos;
-        
+
         // Encode the field data
         if (fieldLength > 0) {
             fieldCoder->encode_line(fieldStart, fieldLength);
             fieldSrcLen += fieldLength;
         }
     }
-    
+
     // Flush the encoder for this field
     fieldCoder->encode_flush();
-    
+    if (fieldIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode field overflow: output buffer too small");
+        return -1;
+    }
+
     // Update output block data length
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
-    
+
     // Set field metadata
     fieldMeta["srclen"] = fieldSrcLen;
     fieldMeta["dstlen"] = fieldIo->data_len;
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
 }
 
 int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    
+
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
-    
+
     fieldSrcLen = 0;
 
     uint32_t lineCount = lineNum - headEndLine;
     baseLengthBuffer =  MemoryUtil::safeAlloc<uint32_t>(lineCount);
-    
+
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
-        
+
         uint8_t* line = buffer + lineStart;
         // Skip header lines (starting with @)
         if (*line == '@') {
@@ -971,34 +989,38 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
             uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
             baseLengthBuffer[lineIdx - headEndLine] = sequeceLength;
         }
-        
+
         // Encode the field data
         if (fieldLength > 0) {
             fieldCoder->encode_line(fieldStart, fieldLength);
             fieldSrcLen += fieldLength;
         }
     }
-    
+
     // Flush the encoder for this field
     fieldCoder->encode_flush();
-    
+    if (fieldIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode field overflow: output buffer too small");
+        return -1;
+    }
+
     // Update output block data length
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
-    
+
     // Set field metadata
     fieldMeta["srclen"] = fieldSrcLen;
     fieldMeta["dstlen"] = fieldIo->data_len;
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
 }
 
 int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
     fieldSrcLen = 0;
@@ -1013,7 +1035,7 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
         if (*line == '@') {
             continue;
         }
-    
+
         uint32_t contentIdx = lineIdx - headEndLine;
         // Middle fields: between tabs
         uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
@@ -1024,7 +1046,7 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
         if (minBaseLength == maxBaseLength) {
             // Remove trailing \t
             memcpy(tmpBuffer.get() + fieldSrcLen, fieldStart, fieldLength - 1);
-            fieldSrcLen += fieldLength - 1; 
+            fieldSrcLen += fieldLength - 1;
         } else {
             // Encode the field data
             memcpy(tmpBuffer.get() + fieldSrcLen, fieldStart, fieldLength);
@@ -1039,10 +1061,14 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
     fieldCoder->encode_line(tmpBuffer.get(), fieldSrcLen);
     fieldCoder->encode_flush();
     // Smart pointer automatically cleans up
+    if (fieldIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode SEQ field overflow: output buffer too small");
+        return -1;
+    }
 
     // Update output block data length
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
-    
+
     // Set field metadata
     fieldMeta["minlen"] = minBaseLength;
     fieldMeta["maxlen"] = maxBaseLength;
@@ -1051,9 +1077,9 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
 
-    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
-    
+
     return fieldIo->data_len;
 }
 
@@ -1063,19 +1089,19 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         return -1;
     }
 
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    
+
     uint32_t offset = 0;
     uint64_t nOffset = 0;
-    
+
     // Initialize mapping buffers similar to FastqActuator
     const uint32_t baseMaxLength = inBlockPtr->getMaxLineLen() + 4;
     const uint32_t lsquash = (baseMaxLength >> 2) + !!(baseMaxLength & 0x3);
-    
+
     uint32_t baseMappedLength = (baseMaxLength << 1);
-    
+
     std::unique_ptr<uint8_t[]> basePairBuffer = std::make_unique<uint8_t[]>(baseMaxLength);
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(lsquash);
     std::unique_ptr<uint8_t[]> baseMappedBuffer = std::make_unique<uint8_t[]>(baseMappedLength);
@@ -1086,23 +1112,23 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     Json::Value metaStreams;
     uint32_t totalSrcLen = 0;
     uint32_t totalDstLen = 0;
-    
+
     // Second pass: compress with reference
     std::shared_ptr<coder_io> matchIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
     std::shared_ptr<coder_bwt_cm> matchCm = std::make_shared<coder_bwt_cm>(matchIo.get());
     int64_t srcLen = 0;
     uint32_t totalBaseLength = 0;
-    
+
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
-        
+
         uint8_t* line = buffer + lineStart;
         // Skip header lines (starting with @)
         if (*line == '@') {
             continue;
         }
-        
+
         uint32_t contentIdx = lineIdx - headEndLine;
         uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
         uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
@@ -1122,13 +1148,13 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
             LOG_WARNING("Warnning: sequece length(%u) not match cigar(%u)", seqLength, baseLengthBuffer[contentIdx]);
             baseLengthBuffer[contentIdx] = seqLength;
         }
-        
+
         // Get mapping information from SAM fields
         uint16_t chrId = mappedChr.find(lineIdx) == mappedChr.end() ? 0xFFFF : mappedChr[lineIdx];
         uint64_t startPos = mappedPos.find(lineIdx) == mappedPos.end() ? 0 : mappedPos[lineIdx];
         // Extract FLAG field to determine strand
         uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
-        
+
         // Process sequence: remove N's and record positions
         uint32_t outLen = 0;
         for (uint32_t n = 0; n < seqLength; n++) {
@@ -1198,7 +1224,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     }
     // Flush match encoder
     matchCm->encode_flush();
-    
+    if (matchIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode base match stream overflow: output buffer too small");
+        return -1;
+    }
     // First sub-stream: match stream between reads and reference
     metaSubs.clear();
     metaSubs["srclen"] = srcLen;
@@ -1217,6 +1246,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(nposIo.get());
         subCoder->encode_line((uint8_t*)baseNPosBuffer, nposSrcLen);
         subCoder->encode_flush();
+        if (nposIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode base N positions overflow: output buffer too small");
+            return -1;
+        }
         metaSubs.clear();
         metaSubs["srclen"] = nposSrcLen;
         metaSubs["dstlen"] = nposIo->data_len;
@@ -1244,6 +1277,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         lenCoder->encode_line((uint8_t*)baseLenBuffer, baseLenSrcLen<<2);
         lenCoder->encode_flush();
         MemoryUtil::safeFree(baseLenBuffer);
+        if (lenIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode base length stream overflow: output buffer too small");
+            return -1;
+        }
 
         metaSubs.clear();
         metaSubs["srclen"] = baseLenSrcLen<<2;
@@ -1255,7 +1292,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         totalSrcLen += baseLenSrcLen<<2;
         totalDstLen += lenIo->data_len;
     }
-    
+
     // Set metadata
     fieldMeta["ncount"] = baseNCount;
     fieldMeta["minlen"] = minBaseLength;
@@ -1266,17 +1303,17 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     fieldMeta["field"] = fieldIdx;
     fieldSrcLen = totalSrcLen;
 
-    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         totalSrcLen, totalDstLen, (double)(totalDstLen * 100)/(double)totalSrcLen);
-    
+
     return totalDstLen;
 }
 
 int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-    
+
     // Create quality encoder similar to FastqActuator
     std::shared_ptr<coder_io> qualityIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
 
@@ -1353,34 +1390,34 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
 
-        uint8_t* line = buffer + lineStart; 
-        
+        uint8_t* line = buffer + lineStart;
+
         // Skip header lines (starting with @)
         if (*line == '@') {
             continue;
         }
-        
+
         // Extract QUAL field (field 11)
         uint32_t contentIdx = lineIdx - headEndLine;
         if (fieldIdx > contentPos[contentIdx].size()) {
             continue;
-        } 
-        
+        }
+
         uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
         uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
         uint8_t* qualStart = line + prevTabPos + 1;
         uint32_t qualLength = currTabPos - prevTabPos - 1;
-        
+
         if (qualLength == 0) {
             continue;
         }
-        
+
         // Get SEQ field for quality compression context (field 9)
         uint8_t* seqStart = nullptr;
         if (fieldIdx >= 1 && contentPos[contentIdx].size() >= fieldIdx) {
             seqStart = line + contentPos[contentIdx][fieldIdx - 2] + 1;
         }
-        
+
         if (useFcv2) {
             /*
              * 从 FLAG 字段取链方向。按 SAM 规范，0x10 置位表示 SEQ 和 QUAL 在文件里
@@ -1409,7 +1446,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
         }
         streamSrcLen += qualLength;
     }
-    
+
     if (useFcv2) {
         fcv2Coder->encode_flush();
     } else if (useBwtCm) {
@@ -1417,8 +1454,12 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     } else {
         qualityCoder->encode_flush();
     }
+    if (qualityIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode quality overflow: output buffer too small");
+        return -1;
+    }
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + qualityIo->data_len);
-    
+
     Json::Value subMeta;
     subMeta["srclen"] = streamSrcLen;
     subMeta["dstlen"] = qualityIo->data_len;
@@ -1445,6 +1486,10 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     uint32_t freqSrcLen = (qualFreqTable.size() << 1) * sizeof(uint16_t);
     qualityFreqCoder->encode_line((uint8_t*)qualityFreqArray.get(), freqSrcLen);
     qualityFreqCoder->encode_flush();
+    if (qualityFreqIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode quality freq overflow: output buffer too small");
+        return -1;
+    }
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + qualityFreqIo->data_len);
 
     subMeta.clear();
@@ -1462,7 +1507,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     fieldMeta["totaldstlen"] = totalDstLength;
     fieldMeta["streams"] = streamMeta;
     fieldMeta["field"] = fieldIdx;
-    
+
     fieldSrcLen = totalSrcLength;
 
     /*
@@ -1491,9 +1536,9 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
                 qualRatio);
     }
 
-    LOG_INFO("SAM quality field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+    LOG_INFO("SAM quality field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
-    
+
     return totalDstLength;
 }
 
@@ -1519,6 +1564,22 @@ int32_t SamCodecActuator::decompress() {
     // Parse meta information
     initMetaInfo();
 
+    /*
+     * 块入口预分配：按文件头的 block_size（压缩时确定的上界）×2 保证输出缓冲够——
+     * 确定值，不是估算，不受 fieldcount/读长影响。堵所有字段越界的主防线。
+     * block_size 从 baseFileMeta 读回（DecompressEngine::createBlockReader），此刻
+     * 已就绪；为 0（老文件没写）时落回默认 getBlockSize()。
+     * coder_io 的 putc 检查与 decode 错误返回链作兜底（见 decompressQuality 等）。
+     */
+    size_t bs = pbgzEngine->getFileBlockSize();
+    if (bs == 0) {
+        bs = ConfigManager::getInstance().getBlockSizeByCompressLevel(pbgzEngine->getParameter().compressLevel);
+    }
+    if (outBlockPtr->ensureCapacity(bs * 2) != 0) {
+        LOG_ERROR("preallocate output buffer failed, block_size=%zu", bs);
+        return -1;
+    }
+
     // Set block information
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
     outBlockPtr->setBlockType(inBlockPtr->getBlockType());
@@ -1534,7 +1595,7 @@ int32_t SamCodecActuator::decompress() {
                 refPosChrIndex = SamInfo::getInstance().getChrNameIndex(parameter.refeGenePos);
                 break;
             }
-            
+
             refPosChrIndex = SamInfo::getInstance().getChrNameIndex(parameter.refeGenePos.substr(0, colonPos));
             size_t dashPos = parameter.refeGenePos.find('-');
             if (dashPos == std::string::npos) {
@@ -1549,7 +1610,7 @@ int32_t SamCodecActuator::decompress() {
         if (refPosChrIndex != 65535) {
             targeBlock = MemoryUtil::safeNewClass<RoughIOBlock>(outBlockPtr->getBlockSize());
         }
-    } 
+    }
 
     if (meta.isMember("header")) {
         if (0 != decompressHeader(targeBlock)) {
@@ -1558,7 +1619,6 @@ int32_t SamCodecActuator::decompress() {
         }
     } else {
         LOG_DEBUG("No header info for block: %d", inBlockPtr->getBlockId());
-        notifyFlag = true;
     }
 
     if (0 != decompressSamByFields(targeBlock)) {
@@ -1575,7 +1635,7 @@ int32_t SamCodecActuator::decompress() {
                 meta["md5"].asString().c_str(), md5.c_str());
             return -1;
         }
-    } 
+    }
     if (targeBlock != outBlockPtr) {
         MemoryUtil::safeDeleteClass(targeBlock);
     }
@@ -1594,6 +1654,8 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         return 0;
     }
 
+    // ensureCapacity 已在 decompress() 开头调用，此处不重复
+
     // Initialize decoders based on compression metadata
     if (0 != initDecoder(outputBlock)) {
         LOG_ERROR("Init decoder failed.");
@@ -1605,36 +1667,6 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
     uint32_t fieldCount = samMeta["fieldcount"].asUInt();
     uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
 
-    /*
-     * 还原数据必须放得进本块缓冲。
-     *
-     * 只判"还原数据本身放不下"，不把 SEQ 暂存区算进来：暂存区贴着缓冲尾部往回摆，
-     * 是边读边消费的，输出在后面追，两者全程重叠也无妨——实测 -l6 的块
-     * (data 65MB + seq 19MB > 64MB 缓冲) 一直是正确往返的，把它算进来会误杀。
-     *
-     * 这个前提在解压侧无法自证：块缓冲大小取自 parameter.compressLevel（见
-     * PbgzEngine::getBlockSize + RoughIOBlock 的 bufferSize = blockSize * 2），
-     * 而 decompress 命令根本没有 -l 选项，压缩时用的块大小也没写进文件。
-     * 于是解压缓冲恒为 2 * 32MB = 64MB，凡是 -l7/-l8/-l9 压出来的块都塞不下。
-     *
-     * 塞不下时不会有任何征兆：coder_io 的读端耗尽后静默返回 '\0'，
-     * 解码继续跑完并产出一个字节错误却"成功"的文件。宁可在这里明确失败。
-     *
-     * 根治要把数据块大小写进文件头并由解压侧回读来决定缓冲大小，
-     * 那需要把 ioReader 的创建提到缓冲池分配之前，属于引擎初始化顺序的调整。
-     */
-    {
-        const uint64_t needOut = (uint64_t)samMeta["totalsrclen"].asUInt();
-        const uint64_t capacity = (uint64_t)outputBlock->getBufferSize();
-        if (needOut > capacity) {
-            LOG_ERROR("Output buffer too small for block %lld: need %llu bytes but buffer is %llu."
-                      " The file was compressed with a larger block size (-l7/-l8/-l9)"
-                      " than this decompressor can hold.",
-                      (long long)inBlockPtr->getBlockId(),
-                      (unsigned long long)needOut, (unsigned long long)capacity);
-            return -1;
-        }
-    }
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     baseDiffSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     refeStrecchBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
@@ -1643,6 +1675,20 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
 
     uint8_t* pBaseOut = nullptr;
     if (streams[9]["coder"]["magic"].asString() == "coder_fc") {
+        /*
+         * coder_fc 是"整块"编码器：SEQ 必须一次性全解出来，但最终 SAM 输出是按行
+         * 交错的（ID\tFLAG\t...\tSEQ\tQUAL\n），所以 SEQ 只能先落到别处、再逐行搬。
+         * 这里把它暂存在 outputBlock 缓冲的**尾部**（见 initDecoder 同样的落点），
+         * 头部正常向前追加行内容，两者对向生长、互不覆盖：
+         *   头部输出 <= block_size，尾部 SEQ <= block_size，块入口已按 block_size*2
+         *   一次性 ensureCapacity，容量有确定上界。
+         * 不用独立 malloc 缓冲的原因：memcpy 次数完全一样（都得逐行搬），独立缓冲只
+         * 会多出每块一次 malloc/free、首次写的缺页开销，以及"线程数 × 整条 SEQ"的
+         * 额外内存峰值。
+         *
+         * 不变量：块内绝对不能对 outputBlock 做 realloc，否则这里的尾部指针以及
+         * 下面 basePtr 都会悬空。
+         */
         pBaseOut = pBaseEnd - streams[9]["totalsrclen"].asUInt();
     }
 
@@ -1675,7 +1721,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                 decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen, outputBlock);
                 actualBaseLen = decoderLen;
             } else if (fieldIdx == 10 ) {  /// QUAL
-                decompressQuality(basePtr, actualBaseLen, outputBlock);
+                decoderLen = decompressQuality(basePtr, actualBaseLen, outputBlock);
                 // No optional fields scenario, replace appended \t with \n
                 if (fieldIdx + 1 == fieldCount) {
                     uint8_t* pEnd = outputBlock->getCurrent();
@@ -1705,7 +1751,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
             if (mappedChr[lineNo] == refPosChrIndex) {
                 if ((refPosBegin == 0 && refPosEnd == 0) || (mappedPos[lineNo]  >= refPosBegin && mappedPos[lineNo] <= refPosEnd)) {
                     memcpy(outBlockPtr->getCurrent(), outputBlock->getBuffer(), outputBlock->getDataLen());
-                    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + outputBlock->getDataLen());  
+                    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + outputBlock->getDataLen());
                 }
             }
             outputBlock->reset();
@@ -1748,7 +1794,11 @@ int32_t SamCodecActuator::decompressHeader(RoughIOBlock* outputBlock) {
         uint32_t decoderTotalLen = 0;
         while (lineCount < headEndLine) {
             // Decompress one line of data
-            uint32_t decodedLen = headerDecoder->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), '\n', false);
+            int32_t decodedLen = headerDecoder->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), '\n', false);
+            if (decodedLen < 0) {
+                LOG_ERROR("Decode SAM header failed: %d", decodedLen);
+                return -1;
+            }
             if (decodedLen == 0) {
                 break; // No more data
             }
@@ -1824,11 +1874,23 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 uint32_t srcLength = streamMeta[idx]["totalsrclen"].asUInt();
                 LOG_DEBUG("srclen = %d, dstlen = %d", srcLength, dstLength);
                 if (coderName == "coder_fc") {
+                    /*
+                     * 整块 SEQ 解到 outputBlock 缓冲的尾部作暂存，decompressBase 再逐行
+                     * 搬到头部。不另开独立缓冲：那样每块要多一次整条 SEQ 的 malloc/free
+                     * 和首次触碰缺页，峰值内存还要多出 线程数×SEQ大小，而拷贝次数一样。
+                     *
+                     * 不变量：块内绝不能对 outputBlock 做 realloc，否则这个尾部指针悬空。
+                     * 容量由块入口一次性按 block_size*2 预分配保证（见 decompress()）——
+                     * 头部输出 ≤ block_size、尾部暂存 ≤ block_size，正好 2 倍。
+                     */
                     coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstLength);
                     baseIo.meta = baseMeta;
                     baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
                     coder_fc baseDecoder = coder_fc(&baseIo);
-                    baseDecoder.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcLength, srcLength, UINT8_MAX, false);
+                    if (baseDecoder.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcLength, srcLength, UINT8_MAX, false) < 0) {
+                        LOG_ERROR("Decode SEQ by coder_fc failed, srclen = %u", srcLength);
+                        return -1;
+                    }
                 } else if(coderName == "coder_bwt_cm") {
                     std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLength);
                     ioVector.push_back(io);
@@ -1872,9 +1934,12 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
                         coder_io nposIo(inBlockPtr->getBuffer() + readOffset, dstlen);
                         auto nposCoder = std::make_unique<coder_bwt_cm>(&nposIo);
-                        nposCoder->decode_line((uint8_t*)baseNPosBuffer, srclen, UINT8_MAX, false);
+                        if (nposCoder->decode_line((uint8_t*)baseNPosBuffer, srclen, UINT8_MAX, false) < 0) {
+                            LOG_ERROR("Decode base N positions failed");
+                            return -1;
+                        }
                     } else {
-                        LOG_ERROR("check sub stream failed. coder not match. coder = %s.", 
+                        LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
                             baseMetaStreams[id]["coder"]["magic"].asString().c_str());
                         return -1;
                     }
@@ -1895,10 +1960,14 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
                         coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen);
                         auto baseLenCoder = std::make_unique<coder_bwt_cm>(&baseLenIo);
-                        baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false);
+                        if (baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false) < 0) {
+                            MemoryUtil::safeFree(baseLenBuffer);
+                            LOG_ERROR("Decode base lengths failed");
+                            return -1;
+                        }
                     } else {
                         MemoryUtil::safeFree(baseLenBuffer);
-                        LOG_ERROR("check sub stream failed. coder not match. coder = %s.", 
+                        LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
                             baseMetaStreams[id]["coder"]["magic"].asString().c_str());
                         return -1;
                     }
@@ -1928,8 +1997,8 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 /* 同 fastq_actuator: 计数用 uint8_t 会在字母表超过 127 个符号时回绕, 导致堆越界。 */
                 uint32_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
                 uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
-                uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
-                if (qualFreq != qualFreqSrcLength) {
+                int32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
+                if (qualFreq < 0 || (uint32_t)qualFreq != qualFreqSrcLength) {
                     LOG_ERROR("Decode quality frequncy failed");
                     delete [] qualFreqArr;
                     return -1;
@@ -2019,7 +2088,12 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
 }
 
 int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag, RoughIOBlock* outputBlock) {
-    uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
+    /* decode_line 负值是错误码（码流损坏/缓冲不足），原样上抛，不能当长度用。 */
+    int32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
+    if (fieldLen < 0) {
+        LOG_ERROR("Decode regular field(%u) failed: %d", fieldIdx, fieldLen);
+        return -1;
+    }
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
     return fieldLen;
 }
@@ -2038,8 +2112,12 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
         std::string coderName = splitMeta["coder"]["magic"].asString();
 
         // Decode segment
-        uint32_t segmentLen = idDecoders[splitIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
+        int32_t segmentLen = idDecoders[splitIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
             (splitIdx < idSplitSymbols.size()) ? idSplitSymbols[splitIdx] : UINT8_MAX, false);
+        if (segmentLen < 0) {
+            LOG_ERROR("Decode id field segment(%u) failed: %d", splitIdx, segmentLen);
+            return -1;
+        }
         readOffset += splitDstLen;
         idLength += splitDstLen;
         outputBlock->setDataLen(outputBlock->getDataLen() + segmentLen);
@@ -2049,7 +2127,10 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
 
 int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock) {
     uint16_t chrIndex = 0;
-    fieldDecoders[fieldIdx]->decode_line((uint8_t*)&chrIndex, sizeof(chrIndex), UINT8_MAX, false);
+    if (fieldDecoders[fieldIdx]->decode_line((uint8_t*)&chrIndex, sizeof(chrIndex), UINT8_MAX, false) < 0) {
+        LOG_ERROR("Decode chr name field(%u) failed, lineNo = %u", fieldIdx, lineNo);
+        return -1;
+    }
     if (chrIndex == 0xFFFF) {
         *outputBlock->getCurrent() = '*';
         *(outputBlock->getCurrent() + 1) = '\t';
@@ -2077,7 +2158,12 @@ int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo, 
 
 int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock) {
-    uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
+    /*
+     * 这里**不能**再 ensureCapacity：调用方 decompressSamByFields 在 SEQ 阶段抓了
+     * basePtr = outputBlock->getCurrent() 留给 QUAL 用，块内任何 realloc 都会让它
+     * 悬空，产出随机错误内容。缓冲够用由块入口一次性预分配保证（按文件头 block_size
+     * 的确定上界 ×2，见 decompress()），逐行不再扩容。
+     */
     bool isUserReference = pRefeGene != nullptr && fieldMeta.isMember("streams");
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
@@ -2088,7 +2174,11 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 pBaseOut += actualBaseLen;
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
             } else if (fieldMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
-                fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), actualBaseLen, UINT8_MAX, false);
+                int32_t decLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), actualBaseLen, UINT8_MAX, false);
+                if (decLen < 0 || (uint32_t)decLen != actualBaseLen) {
+                    LOG_ERROR("base decode failed in block %lld, line %d, expect len %d, actual len %d", (long long)inBlockPtr->getBlockId(), lineNo, actualBaseLen, decLen);
+                    return -1;
+                }
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
             } else {
                 LOG_ERROR("Not supported coder name:%s",fieldMeta["coder"]["magic"].asString().c_str());
@@ -2101,6 +2191,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             if (fieldMeta["coder"]["magic"].asString() == "coder_fc") {
                 uint8_t* pBaseTmp = outputBlock->getCurrent();
                 uint8_t* ptr = pBaseOut;
+                uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
                 for (; ptr < pBaseEnd; ++ptr) {
                     *pBaseTmp++ = *ptr;
                     if (*ptr == '\t') {
@@ -2112,7 +2203,12 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
             } else if (fieldMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
-                actualBaseLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), maxBaseLength, '\t', false);
+                int32_t decLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), maxBaseLength, '\t', false);
+                if (decLen <= 0) {
+                    LOG_ERROR("base decode failed in block %lld, line %d: %d", (long long)inBlockPtr->getBlockId(), lineNo, decLen);
+                    return -1;
+                }
+                actualBaseLen = decLen;
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
             } else {
@@ -2135,7 +2231,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
         }
         Json::Value& baseStream = fieldMeta["streams"];
         if (baseStream[0]["coder"]["magic"].asString() == "coder_bwt_cm") {
-            uint32_t decoderLen = 0;
+            int32_t decoderLen = 0;
             uint16_t mapFlag = mappedFlag.find(lineNo) == mappedFlag.end() ? 4 : mappedFlag[lineNo];
             // Not matched
             if (mapFlag & 0x04) {
@@ -2212,13 +2308,19 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
     if (qualFcv2Decoder != nullptr) {
         /* fcv2 不需要 SEQ 作为上下文，链方向也由它自己的码流带着，只要长度。 */
-        qualFcv2Decoder->decode_record(outputBlock->getCurrent(), actualBaseLen);
+        if (qualFcv2Decoder->decode_record(outputBlock->getCurrent(), actualBaseLen) < 0) {
+            LOG_ERROR("Decode quality by fcv2 failed, len = %u", actualBaseLen);
+            return -1;
+        }
     } else if (qualCmDecoder != nullptr) {
         /*
          * bwt_cm 同样不需要 SEQ 上下文。压缩侧是按记录逐条 encode_line 喂进去的，
          * 这里也按同样的长度逐条取回；不传分隔符，长度由调用方给定。
          */
-        qualCmDecoder->decode_line(outputBlock->getCurrent(), actualBaseLen);
+        if (qualCmDecoder->decode_line(outputBlock->getCurrent(), actualBaseLen) < 0) {
+            LOG_ERROR("Decode quality by bwt_cm failed, len = %u", actualBaseLen);
+            return -1;
+        }
     } else {
         qualCoder->decode_qual_gen2(basePtr, outputBlock->getCurrent(), actualBaseLen);
     }
@@ -2229,7 +2331,11 @@ int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBas
 }
 
 int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, uint32_t lineIdx, RoughIOBlock* outputBlock) {
-    uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
+    int32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
+    if (fieldLen < 0) {
+        LOG_ERROR("Decode cigar field(%u) failed: %d", fieldIdx, fieldLen);
+        return -1;
+    }
     if (fieldLen > 1) {
         uint32_t seqLength = parseCigar(outputBlock->getCurrent(), fieldLen);
         baseLengthBuffer[lineIdx] = seqLength;
@@ -2246,7 +2352,7 @@ uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength
     if (cigarString == nullptr || cigarLength == 0) {
         return 0;
     }
-    
+
     uint32_t seqLength = 0;
     uint32_t currentNumber = 0;
     for (uint32_t i = 0; i < cigarLength; ++i) {

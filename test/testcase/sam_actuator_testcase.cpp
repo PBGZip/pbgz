@@ -91,12 +91,12 @@ public:
         pOutBlock->reset();
 
         // Try multiple possible paths, starting with current directory and test directory
-        std::vector<std::string> paths = { 
+        std::vector<std::string> paths = {
             filename,           // current directory
             "./test/" + filename, // test directory
             "../test/" + filename // test directory above build directory
         };
-        
+
         IOReader* pIoReader = nullptr;
         for (const auto& path : paths) {
             pIoReader = new FileReader(path);
@@ -106,7 +106,7 @@ public:
             delete pIoReader;
             pIoReader = nullptr;
         }
-        
+
         if (pIoReader == nullptr) {
             // If all paths fail, use test_data/test.sam as final fallback
             pIoReader = new FileReader("test_data/test.sam");
@@ -115,14 +115,14 @@ public:
                 return; // Cannot open file
             }
         }
-        
-        BlockReader* pBlockReader = new BlockReader(pIoReader); 
+
+        BlockReader* pBlockReader = new BlockReader(pIoReader);
         pBlockReader->readBlock(pInBlock, TYPE_UNKNOW);
-        
+
         delete pBlockReader;
         delete pIoReader;
     }
-    
+
     void generateSamFile(const std::string& filename) {
         // Directly write real SAM data from test_data, not reading from file
         std::ofstream file(filename);
@@ -179,7 +179,7 @@ public:
                     file.open(testPath);
                 }
             }
-            
+
             if (!file.is_open()) {
                 return; // Cannot create file
             }
@@ -190,46 +190,46 @@ public:
                 file << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";
             }
             file << "ATCGATCGATCGATCGATCG\n";  // Pad to appropriate length
-            
+
             file << ">chr2\n";
             for (int i = 0; i < 16; i++) {
                 file << "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT\n";
             }
             file << "GCTAGCTAGCTAGCTAGC\n";
-            
+
             file << ">chr3\n";
             for (int i = 0; i < 17; i++) {
                 file << "TACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n";
             }
             file << "TACGTACGTACGTACGTACGT\n";
-            
+
             file << ">chr4\n";
             for (int i = 0; i < 17; i++) {
                 file << "CATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n";
             }
             file << "CATGCATGCATGCATGCATGC\n";
-            
+
             file << ">chrX\n";
             for (int i = 0; i < 17; i++) {
                 file << "ATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n";
             }
             file << "ATGCATGCATGCATGCATGC\n";
-            
+
             file << ">chrY\n";
             for (int i = 0; i < 17; i++) {
                 file << "GCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATG\n";
             }
             file << "GCATGCATGCATGCATGCATG\n";
-            
+
             file.close();
             return;
         }
-        
+
             // If can open test_data/reference.fa, copy its content
         std::string content((std::istreambuf_iterator<char>(srcFile)),
                            std::istreambuf_iterator<char>());
         srcFile.close();
-        
+
         std::ofstream file(filename);
         if (!file.is_open()) {
             std::string testPath = "./test/" + filename;
@@ -239,11 +239,11 @@ public:
                 file.open(testPath);
             }
         }
-        
+
         if (!file.is_open()) {
             return; // Cannot create file
         }
-        
+
         file << content;
         file.close();
     }
@@ -260,7 +260,7 @@ public:
 protected:
     RoughIOBlock* pInBlock;
     RoughIOBlock* pOutBlock;
-    
+
     // Mapping data for testing
     std::map<uint32_t, uint16_t> mappedFlag;
     std::map<uint32_t, uint64_t> mappedPos;
@@ -295,7 +295,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     file << "read4_11.SRR001.3\t0\tchr2\t1\t60\t76M\t*\t0\t0\tAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGAAATTAAATTTAAATTTCCGGACAATCGCCGGAAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!F!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
     file << "read5_11.SRR001.4\t0\tchr2\t77\t60\t76M\t*\t0\t0\tATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAAATTGCAACGCAATCGATCGA\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!K!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\tMD:Z:75A0\tAS:i:75\tXS:i:0\n";
     file << "read6_11.5\t16\tchr3\t1\t60\t76M\t*\t0\t0\tCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCGTTAGGCCACAATCGGCGGCCGAATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:2\tMD:Z:74A0\tAS:i:74\tXS:i:0\n";
-    
+
     file.close();
 
     loadSamData("idinvlid_pre_analysis.sam");
@@ -313,11 +313,11 @@ TEST_F(SamActuatorTest, testCompressQuality) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressQuality method with field index 10 (QUAL field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -330,11 +330,11 @@ TEST_F(SamActuatorTest, testCompressChrName) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressChrName method with field index 2 (RNAME field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -347,11 +347,11 @@ TEST_F(SamActuatorTest, testCompressWithoutRef) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressWithoutRef
     result = actuator.compress();
     EXPECT_EQ(result, 0);
@@ -363,11 +363,11 @@ TEST_F(SamActuatorTest, testCompressWithRef) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressWithRef
     result = actuator.compress();
     EXPECT_EQ(result, 0);
@@ -378,11 +378,11 @@ TEST_F(SamActuatorTest, testCompressBaseWithoutRef) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressBaseWithoutRef method with field index 9 (SEQ field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -396,11 +396,11 @@ TEST_F(SamActuatorTest, testCompressBaseWithRef) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressBaseWithRef method with field index 9 (SEQ field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -413,11 +413,11 @@ TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressIdFieldSplit method with field index 0 (QNAME field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -430,11 +430,11 @@ TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressIdFieldInAll method with field index 0 (QNAME field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -447,11 +447,11 @@ TEST_F(SamActuatorTest, testCompressRegularField) {
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     // Pre-analysis
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compressRegularField method with field index 6 (PNEXT field)
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -459,32 +459,21 @@ TEST_F(SamActuatorTest, testCompressRegularField) {
     EXPECT_GT(result, 0);
 }
 
-TEST_F(SamActuatorTest, testNotifyFlag) {
-    loadSamData(SamTestData::testSamFile);
-    PbgzParameter para;
-    CompressEngine engine(para);
-    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
-    // Test getNotifyFlag
-    bool hasData = actuator.getNotifyFlag();
-    EXPECT_FALSE(hasData) << "Should have data after loading SAM file";
-}
-
 TEST_F(SamActuatorTest, testSetReference) {
     loadSamData(SamTestData::testSamFile);
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
-    
+
     Reference refGene = createTestReference();
-    
+
     // Test setReference
     actuator.setReference(&refGene);
-    
+
     // Verify reference is set by trying to compress
     int32_t result = actuator.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     result = actuator.compress();
     EXPECT_EQ(result, 0);
 }
@@ -500,69 +489,69 @@ TEST_F(SamActuatorTest, testDecompress) {
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compress
     result = compressor.compress();
     EXPECT_EQ(result, 0);
 
     pInBlock->reset();
-    
+
     // Copy compressed output Block content to new input Block
     memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
     pInBlock->setDataLen(pOutBlock->getDataLen());
     pInBlock->setMetaLen(pOutBlock->getMetaLen());
     pInBlock->setBlockType(pOutBlock->getBlockType());
-    
+
     // Reset output Block
     pOutBlock->reset();
-    
+
     // Create SamActuator object for decompression
     SamCodecActuator decompressor(pInBlock, pOutBlock, &engine);
-    
+
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
     EXPECT_EQ(result, 0);
-    
+
     // Basic check: ensure decompression produced data
     EXPECT_GT(pOutBlock->getDataLen(), 0);
 }
 
 TEST_F(SamActuatorTest, testDecompressWithRef) {
     loadSamData(SamTestData::testSamFile);
-    
+
     Reference reference = createTestReference();
-    
+
     // Create SamActuator object for compression
     PbgzParameter para;
     CompressEngine engine(para);
     SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
-    
+
     // Pre-analysis for compression
     int32_t result = compressor.preAnalysis();
     EXPECT_EQ(result, 0);
-    
+
     // Test compress
     result = compressor.compress();
     EXPECT_EQ(result, 0);
 
     pInBlock->reset();
-    
+
     // Copy compressed output Block content to new input Block
     memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
     pInBlock->setDataLen(pOutBlock->getDataLen());
     pInBlock->setMetaLen(pOutBlock->getMetaLen());
     pInBlock->setBlockType(pOutBlock->getBlockType());
-    
+
     // Reset output Block
     pOutBlock->reset();
-    
+
     // Create SamActuator object for decompression
     SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
-    
+
     // Decompression doesn't need preAnalysis, directly call decompress
     result = decompressor.decompress();
     EXPECT_EQ(result, 0);
-    
+
     // Basic check: ensure decompression produced data
     EXPECT_GT(pOutBlock->getDataLen(), 0);
 }
@@ -1087,7 +1076,7 @@ TEST_F(SamActuatorTest, testDecompressWithRefGenePosAllIncluded) {
 
     pOutBlock->reset();
 
-    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);    
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
     result = decompressor.decompress();
     EXPECT_EQ(result, 0);
 

@@ -39,22 +39,22 @@
  */
 class QualPriorConsumer : public AuxBlockConsumer {
 public:
-    bool claim(RoughIOBlock* blockPtr, int32_t packageIndex) override;
+    bool claim(RoughIOBlock* blockPtr, int64_t packageIndex) override;
 
     /*
      * 按包序号取该包的先验，没有则返回空。
      * 返回 shared_ptr 是为了让取用者把这份数据一直握到自己解完，
      * 不受认领者后续动作影响。
      */
-    AuxPayloadPtr forPackage(int32_t packageIndex) const {
+    AuxPayloadPtr forPackage(int64_t packageIndex) const {
         std::lock_guard<std::mutex> lock(mutex);
-        std::map<int32_t, AuxPayloadPtr>::const_iterator it = byPackage.find(packageIndex);
+        std::map<int64_t, AuxPayloadPtr>::const_iterator it = byPackage.find(packageIndex);
         return (it == byPackage.end()) ? AuxPayloadPtr() : it->second;
     }
 
 private:
     mutable std::mutex mutex;
-    std::map<int32_t, AuxPayloadPtr> byPackage;
+    std::map<int64_t, AuxPayloadPtr> byPackage;
 };
 
 class DecompressEngine : public CodecEngine {
@@ -66,7 +66,7 @@ public:
 
     virtual ~DecompressEngine() { }
 
-    AuxPayloadPtr getQualPrior(int32_t packageIndex) override {
+    AuxPayloadPtr getQualPrior(int64_t packageIndex) override {
         return qualPriorConsumer.forPackage(packageIndex);
     }
 
@@ -83,7 +83,7 @@ protected:
 
     void releaseBlockWriter(BlockWriter* &BlockWriter) override;
 
-    virtual void readBlocks(BlockReader* blockReader);
+    int64_t readBlocks(BlockReader* blockReader) override;
 
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, false);
@@ -107,7 +107,7 @@ private:
 
     bool initRefeIndex();
 
-    void readBlockByPostition(BlockReader* blockReader);
+    int64_t readBlockByPostition(BlockReader* blockReader);
 
     bool unpackReference(PbgzBlockReader* blockReader, Json::Value& refeMeta);
 

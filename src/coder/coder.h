@@ -28,10 +28,10 @@
 #include <stdint.h>
 #include <cstdarg>
 #include <functional>
+#include <exception>
+#include <string>
 
 #include "coder_io.h"
-
-using coder_exit_func = std::function<void(int, const char*)>;
 
 using coder_alloc_func = std::function<uint8_t*(size_t)> ;
 
@@ -43,11 +43,9 @@ using coder_logger_func = std::function<void(int, const char*)>;
 
 
 namespace coder_ns {
-    void register_alloc_proc(coder_alloc_func proc); 
+    void register_alloc_proc(coder_alloc_func proc);
 
     void register_realloc_proc(coder_realloc_func proc);
-
-    void register_exit_proc(coder_exit_func proc);
 
     void resister_logger_proc(coder_logger_func proc);
 
@@ -60,6 +58,10 @@ namespace coder_ns {
         CODER_ERR_MEM_ALLOC_FAIL = (CODER_ERR_BAD_ARGS) - 1,
         CODER_ERR_INNER = (CODER_ERR_MEM_ALLOC_FAIL) -1,
         CODER_ERR_INVALID_STATE = CODER_ERR_INNER - 1,
+        /* 输出缓冲不足：写入被容量检查拦下（io->err = IO_BUF_FULL），数据未写全。 */
+        CODER_ERR_BUF_SMALL = CODER_ERR_INVALID_STATE - 1,
+        /* 输入码流提前耗尽：读到末尾仍不够（io->err = IO_READ_EMPTY），码流损坏或长度元数据有误。 */
+        CODER_ERR_STREAM_END = CODER_ERR_BUF_SMALL - 1,
 
     };
 
@@ -72,9 +74,9 @@ namespace coder_ns {
     };
 }
 
-void* safe_realloc_init(uint32_t& size, uint8_t* ptr, size_t new_size, char ch); 
+void* safe_realloc_init(uint32_t& size, uint8_t* ptr, size_t new_size, char ch);
 
-void* safe_realloc(uint32_t& size, uint8_t* ptr, size_t new_size); 
+void* safe_realloc(uint32_t& size, uint8_t* ptr, size_t new_size);
 
 void* safe_alloc(size_t size);
 
@@ -86,8 +88,31 @@ void safe_free(void** ptr) ;
 
 void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...);
 
-// The following functions will cause process exit, not recommended for use within coder library
-void coder_exit(int16_t exit_code, const char* exit_msg_format, ...);
+/*
+ * coder 层的错误出口。
+ *
+ * 以前 coder_exit/check_exit 最终走 _Exit()，在库函数深处直接杀进程：
+ * 既不经过 LOG_ERROR，也绕开了引擎的 taskFailed 汇总，外面只能看到一个
+ * 光秃的退出码（实测过 253）。而 69 处 check_exit 都在模板/热路径里，逐个改成
+ * 返回值会穿透整个编解码链。所以改成抛异常：调用点一行不动，错误却能
+ * 沿栈上抛，在 PbgzEngine 的单块处理边界被接住、转成普通的失败返回值。
+ */
+class coder_exception : public std::exception {
+public:
+    coder_exception(int16_t errCode, std::string errMsg)
+        : code(errCode), message(std::move(errMsg)) {}
+
+    const char* what() const noexcept override { return message.c_str(); }
+
+    int16_t getCode() const noexcept { return code; }
+
+private:
+    int16_t code;
+    std::string message;
+};
+
+// 下面两个函数抛 coder_exception，调用后不会返回
+[[noreturn]] void coder_exit(int16_t exit_code, const char* exit_msg_format, ...);
 
 void check_exit(bool condition, int16_t exit_code, const char* exit_msg_format, ...);
 
@@ -141,14 +166,14 @@ public:
     virtual bool supports([[maybe_unused]] uint32_t fileType,
                           [[maybe_unused]] uint32_t fieldIdx) const { return true; }
 
-    virtual int32_t decode_line([[maybe_unused]] uint8_t *dst, 
-                                [[maybe_unused]] uint32_t len, 
-                                [[maybe_unused]] uint8_t split_ch = '\n', 
+    virtual int32_t decode_line([[maybe_unused]] uint8_t *dst,
+                                [[maybe_unused]] uint32_t len,
+                                [[maybe_unused]] uint8_t split_ch = '\n',
                                 [[maybe_unused]] bool need2hold = false) { return 0; }
-    virtual int32_t decode_line([[maybe_unused]] uint8_t *dst, 
-                                [[maybe_unused]] uint32_t len, 
-                                [[maybe_unused]] uint8_t *rely = nullptr, 
-                                [[maybe_unused]] uint8_t split_ch = '\n', 
+    virtual int32_t decode_line([[maybe_unused]] uint8_t *dst,
+                                [[maybe_unused]] uint32_t len,
+                                [[maybe_unused]] uint8_t *rely = nullptr,
+                                [[maybe_unused]] uint8_t split_ch = '\n',
                                 [[maybe_unused]] bool need2hold = false)
     {
         return 0;

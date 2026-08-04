@@ -43,41 +43,6 @@ CodecEngine::~CodecEngine() {
     MemoryUtil::safeDeleteClass(pRefGene);
 }
 
-int64_t CodecEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
-    RoughIOBlock* blockPtr = freeInputPool->get();
-    if (blockPtr == nullptr) {
-        LOG_ERROR("Get free block failed.");
-        return -1;
-    }
-    blockPtr->reset();
-
-    int64_t ret = blockReader->readBlock(blockPtr, fileType);
-    if (ret <= 0) {
-        freeInputPool->push(blockPtr);
-        return ret;
-    }
-
-    if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
-        PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
-        (void)offerAuxBlock(blockPtr, pbgzReader ? pbgzReader->getCurrentFileIndex() : 0);
-        freeInputPool->push(blockPtr);
-        return -2;
-    }
-
-    if (blockPtr->getBlockId() == 0 && blockPtr->getTotalDataLen() > 0){ 
-        fileType = blockPtr->getBlockType();
-        PbgzManager::getInstance().printFileType(fileType);
-    }
-
-    updateInputStatics(blockPtr);
-
-    inputDataPool->push(blockPtr);
-    if (ret > 0) {
-        blockCount++;
-    }
-    return ret;
-}
-
 
 void CodecEngine::writeFilePostProc(BlockWriter* blockWriter) {
     PbgzBlockWriter* pbgzWriter =  dynamic_cast<PbgzBlockWriter*>(blockWriter);

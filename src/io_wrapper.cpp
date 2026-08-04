@@ -63,7 +63,7 @@ int32_t FileOperator::mmapFile(size_t mapFileSize) {
     if (mapFileSize == 0) {
         return 0;
     }
-    
+
     mappedAddress = static_cast<uint8_t*>(mmap(nullptr, mapFileSize, mapMode, MAP_SHARED, fd, 0));
     if (mappedAddress == MAP_FAILED) {
         LOG_ERROR("file mmaped failed.file name = %s, errno = %d", fileName.c_str(), errno);
@@ -143,17 +143,17 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
     }
 
     size_t left = fo.fileSize - fo.position;
-    size_t realRead = readSize > left ? left : readSize; 
-    
+    size_t realRead = readSize > left ? left : readSize;
+
     const uint8_t* src = fo.mappedAddress + fo.position;
     uint8_t* dst = (uint8_t*)pBuffer;
-    
+
     // Conservative SIMD optimization: only for large data (>= 1MB)
     // Use aligned SIMD copy for better performance on large reads
     if (realRead >= 1024 * 1024) {
         // Enhanced prefetch for large data
         const size_t prefetchDistance = 2048;
-        
+
         // Prefetch source regions
         for (size_t i = 0; i < realRead; i += 32) {
             if (i + prefetchDistance < realRead) {
@@ -166,10 +166,10 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
 #endif
             }
         }
-        
+
         // SIMD copy with boundary handling
         size_t i = 0;
-        
+
         // Handle leading unaligned bytes (<16 bytes)
         size_t misalignment = ((uintptr_t)(src + i)) & 15;
         if (misalignment > 0 && i < realRead) {
@@ -177,7 +177,7 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
             memcpy(dst + i, src + i, prefix);
             i += prefix;
         }
-        
+
         // Main SIMD copy loop (16-byte aligned)
         if (i + 16 <= realRead) {
 #if defined(__x86_64__) && defined(__AVX2__)
@@ -194,7 +194,7 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
             }
 #endif
         }
-        
+
         // Handle trailing bytes
         if (i < realRead) {
             memcpy(dst + i, src + i, realRead - i);
@@ -217,7 +217,7 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
         }
         memcpy(dst, src, realRead);
     }
-    
+
     fo.position += realRead;
     if (fo.position >= fo.fileSize) {
         eofFlag = true;
@@ -231,50 +231,50 @@ void* FileReader::getAt(size_t pos) {
 
 size_t FileReader::readLine(std::string& line) {
     line.clear();
-    
+
     if (fo.mappedAddress == nullptr || fo.position >= fo.fileSize) {
         eofFlag = true;
         return 0;
     }
-    
+
     size_t startPos = fo.position;
     const size_t remaining = fo.fileSize - fo.position;
     const char* current = (const char*)(fo.mappedAddress + fo.position);
-    
+
     // Conservative SIMD optimization: only for long lines (>500 bytes)
     // Avoid overhead for common short lines, use standard method for consistency
     if (remaining > 500) {
 #if defined(__x86_64__) && defined(__AVX2__)
         const __m256i newline_vec = _mm256_set1_epi8('\n');
         size_t processed = 0;
-        
+
         while (processed + 32 <= remaining) {
             __m256i data = _mm256_loadu_si256((__m256i*)(current + processed));
             __m256i cmp = _mm256_cmpeq_epi8(data, newline_vec);
             unsigned mask = _mm256_movemask_epi8(cmp);
-            
+
             if (mask != 0) {
                 // Found newline: use standard method for consistent behavior
                 const void* newlinePos = memchr(current + processed, '\n', remaining - processed);
                 if (newlinePos != nullptr) {
                     const char* foundPos = static_cast<const char*>(newlinePos);
                     size_t lineLength = foundPos - current;
-                    
+
                     // Handle carriage return
                     if (lineLength > 0 && current[lineLength - 1] == '\r') {
                         lineLength--;
                     }
-                    
+
                     if (lineLength > 0) {
                         line.append(current, lineLength);
                     }
-                    
+
                     fo.position = foundPos - (const char*)fo.mappedAddress + 1; // Skip newline
-                    
+
                     if (fo.position >= fo.fileSize) {
                         eofFlag = true;
                     }
-                    
+
                     return line.length();
                 }
                 break;
@@ -283,10 +283,10 @@ size_t FileReader::readLine(std::string& line) {
         }
 #endif
     }
-    
+
     // Standard fallback method for all cases
     const void* newlinePos = memchr(current, '\n', remaining);
-    
+
     if (newlinePos != nullptr) {
         const char* foundPos = static_cast<const char*>(newlinePos);
         fo.position = foundPos - (const char*)fo.mappedAddress;
@@ -294,28 +294,28 @@ size_t FileReader::readLine(std::string& line) {
         // No newline found, go to end of file
         fo.position = fo.fileSize;
     }
-    
+
     size_t lineLength = fo.position - startPos;
-    
+
     // If newline found, skip it
     if (fo.position < fo.fileSize && fo.mappedAddress[fo.position] == '\n') {
         fo.position++;
     }
-    
+
     // Handle Windows-style line breaks \r\n
     if (lineLength > 0 && fo.mappedAddress[startPos + lineLength - 1] == '\r') {
         lineLength--;
     }
-    
+
     // Build string
     if (lineLength > 0) {
         line.append(reinterpret_cast<char*>(fo.mappedAddress + startPos), lineLength);
     }
-    
+
     if (fo.position >= fo.fileSize) {
         eofFlag = true;
     }
-    
+
     return lineLength;
 }
 
@@ -395,12 +395,12 @@ size_t FileWriter::getMappedSize(size_t fileSize) {
 
 size_t FileWriter::calculateNextMapSize() {
     const size_t INITIAL_SIZE = 64 * 1024 * 1024; // 64MB initial size
-    
+
     if (initialMapSize == 0) {
         initialMapSize = INITIAL_SIZE;
         return INITIAL_SIZE;
     }
-    
+
     return mapSize * 2;
 }
 
@@ -443,10 +443,10 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
             return 0;
         }
     }
-    
+
     const uint8_t* src = (const uint8_t*)pBuffer;
     uint8_t* dst = fo.mappedAddress + fo.fileSize;
-    
+
     // Conservative SIMD optimization: only for large data (>= 1MB)
     // Use aligned SIMD copy for better performance on large writes
     if (writeLen >= 1024 * 1024) {
@@ -463,10 +463,10 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
 #endif
             }
         }
-        
+
         // SIMD copy with boundary handling
         size_t i = 0;
-        
+
         // Handle leading unaligned bytes (<16 bytes)
         size_t misalignment = (16 - (uintptr_t)(dst + i)) & 15;
         if (misalignment > 0 && i < writeLen) {
@@ -474,7 +474,7 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
             memcpy(dst + i, src + i, prefix);
             i += prefix;
         }
-        
+
         // Main SIMD copy loop (16-byte aligned)
         if (i + 16 <= writeLen) {
 #if defined(__x86_64__) && defined(__AVX2__)
@@ -491,7 +491,7 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
             }
 #endif
         }
-        
+
         // Handle trailing bytes
         if (i < writeLen) {
             memcpy(dst + i, src + i, writeLen - i);
@@ -569,7 +569,7 @@ size_t PipeReader::readIO(void* pBuffer, size_t readSize) {
 
     size_t totalRead = 0;
     uint8_t* buffer = static_cast<uint8_t*>(pBuffer);
-    
+
     // Loop read until reaching requested size or no more data
     while (totalRead < readSize) {
         ssize_t bytesRead = read(STDIN_FILENO, buffer + totalRead, readSize - totalRead);
@@ -585,16 +585,16 @@ size_t PipeReader::readIO(void* pBuffer, size_t readSize) {
             eofFlag = true;
             break; // EOF, write end closed
         }
-        
+
         totalRead += bytesRead;
     }
-    
+
     return totalRead;
 }
 
 size_t PipeReader::readLine(std::string& line) {
     line.clear();
-    
+
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
         bufferSize = 8192;  // 8KB buffer
@@ -602,9 +602,9 @@ size_t PipeReader::readLine(std::string& line) {
         bufferPos = 0;
         bytesRead = 0;
     }
-    
+
     size_t totalRead = 0;
-    
+
     while (true) {
         // If buffer data has been processed, read new data
         if (bufferPos >= static_cast<size_t>(bytesRead)) {
@@ -624,27 +624,27 @@ size_t PipeReader::readLine(std::string& line) {
             }
             bufferPos = 0;
         }
-        
+
         // Process characters in buffer
         while (bufferPos < static_cast<size_t>(bytesRead)) {
             char c = lineBuffer[bufferPos++];
             totalRead++;
-            
+
             // If newline encountered, stop reading
             if (c == '\n') {
                 return totalRead;
             }
-            
+
             // If carriage return encountered, skip it (Windows-style line breaks)
             if (c == '\r') {
                 continue;
             }
-            
+
             // Add character to line
             line += c;
         }
     }
-    
+
     return totalRead;
 }
 
@@ -696,7 +696,7 @@ void GzFileReader::closeIO() {
         bgzf_close(fpGz);
         fpGz = nullptr;
     }
-    
+
     // Clean up buffer
     if (lineBuffer != nullptr) {
         delete[] lineBuffer;
@@ -706,11 +706,11 @@ void GzFileReader::closeIO() {
 
 size_t GzFileReader::readLine(std::string& line) {
     line.clear();
-    
+
     if (fpGz == nullptr) {
         return 0;
     }
-    
+
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
         bufferSize = 8192;  // 8KB buffer
@@ -718,9 +718,9 @@ size_t GzFileReader::readLine(std::string& line) {
         bufferPos = 0;
         bytesRead = 0;
     }
-    
+
     size_t totalRead = 0;
-    
+
     while (true) {
         // If buffer data has been processed, read new data
         if (bufferPos >= static_cast<size_t>(bytesRead)) {
@@ -734,27 +734,27 @@ size_t GzFileReader::readLine(std::string& line) {
             }
             bufferPos = 0;
         }
-        
+
         // Process characters in buffer
         while (bufferPos < static_cast<size_t>(bytesRead)) {
             char c = lineBuffer[bufferPos++];
             totalRead++;
-            
+
             // If newline encountered, stop reading
             if (c == '\n') {
                 return totalRead;
             }
-            
+
             // If carriage return encountered, skip it (Windows-style line breaks)
             if (c == '\r') {
                 continue;
             }
-            
+
             // Add character to line
             line += c;
         }
     }
-    
+
     return totalRead;
 }
 
@@ -828,11 +828,11 @@ size_t FastGzFileReader::readIO(void* pBuffer, size_t readSize) {
     uint64_t isalRes = ISAL_DECOMP_OK;
     isalState.next_out = static_cast<uint8_t*>(pBuffer);
     isalState.avail_out = readSize;
-    
+
     for (;;) {
         if (unzippedLen >= readSize || isalState.next_in == nullptr) {
             break;
-        }  
+        }
 
         for (;;) {
             uint8_t* isalIn = isalState.next_in;
@@ -886,7 +886,7 @@ void FastGzFileReader::closeIO() {
     fileReader.closeIO();
     MemoryUtil::safeFree(isalExtraBuffer);
     MemoryUtil::safeFree(isalInputBuffer);
-    
+
     // Clean up buffer
     if (lineBuffer != nullptr) {
         delete[] lineBuffer;
@@ -896,7 +896,7 @@ void FastGzFileReader::closeIO() {
 
 size_t FastGzFileReader::readLine(std::string& line) {
     line.clear();
-    
+
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
         bufferSize = 8192;  // 8KB buffer
@@ -904,9 +904,9 @@ size_t FastGzFileReader::readLine(std::string& line) {
         bufferPos = 0;
         bytesRead = 0;
     }
-    
+
     size_t totalRead = 0;
-    
+
     while (true) {
         // If buffer data has been processed, read new data
         if (bufferPos >= bytesRead) {
@@ -917,27 +917,27 @@ size_t FastGzFileReader::readLine(std::string& line) {
             }
             bufferPos = 0;
         }
-        
+
         // Process characters in buffer
         while (bufferPos < bytesRead) {
             char c = lineBuffer[bufferPos++];
             totalRead++;
-            
+
             // If newline encountered, stop reading
             if (c == '\n') {
                 return totalRead;
             }
-            
+
             // If carriage return encountered, skip it (Windows-style line breaks)
             if (c == '\r') {
                 continue;
             }
-            
+
             // Add character to line
             line += c;
         }
     }
-    
+
     return totalRead;
 }
 
@@ -1039,7 +1039,7 @@ void GzPipeReader::closeIO() {
         bgzf_close(fpGz);
         fpGz = nullptr;
     }
-    
+
     // Clean up buffer
     if (lineBuffer != nullptr) {
         delete[] lineBuffer;
@@ -1049,11 +1049,11 @@ void GzPipeReader::closeIO() {
 
 size_t GzPipeReader::readLine(std::string& line) {
     line.clear();
-    
+
     if (fpGz == nullptr) {
         return 0;
     }
-    
+
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
         bufferSize = 8192;  // 8KB buffer
@@ -1061,9 +1061,9 @@ size_t GzPipeReader::readLine(std::string& line) {
         bufferPos = 0;
         bytesRead = 0;
     }
-    
+
     size_t totalRead = 0;
-    
+
     while (true) {
         // If buffer data has been processed, read new data
         if (bufferPos >= static_cast<size_t>(bytesRead)) {
@@ -1077,27 +1077,27 @@ size_t GzPipeReader::readLine(std::string& line) {
             }
             bufferPos = 0;
         }
-        
+
         // Process characters in buffer
         while (bufferPos < static_cast<size_t>(bytesRead)) {
             char c = lineBuffer[bufferPos++];
             totalRead++;
-            
+
             // If newline encountered, stop reading
             if (c == '\n') {
                 return totalRead;
             }
-            
+
             // If carriage return encountered, skip it (Windows-style line breaks)
             if (c == '\r') {
                 continue;
             }
-            
+
             // Add character to line
             line += c;
         }
     }
-    
+
     return totalRead;
 }
 
@@ -1134,11 +1134,11 @@ void GzPipeWriter::closeIO() {
    if (fpGz != nullptr) {
         bgzf_close(fpGz);
         fpGz = nullptr;
-    } 
+    }
 }
 
-FastGzPipeReader::FastGzPipeReader() : stateInitialized(false), inputBuffer(nullptr), 
-    outputBuffer(nullptr), remainingBuffer(nullptr), inputBufferSize(0), 
+FastGzPipeReader::FastGzPipeReader() : stateInitialized(false), inputBuffer(nullptr),
+    outputBuffer(nullptr), remainingBuffer(nullptr), inputBufferSize(0),
     outputBufferSize(0), remainingBufferSize(0), remainingSize(0), streamEnded(false) {
 }
 
@@ -1161,11 +1161,11 @@ int FastGzPipeReader::openIO() {
     inputBufferSize = 64 * 1024; // 64KB input buffer
     outputBufferSize = 128 * 1024; // 128KB output buffer
     remainingBufferSize = outputBufferSize;
-    
+
     inputBuffer = MemoryUtil::safeAlloc<uint8_t>(inputBufferSize);
     outputBuffer = MemoryUtil::safeAlloc<uint8_t>(outputBufferSize);
     remainingBuffer = MemoryUtil::safeAlloc<uint8_t>(remainingBufferSize);
-    
+
     if (inputBuffer == nullptr || outputBuffer == nullptr || remainingBuffer == nullptr) {
         LOG_ERROR("Failed to allocate buffers for FastPileGzReader");
         closeIO();
@@ -1174,7 +1174,7 @@ int FastGzPipeReader::openIO() {
 
     remainingSize = 0;
     streamEnded = false;
-    
+
     return 0;
 }
 
@@ -1191,9 +1191,9 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
     // Directly use ISAL state, referencing FastGzFileReader pattern
     state.next_out = static_cast<uint8_t*>(pBuffer);
     state.avail_out = readSize;
-    
+
     size_t totalCopied = 0;
-    
+
     while (totalCopied < readSize) {
         // If no more input data available, read from pipe
         if (state.avail_in == 0) {
@@ -1203,10 +1203,10 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
                 streamEnded = true;
                 break;
             }
-            
+
             state.next_in = inputBuffer;
             state.avail_in = bytesRead;
-            
+
             // If first read or new gzip stream, need to read gzip header
             if (state.avail_in > 0) {
                 int ret = isal_read_gzip_header(&state, &gzipHeader);
@@ -1221,14 +1221,14 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
                 }
             }
         }
-        
+
         // Perform decompression
         uint32_t ret = isal_inflate(&state);
-        
+
         // Calculate amount of data decompressed this time
         size_t decompressedSize = readSize - state.avail_out;
         totalCopied += decompressedSize;
-        
+
         if (ret == ISAL_DECOMP_OK) {
             // Decompression complete, continue to next round
             continue;
@@ -1237,7 +1237,7 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
             isal_inflate_reset(&state);
             state.crc_flag = ISAL_GZIP_NO_HDR_VER;
             isal_gzip_header_init(&gzipHeader);
-            
+
             // If still have input data, try to parse next gzip header
             if (state.avail_in > 0) {
                 ret = isal_read_gzip_header(&state, &gzipHeader);
@@ -1255,19 +1255,19 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
             LOG_ERROR("Decompression failed with error: %d", ret);
             return totalCopied;
         }
-        
+
         // If requested size is satisfied, exit
         if (totalCopied >= readSize) {
             break;
         }
     }
-    
+
     return totalCopied;
 }
 
 void FastGzPipeReader::closeIO() {
     pipeReader.closeIO();
-    
+
     // Clean up buffers
     if (inputBuffer) {
         MemoryUtil::safeFree(inputBuffer);
@@ -1281,7 +1281,7 @@ void FastGzPipeReader::closeIO() {
         MemoryUtil::safeFree(remainingBuffer);
         remainingBuffer = nullptr;
     }
-    
+
     // Reset state
     remainingSize = 0;
     streamEnded = false;
@@ -1293,14 +1293,14 @@ void FastGzPipeReader::closeIO() {
 
 size_t FastGzPipeReader::readLine(std::string& line) {
     line.clear();
-    
+
     // Use larger buffer for batch reading to improve efficiency
     const size_t BUFFER_SIZE = 8192;  // 8KB buffer
     char buffer[BUFFER_SIZE];
     size_t totalRead = 0;
     size_t bufferPos = 0;
     size_t bytesRead = 0;
-    
+
     while (true) {
         // If buffer data has been processed, read new data
         if (bufferPos >= bytesRead) {
@@ -1312,26 +1312,26 @@ size_t FastGzPipeReader::readLine(std::string& line) {
             }
             bufferPos = 0;
         }
-        
+
         // Process characters in buffer
         while (bufferPos < bytesRead) {
             char c = buffer[bufferPos++];
             totalRead++;
-            
+
             // If newline encountered, stop reading
             if (c == '\n') {
                 return totalRead;
             }
-            
+
             // If carriage return encountered, skip it (Windows-style line breaks)
             if (c == '\r') {
                 continue;
             }
-            
+
             // Add character to line
             line += c;
         }
     }
-    
+
     return totalRead;
 }

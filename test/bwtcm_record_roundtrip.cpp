@@ -38,10 +38,6 @@ void registerCoderCallbacks()
             return p;
         });
     coder_ns::register_free_func([](void*& ptr) { free(ptr); ptr = NULL; });
-    coder_ns::register_exit_proc([](int code, const char* msg) {
-        fprintf(stderr, "coder 退出: code=%d, %s\n", code, msg != NULL ? msg : "");
-        exit(code);
-    });
     coder_ns::resister_logger_proc([](int, const char* msg) {
         fprintf(stderr, "coder 日志: %s\n", msg != NULL ? msg : "");
     });

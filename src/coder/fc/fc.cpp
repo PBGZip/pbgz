@@ -147,7 +147,7 @@ unsigned char * fctransform (const unsigned char * RESTRICT input, unsigned char
         for (int t = 5 * 32; t < 6 * 32; ++t) { tids[t] -= (tid1 > tids[t] ? (signed char)-1 : (signed char)0) + (tid2 > tids[t] ? (signed char)-1 : (signed char)0); }
         for (int t = 6 * 32; t < 7 * 32; ++t) { tids[t] -= (tid1 > tids[t] ? (signed char)-1 : (signed char)0) + (tid2 > tids[t] ? (signed char)-1 : (signed char)0); }
         for (int t = 7 * 32; t < 8 * 32; ++t) { tids[t] -= (tid1 > tids[t] ? (signed char)-1 : (signed char)0) + (tid2 > tids[t] ? (signed char)-1 : (signed char)0); }
-        
+
         tids[currentChar1] = -127; tids[currentChar2] = -128;
     }
 
@@ -469,7 +469,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         {
             return FC_FAILED_ZIP;
         }
-        
+
         // Calculate how many times the current character repeats, recorded as runSize, and input advances to the next non-repeating character
         int currentChar = *input, runSize;
         {
@@ -526,7 +526,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
         // contextRank4 is the history record of the lowest 2 bits of tid (i.e., save the last 4 records at most), when tid > 3 take 3, otherwise take the entire tid
         // contextRun is the history record of whether runSize is less than 3 (i.e., save the last 4 records at most)
 
-        short *            RESTRICT statePredictor  = & model->tid_t.state_model[state]; // 
+        short *            RESTRICT statePredictor  = & model->tid_t.state_model[state]; //
         short *            RESTRICT charPredictor   = & model->tid_t.char_model[currentChar];
         short *            RESTRICT staticPredictor = & model->tid_t.static_model;
         pMixer * RESTRICT mixer           = & model->tid_mixer[currentChar];
@@ -546,7 +546,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
 
                 coder.EncodeBit0(mixer->MixupAndUpdateBit0(probability0, probability1, probability2, FC_RANK_TM_LR0, FC_RANK_TM_LR1, FC_RANK_TM_LR2, FC_RANK_TM_TH0, FC_RANK_TM_AR0));
             }
-            else 
+            else
             {
                 { // @@@ --- step : current tid needs encoding, first encode 1, which also represents a condition, this encoding is completely for decompression restoration
                     int probability0 = *charPredictor, probability1 = *statePredictor, probability2 = *staticPredictor;

@@ -65,7 +65,9 @@ protected:
         PbgzManager::getInstance().printHeadInfo(parameter);
     }
 
-    virtual int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType) override;
+    virtual void fileDecisionProc(RoughIOBlock* firstBlock) override {
+        PbgzManager::getInstance().printFileType(firstBlock->getBlockType());
+    }
 
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
         return actuator;

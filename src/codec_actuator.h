@@ -44,10 +44,6 @@ public:
         outBlockPtr = nullptr;
     }
 
-    virtual bool getNotifyFlag() {
-        return true;
-    }
-
 #if defined(TEST_MODE) || defined(GTEST_ENABLED)
     // Test-only constructor: creates a dummy engine wrapper
     static PbgzEngine* createTestEngine(const PbgzParameter& para);
@@ -92,5 +88,3 @@ protected:
     Json::Value meta;
     PbgzEngine* pbgzEngine;
 };
-
-

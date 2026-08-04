@@ -46,7 +46,7 @@
 enum class IOWhence {
     IO_WHENCE_SET = 0,
     IO_WHENCE_CUR = 1,
-    IO_WHENCE_END = 2, 
+    IO_WHENCE_END = 2,
 };
 
 class IOReader {
@@ -64,7 +64,7 @@ public:
 
     virtual size_t readLine(std::string& line) = 0;
 
-    virtual bool isEOF() { return eofFlag; } 
+    virtual bool isEOF() { return eofFlag; }
 
 protected:
     bool eofFlag;
@@ -113,7 +113,7 @@ public:
 
     virtual ~FileOperator() {
         closeIO();
-    } 
+    }
 
     int32_t seekIO(size_t seekOffset, IOWhence whence);
 
@@ -186,7 +186,7 @@ public:
     int32_t seekToEnd() {
         return fo.seekIO(fo.fileSize, IOWhence::IO_WHENCE_SET);
     }
-  
+
     int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen);
 
     void flushIO() {
@@ -222,7 +222,7 @@ public:
 
     size_t readIO(void* pBuffer, size_t readSize);
     size_t readLine(std::string& line) override;
-    
+
     ~PipeReader();
 
 private:
@@ -270,7 +270,7 @@ private:
     std::string gzFileName;
     BGZF* fpGz;
     uint32_t parallel;
-    
+
     // Buffer state management
     char* lineBuffer;      // Buffer pointer
     size_t bufferSize;     // Buffer size
@@ -358,14 +358,14 @@ public:
     size_t readLine(std::string& line) override;
 
     void closeIO() override;
-    
+
     ~GzPipeReader() {
         closeIO();
     }
 private:
     BGZF* fpGz;
     uint32_t parallel;
-    
+
     // Buffer state management
     char* lineBuffer;      // Buffer pointer
     size_t bufferSize;     // Buffer size
@@ -382,7 +382,7 @@ public:
     size_t writeIO(const void* pBuffer, size_t writeLen) override;
 
     void closeIO() override;
-    
+
     ~GzPipeWriter() {
         closeIO();
     }
@@ -405,14 +405,14 @@ public:
     }
 private:
     PipeReader pipeReader;
-    
+
     // ISAL decompression state
     struct inflate_state state;
     bool stateInitialized;
-    
+
     // ISAL gzip header
     struct isal_gzip_header gzipHeader;
-    
+
     // Buffers
     uint8_t* inputBuffer;
     uint8_t* outputBuffer;
@@ -421,7 +421,7 @@ private:
     size_t outputBufferSize;
     size_t remainingBufferSize;
     size_t remainingSize;
-    
+
     // Status flags
     bool streamEnded;
 };

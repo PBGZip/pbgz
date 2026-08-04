@@ -61,7 +61,7 @@ public:
      * 且数据块 meta 要改为记录这个序号；块 meta 里的偏移只作 seek 手段与校验，
      * 不承担索引职责。
      */
-    virtual bool claim(RoughIOBlock* blockPtr, int32_t packageIndex) = 0;
+    virtual bool claim(RoughIOBlock* blockPtr, int64_t packageIndex) = 0;
 };
 
 /* 辅助块载荷按引用共享：解码中的数据块必须能让它引用的那份数据活到自己解完。 */

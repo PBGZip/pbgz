@@ -119,7 +119,7 @@ std::vector<uint8_t> extractRealQuality(const std::string& samPath, uint32_t tar
 /* Build a block of synthetic SAM alignment lines (11 mandatory fields). */
 void buildSamBlock(RoughIOBlock* block, uint32_t numLines, uint32_t readLen)
 {
-    std::vector<uint32_t>& npos = block->getNpos();
+    std::vector<size_t>& npos = block->getNpos();
     uint8_t* buffer = block->getBuffer();
     uint32_t offset = 0;
     std::mt19937 rng(1234);
@@ -152,7 +152,7 @@ void buildSamBlock(RoughIOBlock* block, uint32_t numLines, uint32_t readLen)
 /* Build a block of synthetic FASTQ records (4 lines each). */
 void buildFastqBlock(RoughIOBlock* block, uint32_t numRecords, uint32_t readLen)
 {
-    std::vector<uint32_t>& npos = block->getNpos();
+    std::vector<size_t>& npos = block->getNpos();
     uint8_t* buffer = block->getBuffer();
     uint32_t offset = 0;
     std::mt19937 rng(5678);

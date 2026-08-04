@@ -144,7 +144,6 @@ TEST_F(IndexActuatorTest, Constructor_ValidPointers_Success) {
     EXPECT_EQ(nullptr, actuator.chrDecoder);
     EXPECT_EQ(nullptr, actuator.posDecoder);
     EXPECT_EQ(0, actuator.headEndLine);
-    EXPECT_FALSE(actuator.notifyFlag);
 }
 
 TEST_F(IndexActuatorTest, Constructor_NullInBlock_Created) {
@@ -254,12 +253,7 @@ TEST_F(IndexActuatorTest, Initial_ValidMetaData_CheckSuccess) {
 
 
     IndexActuator actuator(pInBlock, pOutBlock);
-    // Simulate having valid meta data structure
-    actuator.notifyFlag = true; // Would be set by successful initial
-
-    // In a real scenario this would pass with valid meta data
-    // For unit test, we verify flag can be set
-    EXPECT_TRUE(actuator.notifyFlag);
+    EXPECT_EQ(pInBlock, actuator.inBlockPtr);
 }
 
 TEST_F(IndexActuatorTest, Initial_SamIndexSingletonCanBeAccessed) {
@@ -304,25 +298,6 @@ TEST_F(IndexActuatorTest, Initial_MultiBlockHandling_DifferentBlockIds) {
         // Each actuator should have its own state
         EXPECT_EQ(blockId, pInBlock->getBlockId());
     }
-}
-
-TEST_F(IndexActuatorTest, GetNotifyFlag_FalseAfterConstruction) {
-    IndexActuator actuator(pInBlock, pOutBlock);
-    EXPECT_FALSE(actuator.getNotifyFlag());
-}
-
-TEST_F(IndexActuatorTest, GetNotifyFlag_TrueAfterProcessing) {
-    createValidSamFile();
-    IndexActuator actuator(pInBlock, pOutBlock);
-
-    Json::Value meta = createBasicMeta();
-    pInBlock->setMetaLen(0);
-    pInBlock->setBlockId(0);
-
-    // Simulate setting notify flag after some processing
-    actuator.notifyFlag = true;
-
-    EXPECT_TRUE(actuator.getNotifyFlag());
 }
 
 TEST_F(IndexActuatorTest, Process_NullOutBlock_ReturnsError) {
@@ -830,4 +805,3 @@ TEST_F(IndexActuatorTest, IndexSplitting_DifferentChromosomesIndependentSplittin
     // Clean up
     SamIndex::getInstance().clear();
 }
-

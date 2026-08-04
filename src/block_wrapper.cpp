@@ -271,22 +271,31 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
             memcpy(cache, buffer + totalLen - remainLen, remainLen);
             cacheLen = cacheLen + remainLen;
             totalLen -= remainLen;
-        } else {
-            // if not end with \n, add one
-            uint32_t lastNPos  = blockPtr->getNpos()[lineNum - 1];
-            if (lastNPos < totalLen - 1) {
-                blockPtr->getBuffer()[totalLen] = '\n';
-                blockPtr->getNpos().push_back(totalLen);
-                totalLen += 1;
-                lineNum += 1;
-            }
-        }
 
-        blockPtr->setDataLen(static_cast<int64_t>(totalLen));
-        if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) {
-            for (int t = 0; t < lineNum - ((lineNum >> 2) << 2); ++t)  {
-                blockPtr->getNpos().pop_back(); // Remove last newline position
+            blockPtr->setDataLen(static_cast<int64_t>(totalLen));
+            if (BlockUtil::isFastqBlock(blockPtr->getBlockType())) {
+                for (int t = 0; t < lineNum - ((lineNum >> 2) << 2); ++t)  {
+                    blockPtr->getNpos().pop_back(); // Remove last newline position
+                }
             }
+        } else {
+            /*
+             * 末尾块（totalLen < blockSize，EOF）：结构化编码要求块恰好落在记录
+             * 边界上——SAM 以 \n 收尾，FASTQ 还需行数为 4 的倍数（完整记录）。
+             * 不满足即数据不合规（缺结尾换行、记录被截断），绝不能篡改数据去凑
+             * 格式（旧实现会补一个 \n，还原后多出一字节），而是把本块降级为
+             * BINARY 通用压缩：压缩率让位于忠实还原。
+             */
+            bool clean = false;
+            if (lineNum > 0 && blockPtr->getNpos()[lineNum - 1] == (size_t)(totalLen - 1)) {
+                clean = BlockUtil::isSAMBlock(blockPtr->getBlockType()) || (lineNum % 4 == 0);
+            }
+            if (!clean) {
+                LOG_INFO("Tail block not aligned to record boundary, fallback to binary codec (blockId=%ld).",
+                         (long)blockPtr->getBlockId());
+                blockPtr->setBlockType(BINARY);
+            }
+            blockPtr->setDataLen(static_cast<int64_t>(totalLen));
         }
     }
 
@@ -472,8 +481,8 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
 
     PbgzDataBlock dataBlock;    
     dataBlock.setBlockData(blockPtr->getBuffer(), blockPtr->getTotalDataLen());
-    dataBlock.setMetaData("datalen", blockPtr->getDataLen());
-    dataBlock.setMetaData("metalen", blockPtr->getMetaLen());
+    dataBlock.setMetaData("datalen", (Json::Value::UInt64)blockPtr->getDataLen());
+    dataBlock.setMetaData("metalen", (Json::Value::UInt64)blockPtr->getMetaLen());
     dataBlock.setMetaData("blockid", blockPtr->getBlockId());
     if (blockPtr->getBlockType() == FASTQ_GEN2) {
         dataBlock.setMetaData("blocktype", "fastq_gen2");

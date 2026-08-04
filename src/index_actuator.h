@@ -42,8 +42,6 @@ public:
 
     virtual int32_t process() override;
 
-    virtual bool getNotifyFlag() override;
-
 private:
     int32_t parseHeader(Json::Value& meta);
 
@@ -54,7 +52,6 @@ private:
     int32_t decodeAndBuildIndex(uint32_t lineNum);
 
     int64_t headEndLine;
-    bool notifyFlag;
 
     // Decoder objects
     std::shared_ptr<coder_io> flagIo, chrIo, posIo;

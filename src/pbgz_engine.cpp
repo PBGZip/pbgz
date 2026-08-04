@@ -38,7 +38,6 @@ PbgzEngine::PbgzEngine(const PbgzParameter&  para) {
     parameter = para;
     ioReader = nullptr;
     ioWriter = nullptr;
-    syncFlag = false;
     blockId2Write = 0;
     blockCount = 0;
 
@@ -54,7 +53,7 @@ PbgzEngine::~PbgzEngine() {
             th.join();
         }
     }
-    
+
     if (writeThread.joinable()) {
         writeThread.join();
     }
@@ -99,7 +98,6 @@ int32_t PbgzEngine::init() {
     // Register allocation functions required by coder
     coder_ns::register_alloc_proc(MemoryUtil::safeAlloc<uint8_t>);
     coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
-    coder_ns::register_exit_proc(pbgzExitProc);
     coder_ns::register_free_func(MemoryUtil::safeFree<void>);
     coder_ns::resister_logger_proc(coderLog);
     coder_ns::initFcCoder();
@@ -149,7 +147,7 @@ int32_t PbgzEngine::init() {
         } else {
             ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
             LOG_INFO("Create FileReader.");
-            
+
         }
     }
     if (ioReader == nullptr) {
@@ -206,7 +204,7 @@ int32_t PbgzEngine::start() {
         return ret;
     }
 
-    ret = startWorkPreProc(); 
+    ret = startWorkPreProc();
     if (ret != 0) {
         LOG_ERROR("call startWorkPreProc failed, ret = %d", ret);
         return ret;
@@ -291,14 +289,35 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     }
     blockPtr->reset();
 
+    readBlockPreProc(blockReader);
+
     int64_t ret = blockReader->readBlock(blockPtr, fileType);
     if (ret <= 0) {
         freeInputPool->push(blockPtr);
         return ret;
     }
-    
-    if (blockPtr->getBlockId() == 0 && blockPtr->getTotalDataLen() > 0){ 
+
+    /*
+     * 辅助块按定义就不属于数据流，对所有引擎都一样，所以规则只能写在这里。
+     * 没人认领不是错误：那是旧版本读新格式时需要的前向兼容行为。
+     */
+    if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
+        PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
+        (void)offerAuxBlock(blockPtr, pbgzReader ? pbgzReader->getCurrentFileIndex() : 0);
+        freeInputPool->push(blockPtr);
+        return -2;
+    }
+
+    const BlockIntake intake = intakeBlock(blockReader, blockPtr);
+    if (intake != BlockIntake::DISPATCH) {
+        freeInputPool->push(blockPtr);
+        return (intake == BlockIntake::SKIP) ? -2 : -1;
+    }
+
+    if (blockPtr->getBlockId() == 0 && blockPtr->getTotalDataLen() > 0){
         fileType = blockPtr->getBlockType();
+        /* 必须在 push 之前：入队即意味着某个工作线程可能立刻开始处理这个块。 */
+        fileDecisionProc(blockPtr);
     }
 
     updateInputStatics(blockPtr);
@@ -393,7 +412,7 @@ int32_t PbgzEngine::startWriteTask() {
                     } else {
                         break;
                     }
-                } 
+                }
             }
         }
         if (blockWriter->getWriteError() != 0) {
@@ -461,30 +480,12 @@ int64_t PbgzEngine::emitSyncAuxBlock(RoughIOBlock* block) {
 int32_t PbgzEngine::startWorkTask() {
     auto coderTask = [this](int32_t id) {
         pthread_setname_np(std::string("codertask_").append(std::to_string(id)).c_str());
-        if (id > 0 ) {
-            std::unique_lock<std::mutex> lock(mutex);
-            conditionVar.wait(lock);
-        } else if (parameter.verbose) {
-            /*
-             * 只有 id == 0 的线程会不经等待地跳过上面的 wait，直接进入
-             * while 循环处理第一个数据块；此时其余 id > 0 的工作线程都还
-             * 阻塞在 conditionVar 上。也就是说本分支在整次运行里天然
-             * 只会被执行一次，无须再额外加去重标志。
-             * 这里输出一行提示，让 -v 的使用者看得见"第一块串行、编码器
-             * 决策尚未拍板"这个短暂但关键的阶段——它是首块试压结果决定
-             * 全文件后续 coder 选择、进而保证压缩产物可复现的窗口期。
-             */
-            fprintf(stderr, "[流水线] 串行压缩开始，编码器决策未完成，其余线程等待中\n");
-        }
 
         LOG_INFO("Coder task (%d) begin to running!", id);
 
         while (true) {
             RoughIOBlock* inBlockPtr = inputDataPool->get();
             if (inBlockPtr == nullptr) {  // Got null pointer, indicating end marker
-                if (isNeedNotify(true)) {
-                    conditionVar.notify_all();
-                }
                 break;
             }
             RoughIOBlock* outBlockPtr = freeOutputPool->get();
@@ -513,7 +514,25 @@ int32_t PbgzEngine::startWorkTask() {
                 continue;
             }
 
-            int32_t ret = actuatorProc(pActuator, inBlockPtr, outBlockPtr);
+            /*
+             * coder 层的 check_exit/coder_exit 现在抛 coder_exception（以前是在库里
+             * 直接 _Exit 杀进程，不留日志）。这里是它的最终处理地：接住并转成
+             * 与其它失败完全一致的返回值，汇入 taskFailed。catch(...) 也一并拦住：
+             * 工作线程里漏出异常会直接 std::terminate，比丢块更难查。
+             */
+            int32_t ret = 0;
+            try {
+                ret = actuatorProc(pActuator, inBlockPtr, outBlockPtr);
+            } catch (const coder_exception& e) {
+                LOG_ERROR("Coder error on block(%ld): [%d] %s", inBlockPtr->getBlockId(), e.getCode(), e.what());
+                ret = e.getCode() != 0 ? e.getCode() : -1;
+            } catch (const std::exception& e) {
+                LOG_ERROR("Unexpected exception on block(%ld): %s", inBlockPtr->getBlockId(), e.what());
+                ret = -1;
+            } catch (...) {
+                LOG_ERROR("Unknown exception on block(%ld)", inBlockPtr->getBlockId());
+                ret = -1;
+            }
             if (ret != 0) {
                 LOG_ERROR("Coder task failed for block(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
@@ -526,27 +545,11 @@ int32_t PbgzEngine::startWorkTask() {
                 MemoryUtil::safeDeleteClass(pActuator);
                 continue;
             }
-            
+
             outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
-            if (isNeedNotify(pActuator->getNotifyFlag())) {
-                /*
-                 * 走到这里意味着：首块已经完整跑完（含 CodecSelector 的
-                 * 试压/挑选），编码器决策终于"拍板"，可以叫醒其余工作线程
-                 * 进入并行阶段。isNeedNotify 内部由 syncFlag 自锁——首次
-                 * 传入 true 才返回 true，之后永久返回 false——所以这段
-                 * 分支在整次运行里天然只会走一次，无须外层再加一层去重。
-                 * 打印必须是单次 fprintf 保证原子性，因为此刻其他线程即将
-                 * 被唤醒并可能立刻向 stderr 写日志。
-                 */
-                if (parameter.verbose) {
-                    fprintf(stderr, "[流水线] 拍板完成，并行压缩启动（%u 线程）\n", parameter.threadNum);
-                }
-                conditionVar.notify_all();
-            }
-    
             MemoryUtil::safeDeleteClass(pActuator);
-            
+
             freeInputPool->push(inBlockPtr);
             outputDataPool->push(outBlockPtr);
         }
@@ -557,15 +560,6 @@ int32_t PbgzEngine::startWorkTask() {
     return 0;
 }
 
-bool PbgzEngine::isNeedNotify(bool flag) {
-    if (flag && !syncFlag) {
-        syncFlag = flag;
-        return true;
-    }
-
-    return false;
-}
-
 int32_t PbgzEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {
     return actuator->process();
-} 
+}

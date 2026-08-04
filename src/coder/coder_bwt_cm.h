@@ -94,6 +94,8 @@ private:
                 return;
             for (int32_t i = 0; i < 4; ++i)
             {
+                /* 见 encode_bit 的边界说明：写满即 latch，剩余字节放弃，由出口统一上报。 */
+                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_BUF_FULL; break; }
                 *(io->data + io->data_len++) = (low >> 24);
                 low <<= 8;
             }
@@ -113,6 +115,13 @@ private:
             /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
+                /*
+                 * 边界检查沉在字节泵里，fqz/arith_dynamic 同款（RC_ShiftLowCheck）：
+                 * 只在真正吐字节的归一化分支查一次，单次寄存器比较，符号层零开销。
+                 * 写满则 latch io->err = IO_BUF_FULL 并放弃本次写出；此后编码结果已
+                 * 无意义，由 encode_flush 出口统一查 err 报错，热循环不做逐符号判断。
+                 */
+                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_BUF_FULL; return; }
                 *(io->data + io->data_len++) = (low >> 24);
                 low <<= 8;
                 high = (high << 8) + 255;
@@ -133,6 +142,12 @@ private:
             /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
+                /*
+                 * 读端耗尽置 IO_READ_EMPTY 并返回：原来会越过码流末尾读到相邻字段的
+                 * 数据，产出错误却"成功"的内容。latch 后后续 decode_bit 空转，
+                 * 出口 decode_line 查 err 统一报错（同 RC_Decode 的 in_end 检查）。
+                 */
+                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_READ_EMPTY; return bit; }
                 low <<= 8;
                 high = (high << 8) + 255;
                 code = (code << 8) + *(io->data + io->data_len++);
@@ -144,7 +159,10 @@ private:
         {
             int32_t i;
             for (i = 0; i < 4; ++i)
+            {
+                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_READ_EMPTY; return; }
                 code = (code << 8) + *(io->data + io->data_len++);
+            }
         }
 
     private:
@@ -297,13 +315,25 @@ public:
         uint8_t ch;
         int32_t len = 0, n;
 
+        /*
+         * 错误约定（全 coder 统一）：返回值 < 0 是错误（码流损坏/缓冲不足），
+         * == 0 是干净 EOF，> 0 是实际解码长度。decode_one_block 的负值原样上抛，
+         * 不能与 EOF 混为一谈——否则损坏流会被当成正常结尾，产出截断却"成功"的文件。
+         */
+        if (io->err != coder_io::IO_OK)
+            return coder_ns::CODER_ERR_STREAM_END;
+
         if (io->m != coder_io::MDEC)
         {
             decode_init();
+            if (io->err != coder_io::IO_OK)
+                return coder_ns::CODER_ERR_STREAM_END;
             /* decode_one_block 返回负值代表码流损坏或内存不足，此时 coder_buff 可能
-               仍是空指针，必须与正常的 EOF（返回 0）一样立即中止，否则下面按 bsize
-               遍历 coder_buff 会直接段错误。 */
-            if (decode_one_block() <= 0)
+               仍是空指针，必须与正常的 EOF（返回 0）区分并原样上抛。 */
+            int32_t ret = decode_one_block();
+            if (ret < 0)
+                return ret;
+            if (ret == 0)
                 return 0;
             io->m = coder_io::MDEC;
         }
@@ -314,8 +344,11 @@ public:
             {
                 if (curr_out_offset == bsize)
                 { /* Current block decompression completed, need to decompress again */
-                    if (decode_one_block() <= 0)
-                        return len;
+                    int32_t ret = decode_one_block();
+                    if (ret < 0)
+                        return ret;
+                    if (ret == 0)
+                        goto stream_end;
                 }
                 for (n = curr_out_offset; n < bsize; n++) {
                     ch = coder_buff[n];
@@ -325,8 +358,11 @@ public:
                         return len;
                     }
                     if (len >= (int32_t)out_len) {
+                        /* 没找到分隔符就写满：输出缓冲不足。原实现静默返回 len，
+                           上层会把截断行当完整行写进文件。 */
                         curr_out_offset = ++n;
-                        return len;
+                        io->err = coder_io::IO_BUF_FULL;
+                        return coder_ns::CODER_ERR_BUF_SMALL;
                     }
                 }
                 curr_out_offset = n;
@@ -336,12 +372,16 @@ public:
             {
                 if (curr_out_offset == bsize)
                 { /* Current block decompression completed, need to decompress again */
-                    if (decode_one_block() <= 0)
-                        return len;
+                    int32_t ret = decode_one_block();
+                    if (ret < 0)
+                        return ret;
+                    if (ret == 0)
+                        goto stream_end;
                 }
                 for (n = curr_out_offset; n < bsize; n++) {
                     *(out + len++) = coder_buff[n];
                     if (len >= (int32_t)out_len) {
+                        /* 定长模式：写满 out_len 即正常结束，剩余留待下次调用。 */
                         curr_out_offset = ++n;
                         return len;
                     }
@@ -349,7 +389,12 @@ public:
                 curr_out_offset = n;
             }
         }
-        return 0;
+
+stream_end:
+        /* 流提前耗尽（_coder 读端 latch 了 IO_READ_EMPTY）是码流损坏，不是正常结束。 */
+        if (io->err != coder_io::IO_OK)
+            return coder_ns::CODER_ERR_STREAM_END;
+        return len;
     }
 
     /* fake */
@@ -489,7 +534,11 @@ private:
     int32_t decode_one_block()
     {
         int32_t i, p;
+        if (io->err != coder_io::IO_OK)
+            return coder_ns::CODER_ERR_STREAM_END;
         bsize = get32();
+        if (io->err != coder_io::IO_OK)
+            return coder_ns::CODER_ERR_STREAM_END;  // 读 bsize 时流已耗尽：码流被截断
         if (bsize == 0)
             return 0;
         // check_exit(bsize > 0,  coder_ns::CODER_ERR_INNER, "block size %d is invalid", bsize);
@@ -500,6 +549,8 @@ private:
 
 
         bidx = get32();
+        if (io->err != coder_io::IO_OK)
+            return coder_ns::CODER_ERR_STREAM_END;
         // check_exit(bidx >= 1 && bidx <= bsize,  coder_ns::CODER_ERR_INNER, "corrupt input");
         if (!(bidx >= 1 && bidx <= bsize)) {
             coder_logger(coder_ns::ERROR, "corrupt input");
@@ -581,6 +632,9 @@ private:
             }
         }
         curr_out_offset = 0;
+        /* 反变换期间若码流耗尽（_coder latch 了 IO_READ_EMPTY），结果已是垃圾，按损坏上报。 */
+        if (io->err != coder_io::IO_OK)
+            return coder_ns::CODER_ERR_STREAM_END;
         return bsize;
     }
     

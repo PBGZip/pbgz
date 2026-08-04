@@ -25,6 +25,7 @@
 
 #include <thread>
 #include <list>
+#include <atomic>
 
 #include "pbgz_types.h"
 #include "blocking_queue.h"
@@ -100,11 +101,44 @@ protected:
 
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) = 0;
 
-    virtual int32_t actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*); 
-    
+    virtual int32_t actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*);
+
     virtual int64_t readOneBlock(BlockReader* blockReader, BlockType& fileType);
 
-    virtual void readBlocks(BlockReader* blockReader);
+    virtual int64_t readBlocks(BlockReader* blockReader);
+
+    /*     * 读到一个块之后、送进 inputDataPool 之前的处置，由 readOneBlock 统一询问。
+     *
+     * 之所以做成一个返回值而不是让各引擎重写整个 readOneBlock：读循环的骨架
+     * （取空闲块 / 读 / 首块决策 / 入队 / 计数）对所有引擎完全相同，各引擎真正
+     * 不同的只有"这个块归不归我"这一步。此前三个引擎各抄了一份骨架，任何加在
+     * 骨架上的改动都会漏掉两份。
+     */
+    enum class BlockIntake {
+        DISPATCH,   /* 正常数据块，入队交给工作线程 */
+        SKIP,       /* 不属于本引擎的数据流，已就地消费，读循环继续 */
+        ABORT       /* 输入不可用，读循环终止 */
+    };
+
+    virtual BlockIntake intakeBlock(BlockReader* /*blockReader*/, RoughIOBlock* /*blockPtr*/) {
+        return BlockIntake::DISPATCH;
+    }
+
+    /* 读一个块之前的时机，用于捕捉"这个块在源文件里的起始位置"这类只在读前有效的量。 */
+    virtual void readBlockPreProc(BlockReader* /*blockReader*/) { }
+
+    /*     * 文件级决策：读线程在把第一个数据块送进 inputDataPool 之前调一次。
+     *
+     * 位置是这个钩子的全部意义。编码器选型、先验训练这类决策对整个文件只做一次，
+     * 且必须先于任何块的处理。放在"入队之前"，这条先后关系就由数据流位置本身保证：
+     * 工作线程只能从队列里取块，取不到就无块可压。队列的入队/出队自带 release/acquire，
+     * 决策结果的可见性一并解决。因此不需要工作线程互相等待，也不需要额外的同步标志。
+     *
+     * 一并得到的性质：决策永远发生在读线程、永远基于第 0 块，样本不再随调度漂移；
+     * 同步辅助块（如 QUAL 先验）发射时写线程尚未收到任何数据块，"辅助块物理上先于
+     * 全部数据块"从时序上的巧合变成位置上的事实。
+     */
+    virtual void fileDecisionProc(RoughIOBlock* /*firstBlock*/) { }
 
     virtual void updateInputStatics(RoughIOBlock*) { }
 
@@ -127,7 +161,7 @@ protected:
      * 路过一个辅助块时逐个询问认领者。返回值仅用于日志：没人认领的辅助块被安静跳过，
      * 这是老版本读到新格式时需要的前向兼容行为，不构成错误。
      */
-    bool offerAuxBlock(RoughIOBlock* blockPtr, int32_t packageIndex);
+    bool offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageIndex);
 
     /*
      * 同步发射一个辅助块：推给写线程，阻塞等它落盘，返回该块**容器头**的绝对文件偏移
@@ -137,9 +171,9 @@ protected:
      * 写线程见到即写。之所以必须由写线程亲自执行写动作，是因为只有它持有 BlockWriter
      * 并独占文件写指针——调用方在别的线程上取 getCurrentPos() 拿到的都是竞态值。
      *
-     * 仅允许在串行首块窗口内调用：此刻其余工作线程仍阻塞在 conditionVar 上，
-     * 写线程也尚未收到任何数据块，全局至多一个发射在途，故下面用单个槽位承接结果，
-     * 无需按块建映射。返回后块已被写线程归还到 freeOutputPool，调用方不得再触碰它。
+     * 仅允许在 fileDecisionProc 内调用：那时读线程还没派发过任何数据块，写线程手上
+     * 必然空闲，全局至多一个发射在途，故下面用单个槽位承接结果，无需按块建映射。
+     * 返回后块已被写线程归还到 freeOutputPool，调用方不得再触碰它。
      */
     int64_t emitSyncAuxBlock(RoughIOBlock* block);
 
@@ -148,9 +182,6 @@ protected:
             auxConsumers.push_back(consumer);
         }
     }
-
-private:
-    bool isNeedNotify(bool flag);
 
 public:
     std::unique_ptr<BlockingQueueType> freeInputPool;   // Free queue, file reading tasks get blocks from here to read data
@@ -163,6 +194,15 @@ public:
     std::list<RoughIOBlock*> outputSortedCache;
     const PbgzParameter& getParameter() const { return parameter; }
     virtual Reference* getReference() { return nullptr; }
+
+    /*
+     * 压缩时写入文件头的块大小上界。解压侧 createBlockReader 从 baseFileMeta 读回，
+     * actuator 据此 ensureCapacity(block_size*2) 预分配输出缓冲——堵所有字段越界的
+     * 主防线。0 表示尚未读到（老文件没写或 createBlockReader 未跑），actuator 落回
+     * 默认 getBlockSize()。coder_io 的 putc 检查与 decode 错误返回链作兜底。
+     */
+    uint32_t fileBlockSize = 0;
+    uint32_t getFileBlockSize() const { return fileBlockSize; }
 
     /* File preprocessing result (codec pre-selection). Only the compression
        engine populates this; other engines return nullptr. */
@@ -177,7 +217,7 @@ public:
      * 顺序流一定先路过它再遇到数据块；区域查询路径则在引擎初始化时按文件元信息预取。
      * 两条路径都保证工作线程取用时缓存已就位。
      */
-    virtual AuxPayloadPtr getQualPrior(int32_t /*packageIndex*/) { return AuxPayloadPtr(); }
+    virtual AuxPayloadPtr getQualPrior(int64_t /*packageIndex*/) { return AuxPayloadPtr(); }
 
     /* 先验块容器头的绝对偏移；压缩侧据此写进块 meta，解压侧据此回查。-1 表示无先验。 */
     virtual int64_t getQualPriorAddress() const { return -1; }
@@ -187,13 +227,16 @@ public:
 
     std::vector<std::thread> workThreads;
     std::thread writeThread;
-    int64_t blockId2Write; 
+    int64_t blockId2Write;
 
     uint32_t blockCount;
 
-    mutable std::mutex mutex;
-    mutable std::condition_variable conditionVar;
-    bool syncFlag;
+    /*
+     * 块级失败的最终归口：工作线程里 actuatorProc 返回非零时置位，引擎收尾
+     * （startEnginePostProc 之后）统一检查并返回错误，进程以非零退出——
+     * 块失败不再是"打个警告、推个零长块就过去"。atomic 因为工作线程并发置位。
+     */
+    std::atomic<bool> taskFailed{false};
 
     /* 同步辅助块发射的交接槽位，由发射者与写线程共用，受 auxEmitMutex 保护。 */
     mutable std::mutex auxEmitMutex;

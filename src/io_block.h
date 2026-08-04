@@ -32,7 +32,7 @@
 
 #include "utils/memory_util.h"
 
-const uint32_t BLOCK_SIZE = 268435456;
+const size_t BLOCK_SIZE = 268435456;
 
 typedef enum
 {
@@ -56,7 +56,7 @@ typedef enum
 class RoughIOBlock /* Rough block */
 {
 public:
-    RoughIOBlock(uint32_t len = BLOCK_SIZE) {
+    RoughIOBlock(size_t len = BLOCK_SIZE) {
         blockSize = len;
         bufferSize = blockSize * 2; // Extra space to handle cases where compressed data is larger than original
         buffer =  MemoryUtil::safeAlloc<uint8_t>(bufferSize); //static_cast<uint8_t*>(calloc(bufferSize, sizeof(int8_t)));
@@ -80,14 +80,51 @@ public:
     }
 
     /*
+     * 按需扩容。返回 0 成功，-1 失败（realloc 失败）。
+     *
+     * 主防线：actuator 块入口按 block_size（压缩时确定的上界）×2 预分配，堵所有
+     * 字段越界。coder_io 的 putc 检查与 decode 错误返回链作兜底。
+     *
+     * 异常告警：目标 size 超过常规上界（2GB）或相对当前已扩到 16 倍还不够——
+     * 前者多半是 block_size 异常，后者多半是 coder 反复越界（兜底链也调它），
+     * 都说明有更深层问题。打警告但不中断：数据可能就是大，留给上层据错误码决策。
+     *
+     * 在 reset() 之后、任何数据写入之前调用：此刻 dataLen == 0，缓冲里没有有效
+     * 数据，不存在指向缓冲内部的悬空指针，realloc 安全。扩容后 bufferSize 更新，
+     * 后续 getRemain/getCurrent/getBufferSize 都看到新值。块归还 freeOutputPool
+     * 后复用带着更大的缓冲，后续块沿用，不会每块 realloc。
+     */
+    int32_t ensureCapacity(size_t neededSize) {
+        if (bufferSize >= neededSize) {
+            return 0;
+        }
+        size_t newSize = neededSize;
+        if (newSize < bufferSize * 2) {
+            newSize = bufferSize * 2;
+        }
+        if (newSize > ((size_t)2 << 30) || newSize > bufferSize * 16) {
+            LOG_WARNING("ensureCapacity: target %zu bytes (have %zu), abnormally large; "
+                        "block_size may be wrong or coder keeps overflowing", newSize, bufferSize);
+        }
+        uint8_t* newBuffer = static_cast<uint8_t*>(realloc(buffer, newSize));
+        if (newBuffer == nullptr) {
+            LOG_ERROR("ensureCapacity: realloc failed, need %zu, have %zu", neededSize, bufferSize);
+            return -1;
+        }
+        buffer = newBuffer;
+        bufferSize = newSize;
+        return 0;
+    }
+
+    /*
      * 本块属于第几个 pbgz 包。辅助块的身份用的就是它——
      * 绝对文件偏移在管道输入下退化为 0，根本不成立，不能当身份。
      */
-    int32_t getPackageIndex() const {
+    int64_t getPackageIndex() const {
         return packageIndex;
     }
 
-    void setPackageIndex(int32_t index) {
+    void setPackageIndex(int64_t index) {
         packageIndex = index;
     }
 
@@ -124,7 +161,7 @@ public:
         return buffer;
     }
 
-    uint32_t getBufferSize() {
+    size_t getBufferSize() {
         return bufferSize;
     }
 
@@ -144,7 +181,7 @@ public:
         return dataLen;
     }
 
-    std::vector<uint32_t>& getNpos() {
+    std::vector<size_t>& getNpos() {
         return npos;
     }
 
@@ -156,11 +193,11 @@ public:
         return blockType;
     }
 
-    void setMaxLineLen(uint32_t len) {
+    void setMaxLineLen(size_t len) {
         maxLineLen = len;
     }   
 
-    uint32_t getMaxLineLen() const {
+    size_t getMaxLineLen() const {
         return maxLineLen;
     }
 
@@ -168,7 +205,7 @@ public:
         return buffer + dataLen + metaLen;
     } 
 
-    uint32_t getRemain() {
+    size_t getRemain() {
         return bufferSize - dataLen - metaLen;
     }
 
@@ -176,33 +213,33 @@ public:
         return buffer + dataLen;
     }
 
-    uint32_t getMetaLen(){   
+    size_t getMetaLen(){   
         return metaLen;
     }
 
-    void setMetaLen(uint32_t len){
+    void setMetaLen(size_t len){
         metaLen = len;
     }
 
-    uint32_t  getTotalDataLen() {
+    size_t  getTotalDataLen() {
         return dataLen + metaLen;
     }
 
-    uint32_t getBlockSize() {
+    size_t getBlockSize() {
         return blockSize;
     }
     
 private:
     uint8_t *buffer;
-    uint32_t bufferSize;             /* Size of buffer */
+    size_t bufferSize;             /* Size of buffer */
     BlockType blockType;             /* Current block type */
-    uint32_t blockSize;              /* Block size */
-    std::vector<uint32_t> npos;      /* Positions of newline characters in buffer, starting from 0 */
+    size_t blockSize;              /* Block size */
+    std::vector<size_t> npos;      /* Positions of newline characters in buffer, starting from 0 */
     int64_t blockId;
     bool syncAux = false;
     int64_t packageStart = 0;
-    int32_t packageIndex = -1;
+    int64_t packageIndex = -1;
     int64_t dataLen;
-    uint32_t maxLineLen;
-    uint32_t metaLen;
+    size_t maxLineLen;
+    size_t metaLen;
 };

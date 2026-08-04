@@ -85,7 +85,7 @@ public:
 
 private:
     const uint8_t* buffer_;
-    const std::vector<uint32_t>* npos_;
+    const std::vector<size_t>* npos_;
     uint64_t dataLen_;
     uint32_t lineIdx_;
     uint32_t lineCount_;

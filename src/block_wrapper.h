@@ -62,7 +62,7 @@ public:
 
 private:
     BlockType constructBlock(RoughIOBlock* blockPtr);
-    
+
 protected:
     int64_t blockId;
     IOReader* ioReader;
@@ -119,7 +119,7 @@ public:
 
     virtual int32_t writeBlock(RoughIOBlock* blockPtr);
 
-    virtual int32_t init() { return 0; } 
+    virtual int32_t init() { return 0; }
 
     virtual ~BlockWriter() {
         ioWriter = nullptr;
@@ -159,7 +159,7 @@ public:
     int32_t writeDynamicFileMeta();
 
     void updateHeadExt();
-    
+
 private:
     PbgzFileWriter* pbgzFileWriter;
 };

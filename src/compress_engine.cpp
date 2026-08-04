@@ -31,17 +31,6 @@
 
 #include <bzlib.h>
 
-int64_t CompressEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) {
-    int64_t ret = CodecEngine::readOneBlock(blockReader, fileType);
-    
-    // Initialize statistics when file type is determined (first block)
-    if (ret > 0 && !statsInitialized && fileType != TYPE_UNKNOW) {
-        initStatsBasedOnFileType(fileType);
-    }
-    
-    return ret;
-}
-
 int32_t CompressEngine::init() {
     if (0 != CodecEngine::init()) {
         return -1;
@@ -57,7 +46,7 @@ int32_t CompressEngine::init() {
         }
         freeIndexBlockQueue->push(ptr);
     }
-    
+
     return 0;
 }
 
@@ -65,7 +54,7 @@ void CompressEngine::initStatsBasedOnFileType(BlockType fileType) {
     if (statsInitialized) {
         return;
     }
-    
+
     if (BlockUtil::isSAMBlock(fileType)) {
         stats = std::make_unique<SamStat>();
         if (stats->init() != 0) {
@@ -83,7 +72,7 @@ void CompressEngine::initStatsBasedOnFileType(BlockType fileType) {
     } else {
         LOG_DEBUG("File type %d does not require stats initialization", fileType);
     }
-    
+
     statsInitialized = true;
 }
 
@@ -165,38 +154,35 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
         }
     }
 
-    runFilePreprocessOnce(inBlockPtr);
-
     return actuator;
 }
 
-void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
-    /*
-     * runFilePreprocessOnce —— 整个文件生命周期内只跑一次的编码器试压/挑选。
-     *
-     * 这里的 tryClaim（IDLE→RUNNING 的无锁 CAS）**不是**真正决定"只跑一次"
-     * 的地方，它只是最后一道兜底：万一未来有代码路径绕过流水线并发调进
-     * 本函数，也能保证 CodecSelector::analyze 不会被重复触发。
-     *
-     * 真正让首块预处理天然串行的机制在 PbgzEngine::startWorkTask ——
-     * 所有 id > 0 的工作线程刚启动就 conditionVar.wait 挂起，只有 id == 0
-     * 的线程会走到 createActuator，进而调到本函数，为第一个数据块完成
-     * 整套编码器筛选。首块处理完毕后 isNeedNotify 恰好在此刻返回 true，
-     * 随后 notify_all 才放行其余线程。也就是说，正常路径上执行到这里时，
-     * 其他工作线程都还阻塞在条件变量上；tryClaim 在正常路径永远命中，
-     * 抢占逻辑只作为防御性存在。
-     *
-     * 之所以要把首块预处理死死钉在串行阶段，核心目的是让编码器决策
-     * **确定且可复现**：给定同一份输入，被采样的永远是同一段字节，
-     * 各字段试压得到的信号也一致，全文件后续所有块选到的 coder 都稳定
-     * 不变，压缩产物达到字节级可复现。反之若放任多线程同时抢首块预处理，
-     * 各线程看到的样本会随 OS 调度抖动而不同，最终 coder 选择就变成
-     * "依赖调度"的非确定行为，回归对比与压测都无从谈起。
-     *
-     * 预处理内部另有一个**正交**的并发维度："同一份样本、不同 coder 并行
-     * 试压"（各 coder 之间相互独立、无副作用），这与流水线"不同数据块、
-     * 不同工作线程"的并发维度不是一回事，不要与外层的串并转换混为一谈。
-     */
+/*
+ * 编码器试压/挑选与 QUAL 先验训练，整个文件生命周期内只跑一次。
+ *
+ * 由读线程在派发第 0 块之前调用（PbgzEngine::readOneBlock）。之所以钉在这个位置：
+ *
+ * 一是**决策必须先于任何块的压缩**。放在入队之前，这条先后关系由数据流位置保证，
+ *   不再依赖"其余工作线程还挂在条件变量上"这种时序巧合。
+ * 二是**决策结果必须确定可复现**。读线程是唯一的数据源头，被采样的永远是第 0 块的
+ *   同一段字节，各字段试压信号一致，全文件后续所有块选到的 coder 稳定不变，
+ *   压缩产物达到字节级可复现。此前若首块的 preAnalysis 失败，本函数会改由某个并行
+ *   工作线程在它自己那一块上触发，采样内容随调度漂移——那才是真正的隐患。
+ * 三是**读线程手上有文件级信息**（输入总长、可否 seek），先验是否划算这类按全文件
+ *   数据量做的判断才有立足点。
+ *
+ * tryClaim（IDLE→RUNNING 的无锁 CAS）现在纯属兜底：调用方只有读线程一个，且只在
+ * 第 0 块调，重入不可能发生。
+ *
+ * 预处理内部另有一个**正交**的并发维度："同一份样本、不同 coder 并行试压"
+ * （各 coder 相互独立、无副作用），与流水线"不同数据块、不同工作线程"不是一回事。
+ */
+void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
+    CodecEngine::fileDecisionProc(inBlockPtr);
+
+    if (!statsInitialized) {
+        initStatsBasedOnFileType(inBlockPtr->getBlockType());
+    }
     if (!preprocessInfo.tryClaim()) {
         return;
     }
@@ -260,13 +246,16 @@ void CompressEngine::runFilePreprocessOnce(RoughIOBlock* inBlockPtr) {
         fprintf(stderr, "\n");
     }
     /*
-     * 先验必须在这里发射，而不是等到文件收尾：数据块的分片头要写下它的绝对地址。
-     * 此刻仍在串行首块窗口内——其余工作线程阻塞在 conditionVar，写线程也还没收到
-     * 任何数据块——所以这个块一定落在全部数据块之前，地址一经确定即对后续所有块可见。
+     * 先验在这里发射，而不是等到文件收尾：数据块要引用它，它就得先于一切数据块存在。
+     * 此刻读线程还没派发过任何块，写线程手上必然空闲，所以这个块一定落在全部数据块之前。
      */
     emitQualPrior();
 
     preprocessInfo.markDone();
+
+    if (parameter.verbose) {
+        fprintf(stderr, "[流水线] 编码器决策完成，开始并行压缩（%u 线程）\n", parameter.threadNum);
+    }
 }
 
 void CompressEngine::emitQualPrior() {
@@ -388,7 +377,7 @@ bool CompressEngine::initReference() {
 }
 
 uint32_t CompressEngine::calcPackRefeBlockSize() {
-    int64_t each = (16 << 20);  
+    int64_t each = (16 << 20);
     int64_t total = pRefGene->getSquashLength();
 
     uint32_t result = total / each;
@@ -404,14 +393,14 @@ uint32_t CompressEngine::calcPackRefeBlockSize() {
 int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef) {
     int64_t block = 0, offset = 0;
     std::vector<std::thread> tpools;
-    
+
     uint32_t pcnt = parameter.threadNum;
     int64_t each = (16 << 20);
     int64_t total = pRefGene->getSquashLength();
     int64_t remain = total;
     maxBlockLen =0;
     totalEncLen = 0;
-    
+
     BlockingQueue<RefeInfo> inputPool(pcnt);
     Reference* refe = pRefGene;
     int64_t current;
@@ -451,7 +440,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 coder_json cmeta;
                 std::string metaString;
                 cmeta.encoder(meta, metaString); /*  Compress block meta */
-            
+
                 /* Write compressed stream of current block's meta */
                 outBlock->reset();
                 int64_t currBlockLen = metaString.length() + refeIo.data_len;
@@ -522,7 +511,7 @@ int32_t CompressEngine::startEnginePostProc() {
             dynamicFileMeta.getMetaData("refe")["blocks"] = refBlockCount;
         }
     }
-    
+
     return CodecEngine::engineStartAfterProc();
 }
 
@@ -552,6 +541,13 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
   * packReference 留在 startWorkPreProc 不动。
   */
  int32_t CompressEngine::prepareFileMeta() {
+    /*
+     * 块大小是压缩时输入分块的上界，写进文件头让解压侧按它预分配 block_size*2
+     * 的输出缓冲——确定上界，不是估算，不受 fieldcount/读长影响。这是堵所有
+     * 字段越界的主防线；coder_io 的 putc 检查与 decode 错误返回链作兜底。
+     */
+    baseFileMeta.setMetaData("block_size", getBlockSize());
+
     if (pRefGene == nullptr) {
         return 0;
     }
