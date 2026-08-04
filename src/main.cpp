@@ -49,13 +49,14 @@ typedef struct
 
 typedef std::vector<Arg> PbgzArg;
 
-static PbgzArg pbgzArgs = 
+static PbgzArg pbgzArgs =
 {
     {'z', "gz", no_argument, "decompress to gz format"},
     {'o', "outfile", required_argument, "<outfile> specify output filename for compress/decompress, - means output to pipe"},
     {'O', "outdir", required_argument, "<outdir> specify output directory for compress/decompress"},
     {'f', "force", no_argument, "force overwrite of output file. use for compress/decompress"},
     {'r', "reference", required_argument, "<FASTA> specify reference gene file (it's not Mandatory). use for compress/decompress"},
+    {'N', "ni", required_argument, "<NI> use an index built by 'pbgz makeref' instead of re-reading the FASTA. -r is still required and decides which reference is used"},
     {'n', "refunpack", no_argument, "unpack reference to pbgz file, so reference gene is needed when decompress"},
     {'t', "threads", required_argument, "<number> specify number of threads, default is CPUS. use for compress/decompress"},
     {'l', "level", required_argument, "<1-9> specify compress level, default is 5, 1 is fast, 9 is best"},
@@ -122,7 +123,7 @@ public:
                     outputDir = outputDir / "";
                     parameter.outputDir = outputDir.string();
                 }
-                
+
                 std::string outPath = PathUtil::getFilePath(parameter.outputDir);
                 if (!PathUtil::fileExists(outPath)) {
                     // Try to create directory if it doesn't exist
@@ -232,6 +233,23 @@ public:
                 fprintf(stderr, "Reference genic(%s) is not exists.\n", parameter.referenceGenic.c_str());
                 return -1;
             }
+            if (Reference::isNiFile(parameter.referenceGenic)) {
+                fprintf(stderr, "%s is a pbgz index, pass it with --ni and give the FASTA to -r.\n",
+                        parameter.referenceGenic.c_str());
+                return -1;
+            }
+        }
+
+        /* 索引只是加速手段, -r 才决定用哪个参考; 索引不可信时还得靠 -r 退回去重建。 */
+        if (!parameter.niIndexFile.empty()) {
+            if (parameter.referenceGenic.empty()) {
+                fprintf(stderr, "--ni requires -r: the FASTA it was built from decides which reference is used.\n");
+                return -1;
+            }
+            if (!PathUtil::fileExists(parameter.niIndexFile)) {
+                fprintf(stderr, "Index file(%s) is not exists.\n", parameter.niIndexFile.c_str());
+                return -1;
+            }
         }
 
         return 0;
@@ -257,8 +275,8 @@ public:
 class CompressCmdProc : public CommandProc {
 public:
     CompressCmdProc(PbgzParameter& para) : CommandProc(para) {}
-    
-    int32_t reconstructPorc() override { 
+
+    int32_t reconstructPorc() override {
         if (0 != CommandProc::reconstructPorc()) {
             return -1;
         }
@@ -280,7 +298,7 @@ public:
         }
         return 0;
     }
-    
+
     virtual int32_t checkProc() override {
         if (0 != CommandProc::checkProc()) {
             return -1;
@@ -298,7 +316,7 @@ public:
         }
         return 0;
     }
-    
+
     int32_t startEngine() override {
         // Implement compression engine startup logic
         engine = new CompressEngine(parameter);
@@ -315,12 +333,12 @@ public:
 class DecompressCmdProc : public CommandProc {
 public:
     DecompressCmdProc(PbgzParameter& para) : CommandProc(para) {}
-    
+
     int32_t reconstructPorc() override {
         if (0 != CommandProc::reconstructPorc()) {
             return -1;
         }
-        if (parameter.outputFile.empty()) { 
+        if (parameter.outputFile.empty()) {
             // Decompression scenario, remove pbgz suffix from file
             std::string name = PathUtil::getFileName(parameter.inputFile);
             if (name.length() <= 5) {
@@ -341,12 +359,12 @@ public:
             if (parameter.isDecToGZ) {
                 parameter.outputFile = parameter.outputFile + ".gz";
             }
-        } 
+        }
 
         return 0;
     }
-    
-    int32_t checkProc() override { 
+
+    int32_t checkProc() override {
         if (0 != CommandProc::checkProc()) {
             return -1;
         }
@@ -355,7 +373,7 @@ public:
                 fprintf(stdout, "Decompress file cannot be directory.\n");
                 return -1;
             }
-            
+
             if (!PathUtil::suffixCheck(parameter.inputFile, "pbgz")) {
                 fprintf(stdout, "Decompress file must be pbgz format.\n");
                 return -1;
@@ -363,7 +381,7 @@ public:
         }
         return 0;
     }
-    
+
 
     int32_t startEngine() override {
         // Implement decompression engine startup logic
@@ -371,7 +389,7 @@ public:
         if (engine->init() != 0) {
             return -1;
         }
-        
+
         int32_t ret = engine->start();
         return ret;
     }
@@ -380,7 +398,7 @@ public:
 class IndexCmdProc : public CommandProc {
 public:
     IndexCmdProc(PbgzParameter& para) : CommandProc(para) {}
-    
+
     int32_t reconstructPorc() override {
         if (0 != CommandProc::reconstructPorc()) {
             return -1;
@@ -399,7 +417,7 @@ public:
             fprintf(stdout, "Decompress file must be pbgz format.\n");
             return -1;
         }
-   
+
         inputFile = inputFile + ".pbgzi";
         if (parameter.isDecToGZ) {
             inputFile = inputFile + ".gz";
@@ -413,7 +431,7 @@ public:
 
         return 0;
     }
-    
+
     int32_t checkProc() override {
         if (0 != CommandProc::checkProc()) {
             return -1;
@@ -424,7 +442,7 @@ public:
                 fprintf(stdout, "Decompress file cannot be directory.\n");
                 return -1;
             }
-            
+
             if (!PathUtil::suffixCheck(parameter.inputFile, "pbgz")) {
                 fprintf(stdout, "Decompress file must be pbgz format.\n");
                 return -1;
@@ -433,7 +451,7 @@ public:
 
         return 0;
     }
-    
+
     int32_t startEngine() override {
         // Implement index engine startup logic
         engine = new IndexEngine(parameter);
@@ -447,7 +465,7 @@ public:
 class SortCmdProc : public CommandProc {
 public:
     SortCmdProc(PbgzParameter& para) : CommandProc(para) {}
-    
+
     int32_t reconstructPorc() override {
         if (0 != CommandProc::reconstructPorc()) {
             return -1;
@@ -484,7 +502,7 @@ public:
 
         return 0;
     }
-    
+
     int32_t checkProc() override {
         if (0 != CommandProc::checkProc()) {
             return -1;
@@ -492,7 +510,7 @@ public:
 
         return 0;
     }
-    
+
     int32_t startEngine() override {
         // Implement index engine startup logic
         engine = new SortEngine(parameter);
@@ -503,8 +521,73 @@ public:
     }
 } ;
 
-using CommandHandler = std::function<CommandProc*(PbgzParameter&)>;
+/*
+ * 参考索引只在用户显式要求时生成, 且落在用户指定的路径; 之后压缩要复用, 也得由用户
+ * 显式把它交给 -r。不做隐式缓存: 悄悄留下的索引一旦被人改动, 后续压缩会静默压错,
+ * 而用户手上没有任何线索。显式指定意味着用户认得这个文件, 也认这份风险。
+ */
+class MakeRefCmdProc : public CommandProc {
+public:
+    MakeRefCmdProc(PbgzParameter& para) : CommandProc(para) {}
 
+    int32_t reconstructPorc() override {
+        if (0 != CommandProc::reconstructPorc()) {
+            return -1;
+        }
+
+        if (!parameter.outputFile.empty()) {
+            return 0;
+        }
+
+        std::string inputFile = PathUtil::getFileName(parameter.inputFile);
+        if (inputFile.empty()) {
+            fprintf(stderr, "input file %s invalid.\n", parameter.inputFile.c_str());
+            return -1;
+        }
+        inputFile += ".ni";
+
+        if (parameter.outputDir.empty()) {
+            parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + inputFile;
+        } else {
+            parameter.outputFile = PathUtil::getFilePath(parameter.outputDir) + inputFile;
+        }
+        return 0;
+    }
+
+    int32_t checkProc() override {
+        if (STDIN == parameter.inputFile) {
+            fprintf(stdout, "Reference file must be a regular file, not a pipe.\n");
+            return -1;
+        }
+
+        if (0 != CommandProc::checkProc()) {
+            return -1;
+        }
+
+        if (PathUtil::isDir(parameter.inputFile)) {
+            fprintf(stdout, "Reference file cannot be directory.\n");
+            return -1;
+        }
+
+        if (Reference::isNiFile(parameter.inputFile)) {
+            fprintf(stdout, "%s is already a reference index.\n", parameter.inputFile.c_str());
+            return -1;
+        }
+        return 0;
+    }
+
+    int32_t startEngine() override {
+        Reference reference(parameter.inputFile, parameter.threadNum);
+        if (!reference.makeNiFile(parameter.outputFile)) {
+            fprintf(stderr, "Make reference index %s failed.\n", parameter.outputFile.c_str());
+            return -1;
+        }
+        fprintf(stderr, "Reference index created: %s\n", parameter.outputFile.c_str());
+        return 0;
+    }
+};
+
+using CommandHandler = std::function<CommandProc*(PbgzParameter&)>;
 // Subcommand structure
 struct SubCommand {
     std::string name;               // Subcommand name, e.g., "compress"
@@ -513,37 +596,45 @@ struct SubCommand {
     CommandHandler handler;
 };
 
-static std::vector<SubCommand> subCommands = { 
-    {   
-        "compress", 
+static std::vector<SubCommand> subCommands = {
+    {
+        "compress",
         "Compress file to pbgz format",
-        {'h', 'v', 'o', 'O', 'f', 'r', 'n', 't', 'l', 'e', 'i', 'g', 'G', 's'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 'n', 't', 'l', 'e', 'i', 'g', 'G', 's'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<CompressCmdProc>(para);
         },
     },
-    {   
-        "decompress", 
+    {
+        "decompress",
         "Decompress file from pbgz file",
-        {'h', 'v', 'o', 'O', 'f', 'r', 't', 'e', 'p', 'g', 'G', 'z'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 't', 'e', 'p', 'g', 'G', 'z'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<DecompressCmdProc>(para);
         },
     },
-    {   
-        "index", 
+    {
+        "index",
         "Create index file from pbgz file",
         {'h', 'v', 'o', 'O', 'f', 't', 'g', 'G'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<IndexCmdProc>(para);
         },
     },
-    {   
-        "sort", 
+    {
+        "sort",
         "Sort sam file",
         {'h', 'v', 'o', 'O', 'f', 't', 'g', 'G', 'z'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<SortCmdProc>(para);
+        },
+    },
+    {
+        "makeref",
+        "Build a reusable index from a reference FASTA",
+        {'h', 'o', 'O', 'f', 't', 'g', 'G'},
+        [](PbgzParameter& para) {
+            return MemoryUtil::safeNewClass<MakeRefCmdProc>(para);
         },
     },
 };
@@ -555,7 +646,7 @@ void printUsage(const std::string& subCommandName = "") {
 
     FILE *fp = stdout;
     fprintf(fp, "pbgz: %s\n", PbgzManager::getInstance().getVersion().c_str());
-    
+
     if (subCommandName.empty()) {
         // Display general help information
         fprintf(fp, "Usage: pbgz subCommand [FILE] [OPTION]\n\n");
@@ -564,7 +655,7 @@ void printUsage(const std::string& subCommandName = "") {
             fprintf(fp, "  %-12s %s\n", cmd.name.c_str(), cmd.description.c_str());
         }
         fprintf(fp, "\nUse 'pbgz help <subcommand>' for detailed information on a specific subcommand.\n");
-        
+
         fprintf(fp, "\nExamples:\n");
         fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
         fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
@@ -578,7 +669,7 @@ void printUsage(const std::string& subCommandName = "") {
                 break;
             }
         }
-        
+
         if (!targetCmd) {
             fprintf(fp, "Error: Unknown subcommand '%s'\n\n", subCommandName.c_str());
             fprintf(fp, "Available subcommands:\n");
@@ -588,11 +679,11 @@ void printUsage(const std::string& subCommandName = "") {
             fprintf(fp, "\nUse 'pbgz help' to see all available subcommands.\n\n");
             return;
         }
-        
+
         fprintf(fp, "Usage: pbgz %s [FILE] [OPTION]\n\n", subCommandName.c_str());
         fprintf(fp, "Description: %s\n\n", targetCmd->description.c_str());
         fprintf(fp, "Options for %s:\n", subCommandName.c_str());
-        
+
         // Display options supported by subcommand
         for (auto &a : pbgzArgs) {
             bool supported = false;
@@ -606,7 +697,7 @@ void printUsage(const std::string& subCommandName = "") {
                 CMD_ARG(fp, a.argShort, a.argLong.c_str(), a.argDescribe.c_str());
             }
         }
-        
+
         // Display examples
         if (subCommandName == "compress") {
             fprintf(fp, "\nExample:\n");
@@ -624,6 +715,14 @@ void printUsage(const std::string& subCommandName = "") {
             fprintf(fp, "\nExample:\n");
             fprintf(fp, "  pbgz sort human.sam -O /output\n");
             fprintf(fp, "  pbgz sort human.sam.gz -O /output -z\n\n");
+        } else if (subCommandName == "makeref") {
+            fprintf(fp, "\nExample:\n");
+            fprintf(fp, "  pbgz makeref ucsc.hg19.fa -o /path/ucsc.hg19.ni\n");
+            fprintf(fp, "  pbgz compress input.sam -o out.pbgz -r ucsc.hg19.fa --ni /path/ucsc.hg19.ni\n\n");
+            fprintf(fp, "The index is never created or picked up implicitly, and it never replaces -r:\n");
+            fprintf(fp, "-r names the reference, --ni only saves parsing it again. The index must carry\n");
+            fprintf(fp, "that same file name and pass its own checksum, otherwise pbgz warns and builds\n");
+            fprintf(fp, "the index from the FASTA, so the reference in use is always the one you chose.\n\n");
         }
     }
 }
@@ -658,7 +757,7 @@ int main(int argc, char** argv) {
 
     bool foundSubCommand = false;
     SubCommand* selectedSubCommand = nullptr;
-    
+
     for (auto& subCmd : subCommands) {
         if (firstArg == subCmd.name) {
             foundSubCommand = true;
@@ -679,7 +778,7 @@ int main(int argc, char** argv) {
     std::string argOption = "";
     option longopts[pbgzArgs.size() + 1];
     int optIndex = 0;
-    
+
     for (uint32_t i = 0; i < pbgzArgs.size(); ++i) {
         // Check if subcommand option is supported by current subcommand
         bool supported = false;
@@ -689,11 +788,11 @@ int main(int argc, char** argv) {
                 break;
             }
         }
-        
+
         if (supported) {
             longopts[optIndex] = {pbgzArgs[i].argLong.c_str(), pbgzArgs[i].hasFlag, nullptr, pbgzArgs[i].argShort};
             argOption += pbgzArgs[i].argShort;
-            switch (pbgzArgs[i].hasFlag) 
+            switch (pbgzArgs[i].hasFlag)
             {
             case optional_argument:
                 argOption += "::";
@@ -712,7 +811,7 @@ int main(int argc, char** argv) {
 
     // Reset optind to skip program name and subcommand
     optind = 2;
-    
+
     int opt = 0;
     while((opt = getopt_long(argc, argv, argOption.c_str(), longopts, NULL)) != -1) {
         switch (opt) {
@@ -734,6 +833,10 @@ int main(int argc, char** argv) {
         }
         case 'r':{
             parameter.referenceGenic = optarg;
+            break;
+        }
+        case 'N':{
+            parameter.niIndexFile = optarg;
             break;
         }
         case 'n': {
@@ -807,18 +910,18 @@ int main(int argc, char** argv) {
     if (processor->reconstruct() != 0) {
         LOG_ERROR("Command reconstruction failed");
         return -1;
-    } 
-    
+    }
+
     if (processor->check() != 0) {
         LOG_ERROR("Command parameter check failed");
         return -1;
-    } 
+    }
 
     if (processor->afterCheck() != 0) {
         LOG_ERROR("Command parameter after check processs failed");
         return -1;
     }
-    
+
     if (processor->startEngine() != 0) {
         LOG_ERROR("Command start failed");
         return -1;

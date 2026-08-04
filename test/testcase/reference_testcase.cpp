@@ -28,7 +28,7 @@
 #include <chrono>
 #include <thread>
 #include <vector>
-#define private public 
+#define private public
 #include "reference.h"
 #undef private
 #include "pbgz_errno.h"
@@ -42,54 +42,54 @@ protected:
         // Create temporary FASTA file for testing with complex content
         testFastaFile = "test_reference.fasta";
         std::ofstream fastaFile(testFastaFile);
-        
-        // total length:1038 
+
+        // total length:1038
         // Chromosome 1: Long sequence with various patterns   369
         fastaFile << ">chr1\n";
         fastaFile << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";  // 64
         fastaFile << "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT\n";  // 63
-        fastaFile << "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n";  // 62 
-        fastaFile << "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";   // 60 
+        fastaFile << "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n";  // 62
+        fastaFile << "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";   // 60
         fastaFile << "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n";   // 60
         fastaFile << "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\n";   // 60
-        
-        // Chromosome 2: Sequence with N characters and mixed content  245 
+
+        // Chromosome 2: Sequence with N characters and mixed content  245
         fastaFile << ">chr2\n";
         fastaFile << "ATCGNATCGNATCGNATCGNATCGNATCGNATCGNATCGNATCGNATCGNATCGNATCGN\n";   // 60
         fastaFile << "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN\n";  // 62
         fastaFile << "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT\n";  // 63
         fastaFile << "ATNNCGATNNCGATNNCGATNNCGATNNCGATNNCGATNNCGATNNCGATNNCGATNNCG\n";   // 60
-        
+
         // Chromosome 3: Short sequence   60
         fastaFile << ">chr3\n";
         fastaFile << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";   // 60
-        
+
         // Chromosome 4: Sequence with repetitive patterns   182
         fastaFile << ">chr4\n";
         fastaFile << "ATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATAT\n";   // 62
         fastaFile << "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC\n";   // 60
         fastaFile << "TATATATATATATATATATATATATATATATATATATATATATATATATATATATATATA\n";  // 60
-        
+
         // Chromosome 5: Sequence with edge cases (all Ns, mixed case)   182
         fastaFile << ">chr5\n";
         fastaFile << "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN\n";  // 62
-        fastaFile << "atcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcg\n";  // 60 
+        fastaFile << "atcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcgatcg\n";  // 60
         fastaFile << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";  // 60
-        
+
         fastaFile.close();
 
         // Calculate expected squash length based on total sequence length
         // Each 4 bases become 1 byte after squash
         size_t totalBases = 0;
         totalBases += 60 * 6;  // chr1: 6 lines of 60 bases each
-        totalBases += 60 * 4;  // chr2: 4 lines of 60 bases each  
+        totalBases += 60 * 4;  // chr2: 4 lines of 60 bases each
         totalBases += 60 * 1;  // chr3: 1 line of 60 bases
         totalBases += 60 * 3;  // chr4: 3 lines of 60 bases each
         totalBases += 60 * 3;  // chr5: 3 lines of 60 bases each
-        
+
         quashLen = totalBases / 4;
-        quash = MemoryUtil::safeAlloc<uint8_t>(quashLen); 
-        
+        quash = MemoryUtil::safeAlloc<uint8_t>(quashLen);
+
         // Initialize with a pattern that will be different from actual squash
         for (uint32_t i = 0; i < quashLen; ++i) {
             quash[i] = 0x00;
@@ -109,7 +109,7 @@ protected:
         if (quash != nullptr) {
             MemoryUtil::safeFree(quash);
         }
-        
+
         // Clean up test files
         std::filesystem::remove(testFastaFile);
         std::filesystem::remove_all(testDir);
@@ -126,7 +126,7 @@ protected:
     std::string testDir;
 
     uint32_t quashLen;
-    uint8_t* quash = nullptr; 
+    uint8_t* quash = nullptr;
 };
 
 // Test constructor
@@ -139,17 +139,16 @@ TEST_F(ReferenceTest, Constructor) {
     EXPECT_EQ(ref.getSquashLength(), 0);
 }
 
+/*
+ * makeIndex() 只从 fasta 现建内存索引, 不涉及 .ni: 后者只在用户显式要求时才产生和加载。
+ * 原先这里断言 getNiFilePath() 的文件名, 是拿另一条路的后置条件来考它, 从用例引入起
+ * 就一直红着, 反倒把真正该查的返回值漏了。
+ */
 TEST_F(ReferenceTest, ReferenceMakeIndex) {
     Reference refe(testFastaFile, 1);
-    refe.makeIndex();
+    ASSERT_TRUE(refe.makeIndex());
 
     EXPECT_EQ(refe.getFastaFileName(), testFastaFile);
-    std::string nifile;
-    nifile = refe.getNiFilePath(); 
-    // The MD5 will be different due to the complex content
-    std::string fileName = PathUtil::getFileName(nifile);
-    EXPECT_TRUE(fileName.find("test_reference.fasta.") == 0);
-    EXPECT_TRUE(fileName.length() > 3 && fileName.substr(fileName.length() - 3) == ".ni");
 
     // Check that squash buffer is created and has expected length
     EXPECT_NE(refe.getSquash(), nullptr);
@@ -160,25 +159,76 @@ TEST_F(ReferenceTest, ReferenceMakeIndex) {
      * 259 字节只装得下 1036 个碱基, 最后两个会丢。
      */
     EXPECT_EQ(refe.getSquashLength(), 260);
-    
+
     // The squash content should be different from our initialized pattern
     EXPECT_NE(memcmp(refe.getSquash(), quash, quashLen), 0);
+}
+
+/*
+ * 索引只是省一遍 fasta 解析: 对得上就该给出与直接读 fasta 完全相同的 squash, 对不上就
+ * 该退回去读 fasta——不能拿一份来历不明的参考把数据压错。
+ */
+TEST_F(ReferenceTest, NiIndexRoundTripAndFallback) {
+    const std::string niFile = testDir + "/explicit.ni";
+
+    Reference maker(testFastaFile, 1);
+    ASSERT_TRUE(maker.makeNiFile(niFile));
+    ASSERT_TRUE(Reference::isNiFile(niFile));
+    EXPECT_FALSE(Reference::isNiFile(testFastaFile));
+
+    Reference fromFasta(testFastaFile, 1);
+    ASSERT_TRUE(fromFasta.makeIndex());
+
+    Reference fromNi(testFastaFile, 1);
+    fromNi.setNiFile(niFile);
+    ASSERT_TRUE(fromNi.makeIndex());
+    ASSERT_EQ(fromNi.getSquashLength(), fromFasta.getSquashLength());
+    EXPECT_EQ(0, memcmp(fromNi.getSquash(), fromFasta.getSquash(), fromFasta.getSquashLength()));
+    EXPECT_EQ(fromNi.getFastaChecksum(), fromFasta.getFastaChecksum());
+
+    /* 载荷翻掉一个 bit: 自校验必须发现, 并退回 fasta 给出正确结果 */
+    std::fstream tamper(niFile, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(tamper.is_open());
+    tamper.seekg(64);
+    char byte = 0;
+    tamper.read(&byte, 1);
+    byte = (char)(byte ^ 0x01);
+    tamper.seekp(64);
+    tamper.write(&byte, 1);
+    tamper.close();
+
+    Reference tampered(testFastaFile, 1);
+    tampered.setNiFile(niFile);
+    ASSERT_TRUE(tampered.makeIndex());
+    ASSERT_EQ(tampered.getSquashLength(), fromFasta.getSquashLength());
+    EXPECT_EQ(0, memcmp(tampered.getSquash(), fromFasta.getSquash(), fromFasta.getSquashLength()));
+
+    /* 索引记录的参考文件名对不上, 同样不能用 */
+    const std::string otherFasta = testDir + "/other.fasta";
+    std::ofstream other(otherFasta);
+    other << ">chr1\n" << "ATCGATCGATCGATCGATCGATCGATCGATCG\n";
+    other.close();
+
+    Reference mismatched(otherFasta, 1);
+    mismatched.setNiFile(niFile);
+    ASSERT_TRUE(mismatched.makeIndex());
+    EXPECT_NE(mismatched.getSquashLength(), fromFasta.getSquashLength());
 }
 
 TEST_F(ReferenceTest, ReferenceMapping) {
     Reference refe(testFastaFile, 1);
     refe.makeIndex();
-    
+
     // Test getStretchActg method with different positions
     uint8_t actgBuffer[32];
-    
+
     // Test getting ACTG sequence from chromosome 1 (should start with ATCG)
     refe.getStretchActg(actgBuffer, 4, 0);
     EXPECT_EQ(actgBuffer[0], 'A');
     EXPECT_EQ(actgBuffer[1], 'T');
     EXPECT_EQ(actgBuffer[2], 'C');
     EXPECT_EQ(actgBuffer[3], 'G');
-    
+
     // Test getting ACTG sequence from chromosome 2 (should start with ATCGN)
     refe.getStretchActg(actgBuffer, 5, 369);  // Correct position based on actual chr positions
     EXPECT_EQ(actgBuffer[0], 'A');
@@ -186,7 +236,7 @@ TEST_F(ReferenceTest, ReferenceMapping) {
     EXPECT_EQ(actgBuffer[2], 'C');
     EXPECT_EQ(actgBuffer[3], 'G');
     EXPECT_EQ(actgBuffer[4], 'G');  // N is converted to G in output
-    
+
     // Test getting 2-bit encoding
     uint8_t bitsBuffer[4];
     refe.getStretch2Bits1Char(bitsBuffer, 4, 0);
@@ -201,15 +251,15 @@ TEST_F(ReferenceTest, ReferenceMapping) {
 TEST_F(ReferenceTest, MakeIndexFetchBaseGroupTest) {
     Reference refe(testFastaFile, 1);
     refe.makeIndex();
-    
+
     // Test makeIndexFetchBaseGroup calculations
     // Total bases: 1038, baseGroupStep: 32
     // Expected base groups: floor(1038/32) = 32
     int64_t expectedBaseGroups = 1038 / 32;
-    
+
     // Verify hash bucket counts are initialized
     EXPECT_NE(refe.hashBucketCnt, nullptr);
-    
+
     // Check that some hash buckets have entries
     int bucketsCount = 0;
     for (int32_t i = 0; i < refe.hashBuckets; i++) {
@@ -220,11 +270,11 @@ TEST_F(ReferenceTest, MakeIndexFetchBaseGroupTest) {
     }
     // fprintf(stderr, "%d \n", nonEmptyBuckets);
     EXPECT_EQ(bucketsCount, expectedBaseGroups);
-    
+
     // Test queryPosition method with specific hash values
     uint32_t length;
     const uint32_t* positions = refe.queryPosition(0x12345678, length);
-    
+
     // The query should return either nullptr (no matches) or valid positions
     if (length > 0) {
         EXPECT_NE(positions, nullptr);
@@ -258,38 +308,38 @@ TEST_F(ReferenceTest, CalculateReferenceMd5GzipSupport) {
     // Test 1: Text file MD5 calculation
     std::string textMd5, gzipMd5, gzipNoExtMd5;
     int64_t textLength, gzipLength, gzipNoExtLength;
-    
+
     Reference textRef(textFastaFile, 1);
     textRef.calculateReferenceMd5(textFastaFile, textMd5, textLength);
-    
+
     // Verify text file MD5 is calculated correctly
     EXPECT_FALSE(textMd5.empty());
     EXPECT_GT(textLength, 0);
-    
+
     // Test 2: Gzip file with .gz extension
     Reference gzipRef(gzipFastaFile, 1);
     gzipRef.calculateReferenceMd5(gzipFastaFile, gzipMd5, gzipLength);
-    
+
     // Verify gzip file MD5 is calculated correctly
     EXPECT_FALSE(gzipMd5.empty());
     EXPECT_GT(gzipLength, 0);
-    
+
     // Test 3: Gzip file without .gz extension (content-based detection)
     Reference gzipNoExtRef(gzipNoExtFile, 1);
     gzipNoExtRef.calculateReferenceMd5(gzipNoExtFile, gzipNoExtMd5, gzipNoExtLength);
-    
+
     // Verify gzip file without extension is detected correctly
     EXPECT_FALSE(gzipNoExtMd5.empty());
     EXPECT_GT(gzipNoExtLength, 0);
-    
+
     // Test 4: MD5 values should be the same for all three files (same content)
     EXPECT_EQ(textMd5, gzipMd5);
     EXPECT_EQ(textMd5, gzipNoExtMd5);
-    
+
     // Test 5: File lengths should be the same for all three files
     EXPECT_EQ(textLength, gzipLength);
     EXPECT_EQ(textLength, gzipNoExtLength);
-    
+
     // Clean up test files
     std::filesystem::remove(textFastaFile);
     std::filesystem::remove(gzipFastaFile);
@@ -304,33 +354,33 @@ TEST_F(ReferenceTest, FileTypeDetectionByContent) {
     tf << ">chr1\n";
     tf << "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\n";
     tf.close();
-    
+
     // Create a gzip file with different extension
     std::string gzipFile = "test_compressed.bin";
     std::string command = "echo '>chr1' | gzip -c > " + gzipFile;
     system(command.c_str());
-    
+
     // Test text file detection
     FILE* fp = fopen(textFile.c_str(), "rb");
     ASSERT_NE(fp, nullptr);
     uint8_t header[2];
     size_t read = fread(header, 1, 2, fp);
     fclose(fp);
-    
+
     // Text file should not have gzip magic number
     EXPECT_EQ(read, 2);
     EXPECT_FALSE(header[0] == 0x1f && header[1] == 0x8b);
-    
+
     // Test gzip file detection
     fp = fopen(gzipFile.c_str(), "rb");
     ASSERT_NE(fp, nullptr);
     read = fread(header, 1, 2, fp);
     fclose(fp);
-    
+
     // Gzip file should have gzip magic number 0x1f 0x8b
     EXPECT_EQ(read, 2);
     EXPECT_TRUE(header[0] == 0x1f && header[1] == 0x8b);
-    
+
     // Clean up
     std::filesystem::remove(textFile);
     std::filesystem::remove(gzipFile);
@@ -350,7 +400,7 @@ TEST_F(ReferenceTest, IndexCreationWithGzipReference) {
     std::string gzipFastaFile = "test_ref.fasta.gz";
     std::string command = "gzip -c " + textFastaFile + " > " + gzipFastaFile;
     int result = system(command.c_str());
-    
+
     // Verify gzip file was created successfully
     EXPECT_EQ(result, 0);
     EXPECT_TRUE(std::filesystem::exists(gzipFastaFile));
@@ -364,7 +414,7 @@ TEST_F(ReferenceTest, IndexCreationWithGzipReference) {
         EXPECT_GT(textRef.getSquashLength(), 0);
         EXPECT_EQ(textRef.getFastaFileName(), textFastaFile);
     }
-    
+
     // Test 2: Create index with gzip reference file
     Reference gzipRef(gzipFastaFile, 1);
     bool gzipIndexResult = gzipRef.makeIndex();
@@ -374,15 +424,11 @@ TEST_F(ReferenceTest, IndexCreationWithGzipReference) {
         EXPECT_GT(gzipRef.getSquashLength(), 0);
         EXPECT_EQ(gzipRef.getFastaFileName(), gzipFastaFile);
     }
-    
+
     // The main goal is to test that both text and gzip files can be processed
     // without errors. Content comparison is complex due to different processing paths.
-    
+
     // Clean up
     std::filesystem::remove(textFastaFile);
     std::filesystem::remove(gzipFastaFile);
 }
-
-
-
-

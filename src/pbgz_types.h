@@ -34,6 +34,7 @@ typedef struct PbgzParameter{
     std::string outputDir;   // 
     bool isOverwriteOutFile;         // Whether to force overwrite output file
     std::string referenceGenic;      // Reference genome
+    std::string niIndexFile;         // 预建索引, 只是加速手段, 参考基因组始终以 referenceGenic 为准
     bool isUnpackRef;  
     uint32_t threadNum; 
     uint8_t compressLevel;

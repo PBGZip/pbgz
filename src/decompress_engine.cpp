@@ -208,6 +208,7 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     if (pRefGene == nullptr) {
         return false;
     }
+    pRefGene->setNiFile(parameter.niIndexFile);
     if (!pRefGene->makeIndex()) {
         LOG_ERROR("initialize reference failed");
         MemoryUtil::safeDeleteClass(pRefGene);

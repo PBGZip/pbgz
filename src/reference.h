@@ -84,10 +84,6 @@ public:
     /// @return MD5 checksum string
     const std::string& getFastaChecksum() const;
 
-    /// @brief Get complete path of NI index file
-    /// @return String reference of NI file path
-    const std::string& getNiFilePath() const;
-
     /// @brief Clean up unmatched regions in reference genome
     /// Set unmatched squash bytes to 0 within specified range
     /// @param startPos Starting squash position (byte index)
@@ -100,14 +96,29 @@ public:
     /// @param matchLength Matched base length
     void updateMatchedGene(uint64_t actgPos, uint32_t matchLength);
 
-    /// @brief Generate NI index file path based on reference genome file
-    /// @param niFile Output parameter, returns generated NI file complete path
-    void getNiFileFromReference(std::string& niFile);
-
-    /// @brief Initialize reference genome compressed data from NI file
-    /// Read NI file and initialize refGeneSquash buffer
+    /// @brief Build a NI index file from the FASTA reference at an explicit path
+    /// Only ever invoked on explicit user request; nothing is cached implicitly.
+    /// @param niFile NI file path to create
     /// @return true for success, false for failure
-    bool initSquashByNiFile();
+    bool makeNiFile(const std::string& niFile);
+
+    /// @brief Point at a prebuilt NI index to load instead of re-reading the FASTA
+    /// Purely an accelerator: the FASTA passed to the constructor stays authoritative,
+    /// and an index that fails verification is dropped in favour of it.
+    /// @param niFile NI file path supplied by the user
+    void setNiFile(const std::string& niFile) { niIndexFile = niFile; }
+
+    /// @brief Load reference genome compressed data from a user-specified NI file
+    /// The payload is verified against the checksum recorded inside the file, so a
+    /// damaged or tampered index is rejected rather than silently trusted.
+    /// @param niFile NI file path supplied by the user
+    /// @return true for success, false for failure
+    bool loadFromNiFile(const std::string& niFile);
+
+    /// @brief Tell whether a path holds a pbgz NI index, by content rather than by suffix
+    /// @param file Path to probe
+    /// @return true when the file carries the NI magic header
+    static bool isNiFile(const std::string& file);
 
     /// @brief Build squash buffer in-memory directly from FASTA file
     /// No disk cache, no files written to user space.
@@ -186,29 +197,12 @@ private:
     /// @param bgHash Base group hash information array
     /// @param hashBucketCurPos Current position pointer array for each bucket
     void makeIndexBuildHashTable(const BaseGroupHash* bgHash, uint32_t* &hashBucketCurPos);
-    
+
     /// @brief Sort hash table
     /// Sort position information in each bucket to optimize query performance
     void makeIndexSortHashTable();
 
-    /// @brief Check if NI index file is valid
-    /// Verify existence, format correctness and matching with reference genome file of NI file
-    /// @param niFile NI file path
-    /// @return true for valid, false for invalid
-    bool isNiFileValid(const std::string& niFile);
-
-    /// @brief Create NI index file
-    /// Read FASTA reference genome file, perform compression encoding, generate NI index file containing compressed data and metadata
-    /// @param niFile NI file path to create
-    /// @return true for success, false for failure
-    bool makeNiFile(const std::string& niFile);
-
 private:
-    /// @brief Handle file locking for NI file creation
-    /// @param niFile NI file path
-    /// @return true if lock acquired and should proceed, false if should skip
-    bool handleNiFileLock(const std::string& niFile);
-
     /// @brief Calculate MD5 checksum of reference genome file
     /// @param refGeneFile Reference genome file path
     /// @param refGeneMd5 Output MD5 string
@@ -227,8 +221,7 @@ private:
     /// @param md5 MD5 context for checksum calculation
     /// @param wlen Output written data length
     /// @return true for success, false for failure
-    bool processFastaFile(const std::string& refGeneFile, const std::string& niFile);
-
+    bool writeNiFile(const std::string& niFile);
     /// @brief Generate and write metadata to NI file
     /// @param niWriter File writer for NI file
     /// @param refGeneMd5 Reference genome MD5
@@ -237,21 +230,14 @@ private:
     /// @return true for success, false for failure
     bool writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5);
 
-    /// @brief Update configuration file with NI file information
-    /// @param niFile NI file path
-    /// @return true for success, false for failure
-    bool updateConfigurationFile(const std::string& niFile);
-
 private:
     // Progress bar
     GuardBar* guardBar;
     int64_t gbCurrent;
     int64_t gbTotal;
-    
+
     // FASTA file checksum, currently using MD5
     std::string fastaChecksum;
-    // NI file path
-    std::string niFilePath;
     // FASTA file content length
     int64_t fastaLength;
     // Length of bases used as key when building index table, must be odd
@@ -271,6 +257,9 @@ private:
     // Reference genome file
     std::string refGeneFile;
 
+    // Optional prebuilt index; empty means always parse refGeneFile
+    std::string niIndexFile;
+
     // Buffer for reference gene ACTG encoding
     uint8_t* refGeneSquash;
 
@@ -282,9 +271,6 @@ private:
 
     // Corresponding length
     uint64_t refGeneSquashMatchedlen;
-
-    // Cache file
-    Json::Value ref2niCache;
 
     // ACTG hash information
     const int32_t hashBuckets = (32 << 20); // 32M

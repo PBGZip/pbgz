@@ -51,7 +51,7 @@ Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
     hashTableBuffer = nullptr;
     refGeneSquashMatched = nullptr;
     refGeneSquashMatchedlen = 0;
-    
+
     // Set reference genome file path and thread count
     refGeneFile = fastaName;
     parallel = threadNum;
@@ -86,93 +86,100 @@ Reference::~Reference() {
     MemoryUtil::safeDeleteClass(guardBar);
 }
 
-bool Reference::initSquashByNiFile() {
-    std::string niFileName;
-    getNiFileFromReference(niFileName);
-    fprintf(stderr, "Reference index path: %s\n", niFileName.c_str());
-    if (!isNiFileValid(niFileName)) {
-        fprintf(stderr, "Begin to make ni file...\n");
-        if(!makeNiFile(niFileName)) {
-            LOG_ERROR("Make ni file failed.");
-            return false;
-        }
-        if (!isNiFileValid(niFileName)) {
-            LOG_ERROR("Check ni file failed after maked. niFileName = %s.", niFileName.c_str());
-            return false;
-        }
-    } 
+/*
+ * 索引只在用户显式指定时加载, 且必须整个读进内存、校验通过之后才算数。
+ *
+ * 两条理由。其一, 磁盘上这份随时可能正被另一个进程改写, 边读边用等于信任一个会变的
+ * 东西, 所以读完即脱离磁盘, 之后只认内存快照。其二, 载荷与文件内记录的校验和对不上
+ * 就说明它已不是当初那份索引, 拿去压会压错且不留任何迹象。校验通过前不碰任何成员,
+ * 失败时对象保持原样, 调用方可以干净地退回去读 fasta。
+ */
+bool Reference::loadFromNiFile(const std::string& niFile) {
+    const int64_t magicLen = (int64_t)PBGZ_FILE_MAGIC.length();
+    const int64_t headerLen = magicLen + 3 + 2 + (int64_t)sizeof(int64_t);
+    uint8_t* image = nullptr;
 
-    FileReader niReader(niFileName);
+    /* 不可信的索引不是致命错误, 但必须让用户看见, 否则他不知道自己压的是哪一份参考。 */
+    auto reject = [&](const std::string& why) {
+        MemoryUtil::safeFree(image);
+        fprintf(stderr, "warning: index %s is unusable (%s), building the index from %s instead.\n",
+                niFile.c_str(), why.c_str(), refGeneFile.c_str());
+        LOG_WARNING("ni file %s rejected: %s", niFile.c_str(), why.c_str());
+        return false;
+    };
+
+    FileReader niReader(niFile);
     if (0 != niReader.openIO()) {
-        LOG_ERROR("Open ni file %s failed.", niFileName.c_str());
-        return false;
+        return reject("cannot be opened");
     }
 
-    uint8_t buffer[4096];
-    // Read magic number
-    int64_t readLen = niReader.readIO(buffer, PBGZ_FILE_MAGIC.length());
-    int64_t buffOffset = readLen;
-    if (readLen != (int64_t)PBGZ_FILE_MAGIC.length() || 0 != memcmp(PBGZ_FILE_MAGIC.c_str(), buffer, PBGZ_FILE_MAGIC.length())) {
-        LOG_ERROR("ni file format error in file magic header.");
-        return false;
+    const int64_t fileSize = niReader.getFileSize();
+    if (fileSize <= headerLen) {
+        niReader.closeIO();
+        return reject("too short to be an index");
     }
 
-    // Read version number
-    readLen =  niReader.readIO(buffer, 3);
-    buffOffset += readLen;
-    if (readLen != 3) {
-        LOG_ERROR("ni file format error in file version.");
-        return false;
+    image = MemoryUtil::safeAlloc<uint8_t>(fileSize);
+    if (image == nullptr) {
+        niReader.closeIO();
+        return reject("cannot be loaded into memory");
     }
 
-    readLen = niReader.readIO(buffer, 2);
-    buffOffset += readLen;
-    if (readLen != 2 || 0 != memcmp(buffer, "ni", 2)) {
-        LOG_ERROR("ni file format error in magic.");
-        return false;
+    const int64_t readLen = niReader.readIO(image, fileSize);
+    niReader.closeIO();
+    if (readLen != fileSize) {
+        return reject("is being written or was truncated while reading");
     }
 
-    int64_t dataLen;
-    readLen = niReader.readIO(&dataLen, sizeof(dataLen));
-    buffOffset += readLen;
-    if (readLen != sizeof(int64_t)) {
-        LOG_ERROR("ni file format error in meta offset.");
-        return false;
+    if (0 != memcmp(image, PBGZ_FILE_MAGIC.c_str(), magicLen) ||
+        0 != memcmp(image + magicLen + 3, "ni", 2)) {
+        return reject("is not a pbgz index");
     }
 
-    refGeneSquashlen = dataLen;
-    refGeneSquash = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashlen);
-    if (refGeneSquash == nullptr) {
-        return false;
+    int64_t dataLen = 0;
+    memcpy(&dataLen, image + magicLen + 3 + 2, sizeof(dataLen));
+    if (dataLen <= 0 || dataLen >= fileSize - headerLen) {
+        return reject("declares a payload length that does not fit the file");
     }
-    readLen = niReader.readIO(refGeneSquash, refGeneSquashlen);
-    buffOffset += readLen;
-    if (readLen != refGeneSquashlen) {
-        LOG_ERROR("ni file check failed in data.");
-        return false;
-    }
+    const int64_t metaLen = fileSize - headerLen - dataLen;
 
-    int64_t metaLen = niReader.getFileSize() - buffOffset;
-    uint8_t* metaBuf = buffer;
-    if (metaLen > 4096) {
-        metaBuf = MemoryUtil::safeAlloc<uint8_t>(metaLen);
-        if (metaBuf == nullptr) {
-            return false;
-        }
-    }
-    readLen = niReader.readIO(metaBuf, metaLen);
-    if (readLen != metaLen) {
-        LOG_ERROR("ni file check failed meta.");
-        return false;
-    }
-
-    coder_json cmCoder;
     Json::Value niMeta;
-    cmCoder.decoder(metaBuf, metaLen, niMeta);
-    if (metaBuf != buffer) {
-       MemoryUtil::safeFree(metaBuf);
+    try {
+        coder_json cmCoder;
+        cmCoder.decoder(image + headerLen + dataLen, metaLen, niMeta);
+    } catch (const std::exception& e) {
+        return reject(std::string("carries unreadable metadata: ") + e.what());
     }
+
+    /* -r 决定用哪个参考, 索引得先证明自己是从那一份建出来的。 */
+    const std::string wantName = PathUtil::getFileName(refGeneFile);
+    const std::string haveName = niMeta["refe_name"].asString();
+    if (haveName != wantName) {
+        return reject("was built from '" + haveName + "', not from '" + wantName + "'");
+    }
+
+    const std::string expectMd5 = niMeta["ni_data_md5"].asString();
+    if (expectMd5.empty()) {
+        return reject("carries no payload checksum");
+    }
+
+    md5_ctx dataMd5;
+    uint8_t digest[16];
+    md5_init(&dataMd5);
+    md5_update(&dataMd5, image + headerLen, dataLen);
+    md5_final(digest, &dataMd5);
+    if (expectMd5 != std::string(md5_to_string(digest).c_str())) {
+        return reject("failed its own checksum, it was modified or written concurrently");
+    }
+
+    memmove(image, image + headerLen, dataLen);
+    refGeneSquash = image;
+    refGeneSquashlen = dataLen;
     fastaChecksum = niMeta["refe_orgfile_md5"].asString();
+    fastaLength = niMeta["refe_len"].asInt64();
+
+    fprintf(stderr, "Using index %s for reference %s (verified in memory).\n",
+            niFile.c_str(), refGeneFile.c_str());
     return true;
 }
 
@@ -181,6 +188,7 @@ bool Reference::initSquashFromFasta() {
     int64_t refGeneLen;
     calculateReferenceMd5(refGeneFile, refGeneMd5, refGeneLen);
     fastaChecksum = refGeneMd5;
+    fastaLength = refGeneLen;
 
     std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
     if (reader == nullptr || reader->openIO() != 0) {
@@ -257,137 +265,15 @@ uint8_t* Reference::initSquashByStream(int64_t squashLength) {
     return refGeneSquash;
 }
 
-bool Reference::isNiFileValid(const std::string& niFileName) {
-    char cfgdir[MAX_PATH];
-    get_user_config_folder(cfgdir, sizeof(cfgdir), PBGZ_FILE_MAGIC.c_str());
-    if (cfgdir[0] == 0) { 
-        LOG_INFO("user config path not exists.");
-        return false;
-    }
-
-    const std::string conf = std::string(cfgdir) + ".conf";
-    if (!PathUtil::fileExists(conf)) {
-        LOG_INFO("File %s not exists.", conf.c_str());
-        return false;
-    }
-
-    if (!PathUtil::fileExists(niFileName)) {
-        LOG_INFO("File %s not exists.", niFileName.c_str());
-        return false;
-    }
-
-    // Read conf file
-    FileReader confReader(conf);
-    confReader.openIO();
-    int64_t confFileSize = confReader.getFileSize();
-    uint8_t* buffer = MemoryUtil::safeAlloc<uint8_t>(confFileSize);
-    if (buffer == nullptr) {
-        LOG_ERROR("Alloc memory failed.");
-        return false;
-    }
-
-    int64_t readSize = confReader.readIO(buffer, confFileSize);
-    if (readSize != confFileSize) {
-        LOG_ERROR("Read conf file failed.");
-        MemoryUtil::safeFree<uint8_t>(buffer);
-        return false;
-    }
-    confReader.closeIO();
-
-    coder_json metaCoder;
-    metaCoder.decoder(buffer, confFileSize, ref2niCache);
-    MemoryUtil::safeFree<uint8_t>(buffer);
-
-    const std::string refFileName = PathUtil::getFileName(refGeneFile);
-    if (refFileName.empty()){
-        LOG_ERROR("Get refFileName from %s failed.", refGeneFile.c_str());
-        return false;
-    }
-
-    if (!ref2niCache[refFileName.c_str()].isArray()) {
-        LOG_ERROR("ref2niCache[%s] is not array.", refFileName.c_str());
-        return false;
-    }
-
-    FileReader niReader(niFileName);
-    niReader.openIO();
-    int64_t fileSize = niReader.getFileSize();
-    std::string niName = PathUtil::getFileName(niFileName);
-    if (niName.empty()) {
-        LOG_ERROR("Get file name from %s failed.", niFileName.c_str());
-        return false;
-    }
-    niReader.closeIO();
-
-    for (uint32_t n = 0; n < ref2niCache[refFileName.c_str()].size(); ++n) {
-        Json::Value niConf = ref2niCache[refFileName.c_str()][n]; 
-        if (!niConf["ni_name"].isNull() && niConf["ni_name"] == niName) {
-            if (PathUtil::getFileMtime(niFileName) != niConf["ni_mtime"].asInt64()) {
-                LOG_ERROR("Get file %s mtime failed.", niFileName.c_str());
-                return false;
-            }
-            if (fileSize != niConf["ni_fsize"].asInt64()) {
-                LOG_ERROR("file %s size not match, filesize = %d, expect = %d.", niFileName.c_str(), fileSize, niConf["ni_fsize"].asInt64());
-                return false;
-            }
-            return true;
-        }
-    }
-    return false;
-}
-
-bool Reference::handleNiFileLock(const std::string& niFile) {
-    (void)remove(niFile.c_str());
-    /* Check if any program is already making ni */
-    std::thread* progress = nullptr;
-    for (;;){
-        bool skip = false;
-        bool done = false;
-        std::string lockFileName = niFile + ".lock";
-        FileLock fileLock(lockFileName);
-        if(!fileLock.lock()) {
-            skip = true; /* When detecting another program making this ni, current program waits for ni file creation to complete and uses it directly */
-            if (!progress) {
-                progress = new std::thread([&done]() {
-                    const std::string prompt = "......";
-                    int32_t cnt = 0, mask = powerof2Proximal(prompt.length()) - 1;
-                    for (;;) {
-                        if (done) {
-                            break;
-                        }
-                        ++cnt;
-                        cnt &= mask;
-                        fprintf(stderr, "\33[2K\ranother program is making ni file, waiting %s", std::string(prompt.c_str(), cnt).c_str());
-                        usleep(500000);
-                    }
-                });
-            }
-            usleep(10000);
-            continue;
-        }
-        done = true;
-        if (progress) {
-            progress->join();
-            delete progress;
-        }
-        if (skip) {
-            fprintf(stderr, "\n");
-            return false;
-        }
-        break;
-    }
-    return true;
-}
-
 void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen) {
-    std::thread calc_md5([&refGeneFile, &refGeneMd5, &refGeneLen]() {                                 
+    std::thread calc_md5([&refGeneFile, &refGeneMd5, &refGeneLen]() {
         uint32_t bufferLen = 4096, len;
         refGeneLen = 0;
         md5_ctx md5;
         uint8_t digest[16];
         uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
         md5_init(&md5);
-        
+
         // Use PathUtil to detect if it's a gzip file
         bool isGzFile = PathUtil::isGzFile(refGeneFile);
         // Choose appropriate reader based on file type
@@ -466,7 +352,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                 return;
             }
         }
-        
+
         md5_final(digest, &md5);
         refGeneMd5 = md5_to_string(digest);
         MemoryUtil::safeFree(buffer);
@@ -492,7 +378,7 @@ std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName)
         bool useFastGzReader = false;
 #ifdef __SSE4_2__
         useFastGzReader = Hardware::isSupportSimd();
-#endif 
+#endif
         if (useFastGzReader) {
             // Use FastGzFileReader to read gzip file (Intel ISA-L accelerated)
             // Create a mutable copy since FastGzFileReader requires non-const string reference
@@ -508,130 +394,49 @@ std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName)
     }
 }
 
-bool Reference::processFastaFile(const std::string& refGeneFile,  const std::string& niFile) {
-    /* Serial processing is sufficient, basically just file reading time, base_squash time can be ignored */
-    size_t squashBufferlen = 1024 >> 2;
+/*
+ * 只负责把已经建好的 squash 序列化出去。解析 fasta 的实现只保留 initSquashFromFasta 一处:
+ * 这里原先另有一套自己的解析循环, 且漏掉了文件末尾不足 4 个碱基的残留, 于是同一个参考
+ * 经两条路会得到长度不同的 squash。同一件事只留一份实现, 才不会再次分叉。
+ */
+bool Reference::writeNiFile(const std::string& niFile) {
+    if (refGeneSquash == nullptr || refGeneSquashlen <= 0) {
+        LOG_ERROR("Squash is not built yet, nothing to write into %s.", niFile.c_str());
+        return false;
+    }
 
-    // Calculate reference genome MD5 in parallel
-    std::string refGeneMd5;
-    int64_t refGeneLen;
-    calculateReferenceMd5(refGeneFile, refGeneMd5, refGeneLen);
-
-    // Prepare file writer and buffers
-    uint32_t bufferLen = (5 << 20);
-    uint8_t* buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
     FileWriter niWriter(niFile);
     if (niWriter.openIO() != 0) {
         LOG_ERROR("Failed to open NI file for writing: %s", niFile.c_str());
-        MemoryUtil::safeFree(buffer);
         return false;
     }
 
-    // Write NI file header
     int64_t offset;
     if (!writeNiFileHeader(niWriter, offset)) {
         niWriter.closeIO();
-        MemoryUtil::safeFree(buffer);
         return false;
     }
 
-    // Create appropriate IOReader based on file type and hardware support
-    std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
-    if (reader->openIO() != 0) {
-        LOG_ERROR("Failed to open file: %s", refGeneFile.c_str());
-        niWriter.closeIO();
-        MemoryUtil::safeFree(buffer);
-        return false;
-    }
-    MemoryUtil::safeFree(buffer);
+    niWriter.writeIO(refGeneSquash, refGeneSquashlen);
+    niWriter.writeIOAt(offset, (uint8_t *)(&refGeneSquashlen), sizeof(refGeneSquashlen));
 
-    // Process FASTA file and write compressed data
     md5_ctx md5;
-    md5_init(&md5);
-
-    std::string line;
-    uint8_t cacheActg[4];
-    uint32_t cacheLen = 0;
-    int64_t docnt = 0;
-    int64_t  wlen = 0;
-    int64_t left;
-    uint8_t ch;
-    uint32_t l4Align;
-    std::string actgChr = "";
-    
-    uint8_t* squashBuffer = MemoryUtil::safeAlloc<uint8_t>(1024);
-    // Use IOReader::readLine instead of std::getline
-    while (reader->readLine(line) > 0) {
-        if (line.empty()) {
-            continue;
-        }
-        if (line[0] == '>') {
-            continue;
-        }
-        if (cacheLen + line.length() < 4) {
-            memcpy(cacheActg + cacheLen, line.c_str(), line.length());
-            cacheLen += line.length();
-        } else {
-            /* Process cache first */
-            docnt = 4 - cacheLen;
-            memcpy(cacheActg + cacheLen, line.c_str(), docnt);
-            actgSquash((uint8_t *)cacheActg, 4, &ch);
-            niWriter.writeIO(&ch, 1);
-            wlen += 1;
-            md5_update(&md5, &ch, 1);
-            cacheLen = 0;
-
-            left = line.length() - docnt;
-            if (left < 4) {
-                /* Remaining is not enough for cache */
-                memcpy(cacheActg + cacheLen, line.c_str() + docnt, left);
-                cacheLen += left;
-            } else {
-                /* Remaining is enough for cache */
-                l4Align = left >> 2 << 2;
-                size_t newBufferSize = (size_t)(l4Align >> 2);
-                if (newBufferSize > squashBufferlen) {
-                    uint8_t* newBuffer = (uint8_t*)realloc(squashBuffer, newBufferSize);
-                    if (newBuffer != nullptr) {
-                        squashBuffer = newBuffer;
-                        squashBufferlen = newBufferSize;
-                    } else {
-                        LOG_ERROR("Memory realloc failed");
-                        reader->closeIO();
-                        MemoryUtil::safeFree(squashBuffer);
-                        return false;
-                    }
-                }
-                uint32_t lenSquash = actgSquash((const uint8_t *)(line.c_str() + docnt), l4Align, squashBuffer);
-                niWriter.writeIO(squashBuffer, lenSquash);
-                wlen += lenSquash;
-                md5_update(&md5, squashBuffer, lenSquash);
-
-                /* Process unprocessed bytes not aligned to 4 */
-                docnt += l4Align;
-                left = line.length() - docnt;
-                if (left > 0) {
-                    memcpy(cacheActg + cacheLen, line.c_str() + docnt, left);
-                    cacheLen += left;
-                }
-            }
-        }
-    }
-    
-    reader->closeIO();
-    MemoryUtil::safeFree(squashBuffer);
-
-    // Update data length in header
-    niWriter.writeIOAt(offset, (uint8_t *)(&wlen), sizeof(wlen));
-    // Finalize MD5 and write metadata
     uint8_t digest[16];
+    md5_init(&md5);
+    md5_update(&md5, refGeneSquash, refGeneSquashlen);
     md5_final(digest, &md5);
     std::string md5String = md5_to_string(digest);
-    if (!writeNiFileMetadata(niWriter, refGeneMd5, refGeneLen, md5String)) {
+
+    if (!writeNiFileMetadata(niWriter, fastaChecksum, fastaLength, md5String)) {
         niWriter.closeIO();
         return false;
     }
     niWriter.closeIO();
+
+    if (0 != niWriter.getWriteError()) {
+        LOG_ERROR("Write ni file %s failed: %s", niFile.c_str(), strerror(niWriter.getWriteError()));
+        return false;
+    }
     return true;
 }
 
@@ -652,168 +457,38 @@ bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& ref
     return true;
 }
 
-bool Reference::updateConfigurationFile(const std::string& niFile) {
-    Json::Value niconf, nicurr;
-    std::string conf, ni_name, out;
-    uint64_t file_size;
-    char cfgdir[MAX_PATH];
-    uint32_t bufferLen = (5 << 20);
-    uint8_t* buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
-
-    get_user_config_folder(cfgdir, sizeof(cfgdir), PBGZ_FILE_MAGIC.c_str());
-    if (cfgdir[0] == 0) {
-        MemoryUtil::safeFree(buffer);
-        return false;
-    }
-    conf = cfgdir;
-    conf += ".conf";
-
-    FileReader niReader(niFile);
-    niReader.openIO();
-    std::string niFileName = PathUtil::getFileName(niFile);
-    nicurr["ni_name"] = niFileName;
-    nicurr["ni_mtime"] = (Json::Value::Int64)(PathUtil::getFileMtime(niFile));
-    nicurr["ni_fsize"] = (Json::Value::Int64)(niReader.getFileSize());
-    niReader.closeIO();
-
-    coder_json cmeta;
-    if (PathUtil::fileExists(conf)) {
-        FileReader confReader(conf);
-        confReader.openIO();
-        file_size = confReader.getFileSize();
-        if (file_size > bufferLen) {
-            size_t size = bufferLen;
-            buffer = MemoryUtil::safeRealloc<uint8_t>(size, buffer, file_size);
-            bufferLen = size;
-        }
-        if (confReader.readIO(buffer, file_size) != file_size) {
-            LOG_ERROR("conf file read failed: %s", conf.c_str());
-            MemoryUtil::safeFree(buffer);
-            return false;
-        }
-        confReader.closeIO();
-        cmeta.decoder(buffer, file_size, ref2niCache);
-
-        if (!ref2niCache[PathUtil::getFileName(refGeneFile).c_str()].isArray())  { 
-            /* Add new if no conf information exists */ 
-            ref2niCache[PathUtil::getFileName(refGeneFile).c_str()].append(nicurr);
-        } else {
-            int64_t n = 0;
-            for (; n < ref2niCache[PathUtil::getFileName(refGeneFile).c_str()].size(); n++) {
-                niconf = ref2niCache[PathUtil::getFileName(refGeneFile).c_str()][(int32_t)n];
-                if (!niconf["ni_name"].isNull() && niconf["ni_name"] == niFileName) { 
-                    /* Update if exists */
-                    ref2niCache[PathUtil::getFileName(refGeneFile).c_str()][(int32_t)n]["ni_mtime"] = nicurr["ni_mtime"];
-                    ref2niCache[PathUtil::getFileName(refGeneFile).c_str()][(int32_t)n]["ni_fsize"] = nicurr["ni_fsize"];
-                    break;
-                }
-            }
-            if (n >= ref2niCache[PathUtil::getFileName(refGeneFile).c_str()].size()) {
-                ref2niCache[PathUtil::getFileName(refGeneFile).c_str()].append(nicurr);
-            }
-        }
-    } else {
-        ref2niCache[PathUtil::getFileName(refGeneFile).c_str()].append(nicurr);
-    }
-
-    (void)remove(conf.c_str());
-    FileWriter confWriter(conf);
-    confWriter.openIO();
-    cmeta.encoder(ref2niCache, out);
-    if(confWriter.writeIO((uint8_t *)(out.c_str()), out.length()) != out.length()) {
-        LOG_ERROR("conf file write failed: %s.", conf.c_str());
-        MemoryUtil::safeFree(buffer);
-        return false;
-    }    
-    confWriter.closeIO();
-
-    MemoryUtil::safeFree(buffer);
-    return true;
-}
-
+/*
+ * 只在用户显式要求时落盘, 路径也由用户给定: 隐式缓存一旦被改写, 之后压出来的数据
+ * 就是错的且无人察觉, 所以这里不写用户数据目录, 也不登记任何全局配置。
+ */
 bool Reference::makeNiFile(const std::string& niFile) {
-    // Handle file locking for concurrent access
-    if (!handleNiFileLock(niFile)) {
-        return true; // Skip if another process is making the file
-    }
-    if (!processFastaFile(refGeneFile, niFile)) {
+    if (!initSquashFromFasta()) {
+        LOG_ERROR("Build squash from %s failed.", refGeneFile.c_str());
         return false;
     }
-
-    // Update configuration file
-    if (!updateConfigurationFile(niFile)) {
-        return false;
-    }
-    return true;
+    return writeNiFile(niFile);
 }
 
-void Reference::getNiFileFromReference(std::string& niFile) {
-    md5_ctx md5;
-    md5_init(&md5);
-    std::string niFileName = PathUtil::getFileName(refGeneFile);
-    char cfgdir[MAX_PATH];
-    get_user_data_folder(cfgdir, sizeof(cfgdir), PBGZ_FILE_MAGIC.c_str());
-    if (cfgdir[0] == 0) {
-        return;
+/* 按文件头识别, 不看后缀: 用户给什么路径就认什么内容。 */
+bool Reference::isNiFile(const std::string& file) {
+    const size_t magicLen = PBGZ_FILE_MAGIC.length();
+    const size_t headLen = magicLen + 3 + 2; /* magic + 版本 + "ni" */
+    uint8_t head[64];
+    if (headLen > sizeof(head)) {
+        return false;
     }
-    niFilePath = cfgdir;
 
-    FILE *fp = fopen(refGeneFile.c_str(), "rb");
+    FILE* fp = fopen(file.c_str(), "rb");
     if (fp == nullptr) {
-        LOG_ERROR("reference file read failed: %s", refGeneFile.c_str());
-        return;
+        return false;
     }
-    
-    if (fseeko(fp, 0, SEEK_END) != 0) { 
-        LOG_ERROR("fseek failed: %s", refGeneFile.c_str());
-        fclose(fp);
-        return;
-    }
-    
-    int64_t fileSize = ftello(fp);
-    rewind(fp);
-
-    int64_t readEach = 1024;
-    int64_t offsetEach = fileSize >> 2;
-    
-    if (offsetEach < readEach) {
-        uint8_t buffer[fileSize + sizeof(fileSize)];
-        if (fread(buffer, fileSize, 1, fp) != 1) {
-            LOG_ERROR("reference file read failed: %s", refGeneFile.c_str());
-            fclose(fp);
-            return;
-        } 
-        *((int64_t *)(buffer + fileSize)) = fileSize;
-        md5_update(&md5, buffer, fileSize + sizeof(fileSize));
-    } else {
-        uint8_t buffer[(readEach << 2) + sizeof(fileSize)];
-        int64_t offset = 0, len = 0;
-        for (int64_t n = 0; n < 4; n++) {
-            if (fseeko(fp, offset, SEEK_SET) != 0) {
-                LOG_ERROR("reference file fseek failed: %s", refGeneFile.c_str());
-                fclose(fp);
-                return;
-            }
-            if (fread(buffer + len, readEach, 1, fp) != 1)  {
-                LOG_ERROR("reference file read failed: %s", refGeneFile.c_str());
-                fclose(fp);
-                return;
-            }
-            offset += offsetEach;
-            len += readEach;
-        }
-        *((int64_t *)(buffer + len)) = fileSize;
-        md5_update(&md5, buffer, (readEach << 2) + sizeof(fileSize));
-    }
+    size_t got = fread(head, 1, headLen, fp);
     fclose(fp);
-    
-    uint8_t digest[16];
-    md5_final(digest, &md5);
-    niFileName += ".";
-    niFileName += std::string(md5_to_string(digest).c_str(), 8); /* Take first 8 digits of MD5 */
-    niFileName += ".ni";
-    niFilePath += niFileName;
-    niFile = niFilePath;
+    if (got != headLen) {
+        return false;
+    }
+    return 0 == memcmp(head, PBGZ_FILE_MAGIC.c_str(), magicLen) &&
+           0 == memcmp(head + magicLen + 3, "ni", 2);
 }
 
 bool Reference::makeIndex() {
@@ -826,7 +501,12 @@ bool Reference::makeIndex() {
     uint32_t *hashBucketCurpos;
 
     hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
-    if (!initSquashFromFasta()) {
+    /* 索引信不过就退回读 fasta: 参考基因组由 -r 决定, 索引只是省一遍解析。 */
+    bool squashReady = !niIndexFile.empty() && loadFromNiFile(niIndexFile);
+    if (!squashReady) {
+        squashReady = initSquashFromFasta();
+    }
+    if (!squashReady) {
         LOG_ERROR("initialize reference failed");
         MemoryUtil::safeFree(hashBucketCurpos);
         return false;
@@ -850,7 +530,7 @@ bool Reference::makeIndex() {
     if (guardBar != nullptr) {
         guardBar->done(tips);
     }
-   
+
     MemoryUtil::safeFree(bgHash);
     MemoryUtil::safeFree(hashBucketCurpos);
 
@@ -910,7 +590,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
             char actg_bg_pair[bg_len + 1]; /* Complementary base */
             char actg_bgs[len_bgs];    /* squash base group */
             char actg_bgs_pair[len_bgs];
-            
+
             for (*pnnn = 0; *pnnn < current; *pnnn = (*pnnn) + 1) {
                 /* step 1 : get base group */
                 for (m = 0; m < align4; m += 4) {
@@ -1034,7 +714,7 @@ void Reference::makeIndexInitHashTable(const HashTable& hashTable, uint32_t* &ha
     }
 
     hashTableBuffer = MemoryUtil::safeAlloc<uint32_t>(hashBufflen);
-    
+
     int64_t total = hashBuckets;
     uint32_t pcnt = this->parallel;
     int64_t each = hashBuckets / pcnt;
@@ -1164,7 +844,7 @@ void Reference::makeIndexSortHashTable() {
                     if (current_cnt < 255) {
                         p = pstart + phb_buff[n];
                         std::sort(p, p + current_cnt, [](const uint32_t &p1, const uint32_t &p2) -> bool {
-                             return p1 < p2; 
+                             return p1 < p2;
                         }); // Fix potential core dump issue, returning true for equality causes out-of-bounds, uses quick sort when element count >16 (_S_threshold), uses insertion sort when <=16 (quick sort performance is not ideal for few objects)
                     }
                     *(phb_cnt_start + offset + n) = std::min((uint32_t)16, current_cnt);
@@ -1188,14 +868,14 @@ void Reference::dumpHashTable() {
         LOG_ERROR("Failed to open hash_table file for writing");
         return;
     }
-    
+
     for (int32_t n = 0; n < hashBuckets; n++) {
         if (hashBucketCnt[n] <= 0) {
             continue;
         }
         fprintf(fp, "bucket %u : ", n);
         uint32_t *p = (hashBucketCnt[n] > 1) ? (hashTableBuffer + hashTableBuffer[n]) : (hashTableBuffer + n);
-            
+
         for (uint32_t m = 0; m < hashBucketCnt[n]; m++) {
             fprintf(fp, "%u,", *(p + m));
         }
@@ -1211,7 +891,7 @@ void Reference::dumpSquash() {
         LOG_ERROR("Failed to open squash file for writing");
         return;
     }
-    
+
     for(int64_t idx = 0; idx < refGeneSquashlen; idx++) {
         fprintf(fp, "%X", refGeneSquash[idx]);
         if (idx % 64 == 0 && idx != 0) {
@@ -1272,11 +952,6 @@ const std::string& Reference::getFastaChecksum() const {
     return this->fastaChecksum;
 }
 
-/* Get ni file path */
-const std::string& Reference::getNiFilePath() const {
-    return this->niFilePath;
-}
-
 /* Clear unmatched reference to zero */
 void Reference::sanitizeRefSquash(int64_t startSquashPos, int64_t len) {
     uint64_t e = startSquashPos + len;
@@ -1294,7 +969,7 @@ void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) 
     uint32_t offset  = 0;
     const char actg4[4] = {'A', 'C', 'T', 'G'};
     /* Left unaligned part */
-    switch (actgPos & 0x3) 
+    switch (actgPos & 0x3)
     {
     case 0:
         break;
@@ -1334,7 +1009,7 @@ void Reference::getStretchActg(uint8_t *out, uint32_t outLen, uint64_t actgPos) 
     /* Right unaligned part */
     lenNeed = outLen - offset;
     ch = *p;
-    switch (lenNeed & 0x3) 
+    switch (lenNeed & 0x3)
     {
     case 0:
         break;
@@ -1381,12 +1056,12 @@ void Reference::getActgFrom2Bits(const uint8_t *src2Bits, uint32_t src2BitsLen, 
 void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t actgPos) {
     uint32_t offset = 0;
     uint64_t squashPos = actgPos >> 2;
-    
+
     uint8_t *p = refGeneSquash + squashPos;
     uint8_t ch = *p;
 
     /* Left unaligned part */
-    switch (actgPos & 0x3) 
+    switch (actgPos & 0x3)
     {
     case 0:
         break;
@@ -1426,7 +1101,7 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
     /* Right unaligned part */
     lenNeed = outLen - offset;
     ch = *p;
-    switch (lenNeed & 0x3) 
+    switch (lenNeed & 0x3)
     {
     case 0:
         break;

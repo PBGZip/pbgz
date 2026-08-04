@@ -375,10 +375,13 @@ bool CompressEngine::initReference() {
         pRefGene = MemoryUtil::safeNewClass<Reference>(parameter.referenceGenic, parameter.threadNum);
     }
     if (pRefGene) {
+        pRefGene->setNiFile(parameter.niIndexFile);
+        /* 参考是用户明确下的指令, 用不了就得停下, 悄悄改成无参考等于压出另一份东西。 */
         if (!pRefGene->makeIndex()) {
-            LOG_ERROR("makeIndex failed, reference will not be used");
+            LOG_ERROR("Build reference index from %s failed.", parameter.referenceGenic.c_str());
             MemoryUtil::safeDeleteClass(pRefGene);
             pRefGene = nullptr;
+            return false;
         }
     }
     return true;
