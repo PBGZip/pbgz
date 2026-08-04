@@ -25,7 +25,7 @@
 #define _CODER_AFFIX_MATCH_H_
 
 #include <stdint.h>
-#include <cinttypes> 
+#include <cinttypes>
 
 #include "simple_model.h"
 #include "coder_io.h"
@@ -80,7 +80,7 @@ public:
 
         if (io->m != coder_io::MENC)
         {
-            rc.output((char *)(this->io->data));
+            rc.output((char *)io->data, (char *)io->data + io->data_capacity);
             rc.StartEncode();
             io->m = coder_io::MENC;
             this->last_capacity = in_len;
@@ -153,12 +153,12 @@ public:
         if (need2hold)
         {
             /* Allocate new memory to avoid in-place reallocation issues */
-            if (in_len > this->last_capacity) 
+            if (in_len > this->last_capacity)
             {
                 uint8_t* new_last = static_cast<uint8_t*>(safe_alloc(in_len));
                 if (new_last) {
                     memcpy(new_last, in, in_len);
-                    if (last != in && this->last) 
+                    if (last != in && this->last)
                     {
                         safe_free((void**)&this->last);
                     }
@@ -167,8 +167,8 @@ public:
                     this->last_capacity = in_len;
                     this->plast = last;
                 }
-            } 
-            else 
+            }
+            else
             {
                 memcpy(this->last, in, in_len);
                 this->last_len = in_len;
@@ -183,7 +183,7 @@ public:
 
     /* External decompression interface, set need2hold to true if input will be freed after decode call */
     int32_t decode_line(uint8_t *out, uint32_t __attribute__((unused)) out_len,
-                        uint8_t __attribute__((unused)) split_ch = UINT8_MAX, 
+                        uint8_t __attribute__((unused)) split_ch = UINT8_MAX,
                         bool __attribute__((unused)) need2hold = false)
     {
         uint8_t c;
@@ -194,15 +194,15 @@ public:
 
         if (io->m != coder_io::MDEC)
         {
-            rc.input((char *)(this->io->data));
+            rc.input((char *)io->data, (char *)io->data + io->data_capacity);
             rc.StartDecode();
             io->m = coder_io::MDEC;
             this->last_capacity = 1024;
             last = static_cast<uint8_t*>(safe_alloc_init(this->last_capacity, ' '));
             //check_exit(last, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Error: Insufficient memory: need %" PRIu64 " MB\n",  static_cast<uint64_t>(this->last_capacity) >> 20);
-            if (!last) 
+            if (!last)
             {
-                coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",  
+                coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",
                     static_cast<uint64_t>(this->last_capacity) >> 20);
                 return coder_ns::CODER_ERR_MEM_ALLOC_FAIL;
             }
@@ -210,13 +210,13 @@ public:
             this->plast = last;
         }
 
-        if (encode_higher()) 
+        if (encode_higher())
         {
             pre_len = model_prefix[last_prelen].decodeSymbolOrder(&rc);
             suf_len = model_suffix[last_suflen].decodeSymbolOrder(&rc);
             len = model_len[last_len].decodeSymbolOrder(&rc);
-        } 
-        else 
+        }
+        else
         {
             pre_len = model_prefix[last_prelen].decodeSymbol(&rc);
             suf_len = model_suffix[last_suflen].decodeSymbol(&rc);
@@ -230,7 +230,7 @@ public:
             out[i] = last[i];
 
         len2 = len - suf_len, match = pre_len ? 1 : 0;
-        for (i = j = pre_len, k = 0; i < len2; i++, j++, k++) 
+        for (i = j = pre_len, k = 0; i < len2; i++, j++, k++)
         {
             uint8_t ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             last_ch = (((ch - 32) << 1) + match + (k << 6)) & 0x1FFF;
@@ -243,23 +243,23 @@ public:
 
             ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c == ' ' && ch != ' ') j++;
-            
+
             ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c != ' ' && ch == ' ') j--;
-            
+
             ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c == ':' && ch != ':') j++;
-            
+
             ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             if (c != ':' && ch == ':') j--;
-            
+
             if (out[i] == ':' || out[i] == ' ') k = (k + 3) >> 2 << 2;
-            
+
             ch = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
             match = c == ch;
         }
 
-        for (j = last_len - suf_len; i < len; i++, j++) 
+        for (j = last_len - suf_len; i < len; i++, j++)
         {
             out[i] = (j < (int32_t)this->last_len && j >= 0) ? last[j] : ' ';
         }
@@ -268,10 +268,10 @@ public:
         {
             if (len > (int32_t)this->last_capacity) {
                 uint8_t* new_last = static_cast<uint8_t*>(safe_alloc(len));
-                if (new_last) 
+                if (new_last)
                 {
                     memcpy(new_last, out, len);
-                    if (this->last) 
+                    if (this->last)
                     {
                         safe_free((void**)&this->last);
                     }
@@ -280,8 +280,8 @@ public:
                     this->last_capacity = len;
                     this->plast = last;
                 }
-            } 
-            else 
+            }
+            else
             {
                 memcpy(this->last, out, len);
                 last_len = len;
@@ -314,10 +314,12 @@ public:
         if (flushed) {
             return;
         }
-           
+
         if (io->m == coder_io::MENC)
         {
-            rc.FinishEncode();
+            if (rc.FinishEncode() < 0) {
+                io->err = coder_io::IO_BUF_FULL;
+            }
             io->data_len += rc.size_out();
         }
 

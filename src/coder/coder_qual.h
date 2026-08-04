@@ -86,7 +86,7 @@ public:
         if (model_qual)
             delete model_qual;
     }
-    
+
     uint32_t get_context_gen2(uint8_t s, uint8_t q, uint32_t &s_prev_ctx, uint32_t &q_prev_ctx, uint32_t sse_ctx)
     {
 
@@ -116,7 +116,7 @@ public:
 
         q_prev_ctx = ((q_prev_ctx << Q_LOG) + q) & Q_MASK;
         s_prev_ctx = ((s_prev_ctx * AMAX) + L[s]) % S_CTX;
-        return (s_prev_ctx << (q_ctx_len * Q_LOG)) + q_prev_ctx; 
+        return (s_prev_ctx << (q_ctx_len * Q_LOG)) + q_prev_ctx;
     }
 
     void encode_qual_gen2(uint8_t *seq, uint8_t *qual, uint32_t len) {
@@ -126,7 +126,7 @@ public:
         uint32_t sse_ctx_cur = 0;
 
         if (io->m != coder_io::MENC) {
-            rc.output((char *)(this->io->data));
+            rc.output((char *)io->data, (char *)io->data + io->data_capacity);
             rc.StartEncode();
             io->m = coder_io::MENC;
         }
@@ -207,7 +207,7 @@ public:
 
         if (io->m != coder_io::MDEC)
         {
-            rc.input((char *)(this->io->data));
+            rc.input((char *)io->data, (char *)io->data + io->data_capacity);
             rc.StartDecode();
             io->m = coder_io::MDEC;
         }
@@ -243,6 +243,10 @@ public:
             // q2 = q1;
             // q1 = q;
 
+        }
+
+        if (rc.FinishDecode() < 0) {
+            io->err = coder_io::IO_READ_EMPTY;
         }
     }
 
@@ -286,6 +290,10 @@ public:
             // q1 = q;
 
         }
+
+        if (rc.FinishDecode() < 0) {
+            io->err = coder_io::IO_READ_EMPTY;
+        }
     }
 
     /* Encode unprocessed data */
@@ -295,7 +303,9 @@ public:
             return;
         if (io->m == coder_io::MENC)
         {
-            rc.FinishEncode();
+            if (rc.FinishEncode() < 0) {
+                io->err = coder_io::IO_BUF_FULL;
+            }
             io->data_len += rc.size_out();
         }
         flushed = true;
@@ -313,12 +323,12 @@ private:
 private:
 
      /* sequence table lookups ACGTN->0..4 */
-    int32_t L[256];         
+    int32_t L[256];
 
     /*  generate Q_QUANT_GEN2 */
     // uint8_t Q_QUANT[128] = {0};
     // for (uint8_t i = 33; i < 128; i++) {
-        
+
     //     uint8_t qq = i - '!';
 
     //     int32_t high = qq >> 1;

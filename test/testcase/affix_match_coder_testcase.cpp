@@ -41,11 +41,14 @@ public:
         coder_ns::register_realloc_proc(MemoryUtil::safeRealloc<uint8_t>);
         coder_ns::register_free_func(MemoryUtil::safeFree<void>);
         
-        // Prepare sufficient buffer for testing
-        const int32_t buffer_size = 10 * 1024 * 1024; // 10MB buffer, ensure sufficient size
-        test_data = (uint8_t*) malloc(buffer_size);
-        compressed_data = (uint8_t*) malloc(buffer_size);
-        decompressed_data = (uint8_t*) malloc(buffer_size);
+        /*
+         * 分配量必须就是告诉 coder_io 的容量。此前这里分配 10 MB 却只声明 1 MB，
+         * 不可压数据把编码器逼到 1 MB 以外时没人察觉——那 9 MB 余量把越界盖住了。
+         * 生产上 coder_io 拿的是块的真实剩余量，同样的写法就是堆溢出。
+         */
+        test_data = (uint8_t*) malloc(BUFFER_SIZE);
+        compressed_data = (uint8_t*) malloc(BUFFER_SIZE);
+        decompressed_data = (uint8_t*) malloc(BUFFER_SIZE);
         
         ASSERT_NE(test_data, nullptr);
         ASSERT_NE(compressed_data, nullptr);
@@ -903,4 +906,4 @@ TEST_F(AffixMatchCoderTest, RandomDigitsCompressionNotHold)
 }
 
 // Define static member variable to resolve linking error
-const int32_t AffixMatchCoderTest::BUFFER_SIZE = 1024 * 1024;
+const int32_t AffixMatchCoderTest::BUFFER_SIZE = 10 * 1024 * 1024;
