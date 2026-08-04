@@ -59,6 +59,10 @@ public:
         return codecActuator;
     }
 
+    const coder_err_sink& ioError() const override {
+        return codecActuator != nullptr ? codecActuator->ioError() : Actuator::ioError();
+    }
+
 protected:
     BinaryCodecActuator* codecActuator;
 };
@@ -92,6 +96,10 @@ public:
 
     BinaryCodecActuator* getCodecActuator() {
         return codecActuator;
+    }
+
+    const coder_err_sink& ioError() const override {
+        return codecActuator != nullptr ? codecActuator->ioError() : Actuator::ioError();
     }
 
 protected:
@@ -129,6 +137,10 @@ public:
 
     T* getCodecActuator() {
         return codecActuator;
+    }
+
+    const coder_err_sink& ioError() const override {
+        return codecActuator != nullptr ? codecActuator->ioError() : Actuator::ioError();
     }
 
 protected:
@@ -169,6 +181,10 @@ public:
         return codecActuator;
     }
 
+    const coder_err_sink& ioError() const override {
+        return codecActuator != nullptr ? codecActuator->ioError() : Actuator::ioError();
+    }
+
 protected:
     T* codecActuator;
     Reference* pReference;
@@ -180,4 +196,3 @@ using FastqDecompressActuator = DecompressActuator<FastqCodecActuator>;
 
 using SamCompressActuator = CompressActuator<SamCodecActuator>;
 using SamDecompressActuator = DecompressActuator<SamCodecActuator>;
-

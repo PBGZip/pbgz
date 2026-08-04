@@ -47,13 +47,13 @@
 namespace {
     void recordFastqFieldStats(PbgzEngine* engine, uint16_t objectId, uint32_t srcLen, uint32_t dstLen) {
         if (!engine) return;
-        
+
         auto compressEngine = dynamic_cast<CompressEngine*>(engine);
         if (!compressEngine || !compressEngine->getStats()) return;
-        
+
         auto fastqStat = dynamic_cast<FastqStat*>(compressEngine->getStats());
         if (!fastqStat) return;
-        
+
         if (objectId != 0 && srcLen > 0) {
             fastqStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, objectId, StatMetricIds::ORIGINAL_SIZE, srcLen);
             fastqStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, objectId, StatMetricIds::COMPRESSED_SIZE, dstLen);
@@ -188,7 +188,7 @@ int32_t FastqCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bu
         return -1;
     }
 
-    std::vector<uint32_t> idSplitPos;  
+    std::vector<uint32_t> idSplitPos;
     for (uint32_t i = 1 ; i < bufLen; ++i) {    // First character is @, skip it
         char ch = pBuffer[i];
         if (idSplitDefault.find(ch) != std::string::npos) {
@@ -206,13 +206,13 @@ int32_t FastqCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bu
     // Copy first line ID analysis information to idPositions
     uint32_t lastPos = 0;
     for (uint32_t idx = 0;  idx < idSplitPos.size(); ++idx) {
-        uint32_t pos = idSplitPos[idx]; 
+        uint32_t pos = idSplitPos[idx];
         uint32_t curLen = pos - lastPos - (0 == idx ? 0 : 1);   // First line no needs offset
         if (curLen < idSplitMinLen[idx]) {
             idSplitMinLen[idx] = curLen;
         }
         if (curLen > idSplitMaxLen[idx]) {
-            idSplitMaxLen[idx] = curLen; 
+            idSplitMaxLen[idx] = curLen;
         }
         idPositions.push_back(pos);
         idPosLength++;
@@ -232,7 +232,7 @@ int32_t FastqCodecActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) 
             idPosLength = UINT32_MAX;
             break;
         }
-        
+
         uint32_t pos = (uint8_t*)found - pBuffer;
         uint32_t curLen = pos - lastFindPos - (0 == idx ? 0 : 1);
         if (curLen < idSplitMinLen[idx]) {
@@ -350,7 +350,7 @@ int32_t FastqCodecActuator::preAnalysis() {
             break;
         }
         case 2: { // Comment line
-            if (preAnalysisComment(inBlockPtr->getBuffer() + startPos, lineLength, lineNo) != 0) { 
+            if (preAnalysisComment(inBlockPtr->getBuffer() + startPos, lineLength, lineNo) != 0) {
                 return -1;
             }
             break;
@@ -361,13 +361,13 @@ int32_t FastqCodecActuator::preAnalysis() {
             }
             break;
         }
-        default: 
+        default:
             return -1;
         }
         startPos = endPos + 1;
     }
 
-    std::sort(qualityFrequnce, qualityFrequnce + 256, 
+    std::sort(qualityFrequnce, qualityFrequnce + 256,
         [](const std::pair<uint8_t, uint32_t> &a, const std::pair<uint8_t, uint32_t> &b){ return a.second > b.second; });
     for (int i = 0; i < 256; ++i) {
         if (qualityFrequnce[i].second == 0) {
@@ -391,7 +391,7 @@ int32_t FastqCodecActuator::initEncoder() {
     if (pReference) {
        /* base pair + 4 base pair squash + 4 base squash + base mapped + base N pos in block +
         * base delete N + mapped pos + mapped pair + baselen each line
-        */ 
+        */
         uint32_t n = lmax + (lsquash << 3) + baseMappedLength + (baseNCount << 2);
         n += lmax + (line4 << 3) + line4 + baselenLen;
         mappingBuffer = MemoryUtil::safeAlloc<uint8_t>(n);
@@ -689,7 +689,7 @@ int32_t FastqCodecActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Js
         uint32_t splitStep = (idx / 4) * idSplitSymbols.size();
         if (splitSymIdx == 0) {
             data = inBlockPtr->getBuffer() + currLineOffset;
-            currLen =  idPositions[splitSymIdx + splitStep] + 1;  //  currIdPos;  
+            currLen =  idPositions[splitSymIdx + splitStep] + 1;  //  currIdPos;
         } else {
             data = inBlockPtr->getBuffer() + currLineOffset + idPositions[splitSymIdx + splitStep - 1] + 1;
             currLen = idPositions[splitSymIdx + splitStep] - idPositions[splitSymIdx + splitStep - 1];
@@ -706,7 +706,7 @@ int32_t FastqCodecActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Js
     tmpMeta["srclen"] = srcDataLen;
     tmpMeta["dstlen"] = idIo->data_len;
     tmpMeta["coder"] = idIo->meta;
-    
+
     streamMeta.append(tmpMeta);
     return 0;
 }
@@ -714,7 +714,7 @@ int32_t FastqCodecActuator::compressIdStream(coder_io* idIo, TCoder* idCoder, Js
 int32_t FastqCodecActuator::compressIdInAll() {
     Json::Value idMeta;
     Json::Value streamMeta;
-    std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "ID");
     std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
 
     uint32_t srcDataLen = 0;
@@ -723,8 +723,8 @@ int32_t FastqCodecActuator::compressIdInAll() {
         srcDataLen += inBlockPtr->getNpos()[lineId] - startPos + 1;
         idCoder->encode_line(inBlockPtr->getBuffer() + startPos, inBlockPtr->getNpos()[lineId] - startPos + 1);
         startPos = inBlockPtr->getNpos()[lineId + 3] + 1;
-    }  
-    idCoder->encode_flush(); 
+    }
+    idCoder->encode_flush();
 
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idIo->data_len);
     Json::Value tmpMeta;
@@ -732,17 +732,17 @@ int32_t FastqCodecActuator::compressIdInAll() {
     tmpMeta["dstlen"] = idIo->data_len;
     tmpMeta["coder"] = idIo->meta;
     streamMeta.append(tmpMeta);
-    
+
     idMeta["totalsrclen"] = srcDataLen;
     idMeta["totaldstlen"] = idIo->data_len;
     idMeta["splitsym"] = std::string("\n");
     idMeta["streams"] = streamMeta;
     meta["id"] = idMeta;
     LOG_INFO("Compress Id in all: from %d to %d, compress ratio: %.2f%%", srcDataLen, idIo->data_len, ((float)(idIo->data_len * 100)) / srcDataLen);
-    
+
     // Record statistics for ID compression
     recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_ID, srcDataLen, idIo->data_len);
-    
+
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
@@ -762,7 +762,7 @@ int32_t FastqCodecActuator::compressIdInSplit() {
             uint8_t * data = nullptr;
             uint32_t currLen = 0;
             if (i == 0) {
-                data = inBlockPtr->getBuffer() + currLineOffset + 1;    
+                data = inBlockPtr->getBuffer() + currLineOffset + 1;
                 currLen = currIdPos - 1;
             } else {
                 data = inBlockPtr->getBuffer() + currLineOffset + idPositions[i - 1] + 1;
@@ -780,7 +780,7 @@ int32_t FastqCodecActuator::compressIdInSplit() {
 
             if (idDigit) {
                 LOG_DEBUG("Is all digit(%d), use coder_bwt_cm.", i);
-                std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+                std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "ID sub-stream");
                 std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
                 uint32_t srcLength = 0;
                 int32_t ret= compressIdStream<coder_bwt_cm>(idIo.get(), idCoder.get(), streamMeta, srcLength, i);
@@ -796,7 +796,7 @@ int32_t FastqCodecActuator::compressIdInSplit() {
 
         // Fixed length or not all digits scenario
         LOG_DEBUG("Not all digit or fix length(%d), use coder_affix_match.", i);
-        std::shared_ptr<coder_io> idIoAM = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<coder_io> idIoAM = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "ID sub-stream");
         std::shared_ptr<coder_affix_match> idCoderAm = std::make_shared<coder_affix_match>(idIoAM.get());
         uint32_t srcLength = 0;
         int32_t ret= compressIdStream<coder_affix_match>(idIoAM.get(), idCoderAm.get(), streamMeta, srcLength, i);
@@ -814,10 +814,10 @@ int32_t FastqCodecActuator::compressIdInSplit() {
     idMeta["streams"] = streamMeta;
     meta["id"] = idMeta;
     LOG_INFO("Compress Id in split: from %d to %d, compress ratio: %.2f%%.", totalSrcLength, totalDstLength, ((float)(totalDstLength * 100)) / totalSrcLength);
-    
+
     // Record statistics for ID compression
     recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_ID, totalSrcLength, totalDstLength);
-    
+
     return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
@@ -871,7 +871,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     Json::Value metaBase;
     uint32_t totalSrcLen = 0;
     uint32_t totalDstLen = 0;
-    std::shared_ptr<coder_io> matchIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> matchIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match");
     std::shared_ptr<coder_bwt_cm> matchCm = std::make_shared<coder_bwt_cm>(matchIo.get());
     int64_t srcLen = 0;
     for (uint32_t i = 1; i < line; i += 4) {
@@ -945,7 +945,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     totalSrcLen += srcLen;
 
     /* Second sub-stream: position stream of matches between reads and reference */
-    std::shared_ptr<coder_io> posIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> posIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ mapped pos");
     uint32_t line4 = inBlockPtr->getNpos().size() >> 2;
     srcLen = (line4 << 3);
     if (srcLen > FC_MIN_LEN && srcLen < FC_MAX_LEN) {
@@ -968,7 +968,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     totalDstLen += posIo->data_len;
 
     /* Third sub-stream: pair identifier stream of matches between reads and reference */
-    auto pairIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    auto pairIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ mapped pair");
     srcLen = line4;
     if (srcLen > FC_MIN_LEN && srcLen < FC_MAX_LEN) {
         std::shared_ptr<coder_fc> subCoder = std::make_shared<coder_fc>(pairIo.get());
@@ -991,7 +991,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
 
     /* Fourth sub-stream: positions of all N's in reads */
     if (baseNCount > 0) {
-        std::shared_ptr<coder_io> nposIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<coder_io> nposIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
         srcLen = (baseNCount << 2);
         if (false) {
             std::shared_ptr<coder_fc> subCoder = std::make_shared<coder_fc>(nposIo.get());
@@ -1018,7 +1018,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
 
     /* Fifth stream: length of each base line */
     if (encBaseLen) {
-        std::shared_ptr<coder_io> lenIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<coder_io> lenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ length");
         srcLen = (line4 << 1);
         std::shared_ptr<coder_bwt_cm> sub_coder = std::make_shared<coder_bwt_cm>(lenIo.get());
         sub_coder->encode_line((uint8_t *)baseLengthGen2Buffer, srcLen);
@@ -1041,12 +1041,12 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     metaBase["totaldstlen"] = (Json::Value::UInt)totalDstLen;
     metaBase["streams"] = metaStreams;
     meta["base"] = metaBase;
-    
+
     LOG_INFO("Compress base with reference: from %d to %d, compress ratio: %.2f%%.", totalSrcLen, totalDstLen, ((float)(totalDstLen * 100)) / totalSrcLen);
-    
+
     // Record statistics for base compression
     recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_BASE, totalSrcLen, totalDstLen);
-    
+
     return 0;
 }
 
@@ -1061,7 +1061,7 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
 
     std::shared_ptr<coder_io> baseIo;
     if (baseSrcLength <= FC_MIN_LEN || baseSrcLength >= FC_MAX_LEN) {
-        baseIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        baseIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ");
         std::shared_ptr<coder_bwt_cm> baseCoder = std::make_shared<coder_bwt_cm>(baseIo.get());
 
         for (uint32_t idx = 1; idx < inBlockPtr->getNpos().size(); idx += 4) {
@@ -1082,7 +1082,7 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
             srcLength += lineLength;
         }
 
-        baseIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain() - baseSrcLength);
+        baseIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain() - baseSrcLength, "SEQ");
         std::shared_ptr<coder_fc> baseCoder = std::make_shared<coder_fc>(baseIo.get());
         baseCoder->encode_line(tmpBase, srcLength);
         baseCoder->encode_flush();
@@ -1098,17 +1098,17 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
     meta["base"] = baseMeta;
 
     LOG_INFO("Compress base: from %d to %d, compress ratio: %.2f%%.", baseSrcLength, baseIo->data_len, ((float)(baseIo->data_len * 100)) / baseSrcLength);
-    
+
     // Record statistics for base compression
     recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_BASE, baseSrcLength, baseIo->data_len);
-    
+
     return 0;
 }
 
 int32_t FastqCodecActuator::compressComment() {
-    std::shared_ptr<coder_io> commentIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> commentIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "comment");
     std::shared_ptr<coder_bwt_cm> commentCoder = std::make_shared<coder_bwt_cm>(commentIo.get());
-    
+
     Json::Value commentMeta;
     switch (commentType) {
     case CommentType::PLUS_ONLY:
@@ -1136,7 +1136,7 @@ int32_t FastqCodecActuator::compressComment() {
         commentMeta["srclen"] = commmentSrcLength;
         commentMeta["dstlen"] = commentIo->data_len;
         commentMeta["coder"] = commentIo->meta;
-        
+
         LOG_INFO("Compress comment: from %d to %d, compress ratio: %.2f%%.", commmentSrcLength, commentIo->data_len, ((float)(commentIo->data_len * 100)) / commmentSrcLength);
         break;
     }
@@ -1149,7 +1149,7 @@ int32_t FastqCodecActuator::compressComment() {
 }
 
 int32_t FastqCodecActuator::compressQuality() {
-    std::shared_ptr<coder_io> qualityIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
     std::shared_ptr<coder_qual> qualityCoder = std::make_shared<coder_qual>(qualityIo.get(), true, qualityFreqTable);
 
     uint32_t totalSrcLength = 0;
@@ -1168,7 +1168,7 @@ int32_t FastqCodecActuator::compressQuality() {
     }
     qualityCoder->encode_flush();
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + qualityIo->data_len);
-    
+
     Json::Value subMeta;
     subMeta["srclen"] = streamSrcLen;
     subMeta["dstlen"] = qualityIo->data_len;
@@ -1180,7 +1180,7 @@ int32_t FastqCodecActuator::compressQuality() {
     totalDstLength += qualityIo->data_len;
 
     // Encode quality frequency table
-    std::shared_ptr<coder_io> qualityFreqIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> qualityFreqIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL freq table");
     std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
     std::shared_ptr<uint16_t[]> qualiltyFreqArray = std::make_unique<uint16_t[]>(qualityFreqTable.size()<< 1);
     for (uint32_t i = 0; i < qualityFreqTable.size(); ++i) {
@@ -1212,10 +1212,10 @@ int32_t FastqCodecActuator::compressQuality() {
     meta["quality"] = qualityMeta;
 
     LOG_INFO("Compress quality: from %d to %d, compress ratio: %.2f%%.", totalSrcLength, totalDstLength, ((float)(totalDstLength * 100)) / totalSrcLength);
-    
+
     // Record statistics for quality compression
     recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_QUALITY, totalSrcLength, totalDstLength);
-    
+
     return 0;
 }
 
@@ -1232,12 +1232,12 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         std::string coderName = idStreamMeta[idx]["coder"]["magic"].asString();
         uint32_t dstLen = idStreamMeta[idx]["dstlen"].asUInt();
         if (coderName == "coder_affix_match") {
-            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+            std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "ID sub-stream");
             ioVecters.push_back(io);
             idDecoders.push_back(std::make_shared<coder_affix_match>(io.get()));
             idDecoders.back()->set_level(idStreamMeta[idx]["coder"]["level"].asInt());
         } else if (coderName == "coder_bwt_cm") {
-            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+            std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "ID sub-stream");
             ioVecters.push_back(io);
             idDecoders.push_back(std::make_shared<coder_bwt_cm>(io.get()));
             idDecoders.back()->set_level(idStreamMeta[idx]["coder"]["level"].asInt());
@@ -1253,19 +1253,19 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     minBaseLength = baseMeta["minlen"].asUInt();
     maxBaseLength = baseMeta["maxlen"].asUInt();
     baseNCount = baseMeta["ncount"].asUInt();
-    bool isUseReference = (pReference != nullptr) && baseMeta.isMember("streams"); 
+    bool isUseReference = (pReference != nullptr) && baseMeta.isMember("streams");
     if (!isUseReference) {
         std::string baseCoderName = baseMeta["coder"]["magic"].asString();
         uint32_t srcBaseLen = baseMeta["totalsrclen"].asUInt();
         uint32_t dstBaseLen = baseMeta["totaldstlen"].asUInt();
         if (baseCoderName == "coder_fc") {
-            coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstBaseLen);
+            coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstBaseLen, &ioErrSink, "SEQ");
             baseIo.meta = baseMeta;
             baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
             coder_fc baseDecoderFc(&baseIo);
             baseDecoderFc.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcBaseLen, srcBaseLen,  UINT8_MAX, false);
         } else if (baseCoderName == "coder_bwt_cm") {
-            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstBaseLen);
+            std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstBaseLen, "SEQ");
             ioVecters.push_back(io);
             baseDecoder = std::make_shared<coder_bwt_cm>(io.get());
         } else {
@@ -1295,8 +1295,8 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             return -1;
         }
         uint32_t baseDstLen = metaStreams[id]["dstlen"].asUInt();
-        if (metaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {   
-            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, baseDstLen);
+        if (metaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
+            std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, baseDstLen, "SEQ match");
             ioVecters.push_back(io);
             baseDecoder = std::make_shared<coder_bwt_cm>(io.get());
         } else {
@@ -1321,7 +1321,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             dstLen = metaStreams[id]["dstlen"].asInt();
             baseMappedPosBuffer = (uint64_t *)ps;
             ps += srcLen;
-            coder_io posIo(temBuffer, dstLen);
+            coder_io posIo(temBuffer, dstLen, &ioErrSink, "SEQ mapped pos");
             auto posCm = std::make_unique<coder_bwt_cm>(&posIo);
             posCm->decode_line((uint8_t *)baseMappedPosBuffer, srcLen, UINT8_MAX, false);
         } else if (metaStreams[id]["coder"]["magic"].asString() == "coder_fc") {
@@ -1330,7 +1330,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             dstLen = metaStreams[id]["dstlen"].asUInt();
             baseMappedPosBuffer = (uint64_t *)ps;
             ps += srcLen;
-            coder_io posIo(temBuffer, dstLen);
+            coder_io posIo(temBuffer, dstLen, &ioErrSink, "SEQ mapped pos");
             posIo.meta = metaStreams[id];
             // posIo.meta["dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
             coder_fc posFc(&posIo);
@@ -1339,7 +1339,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             LOG_ERROR("check sub stream failed: coder name unmatch");
             return -1;
         }
-            
+
         readOffset += metaStreams[id]["dstlen"].asUInt();
 
         /* check sub stream 3 */
@@ -1355,7 +1355,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             dstLen = metaStreams[id]["dstlen"].asUInt();
             baseMappedPairBuffer = ps;
             ps += srcLen;
-            coder_io pairIo(temBuffer, dstLen);
+            coder_io pairIo(temBuffer, dstLen, &ioErrSink, "SEQ mapped pair");
             auto pairCm = std::make_unique<coder_bwt_cm>(&pairIo);
             pairCm->decode_line(baseMappedPairBuffer, srcLen, UINT8_MAX, false);
         } else if (metaStreams[id]["coder"]["magic"].asString() == "coder_fc") {
@@ -1364,7 +1364,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             dstLen = metaStreams[id]["dstlen"].asUInt();
             baseMappedPairBuffer = ps;
             ps += srcLen;
-            coder_io pairIo(temBuffer, dstLen);
+            coder_io pairIo(temBuffer, dstLen, &ioErrSink, "SEQ mapped pair");
             pairIo.meta = metaStreams[id];
             // pairIo.meta["tot_dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
             coder_fc pairFc(&pairIo);
@@ -1372,7 +1372,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         } else{
             LOG_ERROR("check sub stream failed: coder name unmatch");
             return -1;
-        }        
+        }
         readOffset += metaStreams[id]["dstlen"].asUInt();
 
         /* check sub stream 4 */
@@ -1389,7 +1389,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 dstLen = metaStreams[id]["dstlen"].asUInt();
                 baseNPosBuffer = (uint32_t *)ps;
                 ps += srcLen;
-                coder_io nposIo(temBuffer, dstLen);
+                coder_io nposIo(temBuffer, dstLen, &ioErrSink, "SEQ npos");
                 auto nposCm = std::make_unique<coder_bwt_cm>(&nposIo);
                 nposCm->decode_line((uint8_t *)baseNPosBuffer, srcLen, UINT8_MAX, false);
             } else {
@@ -1408,14 +1408,14 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             if (metaStreams[id]["sname"].asString() != "baselen") {
                 LOG_ERROR("check sub stream failed: %s", metaStreams[id]["sname"].asString().c_str());
                 return -1;
-            }        
+            }
             if (metaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm")  {
                 temBuffer = inBlockPtr->getBuffer() + readOffset;
                 srcLen = metaStreams[id]["srclen"].asUInt();
                 dstLen = metaStreams[id]["dstlen"].asUInt();
                 baseLengthGen2Buffer = (uint16_t *)ps;
                 ps += srcLen;
-                coder_io lenIo(temBuffer, dstLen);
+                coder_io lenIo(temBuffer, dstLen, &ioErrSink, "SEQ length");
                 auto lenCm = std::make_unique<coder_bwt_cm>(&lenIo);
                 lenCm->decode_line((uint8_t *)baseLengthGen2Buffer, srcLen, UINT8_MAX, false);
             } else  {
@@ -1438,7 +1438,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         commentType = CommentType::OTHER;
         uint32_t commentDstLen = commentMeta["dstlen"].asUInt();
         if (commentMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
-            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, commentDstLen);
+            std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, commentDstLen, "comment");
             ioVecters.push_back(io);
             commentDecoder = std::make_shared<coder_bwt_cm>(io.get());
         } else {
@@ -1459,7 +1459,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     if (streamsMeta[1]["coder"]["magic"].asString() == "coder_bwt_cm") {
         uint32_t qualityDstLen = streamsMeta[0]["dstlen"].asUInt();
         uint32_t freqDstLen = streamsMeta[1]["dstlen"].asUInt();
-        coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualityDstLen, freqDstLen);
+        coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualityDstLen, freqDstLen, &ioErrSink, "QUAL freq table");
         auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
 
         uint32_t qualFreqSrcLen = streamsMeta[1]["srclen"].asUInt();
@@ -1483,7 +1483,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         delete [] qualFreqArray;
 
         if (streamsMeta[0]["coder"]["magic"].asString() == "coder_qual") {
-            std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualityDstLen);
+            std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualityDstLen, "QUAL");
             ioVecters.push_back(io);
             qualityDecoder = std::make_shared<coder_qual>(io.get(), true, qualityFreqTable);
         } else {
@@ -1493,7 +1493,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     } else {
         LOG_ERROR("Unsupport coder type: %s", streamsMeta[1]["coder"]["magic"].asString().c_str());
         return -1;
-    }   
+    }
 
     return 0;
 }
@@ -1544,7 +1544,7 @@ int32_t FastqCodecActuator::decompress() {
     }
     uint32_t totalBaseLen = 0;
     uint64_t nposOffset = 0;
-    bool isUseReference = (pReference != nullptr) && meta["base"].isMember("streams"); 
+    bool isUseReference = (pReference != nullptr) && meta["base"].isMember("streams");
     for (uint32_t line = 0; line < lineNum; ++line) {
         uint8_t* idPtr = outBlockPtr->getCurrent();
         uint32_t idLen = 0;
@@ -1569,7 +1569,7 @@ int32_t FastqCodecActuator::decompress() {
                     LOG_ERROR("Unsupport coder type: %s", meta["base"]["coder"]["magic"].asString().c_str());
                     return -1;
                 }
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);  
+                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
                 *outBlockPtr->getCurrent() = '\n';
                 outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
             } else {
@@ -1597,7 +1597,7 @@ int32_t FastqCodecActuator::decompress() {
             /* decode base mapping stream with strip N */;
             actualBaseLen = (baseLengthGen2Buffer) ? (baseLengthGen2Buffer[baseLines] + minBaseLength) : maxBaseLength;
             uint8_t* pout = outBlockPtr->getCurrent();
-            
+
             const uint8_t actg4[4] = {'A', 'C', 'T', 'G'};
             if (baseNCount && nposOffset < baseNCount) { /* This block has N, and not all N's have been processed */
                 /* Calculate the number of N's in the current base line */
@@ -1608,7 +1608,7 @@ int32_t FastqCodecActuator::decompress() {
                         break;
                     }
                 }
-                uint32_t ncntCurrLine = o - nposOffset; 
+                uint32_t ncntCurrLine = o - nposOffset;
 
                 /* Decompress the mapping stream of the current base line */
                 uint32_t stripNLength = actualBaseLen - ncntCurrLine;
@@ -1649,7 +1649,7 @@ int32_t FastqCodecActuator::decompress() {
                     } else {
                         /* Current position is not N */
                         *pout++ = (pdata[o++]);
-                    } 
+                    }
                 }
             } else { /* No N in the block */
                 /* Decompress the mapping stream of the current base line */
@@ -1696,7 +1696,7 @@ int32_t FastqCodecActuator::decompress() {
                 memcpy(commentPtr, idPtr, idLen);
                 outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idLen);
                 break;
-            }   
+            }
             case CommentType::OTHER: {
                 int32_t commentLen = commentDecoder->decode_line(commentPtr, outBlockPtr->getRemain(), '\n', false);
                 outBlockPtr->setDataLen(outBlockPtr->getDataLen() + commentLen);
@@ -1717,10 +1717,10 @@ int32_t FastqCodecActuator::decompress() {
     std::string md5;
     calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
     if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("Md5 check failed for block(%d), expect %s, got %s.", inBlockPtr->getBlockId(),  
+        LOG_ERROR("Md5 check failed for block(%d), expect %s, got %s.", inBlockPtr->getBlockId(),
                 meta["md5"].asCString(), md5.c_str());
         return -1;
     }
-    
+
     return 0;
 }

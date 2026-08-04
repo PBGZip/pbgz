@@ -27,7 +27,7 @@
 /* Context model encoder based on BWT transformation */
 #include <stdint.h>
 #include <algorithm>
-#include <cinttypes> 
+#include <cinttypes>
 
 #include "coder_io.h"
 #include "coder.h"
@@ -95,7 +95,7 @@ private:
             for (int32_t i = 0; i < 4; ++i)
             {
                 /* 见 encode_bit 的边界说明：写满即 latch，剩余字节放弃，由出口统一上报。 */
-                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_BUF_FULL; break; }
+                if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_BUF_FULL); break; }
                 *(io->data + io->data_len++) = (low >> 24);
                 low <<= 8;
             }
@@ -121,7 +121,7 @@ private:
                  * 写满则 latch io->err = IO_BUF_FULL 并放弃本次写出；此后编码结果已
                  * 无意义，由 encode_flush 出口统一查 err 报错，热循环不做逐符号判断。
                  */
-                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_BUF_FULL; return; }
+                if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_BUF_FULL); return; }
                 *(io->data + io->data_len++) = (low >> 24);
                 low <<= 8;
                 high = (high << 8) + 255;
@@ -147,7 +147,7 @@ private:
                  * 数据，产出错误却"成功"的内容。latch 后后续 decode_bit 空转，
                  * 出口 decode_line 查 err 统一报错（同 RC_Decode 的 in_end 检查）。
                  */
-                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_READ_EMPTY; return bit; }
+                if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_READ_EMPTY); return bit; }
                 low <<= 8;
                 high = (high << 8) + 255;
                 code = (code << 8) + *(io->data + io->data_len++);
@@ -160,7 +160,7 @@ private:
             int32_t i;
             for (i = 0; i < 4; ++i)
             {
-                if (io->data_len >= io->data_capacity) { io->err = coder_io::IO_READ_EMPTY; return; }
+                if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_READ_EMPTY); return; }
                 code = (code << 8) + *(io->data + io->data_len++);
             }
         }
@@ -238,7 +238,7 @@ public:
             io->m = coder_io::MENC;
             int32_t level = (io->meta["level"].isInt()) ? (io->meta["level"].asInt()) : 4;
             io->meta["level"] = (Json::Value::Int)level;
-            
+
             check_exit(level <= 9 && level >= 0,  coder_ns::CODER_ERR_BAD_ARGS, "coder level should in [0, 9], current is %d", level);
             const int32_t BLOCK_SIZE = (268435456);
 
@@ -361,7 +361,7 @@ public:
                         /* 没找到分隔符就写满：输出缓冲不足。原实现静默返回 len，
                            上层会把截断行当完整行写进文件。 */
                         curr_out_offset = ++n;
-                        io->err = coder_io::IO_BUF_FULL;
+                        io->set_err(coder_io::IO_BUF_FULL);
                         return coder_ns::CODER_ERR_BUF_SMALL;
                     }
                 }
@@ -563,10 +563,10 @@ private:
             {
                 i = bsize + (bsize << 2) + bsize;
                 coder_buff = static_cast<uint8_t*>(safe_alloc(i));
-                // check_exit(coder_buff, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Error: Insufficient memory: need %" PRIu64 " MB\n",         
+                // check_exit(coder_buff, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Error: Insufficient memory: need %" PRIu64 " MB\n",
                 //         (static_cast<uint64_t>(sizeof(uint8_t)) * (i)) >> 20);
                 if (!coder_buff) {
-                    coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",         
+                    coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",
                         (static_cast<uint64_t>(sizeof(uint8_t)) * (i)) >> 20);
                     return coder_ns::CODER_ERR_MEM_ALLOC_FAIL;
                 }
@@ -577,10 +577,10 @@ private:
             { /* 4*N */
                 i = bsize + (bsize << 2);
                 coder_buff = static_cast<uint8_t*>(safe_alloc(i));
-                //check_exit(coder_buff, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Error: Insufficient memory: need %" PRIu64 " MB\n",         
+                //check_exit(coder_buff, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "Error: Insufficient memory: need %" PRIu64 " MB\n",
                 //    (static_cast<uint64_t>(sizeof(uint8_t)) * (i)) >> 20);
                 if (!coder_buff) {
-                    coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",         
+                    coder_logger(coder_ns::ERROR, "Error: Insufficient memory: need %" PRIu64 " MB\n",
                         (static_cast<uint64_t>(sizeof(uint8_t)) * (i)) >> 20);
                     return coder_ns::CODER_ERR_MEM_ALLOC_FAIL;
                 }
@@ -637,7 +637,7 @@ private:
             return coder_ns::CODER_ERR_STREAM_END;
         return bsize;
     }
-    
+
 private:
     int32_t run;
     int32_t c1;

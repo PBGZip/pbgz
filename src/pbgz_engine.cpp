@@ -533,6 +533,23 @@ int32_t PbgzEngine::startWorkTask() {
                 LOG_ERROR("Unknown exception on block(%ld)", inBlockPtr->getBlockId());
                 ret = -1;
             }
+
+            /*
+             * 越界错误的唯一查处点。coder_io 越界只置标志、不中断，执行器不一定把它
+             * 转成返回值——原来 SAM 查了 12 处、FASTQ 和索引一处没查，越界写坏的数据
+             * 就这样被当成"成功"写了出去。现在所有 coder_io 的错误都汇到执行器身上，
+             * 这里问一次就覆盖全部流、全部执行器，新增的流也不会漏。
+             *
+             * 放在 ret 判断之前而不是合并进去：ret 已经是 0 时才需要补这一问，
+             * ret 非 0 时失败原因更具体，不该被覆盖。
+             */
+            if (ret == 0 && !pActuator->ioError().ok()) {
+                LOG_ERROR("Stream '%s' out of bounds on block(%ld): %s", pActuator->ioError().what,
+                          inBlockPtr->getBlockId(),
+                          pActuator->ioError().err == coder_io::IO_BUF_FULL ? "output buffer too small"
+                                                                            : "input stream exhausted");
+                ret = -1;
+            }
             if (ret != 0) {
                 LOG_ERROR("Coder task failed for block(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());

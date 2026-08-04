@@ -44,6 +44,9 @@ public:
         outBlockPtr = nullptr;
     }
 
+    /* 见 Actuator::ioError()，本次块处理的越界错误汇聚点 */
+    const coder_err_sink& ioError() const { return ioErrSink; }
+
 #if defined(TEST_MODE) || defined(GTEST_ENABLED)
     // Test-only constructor: creates a dummy engine wrapper
     static PbgzEngine* createTestEngine(const PbgzParameter& para);
@@ -83,8 +86,18 @@ protected:
         return enc;
     }
 
+    /*
+     * 构造 coder_io 的唯一入口。走这里出来的视图自带汇聚点，越界必然被引擎看到；
+     * 直接 make_shared<coder_io> 则不带，那是留给试压和单测的——试压时装不下只是
+     * "这个编码器不合适"的选择依据，不是故障，不该让整块失败。
+     */
+    std::shared_ptr<coder_io> makeCoderIo(const uint8_t* buff, int32_t len, const char* name) {
+        return std::make_shared<coder_io>(buff, len, &ioErrSink, name);
+    }
+
     RoughIOBlock* inBlockPtr;
     RoughIOBlock* outBlockPtr;
     Json::Value meta;
     PbgzEngine* pbgzEngine;
+    coder_err_sink ioErrSink;
 };

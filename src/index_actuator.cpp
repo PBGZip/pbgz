@@ -130,7 +130,7 @@ int32_t IndexActuator::parseHeader(Json::Value& meta) {
     uint32_t dstLen = headerMeta["dstlen"].asUInt();
 
     // Create SAM file header decompressor
-    coder_io headerIo(inBlockPtr->getBuffer(), dstLen);
+    coder_io headerIo(inBlockPtr->getBuffer(), dstLen, &ioErrSink, "SAM header");
     coder_bwt_cm headerDecoder(&headerIo);
 
     // Set decoder level
@@ -170,7 +170,7 @@ int32_t IndexActuator::initDecoders(const Json::Value& streams, int32_t& readOff
     // Initialize FLAG decoder (field 1)
     if (streams.size() > 1 && streams[1]["field"].asUInt() == 1) {
         uint32_t dstLen = streams[1]["dstlen"].asUInt();
-        flagIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+        flagIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "FLAG");
         flagDecoder = new coder_bwt_cm(flagIo.get());
         if (streams[1]["coder"].isMember("level")) {
             flagDecoder->set_level(streams[1]["coder"]["level"].asInt());
@@ -181,7 +181,7 @@ int32_t IndexActuator::initDecoders(const Json::Value& streams, int32_t& readOff
     // Initialize RNAME decoder (field 2)
     if (streams.size() > 2 && streams[2]["field"].asUInt() == 2) {
         uint32_t dstLen = streams[2]["dstlen"].asUInt();
-        chrIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+        chrIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "RNAME");
         chrDecoder = new coder_bwt_cm(chrIo.get());
         if (streams[2]["coder"].isMember("level")) {
             chrDecoder->set_level(streams[2]["coder"]["level"].asInt());
@@ -192,7 +192,7 @@ int32_t IndexActuator::initDecoders(const Json::Value& streams, int32_t& readOff
     // Initialize POS decoder (field 3)
     if (streams.size() > 3 && streams[3]["field"].asUInt() == 3) {
         uint32_t dstLen = streams[3]["dstlen"].asUInt();
-        posIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+        posIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "POS");
         posDecoder = new coder_bwt_cm(posIo.get());
         if (streams[3]["coder"].isMember("level")) {
             posDecoder->set_level(streams[3]["coder"]["level"].asInt());

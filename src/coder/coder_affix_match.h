@@ -318,7 +318,7 @@ public:
         if (io->m == coder_io::MENC)
         {
             if (rc.FinishEncode() < 0) {
-                io->err = coder_io::IO_BUF_FULL;
+                io->set_err(coder_io::IO_BUF_FULL);
             }
             io->data_len += rc.size_out();
         }

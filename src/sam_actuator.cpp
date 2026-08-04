@@ -516,7 +516,7 @@ int32_t SamCodecActuator::compressSamHeader() {
     // Note: Do not clear chromosome information as multiple blocks may need to process chromosome info
     headerSrcLen = 0;
     // Create SAM file header compressor
-    std::shared_ptr<coder_io> headerIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> headerIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SAM header");
     std::shared_ptr<coder_bwt_cm> headerCoder = std::make_shared<coder_bwt_cm>(headerIo.get());
 
     // Process SAM file header line by line
@@ -677,7 +677,7 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
 
     // Process each split symbol (similar to FastqActuator)
     for (uint32_t i = 0; i < idSplitSymbols.size(); ++i) {
-        std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME sub-stream");
         std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
         uint32_t srcLength = 0;
         // Process each line and compress the specific split segment
@@ -759,7 +759,7 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
     uint8_t* buffer = inBlockPtr->getBuffer();
 
     // Create encoder for ID field whole compression
-    std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME");
     std::shared_ptr<coder> fieldCoder = makeFieldEncoder(SAM_QNAME, CoderType::BWT_CM, fieldIo.get(), true);
 
     fieldSrcLen = 0;
@@ -820,7 +820,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
     uint8_t* buffer = inBlockPtr->getBuffer();
 
     // Create encoder for regular field compression
-    std::shared_ptr<coder_io> chrIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> chrIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "RNAME");
     std::shared_ptr<coder> chrCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, chrIo.get(), true);
 
     fieldSrcLen = 0;
@@ -893,7 +893,7 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
     uint8_t* buffer = inBlockPtr->getBuffer();
 
     // Create encoder for regular field compression
-    std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SAM field");
     std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
 
     fieldSrcLen = 0;
@@ -957,7 +957,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
     uint8_t* buffer = inBlockPtr->getBuffer();
 
     // Create encoder for regular field compression
-    std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "CIGAR");
     std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
 
     fieldSrcLen = 0;
@@ -1055,7 +1055,7 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
     }
 
     // Create encoder for regular field compression
-    std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ");
     std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::FC, fieldIo.get(), false);
 
     fieldCoder->encode_line(tmpBuffer.get(), fieldSrcLen);
@@ -1114,7 +1114,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     uint32_t totalDstLen = 0;
 
     // Second pass: compress with reference
-    std::shared_ptr<coder_io> matchIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> matchIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match");
     std::shared_ptr<coder_bwt_cm> matchCm = std::make_shared<coder_bwt_cm>(matchIo.get());
     int64_t srcLen = 0;
     uint32_t totalBaseLength = 0;
@@ -1241,7 +1241,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
 
     // Second sub-stream: positions of N's
     if (baseNCount > 0) {
-        std::shared_ptr<coder_io> nposIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<coder_io> nposIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
         uint32_t nposSrcLen = (baseNCount << 2); // 4 bytes per N position
         std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(nposIo.get());
         subCoder->encode_line((uint8_t*)baseNPosBuffer, nposSrcLen);
@@ -1262,7 +1262,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     }
 
     if (minBaseLength != maxBaseLength) {
-        std::shared_ptr<coder_io> lenIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<coder_io> lenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ length");
         uint32_t baseLenSrcLen = unmapedReadLength.size() << 1;
         uint32_t* baseLenBuffer = MemoryUtil::safeAlloc<uint32_t>(baseLenSrcLen);
         if (baseLenBuffer == nullptr) {
@@ -1315,7 +1315,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     uint8_t* buffer = inBlockPtr->getBuffer();
 
     // Create quality encoder similar to FastqActuator
-    std::shared_ptr<coder_io> qualityIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
 
     /*
      * 质量值可以用两种编码器。coder_qual 是原有的，以 SEQ 为上下文；fcv2 是上下文
@@ -1474,7 +1474,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     totalDstLength += qualityIo->data_len;
 
     // Encode quality frequency table
-    std::shared_ptr<coder_io> qualityFreqIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    std::shared_ptr<coder_io> qualityFreqIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL freq table");
     std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
     std::shared_ptr<uint16_t[]> qualityFreqArray(new uint16_t[qualFreqTable.size() << 1]);
     for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
@@ -1781,7 +1781,7 @@ int32_t SamCodecActuator::decompressHeader(RoughIOBlock* outputBlock) {
     uint32_t dstLen = headerMeta["dstlen"].asUInt();
     if (refPosChrIndex == 65535) {  // not set position paramter
         // Create SAM file header decompressor
-        std::shared_ptr<coder_io> headerIo = std::make_shared<coder_io>(inBlockPtr->getBuffer(), dstLen);
+        std::shared_ptr<coder_io> headerIo = makeCoderIo(inBlockPtr->getBuffer(), dstLen, "SAM header");
         std::shared_ptr<coder_bwt_cm> headerDecoder = std::make_shared<coder_bwt_cm>(headerIo.get());
 
         // Set decoder level
@@ -1847,7 +1847,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             for (uint32_t i = 0; i < idStreamMeta.size(); ++i) {
                 std::string coderName = idStreamMeta[i]["coder"]["magic"].asString();
                 uint32_t dstLength = idStreamMeta[i]["dstlen"].asUInt();
-                std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLength);
+                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "QNAME sub-stream");
                 ioVector.push_back(io);
                 if (coderName == "coder_affix_match") {
                     idDecoders.push_back(std::make_shared<coder_affix_match>(io.get()));
@@ -1883,7 +1883,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                      * 容量由块入口一次性按 block_size*2 预分配保证（见 decompress()）——
                      * 头部输出 ≤ block_size、尾部暂存 ≤ block_size，正好 2 倍。
                      */
-                    coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstLength);
+                    coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstLength, &ioErrSink, "SEQ");
                     baseIo.meta = baseMeta;
                     baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
                     coder_fc baseDecoder = coder_fc(&baseIo);
@@ -1892,7 +1892,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                         return -1;
                     }
                 } else if(coderName == "coder_bwt_cm") {
-                    std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLength);
+                    std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ");
                     ioVector.push_back(io);
                     fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
                 } else {
@@ -1910,7 +1910,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 }
 
                 uint32_t dstLength = baseMetaStreams[id]["dstlen"].asUInt();
-                std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLength);
+                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ match");
                 ioVector.push_back(io);
                 if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
                     fieldDecoders[idx] =  std::make_shared<coder_bwt_cm>(io.get());
@@ -1932,7 +1932,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     uint32_t srclen = baseMetaStreams[id]["srclen"].asUInt();
                     baseNPosBuffer = MemoryUtil::safeAlloc<uint32_t>(baseNCount);
                     if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
-                        coder_io nposIo(inBlockPtr->getBuffer() + readOffset, dstlen);
+                        coder_io nposIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ npos");
                         auto nposCoder = std::make_unique<coder_bwt_cm>(&nposIo);
                         if (nposCoder->decode_line((uint8_t*)baseNPosBuffer, srclen, UINT8_MAX, false) < 0) {
                             LOG_ERROR("Decode base N positions failed");
@@ -1958,7 +1958,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     uint8_t* baseLenBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
 
                     if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
-                        coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen);
+                        coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ length");
                         auto baseLenCoder = std::make_unique<coder_bwt_cm>(&baseLenIo);
                         if (baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false) < 0) {
                             MemoryUtil::safeFree(baseLenBuffer);
@@ -1991,7 +1991,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 uint32_t qualDstLength = qualStreamMeta[0]["dstlen"].asUInt();
                 uint32_t freqDstLength = qualStreamMeta[1]["dstlen"].asUInt();
 
-                coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength);
+                coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength, &ioErrSink, "QUAL freq table");
                 auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
                 uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
                 /* 同 fastq_actuator: 计数用 uint8_t 会在字母表超过 127 个符号时回绕, 导致堆越界。 */
@@ -2009,7 +2009,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 delete [] qualFreqArr;
 
                 if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_qual") {
-                    std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
+                    std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
                     ioVector.push_back(qualIo);
                     qualCoder = std::make_shared<coder_qual>(qualIo.get(), true, qualFreqTable);
                 } else if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_fcv2") {
@@ -2017,7 +2017,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                      * fcv2 的字母表和各符号频率都写在它自己的码流头部，begin_decode
                      * 会读回来重建哈夫曼树，所以这里构造时传空频率表即可。
                      */
-                    std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
+                    std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
                     ioVector.push_back(qualIo);
                     std::vector<uint32_t> emptyFreq(256, 0);
                     /*
@@ -2058,7 +2058,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                         return -1;
                     }
                 } else if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_bwt_cm") {
-                    std::shared_ptr<coder_io> qualIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, qualDstLength);
+                    std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
                     ioVector.push_back(qualIo);
                     qualCmDecoder = std::make_shared<coder_bwt_cm>(qualIo.get());
                 } else {
@@ -2074,7 +2074,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
             uint32_t dstLen = streamMeta[idx]["dstlen"].asUInt();
             if (coderName == "coder_bwt_cm") {
-                std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
                 ioVector.push_back(io);
                 fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
             } else {
