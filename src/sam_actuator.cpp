@@ -1871,8 +1871,8 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     baseNPosBuffer = MemoryUtil::safeAlloc<uint32_t>(baseNCount);
                     if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
                         coder_io nposIo(inBlockPtr->getBuffer() + readOffset, dstlen);
-                        coder_bwt_cm nposCoder(&nposIo);
-                        nposCoder.decode_line((uint8_t*)baseNPosBuffer, srclen, UINT8_MAX, false);
+                        auto nposCoder = std::make_unique<coder_bwt_cm>(&nposIo);
+                        nposCoder->decode_line((uint8_t*)baseNPosBuffer, srclen, UINT8_MAX, false);
                     } else {
                         LOG_ERROR("check sub stream failed. coder not match. coder = %s.", 
                             baseMetaStreams[id]["coder"]["magic"].asString().c_str());
@@ -1894,8 +1894,8 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
 
                     if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
                         coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen);
-                        coder_bwt_cm baseLenCoder(&baseLenIo);
-                        baseLenCoder.decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false);
+                        auto baseLenCoder = std::make_unique<coder_bwt_cm>(&baseLenIo);
+                        baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false);
                     } else {
                         MemoryUtil::safeFree(baseLenBuffer);
                         LOG_ERROR("check sub stream failed. coder not match. coder = %s.", 
@@ -1923,11 +1923,11 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 uint32_t freqDstLength = qualStreamMeta[1]["dstlen"].asUInt();
 
                 coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength);
-                coder_bwt_cm qualFreqCoder(&qualFreqIo);
+                auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
                 uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
                 uint8_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
                 uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
-                uint32_t qualFreq = qualFreqCoder.decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
+                uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
                 if (qualFreq != qualFreqSrcLength) {
                     LOG_ERROR("Decode quality frequncy failed");
                     delete [] qualFreqArr;

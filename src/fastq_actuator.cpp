@@ -1321,8 +1321,8 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             baseMappedPosBuffer = (uint64_t *)ps;
             ps += srcLen;
             coder_io posIo(temBuffer, dstLen);
-            coder_bwt_cm posCm(&posIo);
-            posCm.decode_line((uint8_t *)baseMappedPosBuffer, srcLen, UINT8_MAX, false);
+            auto posCm = std::make_unique<coder_bwt_cm>(&posIo);
+            posCm->decode_line((uint8_t *)baseMappedPosBuffer, srcLen, UINT8_MAX, false);
         } else if (metaStreams[id]["coder"]["magic"].asString() == "coder_fc") {
             temBuffer =  inBlockPtr->getBuffer() + readOffset;
             srcLen = metaStreams[id]["srclen"].asUInt();
@@ -1355,8 +1355,8 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             baseMappedPairBuffer = ps;
             ps += srcLen;
             coder_io pairIo(temBuffer, dstLen);
-            coder_bwt_cm pairCm(&pairIo);
-            pairCm.decode_line(baseMappedPairBuffer, srcLen, UINT8_MAX, false);
+            auto pairCm = std::make_unique<coder_bwt_cm>(&pairIo);
+            pairCm->decode_line(baseMappedPairBuffer, srcLen, UINT8_MAX, false);
         } else if (metaStreams[id]["coder"]["magic"].asString() == "coder_fc") {
             temBuffer = inBlockPtr->getBuffer() + readOffset;
             srcLen = metaStreams[id]["srclen"].asUInt();
@@ -1389,8 +1389,8 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 baseNPosBuffer = (uint32_t *)ps;
                 ps += srcLen;
                 coder_io nposIo(temBuffer, dstLen);
-                coder_bwt_cm nposCm(&nposIo);
-                nposCm.decode_line((uint8_t *)baseNPosBuffer, srcLen, UINT8_MAX, false);
+                auto nposCm = std::make_unique<coder_bwt_cm>(&nposIo);
+                nposCm->decode_line((uint8_t *)baseNPosBuffer, srcLen, UINT8_MAX, false);
             } else {
                 LOG_ERROR("check sub stream failed: coder name unmatch");
                 return -1;
@@ -1415,8 +1415,8 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 baseLengthGen2Buffer = (uint16_t *)ps;
                 ps += srcLen;
                 coder_io lenIo(temBuffer, dstLen);
-                coder_bwt_cm lenCm(&lenIo);
-                lenCm.decode_line((uint8_t *)baseLengthGen2Buffer, srcLen, UINT8_MAX, false);
+                auto lenCm = std::make_unique<coder_bwt_cm>(&lenIo);
+                lenCm->decode_line((uint8_t *)baseLengthGen2Buffer, srcLen, UINT8_MAX, false);
             } else  {
                 LOG_ERROR("check sub stream failed: coder name unmatch");
                 return -1;
@@ -1459,12 +1459,12 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         uint32_t qualityDstLen = streamsMeta[0]["dstlen"].asUInt();
         uint32_t freqDstLen = streamsMeta[1]["dstlen"].asUInt();
         coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualityDstLen, freqDstLen);
-        coder_bwt_cm qualFreqCoder(&qualFreqIo);
+        auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
 
         uint32_t qualFreqSrcLen = streamsMeta[1]["srclen"].asUInt();
         uint8_t qualFreqArrLen = qualFreqSrcLen / sizeof(uint16_t);
         uint16_t* qualFreqArray = new uint16_t[qualFreqArrLen];
-        uint32_t qualFreq = qualFreqCoder.decode_line((uint8_t*)qualFreqArray, qualFreqSrcLen, UINT8_MAX, false);
+        uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArray, qualFreqSrcLen, UINT8_MAX, false);
         if (qualFreq != qualFreqSrcLen) {
             LOG_ERROR("Decode quality frequncy failed.");
             return -1;
