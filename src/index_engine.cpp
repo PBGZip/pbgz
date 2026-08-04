@@ -90,8 +90,8 @@ void IndexEngine::readBlockPreProc(BlockReader* /*blockReader*/) {
 }
 
 PbgzEngine::BlockIntake IndexEngine::intakeBlock(BlockReader* /*blockReader*/, RoughIOBlock* blockPtr) {
-    if (blockPtr->getBlockType() != SAM) {
-        fprintf(stderr, "The index command is only valid for SAM  pbgz files.");
+    if (!IndexActuator::supports(blockPtr->getBlockType())) {
+        fprintf(stderr, "The index command is only valid for SAM pbgz files.\n");
         return BlockIntake::ABORT;
     }
 

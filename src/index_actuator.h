@@ -38,6 +38,17 @@ public:
 
     virtual ~IndexActuator();
 
+    /*
+     * 能建索引的块类型，唯一声明处。
+     *
+     * 索引要的是"每条 read 落在参考基因组的哪个位置"：SAM 的 RNAME/POS 是原文自带的，
+     * FASTQ 则要从 compressBaseWithRef 产出的 mpos 子流里取，取法完全不同，所以支持
+     * 哪些类型取决于本执行器实现了哪些解码分支。引擎侧只查询，不重复判断。
+     */
+    static bool supports(BlockType type) {
+        return type == SAM;
+    }
+
     virtual int32_t initial() override;
 
     virtual int32_t process() override;

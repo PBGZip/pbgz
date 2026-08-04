@@ -63,8 +63,8 @@ int32_t IndexActuator::initial() {
         return -1;
     }
 
-    if (inBlockPtr->getBlockType() != SAM) {
-        LOG_ERROR("The index command is only valid for SAM  pbgz files.");
+    if (!supports(inBlockPtr->getBlockType())) {
+        LOG_ERROR("Block type %d cannot be indexed.", inBlockPtr->getBlockType());
         return -1;
     }
 
