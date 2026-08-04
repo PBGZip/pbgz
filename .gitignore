@@ -184,3 +184,17 @@ __pycache__/
 memory-bank/
 memory-bank/*
 
+
+# 测试数据文件不得入库
+test/*.sam
+test/*.pbgz
+test/*.fastq
+test/*.cram
+test/*.gz
+test/*.fa
+test/*.fai
+test/*.ni
+test/con_sorted*
+test/bt_*
+test/a1.*
+test/.*
