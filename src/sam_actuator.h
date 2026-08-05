@@ -169,6 +169,16 @@ private:
             if (fieldLength > 0) {
                 fieldCoder->encode_line(fieldStart, fieldLength);
                 fieldSrcLen += fieldLength;
+                
+                // Populate tracking maps for specific fields
+                std::string str = std::string((char*)fieldStart, fieldLength - 1);
+                if (fieldIdx == 1) {
+                    this->mappedFlag[lineIdx] = (uint16_t)std::stoll(str);
+                } else if (fieldIdx == 3) {
+                    this->mappedPos[lineIdx] = (int64_t)std::stoll(str);
+                } else if (fieldIdx == 7) {
+                    this->nextMappedPos[lineIdx] = (int64_t)std::stoll(str);
+                }
             }
         }
         
