@@ -33,6 +33,7 @@
 #include "reference.h"
 #include "sam_info.h"
 #include "coder_bwt_cm.h"
+#include "coder/coder_affix_match.h"
 #include "pbgz_stat.h"
 
 // Forward declaration
@@ -61,6 +62,8 @@ public:
 
     int32_t decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
+    int32_t decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock); 
+
     int32_t decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta, RoughIOBlock* outputBlock);
 
     int32_t decompressChrName(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock);
@@ -86,7 +89,7 @@ public:
         } else if (fieldIdx == 3) {
             mappedPos[lineNo] = val;
         } else if (fieldIdx == 7) {
-            nextMappedChr[lineNo] = val;
+            nextMappedPos[lineNo] = val;
         }
         memcpy(outputBlock->getCurrent(), strVal.c_str(), strVal.length());
         outputBlock->setDataLen(outputBlock->getDataLen() + strVal.length());
@@ -201,8 +204,91 @@ private:
         return fieldIo->data_len;
     }
 
+    template<typename CoderType>
+    int32_t compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+        std::vector<uint32_t>& npos = this->inBlockPtr->getNpos();
+        uint32_t lineNum = npos.size();
+        uint8_t* buffer = inBlockPtr->getBuffer();
+        
+        // Create encoder for regular field compression with specified CoderType
+        std::shared_ptr<coder_io> fieldIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
+        
+        fieldSrcLen = 0;
+        uint32_t deltaLength = 0;
+        
+        // Process each line and extract the current field
+        for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+            uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+            uint32_t lineEnd = npos[lineIdx] - lineStart;
+            uint8_t* line = buffer + lineStart;
+            if (*line == '@') {
+                continue;
+            }
+
+            uint32_t contentIdx = lineIdx - headEndLine;
+            uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+            uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+            uint8_t* fieldStart = line + prevTabPos + 1;
+            uint32_t  fieldLength = currTabPos - prevTabPos; 
+            
+            // Handle delta encoding with CoderType-specific handling
+            if (fieldLength > 1) {
+                std::string pNextStr = std::string((char*)fieldStart, fieldLength - 1);
+                int64_t pNextValue = (int64_t)std::stoll(pNextStr);
+                this->nextMappedPos[lineIdx] = pNextValue;
+
+                int64_t pos = mappedPos.find(lineIdx) == mappedPos.end() ? 0 : mappedPos[lineIdx];
+                int64_t pNextDelta = pNextValue - pos;
+                
+                // Encode based on CoderType
+                int length = 0;
+                if constexpr (std::is_same<CoderType, coder_affix_match>::value) {
+                    uint8_t buff[32] = {0};
+                    length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", pNextDelta);
+                    fieldCoder->encode_line(buff, length, true);
+                } else {
+                    uint8_t buff[32] = {0};
+                    length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", pNextDelta);
+                    fieldCoder->encode_line(buff, length);
+                }
+
+                fieldSrcLen += fieldLength;
+                deltaLength += length;
+            } else {
+                // Handle empty or invalid delta
+                if constexpr (std::is_same<CoderType, coder_affix_match>::value) {
+                    fieldCoder->encode_line((uint8_t*)"0\t", 2, true);
+                } else {
+                    fieldCoder->encode_line((uint8_t*)"0\t", 2);
+                }
+                
+                deltaLength += 2;
+                fieldSrcLen += 2;
+            }
+        }
+        
+        // Flush the encoder for this field
+        fieldCoder->encode_flush();
+        // Update output block data length
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
+        
+        // Set field metadata
+        fieldMeta["srclen"] = deltaLength;
+        fieldMeta["dstlen"] = fieldIo->data_len;
+        fieldMeta["coder"] = fieldIo->meta;
+        fieldMeta["field"] = fieldIdx;
+        fieldMeta["mode"] = "string";
+
+        LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%", 
+                fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
+
+        return fieldIo->data_len;
+    }
 
     uint32_t parseCigar(uint8_t* cigarString, uint32_t cigarLength);
+    
+    uint32_t parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength);
  
     // CIGAR compression (template function for smart compression)
     template<typename CoderType>
@@ -343,7 +429,7 @@ private:
     
     // Helper methods
     void setReference(Reference* ref) { pRefeGene = ref; }
-    
+
     int32_t compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     int32_t buildSamIndex();
@@ -369,6 +455,7 @@ private:
     std::map<uint32_t, int64_t> nextMappedPos;
     std::map<uint32_t, uint16_t> nextMappedChr;
     std::map<uint32_t, uint16_t> mappedFlag;
+    std::map<uint32_t, uint32_t> cigarReadLen;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
     uint32_t baseNCount;
