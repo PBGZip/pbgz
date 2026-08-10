@@ -25,6 +25,8 @@
 
 #include <map>
 #include <vector>
+#include <unordered_map>
+#include <functional>
 
 #include "codec_actuator.h"
 #include "coder.h"
@@ -38,6 +40,13 @@
 
 // Forward declaration
 class CompressEngine;
+
+// Hash functor for std::pair keys used by the TLEN mate index
+struct PairInt64Hash {
+    std::size_t operator()(const std::pair<int64_t, int64_t>& key) const {
+        return std::hash<int64_t>()(key.first) ^ (std::hash<int64_t>()(key.second) << 1);
+    }
+};
 
 class SamCodecActuator : public CodecActuator {
 public:
@@ -60,6 +69,11 @@ public:
 
     int32_t initDecoder(RoughIOBlock* outputBlock);
 
+    // Pre-decode POS/CIGAR/PNEXT for all lines so the complete mate index and
+    // reference spans are available when TLEN is recomputed, keeping the number
+    // of stored TLEN exceptions near zero
+    int32_t preDecodeForTLEN();
+
     int32_t decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
     int32_t decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock); 
@@ -72,6 +86,10 @@ public:
                                     uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock);
 
     int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock);
+
+    int32_t decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock, const Json::Value& fieldMeta);
+
+    int32_t computeTLEN(uint32_t lineIdx);
 
     template<typename T>
     int32_t decompressNumber(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock) {
@@ -326,9 +344,11 @@ private:
             // Parse CIGAR field, remove hard clipping sequence length
             if (fieldLength == 2 && *fieldStart == '*' ) {
                 this->baseLengthBuffer[lineIdx - this->headEndLine] = 0;
+                this->cigarReadLen[lineIdx] = 0;
             } else {
                 uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
                 this->baseLengthBuffer[lineIdx - this->headEndLine] = sequeceLength;
+                this->cigarReadLen[lineIdx] = parseCigarRefConsumed(fieldStart, fieldLength);
             }
             
             // Encode the field data
@@ -434,6 +454,9 @@ private:
 
     int32_t buildSamIndex();
 
+    template<typename CoderType>
+    int32_t compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+
 private:
     int64_t headEndLine;
     uint32_t samLine;
@@ -456,7 +479,17 @@ private:
     std::map<uint32_t, uint16_t> nextMappedChr;
     std::map<uint32_t, uint16_t> mappedFlag;
     std::map<uint32_t, uint32_t> cigarReadLen;
+    // Full O(1) mate lookup index for TLEN computation, keyed by (pos, pnext)
+    mutable std::unordered_map<std::pair<int64_t, int64_t>, uint32_t, PairInt64Hash> tlenMateIndex;
+    // Per-field compressed data locations, used to pre-decode fields for TLEN recomputation
+    std::map<uint32_t, uint32_t> fieldIoStart;
+    std::map<uint32_t, uint32_t> fieldIoDstLen;
+    std::map<uint32_t, int32_t> fieldIoLevel;
+    // Pre-decoded field contents (POS/CIGAR/PNEXT), one string per line including
+    // separator, so the main loop copies instead of decoding them a second time
+    std::map<uint32_t, std::vector<std::string>> tlenPreDecodedFields;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
+    std::map<uint32_t, int32_t> tlenCache; // Cache for pre-decompressed TLEN values
 
     uint32_t baseNCount;
     uint32_t* baseNPosBuffer; 

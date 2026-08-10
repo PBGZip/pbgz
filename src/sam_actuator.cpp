@@ -115,6 +115,9 @@ SamCodecActuator::~SamCodecActuator() {
     qualCoder.reset();
 
     ioVector.clear();
+    
+    // Clear TLEN cache
+    tlenCache.clear();
 }
 
 int32_t SamCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
@@ -676,19 +679,14 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 7: // PNEXT
                 LOG_INFO("Sam filed %d (PNEXT) will use delta compression", fieldIdx);
-                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) {
-                    fieldDstLen = compressPNextFieldDelta<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
-                } else {
-                    fieldDstLen = compressPNextFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
-                }
+                // bwt_cm compresses the POS-delta text far better than affix_match
+                // (measured ~0.86 vs ~1.11 bytes/line on real data); the model picked
+                // by the selector is based on raw PNEXT text, which mismatches the
+                // delta encoding actually used.
+                fieldDstLen = compressPNextFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
-            case 8: // TLEN (normal compression)
-                LOG_INFO("Sam filed %d (TLEN) will use normal compression", fieldIdx);
-                if (CompressionModel::MODEL_AFFIX_MATCH == coderType) {
-                    fieldDstLen = compressRegularField<coder_affix_match>(fieldIdx, fieldSrcLen, fieldMeta);
-                } else {
-                    fieldDstLen = compressRegularField<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
-                }
+             case 8: // TLEN (optimized compression)
+                fieldDstLen = compressTLen<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 9: // SEQ
                 if (pRefeGene == nullptr) {
@@ -785,8 +783,10 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
                 segmentLength = currPos - prevPos;
             }
 
-            idDigit = true;
-            for (uint32_t j = 0; j < segmentLength; ++j) {
+            idDigit = (segmentLength > 1);
+            for (uint32_t j = 0; idDigit && j + 1 < segmentLength; ++j) {
+                // Exclude the trailing separator; otherwise a pure-digit column
+                // (e.g. "265269\t") would never be detected as all digits
                 if ((segmentStart[j] & 0xF0) != 0x30) {
                     idDigit = false;
                     break;
@@ -796,24 +796,15 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
 
         uint32_t srcLength = 0;
         std::shared_ptr<coder_io> idIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-        if (idDigit) {
-            // Use coder_bwt_cm for all digits and variable length
-            LOG_DEBUG("All digit, use coder_bwt_cm");
-            std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
-            int32_t ret = compressIdStream<coder_bwt_cm>(idIo.get(), idCoder.get(), streamMeta, srcLength, i);
-            if (ret != 0) {
-                LOG_ERROR("Failed to compress ID stream, splitid = %d", i);
-                return -1;
-            }
-        } else {
-            // Use coder_affix_match for fixed length or not all digits
-            LOG_DEBUG("Fixed length or not all digits, use coder_affix_match");
-            std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
-            int32_t ret = compressIdStream<coder_affix_match>(idIo.get(), idCoder.get(), streamMeta, srcLength, i);
-            if (ret != 0) {
-                LOG_ERROR("Failed to compress ID stream, splitid = %d", i);
-                return -1;
-            }
+        // Pure-digit columns are now detected correctly (idDigit), but measured
+        // compression of the raw value with affix_match is better than both
+        // bwt_cm text and per-line delta encoding, so encode them the same way.
+        LOG_DEBUG("Column(%u) use coder_affix_match (idDigit=%d)", i, (int)idDigit);
+        std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
+        int32_t ret = compressIdStream<coder_affix_match>(idIo.get(), idCoder.get(), streamMeta, srcLength, i);
+        if (ret != 0) {
+            LOG_ERROR("Failed to compress ID stream, splitid = %d", i);
+            return -1;
         }
         totalSrcLength += srcLength;
         totalDstLength += idIo->data_len;
@@ -1013,6 +1004,229 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
     return chrIo->data_len;
  }
 
+int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx) {
+    // Check if read is paired (bit 0 in FLAG, 0x1)
+    auto flagIt = mappedFlag.find(lineIdx);
+    if (flagIt == mappedFlag.end() || !(flagIt->second & 0x1)) {
+        // Not paired, TLEN should be 0
+        return 0;
+    }
+    
+    // If this read or its mate is unmapped, TLEN is undefined (set to 0)
+    if ((flagIt->second & 0x4) || (flagIt->second & 0x8)) {
+        return 0;
+    }
+    
+    // Check reference sequences: TLEN is 0 if the mate is unmapped or on a different reference
+    auto chrIt = mappedChr.find(lineIdx);
+    if (chrIt == mappedChr.end() || chrIt->second == 0xFFFF) {
+        return 0; // Current read unmapped or no RNAME available
+    }
+    auto nextChrIt = nextMappedChr.find(lineIdx);
+    if (nextChrIt == nextMappedChr.end() || nextChrIt->second == 0xFFFF) {
+        return 0; // Mate unmapped or unknown
+    }
+    // 0xFFFE ('=') means same reference as RNAME; otherwise the indexes must match
+    if (nextChrIt->second != 0xFFFE && nextChrIt->second != chrIt->second) {
+        return 0; // Mate on a different reference
+    }
+    
+    // Get POS value
+    auto posIt = mappedPos.find(lineIdx);
+    if (posIt == mappedPos.end()) {
+        return 0; // Can't compute without POS
+    }
+    int64_t pos = posIt->second;
+    
+    // Get PNEXT value
+    auto pnextIt = nextMappedPos.find(lineIdx);
+    if (pnextIt == nextMappedPos.end()) {
+        return 0; // Can't compute without PNEXT
+    }
+    int64_t pnext = pnextIt->second;
+    
+    // Get this read's reference span from CIGAR (M/D/N/=/X)
+    auto readLenIt = cigarReadLen.find(lineIdx);
+    uint32_t refSpan = (readLenIt != cigarReadLen.end()) ? readLenIt->second : 0;
+    
+    // Find the mate (our POS == mate's PNEXT and our PNEXT == mate's POS).
+    // The index is maintained incrementally by the caller (compressTLen /
+    // decompressSamByFields) and only contains lines already processed, so a
+    // mate that appears later in the block is simply not found (ref span 0).
+    uint32_t mateRefSpan = 0;
+    auto mateIt = tlenMateIndex.find(std::make_pair(pnext, pos));
+    if (mateIt != tlenMateIndex.end()) {
+        auto spanIt = cigarReadLen.find(mateIt->second);
+        if (spanIt != cigarReadLen.end()) {
+            mateRefSpan = spanIt->second;
+        }
+    }
+    
+    // SAM spec: TLEN = number of bases from the leftmost mapped base to the rightmost mapped base.
+    // The leftmost segment is positive, the rightmost segment is negative.
+    // |TLEN| = rightmost_end - leftmost_pos + 1 = right.POS + right.ref_span - left.POS
+    int64_t templateLen;
+    if (pos < pnext) {
+        // This read is on the left: rightmost end = pnext + mateRefSpan - 1
+        templateLen = pnext + (int64_t)mateRefSpan - pos;
+    } else if (pos > pnext) {
+        // This read is on the right: rightmost end = pos + refSpan - 1
+        templateLen = -(pos + (int64_t)refSpan - pnext);
+    } else {
+        // Same position: treat this read as the leftmost one
+        templateLen = pnext + (int64_t)mateRefSpan - pos;
+    }
+    
+    return (int32_t)templateLen;
+}
+
+template<typename CoderType>
+int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    std::vector<uint32_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+    
+    // Create metadata structure
+    Json::Value metaSubs;
+    Json::Value metaStreams;
+    uint32_t totalSrcLen = 0;
+    uint32_t tolalDstLen = 0;
+    
+    // Track exceptions like base references does
+    std::vector<std::pair<uint32_t, int32_t>> tlenExceptions; // Store relative line numbers and exceptional TLEN values
+    
+    // Build the complete mate index; all mapping fields are already populated
+    // here, matching the full index built on decompression by preDecodeForTLEN
+    tlenMateIndex.clear();
+    for (const auto& entry : nextMappedPos) {
+        auto posIt2 = mappedPos.find(entry.first);
+        if (posIt2 == mappedPos.end()) {
+            continue;
+        }
+        tlenMateIndex[std::make_pair(posIt2->second, entry.second)] = entry.first;
+    }
+    
+    // Process each line and extract the current field
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        uint32_t lineEnd = npos[lineIdx] - lineStart;
+        
+        uint8_t* line = buffer + lineStart;
+        // Skip header lines (starting with @)
+        if (*line == '@') {
+            continue;
+        }
+
+        uint32_t contentIdx = lineIdx - headEndLine;
+        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+        uint8_t* fieldStart = line + prevTabPos + 1;
+        uint32_t fieldLength = currTabPos - prevTabPos;
+        fieldSrcLen += fieldLength;
+        
+        // Get current TLEN value from file
+        if (fieldLength > 1) {
+            std::string tlenStr = std::string((char*)fieldStart, fieldLength - 1);
+            int32_t currentTLEN = (int32_t)std::stoll(tlenStr);
+            // Compute expected TLEN
+            int32_t computedTLEN = computeTLEN(lineIdx);
+            // If computed TLEN doesn't match, store as exception using content line index
+            if (computedTLEN != currentTLEN) {
+                tlenExceptions.push_back(std::make_pair(contentIdx, currentTLEN));
+            }
+        }
+    }
+    
+    // Compress exceptions using array format like base references does
+    if (!tlenExceptions.empty()) {
+        std::shared_ptr<coder_io> tlenIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+        std::shared_ptr<CoderType> tlenCoder = std::make_shared<CoderType>(tlenIo.get());
+        
+        // 计算源数据长度：每个异常包含2个int32值，每个int32是4字节
+        uint32_t tlenExcSrcLen = tlenExceptions.size() * (2 * sizeof(int32_t)); 
+        int32_t* tlenExcBuffer = MemoryUtil::safeAlloc<int32_t>(tlenExcSrcLen);
+        if (tlenExcBuffer == nullptr) {
+            return -1;
+        }
+        
+        for (uint32_t i = 0; i < tlenExceptions.size(); ++i) {
+            tlenExcBuffer[2 * i] = tlenExceptions[i].first;      // relative line index
+            tlenExcBuffer[(2 * i) + 1] = tlenExceptions[i].second; // exceptional TLEN value
+        }
+        
+        // Directly use byte length without extra shifting
+        tlenCoder->encode_line((uint8_t*)tlenExcBuffer, tlenExcSrcLen);
+        tlenCoder->encode_flush();
+        MemoryUtil::safeFree(tlenExcBuffer);
+        
+        metaSubs["srclen"] = tlenExcSrcLen;  // Store directly as bytes
+        metaSubs["dstlen"] = tlenIo->data_len;
+        metaSubs["coder"] = tlenIo->meta;
+        metaSubs["sname"] = "tlenexc";
+        metaStreams.append(metaSubs);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + tlenIo->data_len);
+        totalSrcLen += tlenExcSrcLen;
+        tolalDstLen += tlenIo->data_len;
+    }
+    
+    // Set field metadata
+    fieldMeta["srclen"] = totalSrcLen;
+    fieldMeta["dstlen"] = tolalDstLen;
+    fieldMeta["streams"] = metaStreams;
+    fieldMeta["field"] = fieldIdx;
+    fieldMeta["mode"] = "string";
+    fieldMeta["optimized"] = true;  // Mark as optimized
+    fieldMeta["exceptions"] = (Json::UInt64)tlenExceptions.size();  // Number of exceptional values
+    
+    LOG_INFO("SAM TLEN field compression with optimization: %u bytes -> %u bytes, %u exceptions compressed, compress ratio = %.2f%%", 
+            fieldSrcLen, tolalDstLen, tlenExceptions.size(), (double)(tolalDstLen * 100)/(double)fieldSrcLen);
+    return tolalDstLen;
+}
+
+int32_t SamCodecActuator::decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock, const Json::Value& fieldMeta) {
+    // Check if optimized compression was used
+    bool isOptimized = fieldMeta.isMember("optimized") && fieldMeta["optimized"].asBool();
+    
+    if (isOptimized) {
+        // Use cached TLEN value if available, otherwise compute it
+        auto cacheIt = tlenCache.find(lineNo);
+        if (cacheIt != tlenCache.end()) {
+            // Use cached value
+            int32_t val = cacheIt->second;
+            char buffer[16];
+            int32_t len = snprintf(buffer, sizeof(buffer), "%d", val);
+            
+            memcpy(outputBlock->getCurrent(), buffer, len);
+            char* currentPos = (char*)outputBlock->getCurrent();
+            currentPos[len] = splitFlag;
+            outputBlock->setDataLen(outputBlock->getDataLen() + len + 1);
+            return len + 1;
+        } else {
+            // Compute TLEN value
+            int32_t computedTLEN = computeTLEN(lineNo);
+            char buffer[16];
+            int32_t len = snprintf(buffer, sizeof(buffer), "%d", computedTLEN);
+            
+            memcpy(outputBlock->getCurrent(), buffer, len);
+            char* currentPos = (char*)outputBlock->getCurrent();
+            currentPos[len] = splitFlag;
+            outputBlock->setDataLen(outputBlock->getDataLen() + len + 1);
+            return len + 1;
+        }
+    } else {
+        // Fall back to normal decompression
+        std::string mode = "";
+        if (fieldMeta.isMember("mode")) {
+            mode = fieldMeta["mode"].asString();
+        }
+        
+        if (mode == "string") {
+            return decompressRegularField(fieldIdx, lineNo, splitFlag, outputBlock);
+        } else {
+            return decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
+        }
+    }
+}
 
 int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<uint32_t>& npos = inBlockPtr->getNpos();
@@ -1511,6 +1725,26 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         pBaseOut = pBaseEnd - streams[9]["totalsrclen"].asUInt();
     }
 
+    // Pre-decode POS/CIGAR/PNEXT so the complete mate index and reference spans
+    // are available when TLEN is recomputed for each line
+    if (0 != preDecodeForTLEN()) {
+        LOG_ERROR("Pre-decode for TLEN failed.");
+        return -1;
+    }
+
+    // Copy a pre-decoded field's bytes (already decoded once by preDecodeForTLEN)
+    // instead of decoding it again; returns -1 if not cached
+    auto copyPreDecodedField = [&](uint32_t fieldIdx, uint32_t lineNo) -> int32_t {
+        auto preIt = tlenPreDecodedFields.find(fieldIdx);
+        if (preIt != tlenPreDecodedFields.end() && lineNo < preIt->second.size() && !preIt->second[lineNo].empty()) {
+            const std::string& s = preIt->second[lineNo];
+            memcpy(outputBlock->getCurrent(), s.data(), s.length());
+            outputBlock->setDataLen(outputBlock->getDataLen() + s.length());
+            return (int32_t)s.length();
+        }
+        return -1;
+    };
+
     for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
         uint8_t* basePtr = nullptr;
         uint32_t actualBaseLen = 0;
@@ -1538,10 +1772,13 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
             } else if (fieldIdx == 2) {  /// RNAME
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 3) {  /// POS
-                if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
-                } else {
-                    decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                decoderLen = copyPreDecodedField(3, lineNo);
+                if (decoderLen < 0) {
+                    if (mode == "string") {
+                        decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
+                    } else {
+                        decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                    }
                 }
             } else if (fieldIdx == 4) {  /// MAPQ
                 if (mode == "string") {
@@ -1550,21 +1787,23 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                     decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo, outputBlock);
                 }
             } else if (fieldIdx == 5) {  /// CIGAR
-                decoderLen = decompressCigar(fieldIdx, '\t', lineNo, outputBlock);
+                decoderLen = copyPreDecodedField(5, lineNo);
+                if (decoderLen < 0) {
+                    decoderLen = decompressCigar(fieldIdx, '\t', lineNo, outputBlock);
+                }
             } else if (fieldIdx == 6) {  /// RNEXT
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
                 } else if (fieldIdx == 7) {  /// PNEXT
-                if (mode == "string") {
-                    decoderLen = decompressPNextFieldDelta(fieldIdx, lineNo, '\t', outputBlock);
-                } else {
-                    decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                decoderLen = copyPreDecodedField(7, lineNo);
+                if (decoderLen < 0) {
+                    if (mode == "string") {
+                        decoderLen = decompressPNextFieldDelta(fieldIdx, lineNo, '\t', outputBlock);
+                    } else {
+                        decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                    }
                 }
             } else if (fieldIdx == 8) {  /// TLEN
-                if (mode == "string") {
-                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
-                } else {
-                    decoderLen = decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
-                }
+                decoderLen = decompressTLen(fieldIdx, lineNo, '\t', outputBlock, streams[fieldIdx]);
             } else if (fieldIdx == 9) {  /// SEQ
                 basePtr = outputBlock->getCurrent();
                 decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen, outputBlock);
@@ -1818,6 +2057,69 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     MemoryUtil::safeFree(baseLenBuffer);
                 }
             }
+            } else if (idx == 8) {
+            // TLEN field - check if optimized compression was used
+            Json::Value& tlenMeta = streamMeta[idx];
+            bool isOptimized = tlenMeta.isMember("optimized") && tlenMeta["optimized"].asBool();
+            
+            if (isOptimized) {
+                // Handle optimized TLEN compression with exception streams
+                if (tlenMeta.isMember("streams") && tlenMeta["streams"].isArray()) {
+                    Json::Value& tlenStreams = tlenMeta["streams"];
+                    
+                    LOG_DEBUG("Processing TLEN exception streams, count: %u", tlenStreams.size());
+                    
+                    for (const auto& stream : tlenStreams) {
+                        if (stream["sname"] == "tlenexc") {
+                            LOG_INFO("Found tlenexc stream: srclen=%u, dstlen=%u", stream["srclen"].asUInt(), stream["dstlen"].asUInt());
+                            // Decompress TLEN exceptions
+                            uint32_t srclen = stream["srclen"].asUInt();
+                            uint32_t dstlen = stream["dstlen"].asUInt();
+                            
+                            if (stream["coder"]["magic"].asString() == "coder_bwt_cm") {
+                            int32_t* excBuffer = MemoryUtil::safeAlloc<int32_t>(srclen >> 2);
+                            if (excBuffer == nullptr) {
+                                return -1;
+                            }
+                            
+                            std::shared_ptr<coder_io> tlenIo = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstlen);
+                            std::shared_ptr<coder_bwt_cm> tlenDecoder = std::make_shared<coder_bwt_cm>(tlenIo.get());
+                            tlenDecoder->set_level(stream["coder"]["level"].asInt());
+                            tlenDecoder->decode_line((uint8_t*)excBuffer, srclen, UINT8_MAX, false);
+                            
+                            uint32_t excCount = srclen / (2 * sizeof(int32_t)); // 每个异常包含2个int32值，每个int32是4字节
+                            LOG_INFO("Processing %u TLEN exceptions (srclen=%u)", excCount, srclen);
+                            for (uint32_t i = 0; i < excCount; ++i) {
+                                uint32_t globalLineIdx = excBuffer[2 * i];
+                                int32_t tlenValue = excBuffer[2 * i + 1];
+                                tlenCache[globalLineIdx] = tlenValue;
+                            }
+                            
+                            MemoryUtil::safeFree(excBuffer);
+                            readOffset += dstlen;
+                            } else {
+                                LOG_ERROR("Unsupported TLEN exception coder type: %s", stream["coder"]["magic"].asString().c_str());
+                                return -1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Normal compression for TLEN - only support bwt_cm
+                std::string coderName = tlenMeta["coder"]["magic"].asString();
+                uint32_t dstLen = tlenMeta["dstlen"].asUInt();
+                
+                if (coderName == "coder_bwt_cm") {
+                    std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
+                    ioVector.push_back(io);
+                    fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
+                    fieldDecoders[idx]->set_level(tlenMeta["coder"]["level"].asInt());
+                } else {
+                    LOG_ERROR("Unsupported TLEN coder type: %s", coderName.c_str());
+                    return -1;
+                }
+                readOffset += dstLen;
+            }
         } else if (idx == 10) {
             Json::Value& qualMeta = streamMeta[idx];
             std::string mode = "";
@@ -1880,6 +2182,11 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
             uint32_t dstLen = streamMeta[idx]["dstlen"].asUInt();
             
+            // Record data location so POS/CIGAR/PNEXT can be pre-decoded for TLEN recomputation
+            fieldIoStart[idx] = readOffset;
+            fieldIoDstLen[idx] = dstLen;
+            fieldIoLevel[idx] = streamMeta[idx]["coder"]["level"].asInt();
+            
             if (coderName == "coder_bwt_cm") {
                 std::shared_ptr<coder_io> io = std::make_shared<coder_io>(inBlockPtr->getBuffer() + readOffset, dstLen);
                 ioVector.push_back(io);
@@ -1895,6 +2202,97 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 return -1;
             }
             readOffset += dstLen;
+        }
+    }
+    return 0;
+}
+
+int32_t SamCodecActuator::preDecodeForTLEN() {
+    if (samLine == 0 || !meta.isMember("sam")) {
+        return 0;
+    }
+    
+    uint8_t* buffer = inBlockPtr->getBuffer();
+    uint8_t tmpBuf[1024];
+    Json::Value& streams = meta["sam"]["streams"];
+    
+    // Fields needed to recompute TLEN: POS(3) and PNEXT(7) for the mate index,
+    // CIGAR(5) for reference spans. FLAG/RNAME/RNEXT are decoded per line in
+    // the main loop and are not needed here.
+    static const uint32_t tlenFields[] = {3, 5, 7};
+    
+    for (uint32_t f : tlenFields) {
+        auto startIt = fieldIoStart.find(f);
+        if (startIt == fieldIoStart.end() || !streams.isValidIndex(f) || !streams[f].isMember("coder")) {
+            continue;
+        }
+        
+        uint32_t off = startIt->second;
+        uint32_t dstlen = fieldIoDstLen[f];
+        int32_t level = fieldIoLevel[f];
+        std::string coderName = streams[f]["coder"]["magic"].asString();
+        
+        // Rebuild a decoder over the same (read-only) data region
+        std::shared_ptr<coder_io> tmpIo = std::make_shared<coder_io>(buffer + off, dstlen);
+        std::shared_ptr<coder> tmpDec;
+        if (coderName == "coder_bwt_cm") {
+            tmpDec = std::make_shared<coder_bwt_cm>(tmpIo.get());
+        } else if (coderName == "coder_affix_match") {
+            tmpDec = std::make_shared<coder_affix_match>(tmpIo.get());
+        } else {
+            continue;
+        }
+        tmpDec->set_level(level);
+        
+        std::vector<std::string>& fieldCache = tlenPreDecodedFields[f];
+        fieldCache.clear();
+        fieldCache.reserve(samLine);
+        
+        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+            // coder_affix_match keeps "last" pointing into the caller's output
+            // buffer unless need2hold is set; use a shared scratch buffer only
+            // with need2hold=true so each line's context is preserved
+            bool need2hold = (coderName == "coder_affix_match");
+            uint32_t len = tmpDec->decode_line(tmpBuf, sizeof(tmpBuf), '\t', need2hold);
+            if (len <= 1) {
+                fieldCache.emplace_back();
+                continue;
+            }
+            // Cache the exact bytes to emit so the main loop copies instead of
+            // decoding this field a second time
+            switch (f) {
+                case 3:
+                    mappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                    fieldCache.emplace_back((const char*)tmpBuf, len);
+                    break;
+                case 5:
+                    cigarReadLen[lineNo] = parseCigarRefConsumed(tmpBuf, len);
+                    baseLengthBuffer[lineNo] = parseCigar(tmpBuf, len);
+                    fieldCache.emplace_back((const char*)tmpBuf, len);
+                    break;
+                case 7: {
+                    // PNEXT is delta-encoded against POS; emit the restored PNEXT
+                    int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                    int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                    int64_t pnext = delta + pos;
+                    nextMappedPos[lineNo] = pnext;
+                    fieldCache.emplace_back(std::to_string(pnext) + '\t');
+                    break;
+                }
+                default:
+                    fieldCache.emplace_back((const char*)tmpBuf, len);
+                    break;
+            }
+        }
+    }
+    
+    // Build the complete mate index now that all (pos, pnext) pairs are known
+    tlenMateIndex.clear();
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        auto posIt = mappedPos.find(lineNo);
+        auto pnextIt = nextMappedPos.find(lineNo);
+        if (posIt != mappedPos.end() && pnextIt != nextMappedPos.end()) {
+            tlenMateIndex[std::make_pair(posIt->second, pnextIt->second)] = lineNo;
         }
     }
     return 0;
@@ -2157,9 +2555,8 @@ int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, 
     uint32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
     if (fieldLen > 1) {
         uint32_t seqLength = parseCigar(outputBlock->getCurrent(), fieldLen);
-        uint32_t refConsumed = parseCigarRefConsumed(outputBlock->getCurrent(), fieldLen);
         baseLengthBuffer[lineIdx] = seqLength;
-        cigarReadLen[lineIdx] = seqLength; // Store read length for TLEN computation
+        cigarReadLen[lineIdx] = parseCigarRefConsumed(outputBlock->getCurrent(), fieldLen); // Store reference span for TLEN computation
     } else {
         baseLengthBuffer[lineIdx] = 0;
         cigarReadLen[lineIdx] = 0;
@@ -2169,61 +2566,39 @@ int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, 
     return fieldLen;
 }
 uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength) {
-    // Parse CIGAR format like 6S30M1I114S, M/I/S/=/X: consume SEQ, D/N/H/P don't consume SEQ
+    // Parse CIGAR format like 6S30M1I114S, M/I/S/=/X consume SEQ, D/N/H/P don't consume SEQ
     if (cigarString == nullptr || cigarLength == 0) {
         return 0;
     }
     
     uint32_t seqLength = 0;
-    uint32_t refConsumed = 0;
     uint32_t currentNumber = 0;
     
     for (uint32_t i = 0; i < cigarLength; ++i) {
         char ch = cigarString[i];
         if (ch >= '0' && ch <= '9') {
-            // Accumulate numbers
             currentNumber = currentNumber * 10 + (ch - '0');
         } else {
-            // When encountering operator, determine if it consumes SEQ and reference
             if (currentNumber > 0) {
                 switch (ch) {
                     case 'M':  // Match or mismatch
-                    case 'I':  // Insertion to reference sequence
-                    case 'S':  // Soft clipping at sequence start
-                        // These operations consume SEQ length
-                        seqLength += currentNumber;
-                        // M also consumes reference
-                        refConsumed += currentNumber;
-                        break;
+                    case 'I':  // Insertion to reference
+                    case 'S':  // Soft clipping
+                    case 'm':  case 'i':  case 's':  // Lowercase versions
                     case '=':  // Match
                     case 'X':  // Mismatch
-                        // These operations consume both SEQ and reference
-                        seqLength += currentNumber;
-                        refConsumed += currentNumber;
-                        break;
-                    case 'm':  // Lowercase version
-                    case 'i':  // Lowercase version
-                    case 's':  // Lowercase version
-                        // These only consume SEQ, not reference (for lowercase variants of M/I/S)
+                        // These operations consume SEQ length
                         seqLength += currentNumber;
                         break;
-                    case 'x':  // Lowercase Mismatch (consumes both)
+                    case 'x':  // Lowercase mismatch
                         seqLength += currentNumber;
-                        refConsumed += currentNumber;
                         break;
-                    case 'D':  // Deletion from reference sequence
-                    case 'N':  // Skip from reference sequence
-                    case 'd':  case 'n':  // Lowercase versions
-                        // These operations don't consume SEQ but consume reference
-                        refConsumed += currentNumber;
-                        break;
-                    case 'H':  // Hard clipping at sequence start
-                    case 'P':  // Padding (silent deletion)
-                    case 'h':  case 'p':  // Lowercase versions
-                        // These operations don't consume either
-                        break;
-                    default:
-                        // Unknown operator, ignore
+                    case 'D':  // Deletion from reference
+                    case 'N':  // Skip from reference
+                    case 'H':  // Hard clipping
+                    case 'P':  // Padding
+                    case 'd':  case 'n':  case 'h':  case 'p':  // Lowercase versions
+                    default:   // Unknown operator, ignore
                         break;
                 }
                 currentNumber = 0;
@@ -2231,7 +2606,6 @@ uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength
         }
     }
     
-    // Return SEQ length for base length calculation
     return seqLength;
 }
 

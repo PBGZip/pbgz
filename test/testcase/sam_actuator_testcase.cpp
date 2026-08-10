@@ -643,6 +643,110 @@ TEST_F(SamActuatorTest, testCigarParse) {
     EXPECT_EQ(testParse(actuator, "M10I"), 10);  // Missing number at start
 }
 
+TEST_F(SamActuatorTest, testCigarParseRefConsumed) {
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    auto testParse = [](SamCodecActuator& a, const std::string& cigar) -> uint32_t {
+        return a.parseCigarRefConsumed(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(cigar.c_str())), cigar.length());
+    };
+
+    // M/D/N/=/X consume reference; I/S/H/P do not
+    EXPECT_EQ(testParse(actuator, "90M"), 90);
+    EXPECT_EQ(testParse(actuator, "10S60M"), 60);
+    EXPECT_EQ(testParse(actuator, "5M5I5D5N5S5H5P"), 15);  // 5M+5D+5N = 15
+    EXPECT_EQ(testParse(actuator, "49H41M"), 41);
+    EXPECT_EQ(testParse(actuator, "50=30X"), 80);
+    EXPECT_EQ(testParse(actuator, "5m3d2n"), 10);  // Lowercase variants
+    EXPECT_EQ(testParse(actuator, ""), 0);
+    EXPECT_EQ(testParse(actuator, "100I"), 0);  // Insertion consumes no reference
+    EXPECT_EQ(testParse(actuator, "20S"), 0);   // Soft clip consumes no reference
+}
+
+TEST_F(SamActuatorTest, testComputeTLEN) {
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    // Helper to set a read's mapping data. Mirrors the incremental registration
+    // done by compressTLen / decompressSamByFields: each read is added to the
+    // mate index keyed by (pos, pnext).
+    auto setRead = [&actuator](uint32_t lineIdx, uint16_t flag, uint16_t chr, uint16_t nextChr,
+                               int64_t pos, int64_t pnext, uint32_t refSpan) {
+        actuator.mappedFlag[lineIdx] = flag;
+        actuator.mappedChr[lineIdx] = chr;
+        actuator.nextMappedChr[lineIdx] = nextChr;
+        actuator.mappedPos[lineIdx] = pos;
+        actuator.nextMappedPos[lineIdx] = pnext;
+        actuator.cigarReadLen[lineIdx] = refSpan;
+        actuator.tlenMateIndex[std::make_pair(pos, pnext)] = lineIdx;
+    };
+
+    // Normal pair: read1 on the left, read2 on the right, both 90M
+    // FLAG=0x63 = paired+proper+first; FLAG=0x93 = paired+proper+second
+    setRead(0, 0x63, 5, 0xFFFE, 100, 200, 90);  // read1 left
+    setRead(1, 0x93, 5, 0xFFFE, 200, 100, 90);  // read2 right
+    EXPECT_EQ(actuator.computeTLEN(0), 200 + 90 - 100);   // +190
+    EXPECT_EQ(actuator.computeTLEN(1), -(200 + 90 - 100));  // -190
+
+    // Sign is determined by position, not by read1/read2 flag:
+    // read1 on the right, read2 on the left
+    setRead(0, 0x63, 5, 0xFFFE, 300, 100, 90);      // read1 right
+    setRead(1, 0x93, 5, 0xFFFE, 100, 300, 90);      // read2 left
+    EXPECT_EQ(actuator.computeTLEN(0), -(300 + 90 - 100));  // -290
+    EXPECT_EQ(actuator.computeTLEN(1), 300 + 90 - 100);     // +290
+
+    // Asymmetric spans (soft clip): read1 refSpan=80, read2 refSpan=70
+    setRead(0, 0x63, 5, 0xFFFE, 100, 250, 80);
+    setRead(1, 0x93, 5, 0xFFFE, 250, 100, 70);
+    EXPECT_EQ(actuator.computeTLEN(0), 250 + 70 - 100);   // +220
+    EXPECT_EQ(actuator.computeTLEN(1), -(250 + 70 - 100));  // -220
+
+    // Same position: positive (mate has same position, refSpan 90)
+    setRead(0, 0x63, 5, 0xFFFE, 100, 100, 90);
+    setRead(1, 0x93, 5, 0xFFFE, 100, 100, 90);
+    EXPECT_EQ(actuator.computeTLEN(0), 100 + 90 - 100);  // +90
+    EXPECT_EQ(actuator.computeTLEN(1), 100 + 90 - 100);  // +90
+
+    // Not paired -> 0
+    setRead(0, 0x4, 5, 0xFFFE, 100, 0, 90);
+    EXPECT_EQ(actuator.computeTLEN(0), 0);
+
+    // Self unmapped (flag 0x4) -> 0
+    setRead(0, 0x5, 5, 0xFFFE, 100, 200, 90);
+    setRead(1, 0x93, 5, 0xFFFE, 200, 100, 90);
+    EXPECT_EQ(actuator.computeTLEN(0), 0);
+
+    // Mate unmapped (RNEXT='*' = 0xFFFF) -> 0
+    setRead(0, 0x63, 5, 0xFFFF, 100, 200, 90);
+    setRead(1, 0x93, 5, 0xFFFE, 200, 100, 90);
+    EXPECT_EQ(actuator.computeTLEN(0), 0);
+
+    // Mate on a different chromosome -> 0
+    setRead(0, 0x63, 5, 6, 100, 200, 90);
+    setRead(1, 0x93, 6, 5, 200, 100, 90);
+    EXPECT_EQ(actuator.computeTLEN(0), 0);
+    EXPECT_EQ(actuator.computeTLEN(1), 0);
+
+    // RNEXT='=' (0xFFFE) means same chromosome as RNAME -> computed normally
+    setRead(0, 0x63, 5, 0xFFFE, 100, 200, 90);
+    setRead(1, 0x93, 5, 0xFFFE, 200, 100, 90);
+    EXPECT_EQ(actuator.computeTLEN(0), 190);
+
+    // Mate not found in the block -> mate span 0
+    setRead(0, 0x63, 5, 0xFFFE, 100, 200, 90);
+    actuator.cigarReadLen.erase(1);
+    actuator.mappedFlag.erase(1);
+    actuator.mappedChr.erase(1);
+    actuator.nextMappedChr.erase(1);
+    actuator.mappedPos.erase(1);
+    actuator.nextMappedPos.erase(1);
+    actuator.tlenMateIndex.clear();
+    actuator.tlenMateIndex[std::make_pair(100, 200)] = 0;
+    EXPECT_EQ(actuator.computeTLEN(0), 200 - 100);  // 100
+}
+
 TEST_F(SamActuatorTest, testBuildSamIndexDisabled) {
     loadSamData(SamTestData::testSamFile);
     PbgzParameter para;
