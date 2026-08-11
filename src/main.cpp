@@ -608,7 +608,7 @@ static std::vector<SubCommand> subCommands = {
     {
         "decompress",
         "Decompress file from pbgz file",
-        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 't', 'e', 'p', 'g', 'G', 'z'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 't', 'e', 'p', 'g', 'G', 'z', 'l'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<DecompressCmdProc>(para);
         },
@@ -922,9 +922,11 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    if (processor->startEngine() != 0) {
+    int32_t ret = processor->startEngine();
+    if (ret != 0) {
         LOG_ERROR("Command start failed");
-        return -1;
+        /* 异常退出：清理并删除已创建的输出文件（如缺参考基因导致的失败）。 */
+        PbgzManager::getInstance().exitProc(ret, "pbgz start failed");
     }
 
     MemoryUtil::safeDeleteClass(processor);

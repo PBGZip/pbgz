@@ -49,6 +49,9 @@ public:
 
     void exitProc(int errorCode, const char* errorMessage);
 
+    /* 登记输出文件，异常退出时由 exitProc 统一清理删除。 */
+    void addOutputFile(const std::string& fileName);
+
     static PbgzManager& getInstance();
 
     std::string getVersion();

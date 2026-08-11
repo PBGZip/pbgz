@@ -25,6 +25,8 @@
 
 #include <map>
 #include <vector>
+#include <unordered_map>
+#include <functional>
 
 #include "codec_actuator.h"
 #include "coder.h"
@@ -38,6 +40,13 @@
 
 // Forward declaration
 class CompressEngine;
+
+/* TLEN 伙伴索引用 (pos, pnext) 作键的哈希函数。 */
+struct PairInt64Hash {
+    std::size_t operator()(const std::pair<int64_t, int64_t>& key) const {
+        return std::hash<int64_t>()(key.first) ^ (std::hash<int64_t>()(key.second) << 1);
+    }
+};
 
 class SamCodecActuator : public CodecActuator {
 public:
@@ -56,7 +65,17 @@ public:
 
     int32_t initDecoder(RoughIOBlock* outputBlock);
 
-    int32_t decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag, RoughIOBlock* outputBlock);
+    /*
+     * 先解码全块的 POS/CIGAR/PNEXT，把完整伙伴索引与参考跨度建好，主循环再逐行
+     * 输出时 TLEN 才能用 computeTLEN 还原，异常值因此可以压到接近零。
+     */
+    int32_t preDecodeForTLEN();
+
+    int32_t decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
+
+    int32_t decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
+
+    int32_t decompressPosFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
     int32_t decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta, RoughIOBlock* outputBlock);
 
@@ -66,6 +85,10 @@ public:
                                     uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock);
 
     int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock);
+
+    int32_t decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock, const Json::Value& fieldMeta);
+
+    int32_t computeTLEN(uint32_t lineIdx);
 
     template<typename T>
     int32_t decompressNumber(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock) {
@@ -83,7 +106,7 @@ public:
         } else if (fieldIdx == 3) {
             mappedPos[lineNo] = val;
         } else if (fieldIdx == 7) {
-            nextMappedChr[lineNo] = val;
+            nextMappedPos[lineNo] = val;
         }
         memcpy(outputBlock->getCurrent(), strVal.c_str(), strVal.length());
         outputBlock->setDataLen(outputBlock->getDataLen() + strVal.length());
@@ -126,7 +149,25 @@ private:
 
     int32_t compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
+    /* 预处理选出的编码器类型；引擎不提供或尚未决出时返回 fallback。 */
+    CoderType pickedCoderFor(uint32_t fieldIdx, CoderType fallback) const;
+
     uint32_t parseCigar(uint8_t* cigarString, uint32_t cigarLength);
+
+    /* 只统计消耗参考序列的 CIGAR 操作（M/D/N/=/X），用于 TLEN 推算。 */
+    uint32_t parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength);
+
+    /* PNEXT 按 (PNEXT - POS) 差值文本压缩；连续行的差值远小于原始值，bwt_cm 压得更小。 */
+    template<typename CoderType>
+    int32_t compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+
+    /* POS 按与上一行 POS 的差值文本压缩；实测优于定宽二进制和文本 affix。 */
+    template<typename CoderType>
+    int32_t compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+
+    /* TLEN 不存原值，解压时按 POS/PNEXT/CIGAR 推算，只对推算不上的行存异常。 */
+    template<typename CoderType>
+    int32_t compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     template<typename T>
     int32_t compressNumber(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
@@ -160,7 +201,11 @@ private:
 
             std::string str = std::string((char*)fieldStart, fieldLength);
             T value = (T)std::stoll(str);
-            fieldSrcLen += str.length();
+            /*
+             * fieldSrcLen 记录的是原始文本占用（含行尾 tab，即 currTabPos - prevTabPos）；
+             * 转成数字后压缩流里只有定宽二进制，其总空间记在 meta["srclen"]（srcLen）。
+             */
+            fieldSrcLen += fieldLength + 1;
             // Encode the field data
             numberCoder->encode_line(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
             srcLen += sizeof(T);
@@ -185,6 +230,12 @@ private:
         fieldMeta["dstlen"] = numberIo->data_len;
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
+        /*
+         * 数值字段有两种压缩形态：这里按定宽二进制编码；当预处理选出 affix 时，
+         * compressSamByFields 会改走文本形态（compressRegularField，mode="string"）。
+         * mode 写进 meta，解压侧据此选择解码路径。
+         */
+        fieldMeta["mode"] = "number";
 
         LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
             fieldIdx, fieldSrcLen, numberIo->data_len, (double)(numberIo->data_len * 100)/(double)fieldSrcLen);
@@ -226,6 +277,20 @@ private:
     std::map<uint32_t, int64_t> nextMappedPos;
     std::map<uint32_t, uint16_t> nextMappedChr;
     std::map<uint32_t, uint16_t> mappedFlag;
+    /* 每条记录消耗的参考序列长度（CIGAR 的 M/D/N/=/X 之和），TLEN 推算用。 */
+    std::map<uint32_t, uint32_t> cigarReadLen;
+    /* TLEN 伙伴索引，键为 (pos, pnext)，值为行号。 */
+    std::unordered_map<std::pair<int64_t, int64_t>, uint32_t, PairInt64Hash> tlenMateIndex;
+    /* initDecoder 记下的各字段压缩流位置，供 preDecodeForTLEN 重建解码器。 */
+    std::map<uint32_t, uint32_t> fieldIoStart;
+    std::map<uint32_t, uint32_t> fieldIoDstLen;
+    std::map<uint32_t, int32_t> fieldIoLevel;
+    /* preDecodeForTLEN 预解码的字段内容（POS/CIGAR/PNEXT），主循环直接拷贝。 */
+    std::map<uint32_t, std::vector<std::string>> tlenPreDecodedFields;
+    /* 解压侧 TLEN 推算异常的缓存行。 */
+    std::map<uint32_t, int32_t> tlenCache;
+    /* POS 差值解码时的上一行 POS（主循环兜底路径用，preDecodeForTLEN 用局部变量）。 */
+    int64_t posDeltaPrev = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
     uint32_t baseNCount;

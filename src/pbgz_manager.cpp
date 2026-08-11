@@ -53,6 +53,11 @@ void PbgzManager::exitProc(int errorCode, const char* errorMessage){
     _Exit(errorCode);
 }
 
+void PbgzManager::addOutputFile(const std::string& fileName) {
+    /* second 置 false：异常退出（errorCode < 0）时删除该输出文件。 */
+    outfiles.push_back(std::make_pair(fileName, false));
+}
+
 void pbgzExitProc(int errorCode, const char* errorMessage) {
     return PbgzManager::getInstance().exitProc(errorCode, errorMessage);
 }

@@ -51,7 +51,6 @@ set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp )
 # Define main executable
 add_executable(pbgz ${MAIN_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPEN_SOURCES})
 
-# Link to libraries - Add PRIVATE keyword to match style with CoreServices linkage
 target_link_libraries(pbgz PRIVATE
     pbgz_coder
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
@@ -64,8 +63,12 @@ target_link_libraries(pbgz PRIVATE
     pthread
     curl
     lzma
-    "-framework CoreServices"
 )
+
+if(APPLE) 
+    target_link_libraries(pbgz_test PRIVATE  "-framework CoreServices")
+endif()
+
 
 install(TARGETS pbgz DESTINATION bin)
 

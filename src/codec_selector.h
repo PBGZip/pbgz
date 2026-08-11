@@ -33,6 +33,16 @@
 class RoughIOBlock;
 
 /*
+ * 一个按行切开的字段样本。coder_affix_match 是逐行编码器，前后缀匹配的收益来自
+ * 相邻行之间，试压时必须按行喂（含行尾 tab），整列连成一个字节流会丢掉行边界，
+ * 测出来的数字和真实压缩完全不是一回事。
+ */
+struct LineSample {
+    const uint8_t* data;
+    uint32_t len;
+};
+
+/*
  * CodecSelector
  *
  * Codec pre-selection step of the file preprocessing module. It scans a sample
@@ -64,8 +74,17 @@ public:
     /*
      * Trial-compress one byte stream with every candidate coder and return the
      * selection result. Exposed for unit testing.
+     *
+     * trialAffix 控制是否把 coder_affix_match 纳入候选。affix 是列式前后缀匹配编码器，
+     * 只对部分 SAM 常规字段（FLAG/POS/MAPQ/CIGAR/PNEXT/TLEN）有收益，其他字段（如
+     * SEQ、QNAME）参与比较只会浪费时间，甚至可能被误选。
+     *
+     * affix 必须按行喂数据（见 LineSample），lines 给出逐行样本；为空时退化为
+     * 整段一次 encode_line，测出来的结果不可信，此时 affix 不参与比较。
      */
-    static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len);
+    static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len,
+                                           bool trialAffix = false,
+                                           const std::vector<LineSample>* lines = nullptr);
 
 private:
     static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info);
@@ -88,6 +107,7 @@ private:
 
     static uint32_t extractSamFieldSamples(RoughIOBlock* block,
                                        std::vector<std::string>& fieldBufs,
+                                       std::vector<std::vector<LineSample>>& fieldLines,
                                        uint32_t sampleBudget);
     static uint32_t extractFastqFieldSamples(RoughIOBlock* block,
                                          std::vector<std::string>& fieldBufs,

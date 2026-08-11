@@ -42,6 +42,7 @@
 #include "compress_engine.h"
 #include "pbgz_stat.h"
 #include "config_manager.h"
+#include "field_coder_config.h"
 
 namespace {
     uint16_t mapFieldIdxToStatUnitId(uint16_t fieldIdx) {
@@ -57,6 +58,7 @@ namespace {
             case 8: return StatObjectId::SAM_TLEN;
             case 9: return StatObjectId::SAM_SEQ;
             case 10: return StatObjectId::SAM_QUAL;
+            case 11: return StatObjectId::SAM_OPTION;
             default: return 0;
         }
     }
@@ -589,16 +591,28 @@ int32_t SamCodecActuator::compressSamByFields() {
                 }
                 break;
             case 1: // FLAG
-                fieldDstLen = compressNumber<uint16_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                if (pickedCoderFor(fieldIdx, CoderType::BWT_CM) == CoderType::AFFIX_MATCH) {
+                    fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressNumber<uint16_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 2: // RNAME
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 3: // POS
-                fieldDstLen = compressNumber<uint32_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                /*
+                 * POS 按与上一行 POS 的差值压缩。实测差分约 0.34 B/行，优于定宽二进制
+                 * （1.00 B/行）和文本 affix（0.53 B/行）。固定走差分路径，不参与编码器选择。
+                 */
+                fieldDstLen = compressPosFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 4: // MAPQ
-                fieldDstLen = compressNumber<uint8_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                if (pickedCoderFor(fieldIdx, CoderType::BWT_CM) == CoderType::AFFIX_MATCH) {
+                    fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+                } else {
+                    fieldDstLen = compressNumber<uint8_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
             case 5: // CIGAR
                 fieldDstLen = compressCigar(fieldIdx, fieldSrcLen, fieldMeta);
@@ -607,10 +621,21 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 7: // PNEXT
-                fieldDstLen = compressNumber<uint32_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                /*
+                 * PNEXT 按与 POS 的差值压缩。连续行的差值远小于原始坐标，实测
+                 * bwt_cm 压差值文本约 0.86 bytes/line，远好于压原始 PNEXT 或 affix。
+                 * 试压选择基于的是原始 PNEXT 文本，和这里实际采用的差值编码不一致，
+                 * 所以该字段固定走差值路径，不参与编码器选择。
+                 */
+                fieldDstLen = compressPNextFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 8: // TLEN
-                fieldDstLen = compressNumber<int32_t>(fieldIdx, fieldSrcLen, fieldMeta);
+                /*
+                 * TLEN 不存原值：解压时按 POS/PNEXT/CIGAR 推算，只对推算不上的行
+                 * 存异常。CIGAR/FLAG/RNAME/RNEXT/POS/PNEXT 都在本字段之前压缩，
+                 * 推算所需的跟踪 map 已就绪。
+                 */
+                fieldDstLen = compressTLen<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 9: // SEQ
                 if (pRefeGene == nullptr) {
@@ -669,6 +694,147 @@ int32_t SamCodecActuator::compressSamByFields() {
     return 0;
 }
 
+CoderType SamCodecActuator::pickedCoderFor(uint32_t fieldIdx, CoderType fallback) const
+{
+    const PreprocessInfo* preInfo =
+        (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
+    if (preInfo != nullptr) {
+        return preInfo->coderFor(fieldIdx, fallback);
+    }
+    return fallback;
+}
+
+template<typename CoderType>
+int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "PNEXT delta");
+    std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
+
+    fieldSrcLen = 0;
+    uint32_t deltaLength = 0;
+
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        uint32_t lineEnd = npos[lineIdx] - lineStart;
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+
+        uint32_t contentIdx = lineIdx - headEndLine;
+        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+        uint8_t* fieldStart = line + prevTabPos + 1;
+        uint32_t fieldLength = currTabPos - prevTabPos;
+
+        uint8_t buff[32] = {0};
+        int length = 0;
+        if (fieldLength > 1) {
+            std::string pNextStr = std::string((char*)fieldStart, fieldLength - 1);
+            int64_t pNextValue = (int64_t)std::stoll(pNextStr);
+            nextMappedPos[lineIdx] = pNextValue;
+
+            int64_t pos = mappedPos.find(lineIdx) == mappedPos.end() ? 0 : mappedPos[lineIdx];
+            int64_t pNextDelta = pNextValue - pos;
+            length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", pNextDelta);
+            fieldSrcLen += fieldLength;
+        } else {
+            /* 空/异常值按差值为 0 处理。 */
+            length = snprintf((char*)buff, sizeof(buff), "0\t");
+            fieldSrcLen += 2;
+        }
+        fieldCoder->encode_line(buff, (uint32_t)length);
+        deltaLength += (uint32_t)length;
+    }
+
+    fieldCoder->encode_flush();
+    if (fieldIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode PNEXT delta overflow: output buffer too small");
+        return -1;
+    }
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
+
+    fieldMeta["srclen"] = deltaLength;
+    fieldMeta["dstlen"] = fieldIo->data_len;
+    fieldMeta["coder"] = fieldIo->meta;
+    fieldMeta["field"] = fieldIdx;
+    fieldMeta["mode"] = "pnext_delta";
+
+    LOG_INFO("SAM field(%d) (PNEXT) delta compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
+        fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
+
+    return fieldIo->data_len;
+}
+
+template<typename CoderType>
+int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "POS delta");
+    std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
+
+    fieldSrcLen = 0;
+    uint32_t deltaLength = 0;
+    int64_t prevPos = 0;
+
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        uint32_t lineEnd = npos[lineIdx] - lineStart;
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+
+        uint32_t contentIdx = lineIdx - headEndLine;
+        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+        uint8_t* fieldStart = line + prevTabPos + 1;
+        uint32_t fieldLength = currTabPos - prevTabPos;
+
+        uint8_t buff[32] = {0};
+        int length = 0;
+        if (fieldLength > 1) {
+            std::string posStr = std::string((char*)fieldStart, fieldLength - 1);
+            int64_t posValue = (int64_t)std::stoll(posStr);
+            mappedPos[lineIdx] = posValue;
+            int64_t delta = posValue - prevPos;
+            length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", delta);
+            fieldSrcLen += fieldLength;
+            prevPos = posValue;
+        } else {
+            /* 空/异常值按差值为 0 处理。 */
+            mappedPos[lineIdx] = 0;
+            length = snprintf((char*)buff, sizeof(buff), "0\t");
+            fieldSrcLen += 2;
+        }
+        fieldCoder->encode_line(buff, (uint32_t)length);
+        deltaLength += (uint32_t)length;
+    }
+
+    fieldCoder->encode_flush();
+    if (fieldIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode POS delta overflow: output buffer too small");
+        return -1;
+    }
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
+
+    fieldMeta["srclen"] = deltaLength;
+    fieldMeta["dstlen"] = fieldIo->data_len;
+    fieldMeta["coder"] = fieldIo->meta;
+    fieldMeta["field"] = fieldIdx;
+    fieldMeta["mode"] = "pos_delta";
+
+    LOG_INFO("SAM field(%d) (POS) delta compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
+        fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
+
+    return fieldIo->data_len;
+}
+
 int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     // Similar to FastqActuator::compressIdInSplit, create multiple streams for each split symbol
     Json::Value streamMeta;
@@ -678,13 +844,43 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
     // Process each split symbol (similar to FastqActuator)
     for (uint32_t i = 0; i < idSplitSymbols.size(); ++i) {
         std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME sub-stream");
-        std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
-        uint32_t srcLength = 0;
-        // Process each line and compress the specific split segment
+        std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
+
+        /*
+         * 纯数字段检测（取首行）：排除行尾分隔符，否则像 "265269\t" 这样的纯数字列
+         * 永远判不出来。检测结果只用于日志——实测 affix 压这类短列段比 bwt_cm 文本
+         * 和逐行 delta 都更好，所以所有段统一用 affix，不做分支。
+         */
         std::vector<size_t>& npos = inBlockPtr->getNpos();
         uint32_t lineNum = npos.size();
         uint8_t* buffer = inBlockPtr->getBuffer();
+        bool idDigit = false;
+        if (idSplitMaxLen[i] != idSplitMinLen[i]) {
+            uint32_t lineStart = (headEndLine == 0) ? 0 : npos[headEndLine - 1] + 1;
+            uint8_t* line = buffer + lineStart;
+            uint8_t* segPtr = nullptr;
+            uint32_t segLen = 0;
+            if (i == 0) {
+                segPtr = line;
+                segLen = idSplitPos[0][0] + 1;
+            } else {
+                uint32_t prevPos = idSplitPos[0][i - 1];
+                uint32_t currPos = idSplitPos[0][i];
+                segPtr = line + prevPos + 1;
+                segLen = currPos - prevPos;
+            }
+            idDigit = (segLen > 1);
+            for (uint32_t j = 0; idDigit && j + 1 < segLen; ++j) {
+                if ((segPtr[j] & 0xF0) != 0x30) {
+                    idDigit = false;
+                    break;
+                }
+            }
+        }
+        LOG_DEBUG("SAM QNAME split column(%u) uses coder_affix_match (idDigit=%d)", i, (int)idDigit);
 
+        uint32_t srcLength = 0;
+        // Process each line and compress the specific split segment
         for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
             uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
             uint8_t* line = buffer + lineStart;
@@ -760,7 +956,7 @@ int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Valu
 
     // Create encoder for ID field whole compression
     std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME");
-    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(SAM_QNAME, CoderType::BWT_CM, fieldIo.get(), true);
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(SAM_QNAME, samFieldDefaultCoder(SAM_QNAME, CoderType::BWT_CM), fieldIo.get(), true);
 
     fieldSrcLen = 0;
 
@@ -821,7 +1017,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
 
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> chrIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "RNAME");
-    std::shared_ptr<coder> chrCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, chrIo.get(), true);
+    std::shared_ptr<coder> chrCoder = makeFieldEncoder(fieldIdx, samFieldDefaultCoder(fieldIdx, CoderType::BWT_CM), chrIo.get(), true);
 
     fieldSrcLen = 0;
     uint32_t srcLen = 0;
@@ -894,7 +1090,7 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
 
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SAM field");
-    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, samFieldDefaultCoder(fieldIdx, CoderType::BWT_CM), fieldIo.get(), true);
 
     fieldSrcLen = 0;
 
@@ -926,6 +1122,23 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
         if (fieldLength > 0) {
             fieldCoder->encode_line(fieldStart, fieldLength);
             fieldSrcLen += fieldLength;
+
+            /*
+             * FLAG/POS/PNEXT 被以文本形态（affix）压缩时，这里的跟踪 map 必须照常
+             * 填好：compressBaseWithRef 在 SEQ 阶段要靠 mappedPos/mappedChr/mappedFlag
+             * 还原参考位置，解压侧也要靠它们还原。二进制形态在 compressNumber 里填，
+             * 文本形态在这里填，两边保持一致。
+             */
+            if (fieldLength > 1 && (fieldIdx == 1 || fieldIdx == 3 || fieldIdx == 7)) {
+                std::string str = std::string((char*)fieldStart, fieldLength - 1);
+                if (fieldIdx == 1) {
+                    mappedFlag[lineIdx] = (uint16_t)std::stoll(str);
+                } else if (fieldIdx == 3) {
+                    mappedPos[lineIdx] = (int64_t)std::stoll(str);
+                } else if (fieldIdx == 7) {
+                    nextMappedPos[lineIdx] = (int64_t)std::stoll(str);
+                }
+            }
         }
     }
 
@@ -944,6 +1157,7 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
     fieldMeta["dstlen"] = fieldIo->data_len;
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
+    fieldMeta["mode"] = "string";
 
     LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
@@ -958,7 +1172,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
 
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "CIGAR");
-    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::BWT_CM, fieldIo.get(), true);
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, samFieldDefaultCoder(fieldIdx, CoderType::BWT_CM), fieldIo.get(), true);
 
     fieldSrcLen = 0;
 
@@ -985,9 +1199,12 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
         // Parse CIGAR field, remove hard clipping sequence length
         if (fieldLength == 2 && *fieldStart == '*' ) {
             baseLengthBuffer[lineIdx - headEndLine] = 0;
+            cigarReadLen[lineIdx] = 0;
         } else {
             uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
             baseLengthBuffer[lineIdx - headEndLine] = sequeceLength;
+            /* 参考跨度供 TLEN 推算（field 8 在本字段之后压缩）。 */
+            cigarReadLen[lineIdx] = parseCigarRefConsumed(fieldStart, fieldLength);
         }
 
         // Encode the field data
@@ -1017,6 +1234,193 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
+}
+
+uint32_t SamCodecActuator::parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength) {
+    /* 只统计消耗参考序列的 CIGAR 操作：M/D/N/=/X（含小写）。 */
+    if (cigarString == nullptr || cigarLength == 0) {
+        return 0;
+    }
+
+    uint32_t refConsumed = 0;
+    uint32_t currentNumber = 0;
+    for (uint32_t i = 0; i < cigarLength; ++i) {
+        char ch = cigarString[i];
+        if (ch >= '0' && ch <= '9') {
+            currentNumber = currentNumber * 10 + (ch - '0');
+        } else {
+            if (currentNumber > 0) {
+                switch (ch) {
+                    case 'M': case 'D': case 'N': case '=': case 'X':
+                    case 'm': case 'd': case 'n':
+                        refConsumed += currentNumber;
+                        break;
+                    default:
+                        break;
+                }
+                currentNumber = 0;
+            }
+        }
+    }
+    return refConsumed;
+}
+
+/*
+ * 按 SAM 规范推算 TLEN：
+ *   |TLEN| = 最右 mapped base - 最左 mapped base + 1
+ * 左侧片段为正、右侧片段为负。pos < pnext 时本读在左，右端 = pnext + 伙伴参考跨度 - 1；
+ * pos > pnext 时本读在右，左端 = pos，模板长为负。
+ */
+int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx) {
+    /* 非配对（FLAG bit0）或任一端未比对（bit2/bit3），TLEN 定为 0。 */
+    auto flagIt = mappedFlag.find(lineIdx);
+    if (flagIt == mappedFlag.end() || !(flagIt->second & 0x1) ||
+        (flagIt->second & 0x4) || (flagIt->second & 0x8)) {
+        return 0;
+    }
+
+    /* 参照序列不可用或伙伴在不同参照上，TLEN 定为 0。 */
+    auto chrIt = mappedChr.find(lineIdx);
+    if (chrIt == mappedChr.end() || chrIt->second == 0xFFFF) {
+        return 0;
+    }
+    auto nextChrIt = nextMappedChr.find(lineIdx);
+    if (nextChrIt == nextMappedChr.end() || nextChrIt->second == 0xFFFF) {
+        return 0;
+    }
+    if (nextChrIt->second != 0xFFFE && nextChrIt->second != chrIt->second) {
+        return 0;
+    }
+
+    auto posIt = mappedPos.find(lineIdx);
+    if (posIt == mappedPos.end()) {
+        return 0;
+    }
+    int64_t pos = posIt->second;
+
+    auto pnextIt = nextMappedPos.find(lineIdx);
+    if (pnextIt == nextMappedPos.end()) {
+        return 0;
+    }
+    int64_t pnext = pnextIt->second;
+
+    /* 本读的参考跨度来自 CIGAR。 */
+    auto readLenIt = cigarReadLen.find(lineIdx);
+    uint32_t refSpan = (readLenIt != cigarReadLen.end()) ? readLenIt->second : 0;
+
+    /* 伙伴跨度通过 (pnext, pos) 反查完整索引；找不到按 0 处理（跨度缺失只损失压缩率）。 */
+    uint32_t mateRefSpan = 0;
+    auto mateIt = tlenMateIndex.find(std::make_pair(pnext, pos));
+    if (mateIt != tlenMateIndex.end()) {
+        auto spanIt = cigarReadLen.find(mateIt->second);
+        if (spanIt != cigarReadLen.end()) {
+            mateRefSpan = spanIt->second;
+        }
+    }
+
+    int64_t templateLen;
+    if (pos < pnext) {
+        templateLen = pnext + (int64_t)mateRefSpan - pos;
+    } else if (pos > pnext) {
+        templateLen = -(pos + (int64_t)refSpan - pnext);
+    } else {
+        templateLen = pnext + (int64_t)mateRefSpan - pos;
+    }
+    return (int32_t)templateLen;
+}
+
+template<typename CoderType>
+int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    Json::Value metaSubs;
+    Json::Value metaStreams;
+    uint32_t totalSrcLen = 0;
+    uint32_t totalDstLen = 0;
+
+    /* 推算不上的行存 (相对行号, 实际值)。 */
+    std::vector<std::pair<uint32_t, int32_t>> tlenExceptions;
+
+    /* POS/PNEXT 已在前面字段压好，这里建完整伙伴索引。 */
+    tlenMateIndex.clear();
+    for (const auto& entry : nextMappedPos) {
+        auto posIt2 = mappedPos.find(entry.first);
+        if (posIt2 == mappedPos.end()) {
+            continue;
+        }
+        tlenMateIndex[std::make_pair(posIt2->second, entry.second)] = entry.first;
+    }
+
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        uint32_t lineEnd = npos[lineIdx] - lineStart;
+
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+
+        uint32_t contentIdx = lineIdx - headEndLine;
+        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+        uint8_t* fieldStart = line + prevTabPos + 1;
+        uint32_t fieldLength = currTabPos - prevTabPos;
+        fieldSrcLen += fieldLength;
+
+        if (fieldLength > 1) {
+            std::string tlenStr = std::string((char*)fieldStart, fieldLength - 1);
+            int32_t currentTLEN = (int32_t)std::stoll(tlenStr);
+            int32_t computedTLEN = computeTLEN(lineIdx);
+            if (computedTLEN != currentTLEN) {
+                tlenExceptions.push_back(std::make_pair(contentIdx, currentTLEN));
+            }
+        }
+    }
+
+    if (!tlenExceptions.empty()) {
+        std::shared_ptr<coder_io> tlenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "TLEN exceptions");
+        std::shared_ptr<CoderType> tlenCoder = std::make_shared<CoderType>(tlenIo.get());
+
+        uint32_t tlenExcSrcLen = (uint32_t)(tlenExceptions.size() * (2 * sizeof(int32_t)));
+        int32_t* tlenExcBuffer = MemoryUtil::safeAlloc<int32_t>(tlenExcSrcLen);
+        if (tlenExcBuffer == nullptr) {
+            return -1;
+        }
+        for (uint32_t i = 0; i < tlenExceptions.size(); ++i) {
+            tlenExcBuffer[2 * i] = (int32_t)tlenExceptions[i].first;
+            tlenExcBuffer[(2 * i) + 1] = tlenExceptions[i].second;
+        }
+        tlenCoder->encode_line((uint8_t*)tlenExcBuffer, tlenExcSrcLen);
+        tlenCoder->encode_flush();
+        MemoryUtil::safeFree(tlenExcBuffer);
+        if (tlenIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode TLEN exceptions overflow: output buffer too small");
+            return -1;
+        }
+
+        metaSubs["srclen"] = tlenExcSrcLen;
+        metaSubs["dstlen"] = tlenIo->data_len;
+        metaSubs["coder"] = tlenIo->meta;
+        metaSubs["sname"] = "tlenexc";
+        metaStreams.append(metaSubs);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + tlenIo->data_len);
+        totalSrcLen += tlenExcSrcLen;
+        totalDstLen += tlenIo->data_len;
+    }
+
+    fieldMeta["srclen"] = totalSrcLen;
+    fieldMeta["dstlen"] = totalDstLen;
+    fieldMeta["streams"] = metaStreams;
+    fieldMeta["field"] = fieldIdx;
+    fieldMeta["mode"] = "string";
+    fieldMeta["optimized"] = true;
+    fieldMeta["exceptions"] = (Json::UInt64)tlenExceptions.size();
+
+    LOG_INFO("SAM TLEN field compression with optimization: %u bytes -> %u bytes, %u exceptions compressed, compress ratio = %.2f%%",
+        fieldSrcLen, totalDstLen, (uint32_t)tlenExceptions.size(), (double)(totalDstLen * 100)/(double)fieldSrcLen);
+    return totalDstLen;
 }
 
 int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
@@ -1056,7 +1460,7 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
 
     // Create encoder for regular field compression
     std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ");
-    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, CoderType::FC, fieldIo.get(), false);
+    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, samFieldDefaultCoder(fieldIdx, CoderType::FC), fieldIo.get(), false);
 
     fieldCoder->encode_line(tmpBuffer.get(), fieldSrcLen);
     fieldCoder->encode_flush();
@@ -1301,7 +1705,12 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     fieldMeta["totaldstlen"] = totalDstLen;
     fieldMeta["streams"] = metaStreams;
     fieldMeta["field"] = fieldIdx;
-    fieldSrcLen = totalSrcLen;
+    /*
+     * 只修正 fieldSrcLen：SEQ 列原始大小 = 匹配流源长（srcLen，即各记录 SEQ 文本
+     * 总长，与 QUAL 列口径一致）；npos/baselen 辅助流不计入。meta 的 totalsrclen
+     * 保持原样（含辅助流）。
+     */
+    fieldSrcLen = (uint32_t)srcLen;
 
     LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         totalSrcLen, totalDstLen, (double)(totalDstLen * 100)/(double)totalSrcLen);
@@ -1332,7 +1741,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     const PreprocessInfo* qualPreInfo =
         (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
     if (qualPreInfo != nullptr) {
-        pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, CoderType::QUAL);
+        pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, samFieldDefaultCoder(SAM_QUAL, CoderType::QUAL));
     }
     const bool useFcv2 = (pickedQualCoder == CoderType::FCV2);
     const bool useBwtCm = (pickedQualCoder == CoderType::BWT_CM);
@@ -1499,6 +1908,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     subMeta["streamname"] = "qualityfreq";
     streamMeta.append(subMeta);
 
+    /* 频率表辅助流仍计入 meta 的 totalsrclen（保持原有口径）。 */
     totalSrcLength += freqSrcLen;
     totalDstLength += qualityFreqIo->data_len;
 
@@ -1508,7 +1918,11 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     fieldMeta["streams"] = streamMeta;
     fieldMeta["field"] = fieldIdx;
 
-    fieldSrcLen = totalSrcLength;
+    /*
+     * 只修正 fieldSrcLen：QUAL 列原始大小 = 质量值文本总长（streamSrcLen），
+     * 频率表辅助流不计入；meta 的 totalsrclen 保持原样（含 freqSrcLen）。
+     */
+    fieldSrcLen = streamSrcLen;
 
     /*
      * verbose 模式下逐块打印本块 QUAL 到底走了哪一路编码器、以及本块自己的压缩率。
@@ -1692,6 +2106,28 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         pBaseOut = pBaseEnd - streams[9]["totalsrclen"].asUInt();
     }
 
+    /*
+     * 先把 POS/CIGAR/PNEXT 预解码出来：TLEN 推算需要完整伙伴索引，逐行解码时伙伴
+     * 可能在块的后半段还没解到。预解码结果按行缓存，主循环直接拷贝，避免二次解码。
+     */
+    posDeltaPrev = 0;
+    if (0 != preDecodeForTLEN()) {
+        LOG_ERROR("Pre-decode for TLEN failed.");
+        return -1;
+    }
+
+    /* 拷贝预解码字段的字节，避免再次解码；未缓存时返回 -1。 */
+    auto copyPreDecodedField = [&](uint32_t fieldIdx, uint32_t lineNo) -> int32_t {
+        auto preIt = tlenPreDecodedFields.find(fieldIdx);
+        if (preIt != tlenPreDecodedFields.end() && lineNo < preIt->second.size() && !preIt->second[lineNo].empty()) {
+            const std::string& s = preIt->second[lineNo];
+            memcpy(outputBlock->getCurrent(), s.data(), s.length());
+            outputBlock->setDataLen(outputBlock->getDataLen() + s.length());
+            return (int32_t)s.length();
+        }
+        return -1;
+    };
+
     for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
         uint8_t* basePtr = nullptr;
         uint32_t actualBaseLen = 0;
@@ -1701,21 +2137,50 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
             if (fieldIdx == 0) {    /// ID
                 decoderLen = decompressIdField(fieldIdx, streams[fieldIdx], outputBlock);
             } else if (fieldIdx == 1) {  /// FLAG
-                decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo, outputBlock);
+                if (streams[1]["mode"].asString() == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo, outputBlock);
+                }
             } else if (fieldIdx == 2) {  /// RNAME
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 3) {  /// POS
-                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                decoderLen = copyPreDecodedField(3, lineNo);
+                if (decoderLen < 0) {
+                    if (streams[3]["mode"].asString() == "pos_delta") {
+                        decoderLen = decompressPosFieldDelta(fieldIdx, lineNo, '\t', outputBlock);
+                    } else if (streams[3]["mode"].asString() == "string") {
+                        decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
+                    } else {
+                        decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                    }
+                }
             } else if (fieldIdx == 4) {  /// MAPQ
-                decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo, outputBlock);
+                if (streams[4]["mode"].asString() == "string") {
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
+                } else {
+                    decoderLen = decompressNumber<uint8_t>(fieldIdx, lineNo, outputBlock);
+                }
             } else if (fieldIdx == 5) {  /// CIGAR
-                decoderLen = decompressCigar(fieldIdx, '\t', lineNo, outputBlock);
+                decoderLen = copyPreDecodedField(5, lineNo);
+                if (decoderLen < 0) {
+                    decoderLen = decompressCigar(fieldIdx, '\t', lineNo, outputBlock);
+                }
             } else if (fieldIdx == 6) {  /// RNEXT
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 7) {  /// PNEXT
-                decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                decoderLen = copyPreDecodedField(7, lineNo);
+                if (decoderLen < 0) {
+                    if (streams[7]["mode"].asString() == "pnext_delta") {
+                        decoderLen = decompressPNextFieldDelta(fieldIdx, lineNo, '\t', outputBlock);
+                    } else if (streams[7]["mode"].asString() == "string") {
+                        decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
+                    } else {
+                        decoderLen = decompressNumber<uint32_t>(fieldIdx, lineNo, outputBlock);
+                    }
+                }
             } else if (fieldIdx == 8) {  /// TLEN
-                decoderLen = decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
+                decoderLen = decompressTLen(fieldIdx, lineNo, '\t', outputBlock, streams[8]);
             } else if (fieldIdx == 9) {  /// SEQ
                 basePtr = outputBlock->getCurrent();
                 decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, nposOffset, totalBaseLen, outputBlock);
@@ -1730,7 +2195,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
             } else {   /// Optional fields
                 // Decode field until tab or end
                 if (fieldIdx + 1 == fieldCount) {
-                    decoderLen = decompressRegularField(fieldIdx, '\n', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\n', outputBlock);
                     // Single newline means it's appended, need to change \t after quality to \n and remove appended \n
                     if (decoderLen == 1) {
                         uint8_t* pEnd = outputBlock->getCurrent();
@@ -1738,7 +2203,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                         outputBlock->setDataLen(outputBlock->getDataLen() - 1);
                     }
                 } else {
-                    decoderLen = decompressRegularField(fieldIdx, '\t', outputBlock);
+                    decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
                 }
             }
             if (decoderLen < 0) {
@@ -2070,13 +2535,80 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 LOG_ERROR("Unsupport coder type: %s", streamMeta[1]["coder"]["magic"].asString().c_str());
                 return -1;
             }
+        } else if (idx == 8) {
+            /* TLEN 字段：优先走推算优化，异常流单独解码。 */
+            Json::Value& tlenMeta = streamMeta[idx];
+            bool isOptimized = tlenMeta.isMember("optimized") && tlenMeta["optimized"].asBool();
+
+            if (isOptimized) {
+                if (tlenMeta.isMember("streams") && tlenMeta["streams"].isArray()) {
+                    Json::Value& tlenStreams = tlenMeta["streams"];
+                    for (Json::Value::iterator it = tlenStreams.begin(); it != tlenStreams.end(); ++it) {
+                        Json::Value& stream = *it;
+                        if (stream["sname"].asString() != "tlenexc") {
+                            continue;
+                        }
+                        uint32_t srclen = stream["srclen"].asUInt();
+                        uint32_t dstlen = stream["dstlen"].asUInt();
+                        if (stream["coder"]["magic"].asString() != "coder_bwt_cm") {
+                            LOG_ERROR("Unsupported TLEN exception coder type: %s", stream["coder"]["magic"].asString().c_str());
+                            return -1;
+                        }
+                        int32_t* excBuffer = MemoryUtil::safeAlloc<int32_t>(srclen >> 2);
+                        if (excBuffer == nullptr) {
+                            return -1;
+                        }
+                        coder_io tlenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "TLEN exceptions");
+                        if (stream["coder"].isMember("level")) {
+                            tlenIo.meta["level"] = stream["coder"]["level"].asInt();
+                        }
+                        coder_bwt_cm tlenDecoder(&tlenIo);
+                        if (tlenDecoder.decode_line((uint8_t*)excBuffer, srclen, UINT8_MAX, false) < 0) {
+                            MemoryUtil::safeFree(excBuffer);
+                            LOG_ERROR("Decode TLEN exceptions failed");
+                            return -1;
+                        }
+                        uint32_t excCount = srclen / (2 * sizeof(int32_t));
+                        for (uint32_t i = 0; i < excCount; ++i) {
+                            tlenCache[(uint32_t)excBuffer[2 * i]] = excBuffer[2 * i + 1];
+                        }
+                        MemoryUtil::safeFree(excBuffer);
+                        readOffset += dstlen;
+                    }
+                }
+            } else {
+                std::string coderName = tlenMeta["coder"]["magic"].asString();
+                uint32_t dstLen = tlenMeta["dstlen"].asUInt();
+                if (coderName != "coder_bwt_cm") {
+                    LOG_ERROR("Unsupported TLEN coder type: %s", coderName.c_str());
+                    return -1;
+                }
+                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "TLEN");
+                ioVector.push_back(io);
+                fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
+                readOffset += dstLen;
+            }
         } else {
             std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
             uint32_t dstLen = streamMeta[idx]["dstlen"].asUInt();
+            /*
+             * 记下 POS(3)/CIGAR(5)/PNEXT(7) 的压缩流位置，preDecodeForTLEN 据此重建
+             * 解码器把全块预解码，TLEN 推算才能拿到完整伙伴索引。
+             */
+            fieldIoStart[idx] = readOffset;
+            fieldIoDstLen[idx] = dstLen;
+            if (streamMeta[idx]["coder"].isMember("level")) {
+                fieldIoLevel[idx] = streamMeta[idx]["coder"]["level"].asInt();
+            }
             if (coderName == "coder_bwt_cm") {
                 std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
                 ioVector.push_back(io);
                 fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
+            } else if (coderName == "coder_affix_match") {
+                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
+                ioVector.push_back(io);
+                fieldDecoders[idx] = std::make_shared<coder_affix_match>(io.get());
+                fieldDecoders[idx]->set_level(streamMeta[idx]["coder"]["level"].asInt());
             } else {
                 LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
                 return -1;
@@ -2087,7 +2619,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     return 0;
 }
 
-int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint8_t splitFlag, RoughIOBlock* outputBlock) {
+int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
     /* decode_line 负值是错误码（码流损坏/缓冲不足），原样上抛，不能当长度用。 */
     int32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
     if (fieldLen < 0) {
@@ -2095,8 +2627,234 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint8_t spli
         return -1;
     }
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
+
+    /*
+     * FLAG/POS/PNEXT 以文本形态（affix）压缩时，这里要把跟踪 map 填回来：
+     * 后续 QUAL 阶段与参考序列阶段都要读 mappedPos/mappedChr/mappedFlag。
+     * 与二进制形态 decompressNumber 里填的保持一致。
+     */
+    if (fieldLen > 1 && (fieldIdx == 1 || fieldIdx == 3 || fieldIdx == 7)) {
+        uint8_t* vs = outputBlock->getBuffer() + outputBlock->getDataLen() - fieldLen;
+        std::string str((char*)vs, (size_t)fieldLen - 1);
+        if (fieldIdx == 1) {
+            mappedFlag[lineNo] = (uint16_t)std::stoull(str);
+        } else if (fieldIdx == 3) {
+            mappedPos[lineNo] = (int64_t)std::stoull(str);
+        } else if (fieldIdx == 7) {
+            nextMappedPos[lineNo] = (int64_t)std::stoull(str);
+        }
+    }
     return fieldLen;
 }
+
+int32_t SamCodecActuator::decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
+    uint8_t deltaBuffer[32] = {0};
+    int32_t deltaLen = fieldDecoders[fieldIdx]->decode_line(deltaBuffer, sizeof(deltaBuffer), splitFlag, true);
+    if (deltaLen < 0) {
+        LOG_ERROR("Decode PNEXT delta failed at line %u", lineNo);
+        return -1;
+    }
+
+    int64_t pos = mappedPos.find(lineNo) == mappedPos.end() ? 0 : mappedPos[lineNo];
+    int64_t pNext = pos;
+    if ((uint32_t)deltaLen > 1) {
+        std::string pNextDeltaStr = std::string((char*)deltaBuffer, (size_t)deltaLen - 1);
+        try {
+            pNext = (int64_t)std::stoll(pNextDeltaStr) + pos;
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to parse delta value '%s' for line %d: %s", pNextDeltaStr.c_str(), lineNo, e.what());
+            return -1;
+        }
+    }
+    nextMappedPos[lineNo] = pNext;
+    char buff[32];
+    int pNextLen = snprintf(buff, sizeof(buff), "%" PRId64 "\t", pNext);
+    memcpy(outputBlock->getCurrent(), buff, pNextLen);
+    outputBlock->setDataLen(outputBlock->getDataLen() + pNextLen);
+    return pNextLen;
+}
+
+int32_t SamCodecActuator::decompressPosFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
+    uint8_t deltaBuffer[32] = {0};
+    int32_t deltaLen = fieldDecoders[fieldIdx]->decode_line(deltaBuffer, sizeof(deltaBuffer), splitFlag, true);
+    if (deltaLen < 0) {
+        LOG_ERROR("Decode POS delta failed at line %u", lineNo);
+        return -1;
+    }
+
+    int64_t pos = posDeltaPrev;
+    if ((uint32_t)deltaLen > 1) {
+        std::string deltaStr((char*)deltaBuffer, (size_t)deltaLen - 1);
+        try {
+            pos += (int64_t)std::stoll(deltaStr);
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to parse POS delta '%s' for line %d: %s", deltaStr.c_str(), lineNo, e.what());
+            return -1;
+        }
+    }
+    posDeltaPrev = pos;
+    mappedPos[lineNo] = pos;
+    char buff[32];
+    int posLen = snprintf(buff, sizeof(buff), "%" PRId64 "\t", pos);
+    memcpy(outputBlock->getCurrent(), buff, posLen);
+    outputBlock->setDataLen(outputBlock->getDataLen() + posLen);
+    return posLen;
+}
+
+int32_t SamCodecActuator::decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock, const Json::Value& fieldMeta) {
+    bool isOptimized = fieldMeta.isMember("optimized") && fieldMeta["optimized"].asBool();
+    int32_t val;
+    if (isOptimized) {
+        auto cacheIt = tlenCache.find(lineNo);
+        if (cacheIt != tlenCache.end()) {
+            val = cacheIt->second;
+        } else {
+            val = computeTLEN(lineNo);
+        }
+    } else {
+        std::string mode = fieldMeta.isMember("mode") ? fieldMeta["mode"].asString() : "";
+        if (mode == "string") {
+            return decompressRegularField(fieldIdx, lineNo, splitFlag, outputBlock);
+        }
+        return decompressNumber<int32_t>(fieldIdx, lineNo, outputBlock);
+    }
+
+    char buffer[16];
+    int32_t len = snprintf(buffer, sizeof(buffer), "%d", val);
+    memcpy(outputBlock->getCurrent(), buffer, len);
+    char* currentPos = (char*)outputBlock->getCurrent();
+    currentPos[len] = splitFlag;
+    outputBlock->setDataLen(outputBlock->getDataLen() + len + 1);
+    return len + 1;
+}
+
+/*
+ * 预解码 POS/CIGAR/PNEXT 并把结果按行缓存。TLEN 推算需要完整伙伴索引与参考跨度，
+ * 主循环逐行解码时伙伴可能落在块的后半段，拿不到；这里先解一遍全部行，主循环随后
+ * 直接拷贝缓存，不再二次解码。
+ */
+int32_t SamCodecActuator::preDecodeForTLEN() {
+    if (samLine == 0 || !meta.isMember("sam")) {
+        return 0;
+    }
+
+    uint8_t* buffer = inBlockPtr->getBuffer();
+    uint8_t tmpBuf[1024];
+    Json::Value& streams = meta["sam"]["streams"];
+
+    /* 推算 TLEN 需要的字段：POS(3)、CIGAR(5)、PNEXT(7)。 */
+    static const uint32_t tlenFields[] = {3, 5, 7};
+
+    for (uint32_t f : tlenFields) {
+        auto startIt = fieldIoStart.find(f);
+        if (startIt == fieldIoStart.end() || !streams.isValidIndex(f) || !streams[f].isMember("coder")) {
+            continue;
+        }
+
+        uint32_t off = startIt->second;
+        uint32_t dstlen = fieldIoDstLen[f];
+        std::string coderName = streams[f]["coder"]["magic"].asString();
+        std::string mode = streams[f].isMember("mode") ? streams[f]["mode"].asString() : "";
+
+        std::shared_ptr<coder_io> tmpIo = makeCoderIo(buffer + off, dstlen, "TLEN predecode");
+        std::shared_ptr<coder> tmpDec;
+        if (coderName == "coder_bwt_cm") {
+            tmpDec = std::make_shared<coder_bwt_cm>(tmpIo.get());
+        } else if (coderName == "coder_affix_match") {
+            tmpDec = std::make_shared<coder_affix_match>(tmpIo.get());
+        } else {
+            continue;
+        }
+        auto lvIt = fieldIoLevel.find(f);
+        if (lvIt != fieldIoLevel.end()) {
+            tmpDec->set_level(lvIt->second);
+        }
+
+        std::vector<std::string>& fieldCache = tlenPreDecodedFields[f];
+        fieldCache.clear();
+        fieldCache.reserve(samLine);
+
+        /* pos_delta 模式的差值链：上一行还原出的绝对 POS。 */
+        int64_t posPrev = 0;
+        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+            /*
+             * coder_affix_match 把 last 指向调用方输出缓冲，除非 need2hold 置位；
+             * 这里必须置位，否则跨行上下文会被下一次解码覆盖。bwt_cm 内部自行缓冲。
+             */
+            bool need2hold = (coderName == "coder_affix_match");
+            /*
+             * 字段形态：CIGAR 恒为文本（compressCigar 逐行编码）；POS/PNEXT 缺省按
+             * 二进制定宽处理，mode 为文本形态时才按文本解。文本数据绝不能按定长解，
+             * 否则 bwt_cm 的定长分支会越过块边界空转。
+             */
+            bool binary = (f != 5) && (mode == "number" || mode == "");
+            int32_t len;
+            if (binary) {
+                len = tmpDec->decode_line(tmpBuf, 4, UINT8_MAX, need2hold);
+            } else {
+                len = tmpDec->decode_line(tmpBuf, (uint32_t)sizeof(tmpBuf), '\t', need2hold);
+            }
+            if (len <= 1) {
+                fieldCache.emplace_back();
+                continue;
+            }
+
+            switch (f) {
+                case 3:
+                    if (mode == "pos_delta") {
+                        int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                        int64_t pos = posPrev + delta;
+                        posPrev = pos;
+                        mappedPos[lineNo] = pos;
+                        fieldCache.emplace_back(std::to_string(pos) + '\t');
+                    } else if (binary) {
+                        mappedPos[lineNo] = (int64_t)(uint32_t)(*(uint32_t*)tmpBuf);
+                        fieldCache.emplace_back(std::to_string(mappedPos[lineNo]) + '\t');
+                    } else {
+                        mappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                        fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                    }
+                    break;
+                case 5:
+                    cigarReadLen[lineNo] = parseCigarRefConsumed(tmpBuf, len);
+                    baseLengthBuffer[lineNo] = parseCigar(tmpBuf, len);
+                    fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                    break;
+                case 7:
+                    if (binary) {
+                        int64_t pnextBin = (int64_t)(uint32_t)(*(uint32_t*)tmpBuf);
+                        nextMappedPos[lineNo] = pnextBin;
+                        fieldCache.emplace_back(std::to_string(pnextBin) + '\t');
+                    } else if (mode == "pnext_delta") {
+                        int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                        int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                        int64_t pnext = delta + pos;
+                        nextMappedPos[lineNo] = pnext;
+                        fieldCache.emplace_back(std::to_string(pnext) + '\t');
+                    } else {
+                        nextMappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                        fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                    }
+                    break;
+                default:
+                    fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                    break;
+            }
+        }
+    }
+
+    /* 完整伙伴索引：所有 (pos, pnext) 已知后一次性建立。 */
+    tlenMateIndex.clear();
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        auto posIt = mappedPos.find(lineNo);
+        auto pnextIt = nextMappedPos.find(lineNo);
+        if (posIt != mappedPos.end() && pnextIt != nextMappedPos.end()) {
+            tlenMateIndex[std::make_pair(posIt->second, pnextIt->second)] = lineNo;
+        }
+    }
+    return 0;
+}
+
 
 int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta, RoughIOBlock* outputBlock) {
     if (fieldIdx != 0) {
@@ -2132,11 +2890,17 @@ int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo, 
         return -1;
     }
     if (chrIndex == 0xFFFF) {
+        if (fieldIdx == 6) {
+            nextMappedChr[lineNo] = 0xFFFF;
+        }
         *outputBlock->getCurrent() = '*';
         *(outputBlock->getCurrent() + 1) = '\t';
         outputBlock->setDataLen(outputBlock->getDataLen() + 2);
         return 2;
     } else if (chrIndex == 0xFFFE) {
+        if (fieldIdx == 6) {
+            nextMappedChr[lineNo] = 0xFFFE;
+        }
         *outputBlock->getCurrent() = '=';
         *(outputBlock->getCurrent() + 1) = '\t';
         outputBlock->setDataLen(outputBlock->getDataLen() + 2);
@@ -2339,8 +3103,10 @@ int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, 
     if (fieldLen > 1) {
         uint32_t seqLength = parseCigar(outputBlock->getCurrent(), fieldLen);
         baseLengthBuffer[lineIdx] = seqLength;
+        cigarReadLen[lineIdx] = parseCigarRefConsumed(outputBlock->getCurrent(), fieldLen);
     } else {
         baseLengthBuffer[lineIdx] = 0;
+        cigarReadLen[lineIdx] = 0;
     }
 
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);

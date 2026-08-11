@@ -28,6 +28,7 @@
 #include "coder_json.h"
 #include "codec_actuator_adapter.h"
 #include "codec_selector.h"
+#include "field_coder_config.h"
 
 #include <bzlib.h>
 
@@ -200,14 +201,14 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     } else if (parameter.verbose) {
         static const char* samFieldNames[] = {
             "QNAME", "FLAG", "RNAME", "POS", "MAPQ", "CIGAR",
-            "RNEXT", "PNEXT", "TLEN", "SEQ", "QUAL"
+            "RNEXT", "PNEXT", "TLEN", "SEQ", "QUAL", "OPTION"
         };
         static const char* fqFieldNames[] = {
             "ID", "SEQ", "QUAL", "COMMENT"
         };
 
         bool isSam = (preprocessInfo.fileType == SAM);
-        uint32_t fieldCount = isSam ? SAM_FIELD_COUNT : FQ_FIELD_COUNT;
+        uint32_t fieldCount = isSam ? SAM_FIELD_COUNT_SELECT : FQ_FIELD_COUNT;
         const char* const* names = isSam ? samFieldNames : fqFieldNames;
 
         fprintf(stderr, "\n[preprocess] codec selection"

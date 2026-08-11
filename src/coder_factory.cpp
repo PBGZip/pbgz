@@ -21,12 +21,17 @@
 
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_fc.h"
+#include "coder/coder_affix_match.h"
+#include "field_coder_config.h"
 
 std::shared_ptr<coder> CoderFactory::makeEncoder(CoderType type, coder_io* io)
 {
     switch (type) {
     case CoderType::FC:
         return std::make_shared<coder_fc>(io);
+
+    case CoderType::AFFIX_MATCH:
+        return std::make_shared<coder_affix_match>(io);
 
     /*
      * QUAL 走兜底：coder_qual 不继承 coder 基类，构造时还需要额外的频率表，没法由
@@ -49,6 +54,9 @@ std::shared_ptr<coder> CoderFactory::makeDecoder(const std::string& magic, coder
     if (magic == "coder_fc") {
         return std::make_shared<coder_fc>(io);
     }
+    if (magic == "coder_affix_match") {
+        return std::make_shared<coder_affix_match>(io);
+    }
     return nullptr;
 }
 
@@ -57,10 +65,15 @@ bool CoderFactory::coderSupports(CoderType type, uint32_t fileType, uint32_t fie
     if (type == CoderType::FCV2) {
         return fileType == (uint32_t)SAM && fieldIdx == (uint32_t)SAM_QUAL;
     }
+    if (type == CoderType::AFFIX_MATCH) {
+        /* 是否候选由配置表统一判定，避免与预处理试压范围两处维护。 */
+        return fileType == (uint32_t)SAM && samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH);
+    }
     return true;
 }
 
 bool CoderFactory::canMake(CoderType type)
 {
-    return type == CoderType::BWT_CM || type == CoderType::FC;
+    return type == CoderType::BWT_CM || type == CoderType::FC ||
+           type == CoderType::AFFIX_MATCH;
 }

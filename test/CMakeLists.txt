@@ -63,8 +63,11 @@ target_link_libraries(pbgz_test PRIVATE
     pthread
     curl
     lzma
-    "-framework CoreServices"
 )
+
+if(APPLE) 
+    target_link_libraries(pbgz_test PRIVATE  "-framework CoreServices")
+endif()
 
 target_link_libraries(fcv2_model_roundtrip PRIVATE
     pbgz_coder

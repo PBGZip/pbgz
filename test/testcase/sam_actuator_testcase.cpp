@@ -516,6 +516,54 @@ TEST_F(SamActuatorTest, testDecompress) {
     EXPECT_GT(pOutBlock->getDataLen(), 0);
 }
 
+/*
+ * 配对读的字节级往返：PNEXT 走差值编码、TLEN 走推算（异常单独存）。逐字节比较
+ * 解压结果与原始数据，验证差值还原、伙伴索引推算和异常回填三者叠加仍无损。
+ */
+TEST_F(SamActuatorTest, testPNextDeltaTlenRoundTripByteExact) {
+    /* 用带配对读的 SAM 覆盖 fixture 生成的文件，便于驱动 TLEN 推算路径。 */
+    std::string seq = std::string(76, 'A');
+    std::string qual = std::string(76, '!');
+    std::string seq2 = std::string(50, 'G');
+    std::string qual2 = std::string(50, 'I');
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000000\n";
+    file << "@SQ\tSN:chr2\tLN:1000000\n";
+    /* 正常配对（99/147），RNEXT 用 = 表示同参照，TLEN 与公式一致。 */
+    file << "read1\t99\tchr1\t100\t60\t76M\t=\t300\t276\t" << seq << "\t" << qual << "\tNM:i:0\n";
+    file << "read2\t147\tchr1\t300\t60\t76M\t=\t100\t-276\t" << seq << "\t" << qual << "\tNM:i:0\n";
+    /* 50M 短读配对，CIGAR 参考跨度即 50。 */
+    file << "read3\t99\tchr1\t1000\t60\t50M\t=\t1200\t250\t" << seq2 << "\t" << qual2 << "\tNM:i:0\n";
+    file << "read4\t147\tchr1\t1200\t60\t50M\t=\t1000\t-250\t" << seq2 << "\t" << qual2 << "\tNM:i:0\n";
+    /* 不配对（FLAG=0）且 TLEN 非 0：推算为 0，这一行必须作为异常存下来。 */
+    file << "read5\t0\tchr1\t2000\t60\t76M\t*\t0\t123\t" << seq << "\t" << qual << "\tNM:i:0\n";
+    file.close();
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+}
+
 TEST_F(SamActuatorTest, testDecompressWithRef) {
     loadSamData(SamTestData::testSamFile);
 

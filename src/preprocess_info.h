@@ -42,6 +42,7 @@ enum class CoderType : uint8_t {
     SIMPLE_RC,    /* coder_simple_rc: 有损，已从编解码路径移除，仅保留枚举占位 */
     FCV2,         /* coder_fcv2:   质量值上下文混合编码器，仅适用于 SAM 的 QUAL 列 */
     QUAL,         /* coder_qual:   quality-specific context model coder    */
+    AFFIX_MATCH,  /* coder_affix_match: 前后缀匹配列编码器，适用于 SAM 的常规字段 */
     COUNT
 };
 
@@ -54,6 +55,7 @@ static inline const char* coderTypeToMagic(CoderType type)
     case CoderType::SIMPLE_RC: return "coder_simple_rc";
     case CoderType::FCV2:      return "coder_fcv2";
     case CoderType::QUAL:      return "coder_qual";
+    case CoderType::AFFIX_MATCH: return "coder_affix_match";
     default:                   return "unknown";
     }
 }

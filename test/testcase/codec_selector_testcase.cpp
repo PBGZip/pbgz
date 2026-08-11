@@ -31,8 +31,10 @@
 
 #include "codec_selector.h"
 #include "preprocess_info.h"
+#include "field_coder_config.h"
 #include "io_block.h"
 #include "coder.h"
+#include "coder/coder_affix_match.h"
 #include "utils/memory_util.h"
 
 namespace {
@@ -217,6 +219,85 @@ TEST_F(CodecSelectorTest, QualitySampleIsSelectedAndCompresses)
 }
 
 /*
+ * coder_affix_match 按行编解码的往返一致性。它是逐行编码器，前后缀匹配依赖上一行，
+ * 这一行一行喂数据的用法正是 SAM 常规字段（FLAG/POS/CIGAR 等）选它时的实际喂法。
+ */
+TEST_F(CodecSelectorTest, AffixCoderLineRoundTrip)
+{
+    const char* lines[] = {"99\t", "147\t", "83\t", "16\t", "0\t", "137\t"};
+    std::string data;
+    std::vector<uint32_t> lens;
+    for (int i = 0; i < 4000; ++i) {
+        for (size_t j = 0; j < sizeof(lines) / sizeof(lines[0]); ++j) {
+            data += lines[j];
+            lens.push_back((uint32_t)strlen(lines[j]));
+        }
+    }
+    std::vector<uint8_t> out(1 << 20, 0);
+    coder_io io(out.data(), 1 << 20);
+    {
+        coder_affix_match c(&io);
+        size_t pos = 0;
+        for (size_t i = 0; i < lens.size(); ++i) {
+            c.encode_line((const uint8_t*)data.data() + pos, lens[i]);
+            pos += lens[i];
+        }
+        c.encode_flush();
+    }
+    std::vector<uint8_t> dec(1 << 20, 0);
+    coder_io dio(out.data(), io.data_len);
+    coder_affix_match d(&dio);
+    size_t total = 0;
+    for (size_t i = 0; i < lens.size(); ++i) {
+        int32_t l = d.decode_line(dec.data() + total, lens[i], '\n', false);
+        ASSERT_GE(l, 0) << "affix decode failed at line " << i;
+        total += (size_t)l;
+    }
+    EXPECT_EQ(total, data.size());
+    EXPECT_EQ(0, memcmp(dec.data(), data.data(), data.size()));
+}
+
+/*
+ * affix 参与试压的机制验证：打开 trialAffix 且提供按行样本时，选择结果只会更好
+ * （bestCompLen 不大于不试 affix 时的结果）；不打开时 AFFIX_MATCH 永远不会被选中，
+ * 行为与既有路径一致。affix 是否胜出取决于数据本身，这里不预设具体数据一定胜出。
+ */
+TEST_F(CodecSelectorTest, AffixTrialMechanism)
+{
+    std::vector<std::string> parts;
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < 40000; ++i) {
+        parts.push_back("chr1:1000000" + std::to_string(i % 100) + "\t");
+        total += (uint32_t)parts.back().size();
+    }
+    /* 先一次性预留缓冲，保证 LineSample 里的指针在拼接后仍然有效。 */
+    std::string column;
+    column.reserve(total);
+    std::vector<LineSample> lines;
+    lines.reserve(parts.size());
+    for (size_t i = 0; i < parts.size(); ++i) {
+        LineSample ls;
+        ls.data = (const uint8_t*)column.data() + column.size();
+        ls.len = (uint32_t)parts[i].size();
+        column += parts[i];
+        lines.push_back(ls);
+    }
+    ASSERT_GE(column.size(), (size_t)(64u << 10)) << "sample too small";
+
+    FieldCodecSelection withAffix = CodecSelector::selectCoder(
+        (const uint8_t*)column.data(), (uint32_t)column.size(), true, &lines);
+    ASSERT_EQ(withAffix.status, FieldStatus::SELECTED);
+    EXPECT_GT(withAffix.bestCompLen, 0u);
+
+    FieldCodecSelection withoutAffix = CodecSelector::selectCoder(
+        (const uint8_t*)column.data(), (uint32_t)column.size(), false);
+    ASSERT_EQ(withoutAffix.status, FieldStatus::SELECTED);
+    EXPECT_NE(withoutAffix.selectedCoder, CoderType::AFFIX_MATCH);
+    EXPECT_LE(withAffix.bestCompLen, withoutAffix.bestCompLen)
+        << "加入 affix 候选不应让选中的压缩结果变差";
+}
+
+/*
  * Measured on 1MB of real QUAL extracted from con_sorted.sam:
  *   bwt_cm 26.60% < fc 27.23% < simple_rc 32.46%.
  * So the selector must pick bwt_cm here; that ratio also beats CRAM FQZ
@@ -263,7 +344,7 @@ TEST_F(CodecSelectorTest, AnalyzeSamBlockSelectsLargeFields)
     info.markDone();
     EXPECT_TRUE(info.isDone());
     EXPECT_EQ(info.fileType, SAM);
-    ASSERT_EQ(info.fields.size(), (size_t)SAM_FIELD_COUNT);
+    ASSERT_EQ(info.fields.size(), (size_t)SAM_FIELD_COUNT_SELECT);
 
     EXPECT_EQ(info.fields[SAM_QUAL].status, FieldStatus::SELECTED);
     EXPECT_EQ(info.fields[SAM_SEQ].status, FieldStatus::SELECTED);
@@ -335,4 +416,25 @@ TEST_F(CodecSelectorTest, CoderForFallsBackWhenNotSelected)
     EXPECT_EQ(info.coderFor(SAM_QUAL, CoderType::BWT_CM), CoderType::SIMPLE_RC);
     EXPECT_EQ(info.coderFor(SAM_SEQ, CoderType::BWT_CM), CoderType::BWT_CM);
     EXPECT_EQ(info.coderFor(999, CoderType::FC), CoderType::FC);
+}
+
+/*
+ * 配置表是各字段候选编码器与默认编码器的唯一来源，试压范围与执行器兜底都读它。
+ * 断言几个代表性字段：FLAG 有 affix 候选、默认 bwt_cm；SEQ 默认 fc；PNEXT/TLEN/QUAL
+ * 无通用候选（固定策略/专用路径）；OPTION（第 12 列）纳入 affix 候选。
+ */
+TEST_F(CodecSelectorTest, SamFieldCoderConfigTable)
+{
+    ASSERT_EQ(samFieldCoderConfig(SAM_QNAME)->fallback, CoderType::BWT_CM);
+    ASSERT_TRUE(samFieldCandidate(SAM_FLAG, CoderType::AFFIX_MATCH));
+    ASSERT_TRUE(samFieldCandidate(SAM_FLAG, CoderType::FC));
+    ASSERT_FALSE(samFieldCandidate(SAM_QNAME, CoderType::AFFIX_MATCH));
+    ASSERT_TRUE(samFieldCoderConfig(SAM_PNEXT)->candidates.empty());
+    ASSERT_TRUE(samFieldCoderConfig(SAM_TLEN)->candidates.empty());
+    ASSERT_TRUE(samFieldCoderConfig(SAM_QUAL)->candidates.empty());
+    ASSERT_EQ(samFieldCoderConfig(SAM_SEQ)->fallback, CoderType::FC);
+    ASSERT_EQ(samFieldCoderConfig(SAM_QUAL)->fallback, CoderType::QUAL);
+    ASSERT_TRUE(samFieldCandidate(11u, CoderType::AFFIX_MATCH));   /* OPTION */
+    ASSERT_EQ(samFieldDefaultCoder(SAM_CIGAR, CoderType::BWT_CM), CoderType::BWT_CM);
+    ASSERT_EQ(samFieldDefaultCoder(999, CoderType::FC), CoderType::FC);   /* 越界走兜底 */
 }

@@ -36,6 +36,8 @@
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_fc.h"
 #include "coder/coder_fcv2.h"
+#include "coder/coder_affix_match.h"
+#include "field_coder_config.h"
 
 namespace {
 
@@ -100,6 +102,36 @@ bool trialEncode(const uint8_t* data, uint32_t len, int bwtLevel, uint32_t& outL
     return (outLen > 0 && outLen < cap);
 }
 
+/*
+ * 按行试压 coder_affix_match。affix 的前后缀匹配发生在相邻两行之间，必须逐行喂，
+ * 一次 encode_line 灌进整列会退化成普通上下文模型，测不出它的真实水平。
+ */
+bool trialAffixLines(const std::vector<LineSample>& lines, uint32_t& outLen, uint32_t& usec)
+{
+    if (lines.empty()) {
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    uint64_t total = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        total += lines[i].len;
+    }
+    uint32_t cap = (uint32_t)((total << 1) + 65536);
+    std::vector<uint8_t> outBuf(cap, 0);
+    coder_io io(outBuf.data(), (int32_t)cap);
+    {
+        coder_affix_match coder(&io);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            coder.encode_line(lines[i].data, lines[i].len);
+        }
+        coder.encode_flush();
+    }
+    outLen = (uint32_t)io.data_len;
+    usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    return (outLen > 0 && outLen < cap);
+}
+
 } // namespace
 
 int CodecSelector::pickBwtLevel(uint32_t sampleLen)
@@ -124,7 +156,8 @@ const double SETTLE_MARGIN = 0.03;
 /* 评估的起步样本量。太小容易被局部数据带偏，取和最小可信样本一致。 */
 const uint32_t PROBE_START = MIN_SELECT_SAMPLE;
 
-FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len)
+FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len, bool trialAffix,
+                                               const std::vector<LineSample>* lines)
 {
     FieldCodecSelection sel;
     sel.sampleLen = len;
@@ -143,8 +176,8 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
      * 重压带来的额外开销是有界的：样本量按 2 倍递增，所有轮次加起来不超过最后一轮的
      * 两倍。而多数字段在头一两轮就定案了，实际反而比一次性压满整个采样更省。
      */
-    uint32_t bwtCmLen = 0, fcLen = 0;
-    uint32_t bwtCmUs = 0, fcUs = 0, outUs = 0, outLen = 0;
+    uint32_t bwtCmLen = 0, fcLen = 0, affixLen = 0;
+    uint32_t bwtCmUs = 0, fcUs = 0, affixUs = 0, outUs = 0, outLen = 0;
     uint32_t bestLen = UINT32_MAX;
     CoderType bestCoder = CoderType::BWT_CM;
     bool anyOk = false;
@@ -166,7 +199,7 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
         if (trialEncode<coder_fc>(data, probe, 0, outLen, outUs)) {
             fcLen = outLen; fcUs = outUs;
             if (outLen < bestLen) { runnerUp = bestLen; bestLen = outLen; bestCoder = CoderType::FC; }
-            else { runnerUp = outLen; }
+            else if (outLen < runnerUp) { runnerUp = outLen; }
             anyOk = true;
         }
 
@@ -188,12 +221,29 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
         probe = (probe > len / 2) ? len : (probe * 2);
     }
 
+    /*
+     * affix 的逐行试压单独做：它是逐行编码器，需要行边界，无法并入上面的整段试压。
+     * 用全部逐行样本压一次（不再做逐轮加倍），和 bwt/fc 的定案结果比较大小定胜负。
+     * lines 为空说明调用方没有提供按行样本，affix 直接弃权。
+     */
+    if (trialAffix && lines != nullptr && !lines->empty() &&
+        trialAffixLines(*lines, outLen, outUs)) {
+        affixLen = outLen; affixUs = outUs;
+        if (affixLen < bestLen) {
+            bestLen = affixLen;
+            bestCoder = CoderType::AFFIX_MATCH;
+        }
+    }
+
     sel.decidedLen = probe;
     sel.trialCount = 0;
     sel.addTrial(CoderType::BWT_CM, bwtCmLen, bwtCmUs);
     sel.addTrial(CoderType::FC, fcLen, fcUs);
+    if (trialAffix && affixLen > 0) {
+        sel.addTrial(CoderType::AFFIX_MATCH, affixLen, affixUs);
+    }
 
-    if (!anyOk) {
+    if (!anyOk && bestCoder != CoderType::AFFIX_MATCH) {
         sel.status = FieldStatus::FAILED;
         return sel;
     }
@@ -335,9 +385,11 @@ void CodecSelector::trainQualPrior(RoughIOBlock* block, PreprocessInfo& info)
 
 uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
                                            std::vector<std::string>& fieldBufs,
+                                           std::vector<std::vector<LineSample>>& fieldLines,
                                            uint32_t sampleBudget)
 {
-    fieldBufs.assign(SAM_FIELD_COUNT, std::string());
+    fieldBufs.assign(SAM_FIELD_COUNT_SELECT, std::string());
+    fieldLines.assign(SAM_FIELD_COUNT_SELECT, std::vector<LineSample>());
     SafeLineReader reader(block);
 
     const uint8_t* line = nullptr;
@@ -352,12 +404,23 @@ uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
 
         uint32_t fieldIdx = 0;
         uint32_t pos = 0;
-        while (pos <= lineLen && fieldIdx < SAM_FIELD_COUNT) {
+        while (pos <= lineLen && fieldIdx < SAM_FIELD_COUNT_SELECT) {
             uint32_t tabPos = pos;
             while (tabPos < lineLen && line[tabPos] != '\t') {
                 ++tabPos;
             }
             fieldBufs[fieldIdx].append((const char*)(line + pos), (size_t)(tabPos - pos));
+            /*
+             * affix 逐行试压需要行边界，整列拼起来会丢。这里只记指针不拷贝——
+             * SafeLineReader 返回的是块缓冲内的视图，analyze 期间块内容不变。
+             * 含行尾 tab 与压缩时的喂法一致（见 compressRegularField）。
+             */
+            if (samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH)) {
+                LineSample ls;
+                ls.data = line + pos;
+                ls.len = (uint32_t)(tabPos - pos) + 1;
+                fieldLines[fieldIdx].push_back(ls);
+            }
             ++fieldIdx;
             pos = tabPos + 1;
         }
@@ -441,11 +504,12 @@ static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, ui
 int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info)
 {
     std::vector<std::string> fieldBufs;
-    info.scannedBytes = extractSamFieldSamples(block, fieldBufs, SAMPLE_TARGET);
+    std::vector<std::vector<LineSample>> fieldLines;
+    info.scannedBytes = extractSamFieldSamples(block, fieldBufs, fieldLines, SAMPLE_TARGET);
 
-    info.fields.resize(SAM_FIELD_COUNT);
+    info.fields.resize(SAM_FIELD_COUNT_SELECT);
     uint64_t totalSample = 0;
-    for (uint32_t f = 0; f < SAM_FIELD_COUNT; ++f) {
+    for (uint32_t f = 0; f < SAM_FIELD_COUNT_SELECT; ++f) {
         const std::string& buf = fieldBufs[f];
         totalSample += buf.size();
         if (buf.size() < MIN_SELECT_SAMPLE) {
@@ -470,7 +534,19 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             }
             continue;
         }
-        info.fields[f] = selectCoder((const uint8_t*)buf.data(), (uint32_t)buf.size());
+        /*
+         * 该字段试压哪些候选编码器由配置表决定（field_coder_config.h）。
+         * 候选为空表示字段走固定策略（PNEXT/TLEN 的差值/推算），不参与通用选择。
+         */
+        const FieldCoderConfig* cfg = samFieldCoderConfig(f);
+        if (cfg == nullptr || cfg->candidates.empty()) {
+            info.fields[f].status = FieldStatus::SKIPPED;
+            info.fields[f].sampleLen = (uint32_t)buf.size();
+            continue;
+        }
+        const bool trialAffix = samFieldCandidate(f, CoderType::AFFIX_MATCH);
+        info.fields[f] = selectCoder((const uint8_t*)buf.data(), (uint32_t)buf.size(), trialAffix,
+                                     trialAffix ? &fieldLines[f] : nullptr);
         LOG_DEBUG("Preprocess SAM field %u: sample=%u, coder=%s, comp=%u (%.2f%%)",
                   f, info.fields[f].sampleLen, coderTypeToMagic(info.fields[f].selectedCoder),
                   info.fields[f].bestCompLen, info.fields[f].ratio() * 100.0);

@@ -179,6 +179,11 @@ int32_t PbgzEngine::init() {
     }
     ioWriter->openIO();
 
+    /* 注册输出文件：异常退出（如缺参考基因）时由 PbgzManager 清理删除。 */
+    if (parameter.outputFile != STDOUT && parameter.outputFile != "-") {
+        PbgzManager::getInstance().addOutputFile(parameter.outputFile);
+    }
+
     return 0;
 }
 
@@ -345,7 +350,7 @@ int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
 }
 
 int32_t PbgzEngine::startReadTask() {
-    pthread_setname_np("readtask");
+    pthread_setname_np(pthread_self(), "readtask");
     BlockReader* blockReader = createBlockReader();
     if (blockReader == nullptr) {
         return -1;
@@ -374,7 +379,7 @@ bool PbgzEngine::offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageIndex) {
 
 int32_t PbgzEngine::startWriteTask() {
     auto writerTask = [this]() -> int32_t {
-        pthread_setname_np("writetask");
+        pthread_setname_np(pthread_self(), "writetask");
         BlockWriter* blockWriter = createBlockWriter();
         if (blockWriter == nullptr) {
             PbgzManager::getInstance().exitProc(-1, "Inner error");
@@ -479,7 +484,7 @@ int64_t PbgzEngine::emitSyncAuxBlock(RoughIOBlock* block) {
 
 int32_t PbgzEngine::startWorkTask() {
     auto coderTask = [this](int32_t id) {
-        pthread_setname_np(std::string("codertask_").append(std::to_string(id)).c_str());
+        pthread_setname_np(pthread_self(), std::string("codertask_").append(std::to_string(id)).c_str());
 
         LOG_INFO("Coder task (%d) begin to running!", id);
 
