@@ -520,6 +520,7 @@ int32_t SamCodecActuator::compressSamHeader() {
     // Create SAM file header compressor
     std::shared_ptr<coder_io> headerIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SAM header");
     std::shared_ptr<coder_bwt_cm> headerCoder = std::make_shared<coder_bwt_cm>(headerIo.get());
+    CoderFactory::applyLevel(headerIo.get(), CoderType::BWT_CM, engineCompressLevel());
 
     // Process SAM file header line by line
     for (uint32_t lineId = 0; lineId < headEndLine; ++lineId) {
@@ -1520,6 +1521,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     // Second pass: compress with reference
     std::shared_ptr<coder_io> matchIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match");
     std::shared_ptr<coder_bwt_cm> matchCm = std::make_shared<coder_bwt_cm>(matchIo.get());
+    CoderFactory::applyLevel(matchIo.get(), CoderType::BWT_CM, engineCompressLevel());
     int64_t srcLen = 0;
     uint32_t totalBaseLength = 0;
 
@@ -1648,6 +1650,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         std::shared_ptr<coder_io> nposIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
         uint32_t nposSrcLen = (baseNCount << 2); // 4 bytes per N position
         std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(nposIo.get());
+        CoderFactory::applyLevel(nposIo.get(), CoderType::BWT_CM, engineCompressLevel());
         subCoder->encode_line((uint8_t*)baseNPosBuffer, nposSrcLen);
         subCoder->encode_flush();
         if (nposIo->err != coder_io::IO_OK) {
@@ -1678,6 +1681,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
             baseLenBuffer[(2 * i) + 1] = baseLenPos.second;
         }
         std::shared_ptr<coder_bwt_cm> lenCoder = std::make_shared<coder_bwt_cm>(lenIo.get());
+        CoderFactory::applyLevel(lenIo.get(), CoderType::BWT_CM, engineCompressLevel());
         lenCoder->encode_line((uint8_t*)baseLenBuffer, baseLenSrcLen<<2);
         lenCoder->encode_flush();
         MemoryUtil::safeFree(baseLenBuffer);
@@ -1785,6 +1789,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
          * 它是 fcv2 不适用时的第二顺位：实测比 coder_qual 好 7.4 个百分点。
          */
         qualCmCoder = std::make_shared<coder_bwt_cm>(qualityIo.get());
+        CoderFactory::applyLevel(qualityIo.get(), CoderType::BWT_CM, engineCompressLevel());
     } else {
         qualityCoder = std::make_shared<coder_qual>(qualityIo.get(), true, qualFreqTable);
     }
@@ -1885,6 +1890,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     // Encode quality frequency table
     std::shared_ptr<coder_io> qualityFreqIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL freq table");
     std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
+    CoderFactory::applyLevel(qualityFreqIo.get(), CoderType::BWT_CM, engineCompressLevel());
     std::shared_ptr<uint16_t[]> qualityFreqArray(new uint16_t[qualFreqTable.size() << 1]);
     for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
         int idx = i << 1;

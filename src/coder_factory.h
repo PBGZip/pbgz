@@ -52,6 +52,20 @@ public:
     static std::shared_ptr<coder> makeDecoder(const std::string& magic, coder_io* io);
 
     /*
+     * 创建编码器之前，把引擎的压缩级别按编码器类型换算成该编码器能接受的 level，
+     * 写入 coder_io 的 meta。编码器构造/首次编码时会读取这个值，并随之写进块 meta
+     * （解码侧按 meta["coder"]["level"] 回放）。
+     *
+     * 目前只有 coder_bwt_cm 真正消费 level（内部 BWT 块大小，0-9），compressLevel
+     * 1-9 与之直接对应；该参数只在编码侧生效，解码侧块大小从码流读出，改它不影响
+     * 兼容。coder_affix_match 虽然也有 level（1-2），但它的解码侧在构造之后才
+     * set_level（不生效，恒为默认 2），编码侧一旦设成 1 就会与解码侧不一致、损坏
+     * 数据，所以保持默认 2、不随 compressLevel 变化。其余编码器（fc/fcv2/qual）
+     * 不消费 level，设置是空操作。
+     */
+    static void applyLevel(coder_io* io, CoderType type, uint8_t compressLevel);
+
+    /*
      * 该类型能否由本工厂创建。
      *
      * 预处理阶段用它来过滤试压候选：如果某个类型工厂造不出来，就算试压赢了也没法

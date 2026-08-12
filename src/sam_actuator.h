@@ -178,6 +178,7 @@ private:
         // Create encoder for regular field compression
         std::shared_ptr<coder_io> numberIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
         std::shared_ptr<coder_bwt_cm> numberCoder = std::make_shared<coder_bwt_cm>(numberIo.get());
+        CoderFactory::applyLevel(numberIo.get(), CoderType::BWT_CM, engineCompressLevel());
 
         fieldSrcLen = 0;
         uint32_t srcLen = 0;

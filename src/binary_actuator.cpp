@@ -32,6 +32,7 @@
 
 int32_t BinaryCodecActuator::compress() {
     coder_io io (outBlockPtr->getCurrent(), outBlockPtr->getRemain());
+    CoderFactory::applyLevel(&io, CoderType::BWT_CM, engineCompressLevel());
     uint32_t srcLength = inBlockPtr->getDataLen();
     if (srcLength <= FC_MIN_LEN || srcLength > FC_MAX_LEN) {
         coder_bwt_cm coder(&io);

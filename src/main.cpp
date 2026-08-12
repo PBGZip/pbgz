@@ -608,7 +608,7 @@ static std::vector<SubCommand> subCommands = {
     {
         "decompress",
         "Decompress file from pbgz file",
-        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 't', 'e', 'p', 'g', 'G', 'z', 'l'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 't', 'e', 'p', 'g', 'G', 'z'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<DecompressCmdProc>(para);
         },

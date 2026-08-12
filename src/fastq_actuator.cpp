@@ -716,6 +716,7 @@ int32_t FastqCodecActuator::compressIdInAll() {
     Json::Value streamMeta;
     std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "ID");
     std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
+    CoderFactory::applyLevel(idIo.get(), CoderType::BWT_CM, engineCompressLevel());
 
     uint32_t srcDataLen = 0;
     int32_t startPos = 0;
@@ -782,6 +783,7 @@ int32_t FastqCodecActuator::compressIdInSplit() {
                 LOG_DEBUG("Is all digit(%d), use coder_bwt_cm.", i);
                 std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "ID sub-stream");
                 std::shared_ptr<coder_bwt_cm> idCoder = std::make_shared<coder_bwt_cm>(idIo.get());
+                CoderFactory::applyLevel(idIo.get(), CoderType::BWT_CM, engineCompressLevel());
                 uint32_t srcLength = 0;
                 int32_t ret= compressIdStream<coder_bwt_cm>(idIo.get(), idCoder.get(), streamMeta, srcLength, i);
                 if (ret != 0) {
@@ -873,6 +875,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     uint32_t totalDstLen = 0;
     std::shared_ptr<coder_io> matchIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match");
     std::shared_ptr<coder_bwt_cm> matchCm = std::make_shared<coder_bwt_cm>(matchIo.get());
+    CoderFactory::applyLevel(matchIo.get(), CoderType::BWT_CM, engineCompressLevel());
     int64_t srcLen = 0;
     for (uint32_t i = 1; i < line; i += 4) {
         uint32_t endPos = inBlockPtr->getNpos()[i];
@@ -954,6 +957,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         posCm->encode_flush();
     } else {
         std::shared_ptr<coder_bwt_cm> posCm = std::make_shared<coder_bwt_cm>(posIo.get());
+        CoderFactory::applyLevel(posIo.get(), CoderType::BWT_CM, engineCompressLevel());
         posCm->encode_line((uint8_t *)baseMappedPosBuffer, srcLen);
         posCm->encode_flush();
     }
@@ -976,6 +980,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         subCoder->encode_flush();
     } else {
         std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(pairIo.get());
+        CoderFactory::applyLevel(pairIo.get(), CoderType::BWT_CM, engineCompressLevel());
         subCoder->encode_line((uint8_t *)baseMappedPairBuffer, srcLen);
         subCoder->encode_flush();
     }
@@ -999,6 +1004,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
             subCoder->encode_flush();
         } else {
             std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(nposIo.get());
+            CoderFactory::applyLevel(nposIo.get(), CoderType::BWT_CM, engineCompressLevel());
             subCoder->encode_line((uint8_t *)baseNPosBuffer, srcLen);
             subCoder->encode_flush();
         }
@@ -1021,6 +1027,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         std::shared_ptr<coder_io> lenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ length");
         srcLen = (line4 << 1);
         std::shared_ptr<coder_bwt_cm> sub_coder = std::make_shared<coder_bwt_cm>(lenIo.get());
+        CoderFactory::applyLevel(lenIo.get(), CoderType::BWT_CM, engineCompressLevel());
         sub_coder->encode_line((uint8_t *)baseLengthGen2Buffer, srcLen);
         sub_coder->encode_flush();
         metaSubs.clear();
@@ -1063,6 +1070,7 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
     if (baseSrcLength <= FC_MIN_LEN || baseSrcLength >= FC_MAX_LEN) {
         baseIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ");
         std::shared_ptr<coder_bwt_cm> baseCoder = std::make_shared<coder_bwt_cm>(baseIo.get());
+        CoderFactory::applyLevel(baseIo.get(), CoderType::BWT_CM, engineCompressLevel());
 
         for (uint32_t idx = 1; idx < inBlockPtr->getNpos().size(); idx += 4) {
             int64_t end = inBlockPtr->getNpos()[idx];
@@ -1108,6 +1116,7 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
 int32_t FastqCodecActuator::compressComment() {
     std::shared_ptr<coder_io> commentIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "comment");
     std::shared_ptr<coder_bwt_cm> commentCoder = std::make_shared<coder_bwt_cm>(commentIo.get());
+    CoderFactory::applyLevel(commentIo.get(), CoderType::BWT_CM, engineCompressLevel());
 
     Json::Value commentMeta;
     switch (commentType) {
@@ -1182,6 +1191,7 @@ int32_t FastqCodecActuator::compressQuality() {
     // Encode quality frequency table
     std::shared_ptr<coder_io> qualityFreqIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL freq table");
     std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
+    CoderFactory::applyLevel(qualityFreqIo.get(), CoderType::BWT_CM, engineCompressLevel());
     std::shared_ptr<uint16_t[]> qualiltyFreqArray = std::make_unique<uint16_t[]>(qualityFreqTable.size()<< 1);
     for (uint32_t i = 0; i < qualityFreqTable.size(); ++i) {
         int idx = i << 1;

@@ -60,6 +60,25 @@ std::shared_ptr<coder> CoderFactory::makeDecoder(const std::string& magic, coder
     return nullptr;
 }
 
+void CoderFactory::applyLevel(coder_io* io, CoderType type, uint8_t compressLevel)
+{
+    if (io == nullptr || compressLevel < 1 || compressLevel > 9) {
+        return;
+    }
+    switch (type) {
+    case CoderType::BWT_CM:
+        io->set_level(compressLevel);
+        break;
+    case CoderType::FC:
+    case CoderType::AFFIX_MATCH:
+    case CoderType::QUAL:
+    case CoderType::FCV2:
+    case CoderType::SIMPLE_RC:
+    default:
+        break;
+    }
+}
+
 bool CoderFactory::coderSupports(CoderType type, uint32_t fileType, uint32_t fieldIdx)
 {
     if (type == CoderType::FCV2) {
