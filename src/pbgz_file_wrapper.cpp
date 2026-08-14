@@ -22,6 +22,7 @@
  */
 
 #include "pbgz_file_wrapper.h"
+#include "io_block.h"
 #include "log/logger.h"
 #include "coder_json.h"
 #include "utils/memory_util.h"
@@ -269,7 +270,7 @@ PbgzFileMeta& PbgzFileReader::getDynamicFileMeta() {     // if currentFileIndex 
     return dynamicFileMetaMap[currentFileIndex];
 }
 
-int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
+int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* dst) {
     if (!ioReader) {
         LOG_ERROR("File is not open.");
         return -1; // File not open
@@ -307,13 +308,13 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
             }
 
             // continue to read the data block from new file
-            return readDataBlock(dataBlock); 
+            return readDataBlock(dataBlock, dst); 
         } else if (memcmp(pReadBuffer, &PBGZ_FILE_META_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
             PbgzFileMeta tmpMete;
             if (0 != readFileMeta(tmpMete, false)) {
                 LOG_INFO("Failed to read file dynamic file meta.");
             }
-            return readDataBlock(dataBlock);
+            return readDataBlock(dataBlock, dst);
         }
         return -1; // Unexpect block, maybe meta, should ignore
     }
@@ -360,6 +361,19 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock) {
         return -1; // Invalid data length
     }
     dataBlock.setDataLength(dataLength);
+
+    /*
+     * 块数据读进 dst 的缓冲：输入块是按参数级 block_size 预分配的，而文件里的块可能
+     * 更大（-l 9 的 512MB 块压缩后仍 ~72MB > 64MB 输入缓冲），必须先扩容再读，
+     * 否则 readIO 直接写越界。与解压侧输出块的 ensureCapacity(block_size*2) 同一机制。
+     */
+    if (dst != nullptr) {
+        if (0 != dst->ensureCapacity(dataLength)) {
+            LOG_ERROR("Failed to ensure input block capacity %u", dataLength);
+            return -1;
+        }
+        dataBlock.setDataPtr(dst->getBuffer());   // realloc 后指针可能变了
+    }
 
     // Read the block data
     // PbgzDataBlock data storage is not memory allocated by itself, the address is passed in from external, reducing copying

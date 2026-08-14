@@ -60,6 +60,11 @@ struct LineSample {
  */
 class CodecSelector {
 public:
+    /* 先验训练最多使用 45 MB QUAL。实测到此处收益约为 1.84 个百分点，继续加到 90 MB
+       只多约 0.10 个百分点；多出的时间却发生在切换到并行压缩之前的串行阶段，会直接
+       推迟后续工作线程启动，所以必须在收益曲线变平前截断。 */
+    static constexpr uint32_t QUAL_PRIOR_TRAIN_MAX = 45u * 1024u * 1024u; // TEMP
+
     /*
      * Analyze a sample of the given block and fill info.
      * Returns 0 on success (including the "some fields skipped" case),
@@ -86,10 +91,36 @@ public:
                                            bool trialAffix = false,
                                            const std::vector<LineSample>* lines = nullptr);
 
+    /*
+     * QUAL 先验的跨块训练样本累积器。由 CompressEngine 在读线程持有：前 N 个块的
+     * QUAL 按记录累积进来（每块扫描到块尾，但收集到 QUAL_PRIOR_TRAIN_MAX 即止），
+     * 读完目标块数或累积满后由 trainQualPriorModel 一次性训练并导出快照。
+     *
+     * 为什么跨块：首块通常只有 ~9 MB QUAL，而先验收益在 45 MB 处才基本收敛（见
+     * QUAL_PRIOR_TRAIN_MAX）。多块累积让小块也能逼近这个训练量。
+     */
+    struct QualPriorAccum {
+        std::vector<QualSampleRecord> records;
+        std::vector<uint32_t> freqByByte;
+        uint64_t collectedBytes = 0;
+
+        bool full() const { return collectedBytes >= QUAL_PRIOR_TRAIN_MAX; }
+    };
+
+    /* 把一块的 QUAL 记录追加进累积器（上限 QUAL_PRIOR_TRAIN_MAX，超出部分丢弃）。 */
+    static void accumulateQualPrior(RoughIOBlock* block, QualPriorAccum& acc);
+
+    /* 在累积样本上训练 fcv2 并导出模型快照；trainedBytes 输出实际训练字节数。
+     * params 是 QualSelector 选定的上下文参数档位（仅 fcv2 胜出时有意义），必须与
+     * 实际压缩用的档位一致，否则先验快照加载会因布局不符而整体回退。
+     * 失败或样本为空返回空向量。 */
+    static std::vector<uint8_t> trainQualPriorModel(const QualPriorAccum& acc,
+                                                    const QualFcv2Params& params,
+                                                    uint64_t* trainedBytes);
+
 private:
     static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info);
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
-    static void trainQualPrior(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
     /*

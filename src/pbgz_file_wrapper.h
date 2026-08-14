@@ -29,6 +29,8 @@
 #include "pbgz_file.h"
 #include "io_wrapper.h"
 
+class RoughIOBlock;
+
 
 /// @brief Reader for pbgz format files
 class PbgzFileReader {
@@ -69,7 +71,12 @@ public:
      */
     int32_t getCurrentFileIndex() const { return currentFileIndex; }
 
-    int32_t readDataBlock(PbgzDataBlock& dataBlock);
+    /*
+     * 读一个数据块。dst 非空时，块数据先按 dataLength 扩容到 dst（输入块缓冲按
+     * 参数级 block_size 预分配，而文件的块可能更大，如 -l 9 的 512MB 块压缩后仍达
+     * ~72MB），再把数据读进 dst 的缓冲。
+     */
+    int32_t readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* dst = nullptr);
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
         currentFileIndex = -1;  // Initialize file index to -1, indicating no file has been read yet

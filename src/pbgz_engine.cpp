@@ -325,6 +325,9 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
         fileDecisionProc(blockPtr);
     }
 
+    /* 跨块预训练等按块累积工作（压缩引擎用），也在入队前执行。 */
+    pretrainBlockProc(blockPtr);
+
     updateInputStatics(blockPtr);
     inputDataPool->push(blockPtr);
     if (ret > 0) {
@@ -346,6 +349,8 @@ int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
         ret = readOneBlock(blockReader, fileType);
     } while(ret > 0 || ret == -2);
 
+    /* EOF/错误后收尾未完成的预处理（如跨块先验训练），必须在推终止符之前。 */
+    readLoopPostProc();
     return ret;
 }
 
@@ -488,9 +493,26 @@ int32_t PbgzEngine::startWorkTask() {
 
         LOG_INFO("Coder task (%d) begin to running!", id);
 
+        /* 压缩引擎的先验发布门闩：发布前 coder 线程等待通知，发布后才开始拉块压缩。 */
+        workStartBarrier();
+
+        /*
+         * 首块串行化（perf 分支机制，见 firstCoderNotify）：id==0 的线程直接开始，
+         * 其余线程等第 0 块处理完（preAnalysis 填充 SamInfo 等共享状态）再放行，
+         * 避免并发 preAnalysis 在染色体表未就绪时把块误降级为 BINARY。
+         */
+        if (id > 0) {
+            std::unique_lock<std::mutex> lock(coderStartMutex);
+            coderStartCond.wait(lock);
+        }
+
         while (true) {
             RoughIOBlock* inBlockPtr = inputDataPool->get();
             if (inBlockPtr == nullptr) {  // Got null pointer, indicating end marker
+                /* 第 0 块未能完成（读错/全错）时也要放行，否则其余线程永久阻塞。 */
+                if (firstCoderNotify(true)) {
+                    coderStartCond.notify_all();
+                }
                 break;
             }
             RoughIOBlock* outBlockPtr = freeOutputPool->get();
@@ -570,6 +592,11 @@ int32_t PbgzEngine::startWorkTask() {
 
             outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
+            /* 首个完成的块放行其余 coder 线程（通常是第 0 块）。 */
+            if (firstCoderNotify(pActuator->getNotifyFlag())) {
+                coderStartCond.notify_all();
+            }
+
             MemoryUtil::safeDeleteClass(pActuator);
 
             freeInputPool->push(inBlockPtr);
@@ -580,6 +607,14 @@ int32_t PbgzEngine::startWorkTask() {
         workThreads.emplace_back(std::thread(coderTask, i));
     }
     return 0;
+}
+
+bool PbgzEngine::firstCoderNotify(bool flag) {
+    if (flag && !coderStartSync) {
+        coderStartSync = true;
+        return true;
+    }
+    return false;
 }
 
 int32_t PbgzEngine::actuatorProc(Actuator* actuator, RoughIOBlock*, RoughIOBlock*) {

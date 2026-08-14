@@ -355,7 +355,7 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
 
     PbgzDataBlock pbgzDataBlock;
     pbgzDataBlock.setDataPtr(blockPtr->getBuffer());
-    if (0 != pbgzFileReader->readDataBlock(pbgzDataBlock)) {
+    if (0 != pbgzFileReader->readDataBlock(pbgzDataBlock, blockPtr)) {
         LOG_ERROR("Read Pbgz data block failed.");
         return -1;
     }

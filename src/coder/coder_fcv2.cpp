@@ -23,20 +23,73 @@
 
 namespace {
 
-/* 每条记录内的位置（测序循环序号）上限，超出的位置一律归入最后一档。 */
-const int CYCLE_MAX = 96;
-
-/* 高阶模型里位置被压缩成多少档。位置本身取值可达 96，直接用会让上下文数量过大。 */
-const int CYCLE_BUCKET = 16;
-
 /* 哈夫曼树的节点数上限，同时也限制了字母表大小。 */
 const int TREE_CAP = 64;
 
 /* 权重更新的步长移位量，等效学习率 1/4096。 */
 const int WEIGHT_LR_SHIFT = 12;
 
-/* 参与混合的模型个数。 */
-const int MODEL_COUNT = 4;
+/* 参与混合的模型个数。m0..m5 为既有六档，m6 为策略 4 新增的 read 平均质量分档上下文。 */
+const int MODEL_COUNT = 7;
+
+/* m6 的 read 平均质量分档数（策略 4）。 */
+const int QA_BINS = 4;
+
+/* 上下文参数档位的合法范围，解码端读回码流头部时按同一规则归一，防止损坏的码流
+   分配出过大的模型数组。各数组大小随 cfg 增长，必须给上界。 */
+const int CFG_CYCLE_MAX_MIN = 32;
+const int CFG_CYCLE_MAX_MAX = 128;
+const int CFG_CYCLE_BUCKET_MAX = 32;
+const int CFG_DELTA_MAX_MAX = 256;
+const int CFG_DELTA_BUCKET_MAX = 16;
+const int CFG_PREV_SHIFT_MAX = 3;
+
+/*
+ * 把外部传入的 cfg 归一成编码器实际使用的档位。两边（编码端、解码端）都必须调用，
+ * 任何一条与这里不一致，编解码就会在上下文索引上错位。
+ */
+Fcv2Cfg normalizeCfg(Fcv2Cfg cfg)
+{
+    if (cfg.cycleMax < CFG_CYCLE_MAX_MIN) cfg.cycleMax = CFG_CYCLE_MAX_MIN;
+    if (cfg.cycleMax > CFG_CYCLE_MAX_MAX) cfg.cycleMax = CFG_CYCLE_MAX_MAX;
+    if (cfg.cycleBucket < 1) cfg.cycleBucket = 1;
+    if (cfg.cycleBucket > CFG_CYCLE_BUCKET_MAX) cfg.cycleBucket = CFG_CYCLE_BUCKET_MAX;
+    if (cfg.deltaMax < 8) cfg.deltaMax = 8;
+    if (cfg.deltaMax > CFG_DELTA_MAX_MAX) cfg.deltaMax = CFG_DELTA_MAX_MAX;
+    if (cfg.deltaBucket < 1) cfg.deltaBucket = 1;
+    if (cfg.deltaBucket > CFG_DELTA_BUCKET_MAX) cfg.deltaBucket = CFG_DELTA_BUCKET_MAX;
+    if (cfg.prevShift < 0) cfg.prevShift = 0;
+    if (cfg.prevShift > CFG_PREV_SHIFT_MAX) cfg.prevShift = CFG_PREV_SHIFT_MAX;
+    if (!cfg.useDelta) {
+        /* 关闭跳变上下文时把分档归一为 1，模型退化为"位置 + 树节点"，数组布局不变。 */
+        cfg.deltaBucket = 1;
+    }
+    return cfg;
+}
+
+/*
+ * 计算一条 read 的平均质量档（策略 4，fqzcomp 的 do_qa）。均值与存储顺序无关
+ * （求和对整条质量串），按 phred 均值分 4 档。只有编码端用它把档位写进码流，
+ * 解码端直接读回，所以这里的阈值只影响压缩率、不影响两端一致性。
+ */
+inline int qaBinOf(const uint8_t* qual, uint32_t len)
+{
+    uint64_t sum = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        sum += qual[i];
+    }
+    int avg = (int)(sum / len);   /* 原始字节值，约 33..74（phred 0..41） */
+    if (avg < 63) return 0;       /* phred < 30 */
+    if (avg < 68) return 1;       /* 30..34 */
+    if (avg < 71) return 2;       /* 35..37 */
+    return 3;                     /* >= 38 */
+}
+
+/* 碱基上下文的取值个数：ACGTN + 未知（seq 为空或非碱基字符）。 */
+const int BASE_STATES = 6;
+
+/* 原始字节 -> 碱基符号（ACGTN -> 0..4），其余全部归入 5（未知）。initTables 里填充。 */
+uint8_t g_baseSym[256];
 
 /*
  * 模型快照与码流刻意分离：码流格式不能因先验模型功能而改变。下面的固定头让快照能在
@@ -44,7 +97,7 @@ const int MODEL_COUNT = 4;
  * 有定义，必须拒绝，而不是以看似可用但实际错误的概率继续编码。
  */
 const uint8_t MODEL_MAGIC[] = { 'f', 'c', 'v', '2', 'p', 'r', 'i', 'o', 'r' };
-const uint16_t MODEL_FORMAT_VERSION = 1;
+const uint16_t MODEL_FORMAT_VERSION = 7;  /* v7: read 平均质量档上下文 m6（useQa + QA_BINS） */
 
 inline void appendU16(std::vector<uint8_t>& out, uint16_t value)
 {
@@ -156,6 +209,12 @@ void initTables()
         int s = 1 + n / 3;
         g_adaptShift[n] = (uint8_t)(s > 6 ? 6 : s);
     }
+    for (int i = 0; i < 256; i++) g_baseSym[i] = BASE_STATES - 1;
+    g_baseSym[(int)'A'] = g_baseSym[(int)'a'] = 0;
+    g_baseSym[(int)'C'] = g_baseSym[(int)'c'] = 1;
+    g_baseSym[(int)'G'] = g_baseSym[(int)'g'] = 2;
+    g_baseSym[(int)'T'] = g_baseSym[(int)'t'] = 3;
+    g_baseSym[(int)'N'] = g_baseSym[(int)'n'] = 4;
     g_tablesReady = true;
 }
 
@@ -256,49 +315,93 @@ private:
 };
 
 /*
- * 四个粒度递增的上下文模型。
+ * 七个粒度递增的上下文模型。
  *
  *   m0  只看树节点，最粗，任何时候样本都充足，起保底作用
  *   m1  位置 + 树节点
  *   m2  前一个符号 + 位置 + 树节点
- *   m3  前两个符号 + 位置档 + 链方向 + 树节点，最细也最稀疏
+ *   m3  前两个符号 + 位置档 + 链方向 + 树节点
+ *   m4  当前碱基 + 位置 + 树节点
+ *   m5  read 内质量跳变次数档 + 位置 + 树节点（策略 1）
+ *   m6  read 平均质量分档 + 位置 + 树节点（策略 4）
  *
- * 早期版本在 m2 和 m3 之间还有一个"前两个符号 + 位置档"的模型，实测它与 m3 的上下文
- * 高度重叠（m3 只是多了链方向一维），信息冗余，去掉后压缩率几乎不变而速度和内存都
- * 改善，因此不再保留。
+ * m4 用的碱基是"产生本质量值的那次测序循环"的碱基：正向链是位置 i，反向链按存储序
+ * 取 len-1-i。质量值与碱基强相关（错配位、低复杂度区的质量系统性偏低），这维上下文
+ * 与其他维度（前驱符号、链方向）基本正交，与 m3 不重叠。
+ *
+ * m5 的跳变次数是质量值随 read 单调变化（测序循环越靠后质量越低）的另一种刻画：
+ * "到当前位置为止质量值一共变了多少次"反映这条 read 的质量是否干净，与局部前驱符号
+ * （m2/m3）和位置（m1）都不重叠，且只在 read 内部累积、逐条重置。fqzcomp 用同一维
+ * 度（state->delta）参与上下文，这里做成独立模型交给混合器，由权重决定它值多少。
+ *
+ * m6 是整条 read 的平均质量档（策略 4，fqzcomp 的 do_qa）：不同 read 的平均质量差异
+ * 很大（实测 Q10~Q40 长尾），整条 read 处于"高质量档"还是"低质量档"是符号分布的
+ * 强先验。档位由编码端算好写进码流（每记录 2 bit），解码端直接读回，上下文两侧一致。
+ *
+ * 各数组的尺寸由 Fcv2Cfg 决定，见 init()。
  */
 struct ContextModel {
     int alphaSize;
     int prevStates;          /* 符号取值数加一，多出来的那个表示"没有前驱" */
-    std::vector<Counter> m0, m1, m2, m3;
+    int prevQStates;         /* m3 用的量化前驱取值数（>> prevShift） */
+    int cycleMax;
+    int cycleBucket;
+    int deltaMax;
+    int deltaBucket;
+    int prevShift;
+    std::vector<Counter> m0, m1, m2, m3, m4, m5, m6;
     std::vector<int> weight; /* 混合权重，按 位置档 × 树节点 × 模型 组织 */
 
-    void init(int alpha)
+    void init(int alpha, const Fcv2Cfg& cfg)
     {
         alphaSize = alpha;
         prevStates = alpha + 1;
+        cycleMax = cfg.cycleMax;
+        cycleBucket = cfg.cycleBucket;
+        deltaMax = cfg.deltaMax;
+        deltaBucket = cfg.deltaBucket;
+        prevShift = cfg.prevShift;
+        /*
+         * m3 用全符号取值太稀疏（本数据 39×39×16×2×64 ≈ 3.1M 槽，每块仅 ~9 次访问），
+         * 学不出 order-2 结构。实测把前驱质量值 >>1 量化到 22 档（质量值≈符号 id），
+         * 保留 55% 的 order-2 条件熵收益（3.66 vs 3.53 bits），槽数却降到 1/3。
+         * 档位随 prevShift 可调：字母表大时继续右移更粗，字母表小时可以不量化。
+         */
+        prevQStates = (alpha >> prevShift) + 2;
         m0.assign((size_t)TREE_CAP, COUNTER_INIT);
-        m1.assign((size_t)CYCLE_MAX * TREE_CAP, COUNTER_INIT);
-        m2.assign((size_t)prevStates * CYCLE_MAX * TREE_CAP, COUNTER_INIT);
-        m3.assign((size_t)prevStates * prevStates * CYCLE_BUCKET * 2 * TREE_CAP, COUNTER_INIT);
-        /* 权重初值取 1<<14，即定点 0.25，四个模型合起来接近简单平均。 */
-        weight.assign((size_t)CYCLE_BUCKET * TREE_CAP * MODEL_COUNT, 1 << 14);
+        m1.assign((size_t)cycleMax * TREE_CAP, COUNTER_INIT);
+        m2.assign((size_t)prevStates * cycleMax * TREE_CAP, COUNTER_INIT);
+        m3.assign((size_t)prevQStates * prevQStates * cycleBucket * 2 * TREE_CAP, COUNTER_INIT);
+        m4.assign((size_t)BASE_STATES * cycleMax * TREE_CAP, COUNTER_INIT);
+        m5.assign((size_t)deltaBucket * cycleMax * TREE_CAP, COUNTER_INIT);
+        m6.assign((size_t)QA_BINS * cycleMax * TREE_CAP, COUNTER_INIT);
+        /* 权重初值取 1<<14，即定点 0.25，七个模型合起来接近简单平均。 */
+        weight.assign((size_t)cycleBucket * TREE_CAP * MODEL_COUNT, 1 << 14);
     }
 
-    inline void slotBases(int prev, int prev2, int cyc, int rev, size_t* base) const
+    inline void slotBases(int prev, int prev2, int cyc, int rev, int baseSym,
+                          int delta, int qa, size_t* base) const
     {
-        int bucket = cyc * CYCLE_BUCKET / CYCLE_MAX;
-        if (bucket >= CYCLE_BUCKET) bucket = CYCLE_BUCKET - 1;
+        int bucket = cyc * cycleBucket / cycleMax;
+        if (bucket >= cycleBucket) bucket = cycleBucket - 1;
+        int qp = (prev >> prevShift);      /* 量化前驱质量值 */
+        int qp2 = (prev2 >> prevShift);
+        if (qp >= prevQStates) qp = prevQStates - 1;
+        if (qp2 >= prevQStates) qp2 = prevQStates - 1;
+        int dlt = delta >= deltaMax ? deltaBucket - 1 : delta * deltaBucket / deltaMax;
         base[0] = 0;
         base[1] = (size_t)cyc * TREE_CAP;
-        base[2] = ((size_t)prev * CYCLE_MAX + cyc) * TREE_CAP;
-        base[3] = ((((size_t)prev2 * prevStates + prev) * CYCLE_BUCKET + bucket) * 2 + rev) * TREE_CAP;
+        base[2] = ((size_t)prev * cycleMax + cyc) * TREE_CAP;
+        base[3] = ((((size_t)qp2 * prevQStates + qp) * cycleBucket + bucket) * 2 + rev) * TREE_CAP;
+        base[4] = ((size_t)baseSym * cycleMax + cyc) * TREE_CAP;
+        base[5] = ((size_t)dlt * cycleMax + cyc) * TREE_CAP;
+        base[6] = ((size_t)qa * cycleMax + cyc) * TREE_CAP;
     }
 
     inline int* weightPtr(int cyc, int node)
     {
-        int bucket = cyc * CYCLE_BUCKET / CYCLE_MAX;
-        if (bucket >= CYCLE_BUCKET) bucket = CYCLE_BUCKET - 1;
+        int bucket = cyc * cycleBucket / cycleMax;
+        if (bucket >= cycleBucket) bucket = cycleBucket - 1;
         return &weight[((size_t)bucket * TREE_CAP + node) * MODEL_COUNT];
     }
 
@@ -308,7 +411,10 @@ struct ContextModel {
         case 0:  return &m0[base + node];
         case 1:  return &m1[base + node];
         case 2:  return &m2[base + node];
-        default: return &m3[base + node];
+        case 3:  return &m3[base + node];
+        case 4:  return &m4[base + node];
+        case 5:  return &m5[base + node];
+        default: return &m6[base + node];
         }
     }
 };
@@ -341,6 +447,14 @@ public:
      */
     Counter revCounter;
 
+    /* 相邻重复 read 去重（策略 3）：dup 标记自己的自适应概率，随记录逐条维护。 */
+    Counter dupCounter;
+    /* 上一条记录的质量串（存储序），用于比对与解码端还原；跨记录保留。 */
+    std::vector<uint8_t> prevQual;
+    uint32_t prevQualLen = 0;
+
+    Fcv2Cfg cfg;             /* 归一后的上下文参数档位 */
+
     int alphaSize;
     int symbolOf[256];      /* 原始字节 -> 内部符号编号 */
     int byteOf[TREE_CAP];   /* 内部符号编号 -> 原始字节 */
@@ -349,9 +463,10 @@ public:
     bool flushed;
     bool modelLoaded;
 
-    explicit fcv2_impl(coder_io* ioPtr)
-        : io(ioPtr), revCounter(COUNTER_INIT), alphaSize(0), encodeStarted(false), flushed(false),
-          modelLoaded(false)
+    explicit fcv2_impl(coder_io* ioPtr, const Fcv2Cfg& cfgIn)
+        : io(ioPtr), cfg(normalizeCfg(cfgIn)), revCounter(COUNTER_INIT),
+          dupCounter(COUNTER_INIT), alphaSize(0),
+          encodeStarted(false), flushed(false), modelLoaded(false)
     {
         initTables();
         memset(symbolOf, -1, sizeof(symbolOf));
@@ -399,10 +514,10 @@ public:
     }
 
     /* 记录内位置转成测序循环序号，反向链需要按记录长度翻转，见头文件说明。 */
-    static inline int cycleOf(uint32_t i, uint32_t len, bool rev)
+    inline int cycleOf(uint32_t i, uint32_t len, bool rev) const
     {
         uint32_t c = rev ? (len - 1 - i) : i;
-        return (c >= (uint32_t)CYCLE_MAX) ? (CYCLE_MAX - 1) : (int)c;
+        return (c >= (uint32_t)cfg.cycleMax) ? (cfg.cycleMax - 1) : (int)c;
     }
 
     bool exportModel(std::vector<uint8_t>& out) const
@@ -413,11 +528,17 @@ public:
 
         std::vector<uint8_t> snapshot;
         try {
-            snapshot.reserve(modelBlobSize(alphaSize));
+            snapshot.reserve(modelBlobSize(alphaSize, cfg));
             snapshot.insert(snapshot.end(), MODEL_MAGIC, MODEL_MAGIC + sizeof(MODEL_MAGIC));
             appendU16(snapshot, MODEL_FORMAT_VERSION);
-            appendU16(snapshot, (uint16_t)CYCLE_MAX);
-            appendU16(snapshot, (uint16_t)CYCLE_BUCKET);
+            appendU16(snapshot, (uint16_t)cfg.cycleMax);
+            appendU16(snapshot, (uint16_t)cfg.cycleBucket);
+            appendU16(snapshot, (uint16_t)cfg.deltaMax);
+            appendU16(snapshot, (uint16_t)cfg.deltaBucket);
+            appendU16(snapshot, (uint16_t)cfg.prevShift);
+            appendU16(snapshot, (uint16_t)(cfg.useDelta ? 1 : 0));
+            appendU16(snapshot, (uint16_t)(cfg.useDedup ? 1 : 0));
+            appendU16(snapshot, (uint16_t)(cfg.useQa ? 1 : 0));
             appendU16(snapshot, (uint16_t)TREE_CAP);
             appendU16(snapshot, (uint16_t)MODEL_COUNT);
             appendU16(snapshot, (uint16_t)alphaSize);
@@ -425,14 +546,21 @@ public:
             appendU32(snapshot, (uint32_t)cm.m1.size());
             appendU32(snapshot, (uint32_t)cm.m2.size());
             appendU32(snapshot, (uint32_t)cm.m3.size());
+            appendU32(snapshot, (uint32_t)cm.m4.size());
+            appendU32(snapshot, (uint32_t)cm.m5.size());
+            appendU32(snapshot, (uint32_t)cm.m6.size());
             appendU32(snapshot, (uint32_t)cm.weight.size());
             for (int s = 0; s < alphaSize; s++) appendU8(snapshot, (uint8_t)byteOf[s]);
             for (int s = 0; s < alphaSize; s++) appendU16(snapshot, quantFreq[s]);
             appendU16(snapshot, revCounter);
+            appendU16(snapshot, dupCounter);
             appendCounters(snapshot, cm.m0);
             appendCounters(snapshot, cm.m1);
             appendCounters(snapshot, cm.m2);
             appendCounters(snapshot, cm.m3);
+            appendCounters(snapshot, cm.m4);
+            appendCounters(snapshot, cm.m5);
+            appendCounters(snapshot, cm.m6);
             for (size_t i = 0; i < cm.weight.size(); i++) appendI32(snapshot, cm.weight[i]);
         } catch (...) {
             return false;
@@ -449,32 +577,54 @@ public:
             if (!reader.readU8(byte) || byte != MODEL_MAGIC[i]) return false;
         }
 
-        uint16_t version = 0, cycleMax = 0, cycleBucket = 0, treeCap = 0, modelCount = 0;
-        uint16_t storedAlpha = 0;
-        uint32_t m0Length = 0, m1Length = 0, m2Length = 0, m3Length = 0, weightLength = 0;
+        uint16_t version = 0, cycleMax = 0, cycleBucket = 0, deltaMax = 0, deltaBucket = 0;
+        uint16_t prevShift = 0, useDelta = 0, useDedup = 0, useQa = 0, treeCap = 0, modelCount = 0, storedAlpha = 0;
+        uint32_t m0Length = 0, m1Length = 0, m2Length = 0, m3Length = 0, m4Length = 0;
+        uint32_t m5Length = 0, m6Length = 0, weightLength = 0;
         if (!reader.readU16(version) || !reader.readU16(cycleMax) ||
-            !reader.readU16(cycleBucket) || !reader.readU16(treeCap) ||
-            !reader.readU16(modelCount) || !reader.readU16(storedAlpha) ||
+            !reader.readU16(cycleBucket) || !reader.readU16(deltaMax) ||
+            !reader.readU16(deltaBucket) || !reader.readU16(prevShift) ||
+            !reader.readU16(useDelta) || !reader.readU16(useDedup) ||
+            !reader.readU16(useQa) ||
+            !reader.readU16(treeCap) || !reader.readU16(modelCount) ||
+            !reader.readU16(storedAlpha) ||
             !reader.readU32(m0Length) || !reader.readU32(m1Length) ||
             !reader.readU32(m2Length) || !reader.readU32(m3Length) ||
-            !reader.readU32(weightLength)) {
+            !reader.readU32(m4Length) || !reader.readU32(m5Length) ||
+            !reader.readU32(m6Length) || !reader.readU32(weightLength)) {
             return false;
         }
-        if (version != MODEL_FORMAT_VERSION || cycleMax != CYCLE_MAX ||
-            cycleBucket != CYCLE_BUCKET || treeCap != TREE_CAP || modelCount != MODEL_COUNT ||
-            storedAlpha == 0 || storedAlpha > TREE_CAP) {
+        if (version != MODEL_FORMAT_VERSION || treeCap != TREE_CAP ||
+            modelCount != MODEL_COUNT || storedAlpha == 0 || storedAlpha > TREE_CAP) {
+            return false;
+        }
+        if (useDelta > 1 || useDedup > 1 || useQa > 1 || prevShift > CFG_PREV_SHIFT_MAX) {
             return false;
         }
 
+        Fcv2Cfg storedCfg = { (int)cycleMax, (int)cycleBucket, (int)deltaMax,
+                              (int)deltaBucket, (int)prevShift, useDelta == 1,
+                              useDedup == 1, useQa == 1 };
+        storedCfg = normalizeCfg(storedCfg);
+        /*
+         * 先验是跨块训练产物，其计数器数组按训练时的档位布局。加载方（可能是压缩端或
+         * 解码端）采用先验自身携带的档位作为有效档位，而不是要求先验与构造时的档位
+         * 一致：先验总是与它一起使用的那条码流同档位（训练与压缩用同一组参数），
+         * 这样任何一端都能安全地"先验决定了档位"。若与码流头部不一致，begin_decode
+         * 会以档位不符拒绝，见其 modelLoaded 分支。
+         */
+        cfg = storedCfg;
+
         ContextModel restored;
         try {
-            restored.init((int)storedAlpha);
+            restored.init((int)storedAlpha, storedCfg);
         } catch (...) {
             return false;
         }
         if (m0Length != restored.m0.size() || m1Length != restored.m1.size() ||
             m2Length != restored.m2.size() || m3Length != restored.m3.size() ||
-            weightLength != restored.weight.size()) {
+            m4Length != restored.m4.size() || m5Length != restored.m5.size() ||
+            m6Length != restored.m6.size() || weightLength != restored.weight.size()) {
             return false;
         }
 
@@ -497,9 +647,13 @@ public:
         }
 
         Counter restoredRevCounter = 0;
+        Counter restoredDupCounter = 0;
         if (!reader.readU16(restoredRevCounter) ||
+            !reader.readU16(restoredDupCounter) ||
             !readCounters(reader, restored.m0) || !readCounters(reader, restored.m1) ||
             !readCounters(reader, restored.m2) || !readCounters(reader, restored.m3) ||
+            !readCounters(reader, restored.m4) || !readCounters(reader, restored.m5) ||
+            !readCounters(reader, restored.m6) ||
             !readWeights(reader, restored.weight) || !reader.atEnd()) {
             return false;
         }
@@ -509,6 +663,9 @@ public:
         cm = std::move(restored);
         tree = restoredTree;
         revCounter = restoredRevCounter;
+        dupCounter = restoredDupCounter;
+        prevQualLen = 0;   /* 先验只带模型状态，不带上一条质量串 */
+        prevQual.clear();
         alphaSize = (int)storedAlpha;
         memcpy(byteOf, restoredByteOf, sizeof(byteOf));
         memcpy(symbolOf, restoredSymbolOf, sizeof(symbolOf));
@@ -548,20 +705,31 @@ private:
         return true;
     }
 
-    static size_t modelBlobSize(int alpha)
+    static size_t modelBlobSize(int alpha, const Fcv2Cfg& cfgIn)
     {
+        Fcv2Cfg cfg = normalizeCfg(cfgIn);
         size_t prevStates = (size_t)alpha + 1;
-        size_t counters = (size_t)TREE_CAP + (size_t)CYCLE_MAX * TREE_CAP +
-            prevStates * CYCLE_MAX * TREE_CAP +
-            prevStates * prevStates * CYCLE_BUCKET * 2 * TREE_CAP;
-        return sizeof(MODEL_MAGIC) + 2 + 4 * 2 + 2 + 5 * 4 + (size_t)alpha +
-            (size_t)alpha * 2 + 2 + counters * 2 +
-            (size_t)CYCLE_BUCKET * TREE_CAP * MODEL_COUNT * 4;
+        size_t prevQStates = (size_t)(alpha >> cfg.prevShift) + 2;
+        size_t counters = (size_t)TREE_CAP +
+            (size_t)cfg.cycleMax * TREE_CAP +
+            prevStates * cfg.cycleMax * TREE_CAP +
+            prevQStates * prevQStates * cfg.cycleBucket * 2 * TREE_CAP +
+            (size_t)BASE_STATES * cfg.cycleMax * TREE_CAP +
+            (size_t)cfg.deltaBucket * cfg.cycleMax * TREE_CAP +
+            (size_t)QA_BINS * cfg.cycleMax * TREE_CAP;
+        return sizeof(MODEL_MAGIC) + 12 * 2 + 8 * 4 + (size_t)alpha +
+            (size_t)alpha * 2 + 2 + 2 + counters * 2 +
+            (size_t)cfg.cycleBucket * TREE_CAP * MODEL_COUNT * 4;
     }
 };
 
 coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable)
-    : impl(new fcv2_impl(io))
+    : coder_fcv2(io, freqTable, Fcv2Cfg())
+{
+}
+
+coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, const Fcv2Cfg& cfg)
+    : impl(new fcv2_impl(io, cfg))
 {
     /* 只收录实际出现过的质量值，字母表越小树越浅。 */
     int alpha = 0;
@@ -601,13 +769,23 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable)
             ordered[s] = impl->quantFreq[s];
         }
         impl->tree.build(ordered, alpha);
-        impl->cm.init(alpha);
+        impl->cm.init(alpha, impl->cfg);
     }
 }
 
 coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable,
                        const std::vector<uint8_t>& modelBlob, bool* modelLoaded)
-    : coder_fcv2(io, freqTable)
+    : coder_fcv2(io, freqTable, Fcv2Cfg())
+{
+    bool loaded = impl->loadModel(modelBlob);
+    if (modelLoaded != nullptr) {
+        *modelLoaded = loaded;
+    }
+}
+
+coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, const Fcv2Cfg& cfg,
+                       const std::vector<uint8_t>& modelBlob, bool* modelLoaded)
+    : coder_fcv2(io, freqTable, cfg)
 {
     bool loaded = impl->loadModel(modelBlob);
     if (modelLoaded != nullptr) {
@@ -622,7 +800,8 @@ bool coder_fcv2::export_model(std::vector<uint8_t>& out) const
     return impl->exportModel(out);
 }
 
-void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev)
+void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
+                               const uint8_t* seq, uint32_t seqLen)
 {
     fcv2_impl* d = impl.get();
     if (d->alphaSize == 0 || qual == nullptr || len == 0) {
@@ -631,6 +810,19 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev)
     if (!d->encodeStarted) {
         d->rc.InitEncoder(d->io->data, d->io->data_capacity);
         d->rc.EncodeByte((unsigned)d->alphaSize);
+        /*
+         * 上下文参数档位写进码流头部。模型数组的布局由它决定，解码端必须读回同一组
+         * 参数才能对上上下文索引；这也让每个数据块可以独立携带自己的档位选择。
+         * 见 normalizeCfg()：两端按同一规则归一，保证任何合法取值两侧一致。
+         */
+        d->rc.EncodeByte((unsigned)d->cfg.cycleMax);
+        d->rc.EncodeByte((unsigned)d->cfg.cycleBucket);
+        d->rc.EncodeByte((unsigned)d->cfg.deltaMax);
+        d->rc.EncodeByte((unsigned)d->cfg.deltaBucket);
+        d->rc.EncodeByte((unsigned)d->cfg.prevShift);
+        d->rc.EncodeByte((unsigned)(d->cfg.useDelta ? 1 : 0));
+        d->rc.EncodeByte((unsigned)(d->cfg.useDedup ? 1 : 0));
+        d->rc.EncodeByte((unsigned)(d->cfg.useQa ? 1 : 0));
         /*
          * 字母表连同各符号的量化频率一起写进码流。
          *
@@ -661,8 +853,55 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev)
         counterUpdate(d->revCounter, !rv);
     }
 
+    /*
+     * 相邻重复 read 去重（策略 3，fqzcomp 的 do_dedup）：与上一条记录逐字节比对，
+     * 完全相同就写 1 bit 并把整条质量串跳过。命中重复时本记录的上下文状态不更新
+     * （prev/prev2/delta 都在记录开头重置），下一条记录照常从零开始，两端一致。
+     */
+    if (d->cfg.useDedup) {
+        bool isDup = (len == d->prevQualLen) &&
+                     (d->prevQualLen == 0 || memcmp(qual, d->prevQual.data(), len) == 0);
+        int p0 = counterProb(d->dupCounter);
+        if (p0 < 1)    p0 = 1;
+        if (p0 > 4095) p0 = 4095;
+        if (isDup) {
+            d->rc.EncodeBit1<12>(p0);
+        } else {
+            d->rc.EncodeBit0<12>(p0);
+        }
+        counterUpdate(d->dupCounter, !isDup);
+        if (isDup) {
+            d->prevQualLen = len;
+            if (d->prevQual.size() < (size_t)len) {
+                d->prevQual.resize(len);
+            }
+            memcpy(d->prevQual.data(), qual, len);
+            return;
+        }
+    }
+
+    /*
+     * read 平均质量档（策略 4）：档位写进码流，作为 m6 上下文。固定 2 bit/记录，
+     * 解码端读回同一档位。
+     */
+    int qa = 0;
+    if (d->cfg.useQa) {
+        qa = qaBinOf(qual, len);
+        if (qa & 2) {
+            d->rc.EncodeBit1<12>(2048);
+        } else {
+            d->rc.EncodeBit0<12>(2048);
+        }
+        if (qa & 1) {
+            d->rc.EncodeBit1<12>(2048);
+        } else {
+            d->rc.EncodeBit0<12>(2048);
+        }
+    }
+
     int prev = d->alphaSize;
     int prev2 = d->alphaSize;
+    int delta = 0;   /* read 内质量跳变次数，随记录重置 */
 
     for (uint32_t i = 0; i < len; i++) {
         int sym = d->symbolOf[qual[i]];
@@ -672,9 +911,16 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev)
                这里选择保持前驱不变、跳过本字节，由上层的往返校验暴露问题。 */
             continue;
         }
-        int cyc = fcv2_impl::cycleOf(i, len, rev);
+        /*
+         * 碱基上下文取"产生本质量值的循环"对应的碱基：正向链 i、反向链 len-1-i，
+         * 与 cycleOf 用同一套映射，保证两端一致。seq 长度不足（异常数据）时该位置
+         * 归入"未知"档，绝不对 seq 越界读取。
+         */
+        uint32_t mapped = rev ? (len - 1 - i) : i;
+        int cyc = d->cycleOf(i, len, rev);
+        int baseSym = (seq != nullptr && mapped < seqLen) ? g_baseSym[seq[mapped]] : (BASE_STATES - 1);
         size_t base[MODEL_COUNT];
-        d->cm.slotBases(prev, prev2, cyc, rv, base);
+        d->cm.slotBases(prev, prev2, cyc, rv, baseSym, delta, qa, base);
 
         int pathLen = d->tree.pathLen[sym];
         for (int step = 0; step < pathLen; step++) {
@@ -691,9 +937,23 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev)
             }
             d->update(slot, stretched, wp, p0, !bit);
         }
+        /*
+         * 跳变次数在本符号编码后才更新，因此 m5 的上下文统计的是"当前符号之前"的变化
+         * 次数，与 fqzcomp 的 delta 用法一致。第一个符号没有前驱，不算跳变。
+         */
+        if (prev != d->alphaSize && sym != prev) {
+            delta++;
+        }
         prev2 = prev;
         prev = sym;
     }
+
+    /* 非重复记录：记录本条质量串，供下一条做去重比对。 */
+    d->prevQualLen = len;
+    if (d->prevQual.size() < (size_t)len) {
+        d->prevQual.resize(len);
+    }
+    memcpy(d->prevQual.data(), qual, len);
 }
 
 int32_t coder_fcv2::encode_flush()
@@ -715,6 +975,31 @@ int32_t coder_fcv2::begin_decode()
     if (alpha <= 0 || alpha > TREE_CAP) {
         return -1;
     }
+    /* 读回编码端写入的上下文参数档位，与 encode_record 的写出顺序严格一致。 */
+    Fcv2Cfg streamCfg;
+    streamCfg.cycleMax = (int)d->rc.DecodeByte();
+    streamCfg.cycleBucket = (int)d->rc.DecodeByte();
+    streamCfg.deltaMax = (int)d->rc.DecodeByte();
+    streamCfg.deltaBucket = (int)d->rc.DecodeByte();
+    streamCfg.prevShift = (int)d->rc.DecodeByte();
+    streamCfg.useDelta = (d->rc.DecodeByte() != 0);
+    streamCfg.useDedup = (d->rc.DecodeByte() != 0);
+    streamCfg.useQa = (d->rc.DecodeByte() != 0);
+    if (streamCfg.prevShift > CFG_PREV_SHIFT_MAX ||
+        streamCfg.cycleBucket > CFG_CYCLE_BUCKET_MAX ||
+        streamCfg.deltaBucket > CFG_DELTA_BUCKET_MAX) {
+        return -1;   /* 损坏码流：档位超出合法范围，禁止据此分配模型 */
+    }
+    streamCfg = normalizeCfg(streamCfg);
+    /*
+     * 先验来自跨块训练，其模型布局由训练时的档位决定；如果与码流头部不一致，计数器
+     * 数组对不上，只能拒绝（压缩侧的同款不一致会让 loadModel 返回 false）。
+     */
+    if (d->modelLoaded && d->cfg != streamCfg) {
+        return -1;
+    }
+    d->cfg = streamCfg;
+
     int streamByteOf[TREE_CAP];
     uint16_t streamQuantFreq[TREE_CAP];
     memset(streamByteOf, 0, sizeof(streamByteOf));
@@ -753,11 +1038,12 @@ int32_t coder_fcv2::begin_decode()
     d->alphaSize = alpha;
     /* 用码流里带来的量化频率重建，保证与编码端是同一棵树。 */
     d->tree.build(freq, alpha);
-    d->cm.init(alpha);
+    d->cm.init(alpha, d->cfg);
     return 0;
 }
 
-int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len)
+int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
+                                  const uint8_t* seq, uint32_t seqLen)
 {
     fcv2_impl* d = impl.get();
     if (d->alphaSize == 0 || dst == nullptr || len == 0) {
@@ -772,13 +1058,45 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len)
     counterUpdate(d->revCounter, !rv);
     bool rev = (rv != 0);
 
+    /* 相邻重复 read 去重：dup=1 时直接拷贝上一条解码出的质量串，跳过本记录。 */
+    if (d->cfg.useDedup) {
+        int pDup = counterProb(d->dupCounter);
+        if (pDup < 1)    pDup = 1;
+        if (pDup > 4095) pDup = 4095;
+        int isDup = d->rc.DecodeBit<12>(pDup);
+        counterUpdate(d->dupCounter, !isDup);
+        if (isDup) {
+            if (d->prevQualLen < len) {
+                /* 上一条质量串缺失或过短，属于损坏流；用 '!' 兜底避免越界读。 */
+                memset(dst, '!', len);
+            } else {
+                memcpy(dst, d->prevQual.data(), len);
+            }
+            d->prevQualLen = len;
+            if (d->prevQual.size() < (size_t)len) {
+                d->prevQual.resize(len);
+            }
+            memcpy(d->prevQual.data(), dst, len);
+            return (int32_t)len;
+        }
+    }
+
     int prev = d->alphaSize;
     int prev2 = d->alphaSize;
+    int delta = 0;   /* 与编码侧同序维护的 read 内质量跳变次数 */
+
+    /* read 平均质量档：读回编码端写下的 2 bit，作为 m6 上下文。 */
+    int qa = 0;
+    if (d->cfg.useQa) {
+        qa = (d->rc.DecodeBit<12>(2048) << 1) | d->rc.DecodeBit<12>(2048);
+    }
 
     for (uint32_t i = 0; i < len; i++) {
-        int cyc = fcv2_impl::cycleOf(i, len, rev);
+        uint32_t mapped = rev ? (len - 1 - i) : i;
+        int cyc = d->cycleOf(i, len, rev);
+        int baseSym = (seq != nullptr && mapped < seqLen) ? g_baseSym[seq[mapped]] : (BASE_STATES - 1);
         size_t base[MODEL_COUNT];
-        d->cm.slotBases(prev, prev2, cyc, rv, base);
+        d->cm.slotBases(prev, prev2, cyc, rv, baseSym, delta, qa, base);
 
         int cur = d->tree.root;
         while (cur >= d->alphaSize) {
@@ -792,8 +1110,16 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len)
             cur = d->tree.child[node][bit];
         }
         dst[i] = (uint8_t)d->byteOf[cur];
+        if (prev != d->alphaSize && cur != prev) {
+            delta++;
+        }
         prev2 = prev;
         prev = cur;
     }
+    d->prevQualLen = len;
+    if (d->prevQual.size() < (size_t)len) {
+        d->prevQual.resize(len);
+    }
+    memcpy(d->prevQual.data(), dst, len);
     return (int32_t)len;
 }

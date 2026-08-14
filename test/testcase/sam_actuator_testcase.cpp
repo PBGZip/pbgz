@@ -425,6 +425,23 @@ TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
     EXPECT_GT(result, 0);
 }
 
+TEST_F(SamActuatorTest, testCompressIdFieldQname) {
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
+
+    // Pre-analysis
+    int32_t result = actuator.preAnalysis();
+    EXPECT_EQ(result, 0);
+
+    // Test compressIdFieldQname method with field index 0 (QNAME field)
+    uint32_t fieldSrcLen = 0;
+    Json::Value fieldMeta;
+    result = actuator.compressIdFieldQname(fieldSrcLen, fieldMeta);
+    EXPECT_GT(result, 0);
+}
+
 TEST_F(SamActuatorTest, testCompressIdFieldInAll) {
     loadSamData(SamTestData::testSamFile);
     PbgzParameter para;

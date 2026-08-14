@@ -926,7 +926,7 @@ int main(int argc, char** argv) {
     if (ret != 0) {
         LOG_ERROR("Command start failed");
         /* 异常退出：清理并删除已创建的输出文件（如缺参考基因导致的失败）。 */
-        PbgzManager::getInstance().exitProc(ret, "pbgz start failed");
+        PbgzManager::getInstance().exitProc(ret, nullptr);
     }
 
     MemoryUtil::safeDeleteClass(processor);

@@ -34,12 +34,16 @@ struct QualSampleRecord {
 class QualSelector {
 public:
     /*
-     * 在采样记录上试压 coder_qual 与 fcv2，返回压缩后更小的那个。
-     *
-     * freqByByte 是质量值的出现次数，下标为原始字节值。两个候选都需要它：
+     * 在采样记录上试压 coder_qual、fcv2（多个上下文参数档位）与 bwt_cm，返回压缩后
+     * 更小的那个。freqByByte 是质量值的出现次数，下标为原始字节值。三个候选都需要它：
      * coder_qual 用它建自己的频率表，fcv2 用它建哈夫曼树。
      *
-     * 样本太少时返回 SKIPPED，由调用方沿用默认编码器。评估失败（两个候选都跑不通）
+     * 评估走多轮收敛：从 64KB 起步逐轮翻倍样本量，领先者拉开 3% 以上差距即定案
+     * （见 codec_selector.cpp 的 SETTLE_MARGIN）。选中的 fcv2 参数档位（若有）随
+     * FieldCodecSelection.fcv2Params 返回，压缩端与先验训练据此保持一致；解码端从
+     * fcv2 码流头部读回同一组参数。
+     *
+     * 样本太少时返回 SKIPPED，由调用方沿用默认编码器。评估失败（所有候选都跑不通）
      * 时返回 FAILED，同样退回默认，绝不会因为评估出问题而让压缩无法进行。
      */
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,

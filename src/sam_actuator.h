@@ -36,6 +36,7 @@
 #include "reference.h"
 #include "sam_info.h"
 #include "coder_bwt_cm.h"
+#include "coder_qname.h"
 #include "pbgz_stat.h"
 
 // Forward declaration
@@ -73,6 +74,11 @@ public:
 
     int32_t decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
+    /* OPTION 字段（第 12 列起的所有 tag）按 CRAM 式 tag 列化压缩/解压。当前未启用（OPTION 走 affix），保留代码。 */
+    int32_t compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+    int32_t decompressOptionField(uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock,
+                                  const Json::Value& fieldMeta);
+
     int32_t decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
     int32_t decompressPosFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
@@ -88,7 +94,7 @@ public:
 
     int32_t decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock, const Json::Value& fieldMeta);
 
-    int32_t computeTLEN(uint32_t lineIdx);
+    int32_t computeTLEN(uint32_t lineIdx, bool minusOne);
 
     template<typename T>
     int32_t decompressNumber(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock) {
@@ -139,7 +145,11 @@ private:
     int32_t compressSamByFields();
 
     // ID field split compression
-    int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+    int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
+                                 uint32_t trialLines = 0);
+    /* QNAME 专用：跨行去重 + 按位置建模（见 coder_qname.h）。trialLines>0 时只压前 N 行（选型试压用）。 */
+    int32_t compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
+                                 uint32_t trialLines = 0);
 
     // ID field whole compression
     int32_t compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
@@ -257,7 +267,7 @@ private:
 
     int32_t buildSamIndex();
 
-private:
+ private:
     int64_t headEndLine;
     uint32_t samLine;
     std::vector<std::vector<int64_t>> contentPos;
@@ -311,6 +321,8 @@ private:
 
     std::vector<std::shared_ptr<coder_io>> ioVector;
     std::vector<std::shared_ptr<coder>> idDecoders;
+    /* QNAME 用 coder_qname 压缩/解压时为 true（见 decompressIdField）。 */
+    bool idUsesQnameCoder = false;
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     std::shared_ptr<coder_qual> qualCoder;
     /* QUAL 用 fcv2 压缩时的解码器；用其他编码器压缩时保持为空。 */
@@ -322,6 +334,10 @@ private:
     uint8_t* baseDiffSquashBuffer;
     uint8_t* refeStrecchBuffer;
 
+    /* OPTION tag-split 列化：整块解一次，逐行从缓存取。当前未启用，保留代码。 */
+    int32_t decodeOptionColumn(const Json::Value& fieldMeta);
+    std::vector<std::string> optionRecLines;
+    bool optionCacheEmpty = true;
 
     const uint8_t atcg4[4] = {'A', 'C', 'T', 'G'};
 

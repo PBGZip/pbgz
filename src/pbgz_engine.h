@@ -107,6 +107,25 @@ protected:
 
     virtual int64_t readBlocks(BlockReader* blockReader);
 
+    /*     * 读到一个数据块之后、入队之前回调，供引擎做按块累积等预处理相关工作。
+     *
+     * 基类默认空操作。压缩引擎用它跨块累积 QUAL 先验训练样本（首块决策 + 后续块
+     * 追加），累积到目标块数或上限后训练并发布先验。
+     */
+    virtual void pretrainBlockProc(RoughIOBlock* /*blockPtr*/) {}
+
+    /*     * 读循环结束（EOF 或读错误）后调用一次，供引擎收尾未完成的预处理。
+     * 基类默认空操作。
+     */
+    virtual void readLoopPostProc() {}
+
+    /*     * 工作线程开始拉块压缩前的同步点。基类默认空操作。
+     *
+     * 压缩引擎用它实现"先验发布前 coder 线程不得开始"：读线程把跨块训练出的先验
+     * 发布（落盘辅助块 + 置位标志）后通知，工作线程才被放行。其他引擎无此需求。
+     */
+    virtual void workStartBarrier() {}
+
     /*     * 读到一个块之后、送进 inputDataPool 之前的处置，由 readOneBlock 统一询问。
      *
      * 之所以做成一个返回值而不是让各引擎重写整个 readOneBlock：读循环的骨架
@@ -243,4 +262,16 @@ public:
     mutable std::condition_variable auxEmitCond;
     int64_t auxEmitOffset = -1;
     bool auxEmitDone = false;
+
+    /*
+     * 首块串行化：id==0 的 coder 线程先处理完第 0 块再放行其余线程，避免并发
+     * preAnalysis 在 SamInfo 尚未填充时把块误判为二进制。perf 分支原有机制，
+     * 接入先验门闩（workStartBarrier）时被误删，此处恢复。放行只发生一次。
+     */
+    mutable std::mutex coderStartMutex;
+    std::condition_variable coderStartCond;
+    bool coderStartSync = false;
+
+    /* 首次返回 true 并记下，之后恒返回 false；配合 notify_all 只放行一次。 */
+    bool firstCoderNotify(bool flag);
 };

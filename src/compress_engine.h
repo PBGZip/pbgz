@@ -26,9 +26,11 @@
 #include "codec_engine.h"
 #include "actuator.h"
 #include <mutex>
+#include <condition_variable>
 #include "pbgz_stat.h"
 #include "block_wrapper.h"
 #include "preprocess_info.h"
+#include "codec_selector.h"
 #include <atomic>
 
 class CompressEngine : public CodecEngine {
@@ -51,6 +53,20 @@ public:
     virtual void fileDecisionProc(RoughIOBlock* firstBlock) override;
 
 protected:
+    /*
+     * 读线程逐块累积 QUAL 先验训练样本；累积到目标块数（=并发度）或 45 MB 上限后
+     * 统一训练并发布。
+     */
+    virtual void pretrainBlockProc(RoughIOBlock* blockPtr) override;
+
+    /* 读循环结束（EOF/错误）时收尾未完成的预训练。 */
+    virtual void readLoopPostProc() override;
+
+    /* coder 线程启动门闩：等待先验发布（或判定无先验）的通知后才开始拉块压缩。 */
+    virtual void workStartBarrier() override;
+
+    /* 训练累积的 QUAL、发布先验辅助块、置 DONE 并通知等待中的 coder 线程。 */
+    void finalizePretrain();
     virtual BlockReader* createBlockReader() override;
 
     virtual BlockWriter* createBlockWriter() override;
@@ -69,11 +85,11 @@ protected:
 
 
     /*
-     * 把首块训练出的 QUAL 先验发射成一个 QUAL_PRIOR 辅助块，并记下其容器头绝对偏移。
+     * 把训练出的 QUAL 先验发射成一个 QUAL_PRIOR 辅助块，并记下其容器头绝对偏移。
      *
-     * 调用点在 fileDecisionProc 内（读线程派发第 0 块之前），而不是文件收尾：
-     * 数据块要引用先验，先验就必须先于一切数据块存在。
-     * 放在这里还有个直接好处——连第 0 块自己都能用上先验，不必为它开特例。
+     * 调用点在 finalizePretrain（跨块预训练完成后），而不是文件收尾：数据块要引用
+     * 先验，先验就必须先于一切数据块被压缩完成。由于 coder 线程在发布前被门闩挡住，
+     * 这里可以放心让先验落盘后再放行——连第 0 块自己都能用上先验，不必为它开特例。
      *
      * 实际落盘由写线程经 emitSyncAuxBlock 完成，本函数只负责构块与登记元信息。
      */
@@ -138,6 +154,31 @@ private:
 
     /* 训练出的先验快照，构块时做一次拷贝后只读共享，供全部工作线程零拷贝取用。 */
     AuxPayloadPtr qualPriorBlob;
+
+    /*
+     * 跨块预训练状态（仅读线程访问）：累积器 + 已喂块计数 + 目标块数 + 是否在预训练。
+     * 目标块数取并发度，45 MB 上限由累积器自身保证。
+     */
+    CodecSelector::QualPriorAccum qualPriorAccum;
+    uint32_t pretrainBlockCount = 0;
+    uint32_t pretrainTarget = 0;
+    bool pretraining = false;
+
+    /*
+     * coder 线程的发布门闩：读线程训练并发布先验后置位并通知，coder 线程在
+     * workStartBarrier 等待。无先验的文件在 fileDecisionProc 里立即置位，不拖慢
+     * 任何非先验路径；空文件由 readLoopPostProc 兜底置位。
+     */
+    std::mutex priorMutex;
+    std::condition_variable priorCv;
+    bool priorSettled = false;
+
+    void signalPriorSettled()
+    {
+        std::lock_guard<std::mutex> lk(priorMutex);
+        priorSettled = true;
+        priorCv.notify_all();
+    }
 
 public:
     int64_t getQualPriorAddress() const override {

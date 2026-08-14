@@ -50,13 +50,6 @@ namespace {
 const uint32_t SAMPLE_TARGET = 4u << 20;   /* 4 MB */
 
 /*
- * 先验训练最多使用 45 MB QUAL。实测到此处收益约为 1.84 个百分点，继续加到 90 MB
- * 只多约 0.10 个百分点；多出的时间却发生在切换到并行压缩之前的串行阶段，会直接
- * 推迟后续工作线程启动，所以必须在收益曲线变平前截断。
- */
-const uint32_t QUAL_PRIOR_TRAIN_MAX = 45u * 1024u * 1024u;
-
-/*
  * Minimum per-field sample required before we trust a codec comparison.
  * Each coder carries a small fixed overhead (BWT index, range-coder flush,
  * EOF marker, on the order of tens of bytes). At 64KB a real 1.7pp coder
@@ -254,16 +247,22 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     return sel;
 }
 
-void CodecSelector::extractQualSamples(RoughIOBlock* block,
-                                       std::vector<QualSampleRecord>& records,
-                                       std::vector<uint32_t>& freqByByte,
-                                       uint32_t sampleBudget,
-                                       uint64_t qualBudget)
+/*
+ * 从一块中追加采集 QUAL 记录。不清空 records/freqByByte，collectedQualBytes 为进出
+ * 累计值，因此既支持"清空后采一次"（extractQualSamples），也支持跨块累积
+ * （accumulateQualPrior）。qualBudget 是**总量上限**（不是本次剩余额度）：内部越界
+ * 检查为 collectedQualBytes + qualLen > qualBudget，collectedQualBytes 在跨块时是
+ * 已累计的总量，传剩余额度会误跳过后续块。
+ */
+namespace {
+void collectQualSamplesInto(RoughIOBlock* block,
+                            std::vector<QualSampleRecord>& records,
+                            std::vector<uint32_t>& freqByByte,
+                            uint32_t sampleBudget,
+                            uint64_t qualBudget,
+                            uint64_t& collectedQualBytes)
 {
-    records.clear();
-    freqByByte.assign(256, 0);
     SafeLineReader reader(block);
-    uint64_t collectedQualBytes = 0;
 
     const uint8_t* line = nullptr;
     uint32_t lineLen = 0;
@@ -306,8 +305,7 @@ void CodecSelector::extractQualSamples(RoughIOBlock* block,
         uint32_t qualLen = qEnd - qBeg;
         /*
          * 只接收完整记录，不能为了凑满上限截断 QUAL：fcv2 依赖真实读长来还原循环位置，
-         * 截断会悄悄训练出错误的上下文。超过上限后不再保留记录，但仍扫描到块尾，保证
-         * 训练路径处理的是完整首块而非选择阶段的 4 MB 原始样本。
+         * 截断会悄悄训练出错误的上下文。超过上限后不再保留记录，但仍扫描到块尾。
          */
         if (collectedQualBytes + qualLen > qualBudget) {
             continue;
@@ -335,51 +333,91 @@ void CodecSelector::extractQualSamples(RoughIOBlock* block,
         collectedQualBytes += qualLen;
     }
 }
+} /* namespace */
+
+void CodecSelector::extractQualSamples(RoughIOBlock* block,
+                                       std::vector<QualSampleRecord>& records,
+                                       std::vector<uint32_t>& freqByByte,
+                                       uint32_t sampleBudget,
+                                       uint64_t qualBudget)
+{
+    records.clear();
+    freqByByte.assign(256, 0);
+    uint64_t collected = 0;
+    collectQualSamplesInto(block, records, freqByByte, sampleBudget, qualBudget, collected);
+}
 
 /*
- * 在首块的完整 QUAL 上训练 fcv2 先验。编码器选择仍只用小样本；小样本足以稳定比较
- * 候选，而模型学习需要更多质量值，复用它会把约 1.18 MB 的选择样本误当成训练集，损失
- * 大部分先验收益。这里故意只修改 PreprocessInfo：它是流水线与编码器决策的唯一接口，
- * 让 coder/ 层继续不知道块和文件偏移，维持既有分层。
+ * 把一块的 QUAL 追加进跨块训练累积器。达到 QUAL_PRIOR_TRAIN_MAX 后不再采集；
+ * 单块内部同样只收完整记录，超限部分丢弃但不提前停止扫描。
  */
-void CodecSelector::trainQualPrior(RoughIOBlock* block, PreprocessInfo& info)
+void CodecSelector::accumulateQualPrior(RoughIOBlock* block, QualPriorAccum& acc)
 {
-    if (block == nullptr || block->getDataLen() <= 0) {
+    if (block == nullptr || block->getDataLen() <= 0 || acc.full()) {
         return;
+    }
+    if (acc.freqByByte.empty()) {
+        acc.freqByByte.assign(256, 0);
+    }
+    /*
+     * 预算传总上限 QUAL_PRIOR_TRAIN_MAX：collectQualSamplesInto 内部的越界检查是
+     * collectedQualBytes + qualLen > qualBudget，而 collectedQualBytes 是跨块累计值，
+     * 传"剩余额度"会让已累计量超过剩余量，后续块整块被跳过。
+     */
+    collectQualSamplesInto(block, acc.records, acc.freqByByte, UINT32_MAX, QUAL_PRIOR_TRAIN_MAX, acc.collectedBytes);
+}
+
+/*
+ * 在累积的 QUAL 上训练 fcv2 先验并导出模型快照。编码器选择仍只用小样本；小样本足以
+ * 稳定比较候选，而模型学习需要更多质量值。这里故意只产出快照、不触碰块或文件偏移，
+ * 让 coder/ 层继续不知道块和文件偏移，维持既有分层。失败或样本为空返回空向量。
+ */
+std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& acc,
+                                                        const QualFcv2Params& params,
+                                                        uint64_t* trainedBytes)
+{
+    uint64_t trained = 0;
+    for (const QualSampleRecord& r : acc.records) {
+        trained += r.qual.size();
+    }
+    if (trainedBytes != nullptr) {
+        *trainedBytes = trained;
+    }
+    if (trained == 0) {
+        return {};
     }
 
     try {
-        std::vector<QualSampleRecord> records;
-        std::vector<uint32_t> freqByByte;
-        extractQualSamples(block, records, freqByByte, UINT32_MAX, QUAL_PRIOR_TRAIN_MAX);
-
-        uint64_t trainedBytes = 0;
-        for (size_t i = 0; i < records.size(); ++i) {
-            trainedBytes += records[i].qual.size();
-        }
-        if (trainedBytes == 0) {
-            return;
-        }
-
-        std::vector<uint8_t> scratch((size_t)trainedBytes * 2 + (1u << 16), 0);
+        std::vector<uint8_t> scratch((size_t)trained * 2 + (1u << 16), 0);
         coder_io io(scratch.data(), (int32_t)scratch.size());
-        coder_fcv2 coder(&io, freqByByte);
-        for (size_t i = 0; i < records.size(); ++i) {
-            const QualSampleRecord& record = records[i];
-            coder.encode_record((const uint8_t*)record.qual.data(),
-                                (uint32_t)record.qual.size(), record.rev);
+        /* 把 QualSelector 选定的档位翻译成 coder 层参数，保证先验与压缩端一致。 */
+        Fcv2Cfg cfg;
+        cfg.cycleMax = params.cycleMax;
+        cfg.cycleBucket = params.cycleBucket;
+        cfg.deltaMax = params.deltaMax;
+        cfg.deltaBucket = params.deltaBucket;
+        cfg.prevShift = params.prevShift;
+        cfg.useDelta = params.useDelta;
+        cfg.useDedup = params.useDedup;
+        cfg.useQa = params.useQa;
+        coder_fcv2 coder(&io, acc.freqByByte, cfg);
+        for (const QualSampleRecord& r : acc.records) {
+            coder.encode_record((const uint8_t*)r.qual.data(),
+                                (uint32_t)r.qual.size(), r.rev,
+                                (const uint8_t*)r.seq.data(), (uint32_t)r.seq.size());
         }
         if (coder.encode_flush() <= 0) {
-            return;
+            return {};
         }
 
         std::vector<uint8_t> snapshot;
         if (!coder.export_model(snapshot) || snapshot.empty()) {
-            return;
+            return {};
         }
-        info.setQualPrior(std::move(snapshot), trainedBytes);
+        return snapshot;
     } catch (...) {
         /* 训练只是可选优化；任意分配或未知数据失败都必须回到无先验的既有压缩路径。 */
+        return {};
     }
 }
 
@@ -525,12 +563,22 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
              */
             std::vector<QualSampleRecord> qualRecs;
             std::vector<uint32_t> qualFreq;
-            extractQualSamples(block, qualRecs, qualFreq, SAMPLE_TARGET);
+            /*
+             * 质量值选型扫整块而不是 4MB：fcv2 是自适应上下文混合器，小样本下还没收敛
+             * 会被低估（实测 970KB 样本 48.27%，整块 7.7MB 时 48.33% 已反超 bwt_cm），
+             * 只有让它在真实数据量下参与比较，选出来的 coder 才对得上实际压缩。
+             */
+            extractQualSamples(block, qualRecs, qualFreq,
+                               (uint32_t)block->getDataLen(), QUAL_PRIOR_TRAIN_MAX);
             info.fields[f] = QualSelector::select(qualRecs, qualFreq);
+            /*
+             * 先验值得训练就记下请求，实际训练推迟到读线程读完预训练块之后跨块累积
+             * 完成再执行（见 CompressEngine）。这里只产出决策，不在这里训练。
+             */
             if (info.fields[f].status == FieldStatus::SELECTED &&
                 info.fields[f].selectedCoder == CoderType::FCV2 &&
                 qualPriorPaysOff(buf.size(), info.scannedBytes, inputTotalBytes)) {
-                trainQualPrior(block, info);
+                info.setQualPriorRequested(true);
             }
             continue;
         }

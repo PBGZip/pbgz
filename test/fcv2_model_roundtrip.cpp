@@ -15,14 +15,26 @@
 
 namespace {
 
-const size_t kHeaderBytes = 43;
+/*
+ * 与 coder_fcv2.cpp 的 exportModel 布局逐字段对应：
+ *   魔数 9 + 12×u16（版本/循环上限/位置档/跳变上限/跳变档/前驱右移/跳变开关/去重开关/
+ *   质量档开关/树容量/模型数/字母表）+ 8×u32（m0..m6、权重数组长度）
+ *   之后是字母表字节、各符号量化频率、revCounter、dupCounter、七个计数数组、权重数组。
+ * 任一尺寸常量或模型数改动都要同步这里，否则 6a 的长度断言会失真。
+ */
+const size_t kHeaderBytes = 9 + 12 * 2 + 8 * 4;
 
 size_t expectedBlobSize(int alpha)
 {
     size_t prevStates = (size_t)alpha + 1;
+    size_t prevQStates = (size_t)(alpha >> 1) + 2;   /* m3 量化前驱（默认档 prevShift=1） */
     size_t counters = 64 + 96 * 64 + prevStates * 96 * 64 +
-        prevStates * prevStates * 16 * 2 * 64;
-    return kHeaderBytes + (size_t)alpha * 3 + counters * 2 + 16 * 64 * 4 * 4;
+        prevQStates * prevQStates * 16 * 2 * 64 +     /* m0..m3 */
+        6 * 96 * 64 +                                  /* m4 碱基上下文 */
+        8 * 96 * 64 +                                  /* m5 跳变上下文（默认 deltaBucket=8） */
+        4 * 96 * 64;                                   /* m6 平均质量档（QA_BINS=4） */
+    return kHeaderBytes + (size_t)alpha + (size_t)alpha * 2 + 2 + 2 + counters * 2 +
+           16 * 64 * 7 * 4;                            /* 权重：位置档 × 树节点 × 7 模型 × 4 字节 */
 }
 
 std::vector<uint8_t> makeQualityData()

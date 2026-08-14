@@ -159,7 +159,7 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
 }
 
 /*
- * 编码器试压/挑选与 QUAL 先验训练，整个文件生命周期内只跑一次。
+ * 编码器试压/挑选与 QUAL 先验决策，整个文件生命周期内只跑一次。
  *
  * 由读线程在派发第 0 块之前调用（PbgzEngine::readOneBlock）。之所以钉在这个位置：
  *
@@ -171,6 +171,10 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
  *   工作线程在它自己那一块上触发，采样内容随调度漂移——那才是真正的隐患。
  * 三是**读线程手上有文件级信息**（输入总长、可否 seek），先验是否划算这类按全文件
  *   数据量做的判断才有立足点。
+ *
+ * 注意：这里只做**决策**。QUAL 先验的训练和发布被推迟到跨块预训练完成
+ * （finalizePretrain）——首块通常只有 ~9 MB QUAL，跨块累积到 45 MB 才能逼近
+ * 先验收益的收敛点。发布期间 coder 线程在 workStartBarrier 门闩上等待。
  *
  * tryClaim（IDLE→RUNNING 的无锁 CAS）现在纯属兜底：调用方只有读线程一个，且只在
  * 第 0 块调，重入不可能发生。
@@ -247,24 +251,99 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
                         names[i], status, sel.sampleLen);
             }
         }
-        if (!preprocessInfo.qualPrior().empty()) {
-            fprintf(stderr, "  QUAL 先验：训练 %llu 字节，快照 %zu 字节\n",
-                    (unsigned long long)preprocessInfo.qualPriorTrainedBytes(),
-                    preprocessInfo.qualPrior().size());
-        }
         fprintf(stderr, "\n");
     }
-    /*
-     * 先验在这里发射，而不是等到文件收尾：数据块要引用它，它就得先于一切数据块存在。
-     * 此刻读线程还没派发过任何块，写线程手上必然空闲，所以这个块一定落在全部数据块之前。
-     */
-    emitQualPrior();
 
+    /*
+     * 先验值得训练：进入跨块预训练。块 0 由随后的 pretrainBlockProc 累积 QUAL，
+     * 读完目标块数（=并发度）或 45 MB 上限后由 finalizePretrain 统一训练、发布，
+     * 届时才通知 coder 线程开始压缩。此处先不 emit、不 markDone。
+     */
+    if (preprocessInfo.wantQualPrior()) {
+        pretrainTarget = (parameter.threadNum > 0) ? parameter.threadNum : 1;
+        pretraining = true;
+        pretrainBlockCount = 0;
+        return;
+    }
+
+    /* 无先验：保持原行为——发射（空先验时为 no-op）、标记完成、放行 coder 线程。 */
+    emitQualPrior();
     preprocessInfo.markDone();
+    signalPriorSettled();
 
     if (parameter.verbose) {
         fprintf(stderr, "[流水线] 编码器决策完成，开始并行压缩（%u 线程）\n", parameter.threadNum);
     }
+}
+
+/*
+ * 逐块累积 QUAL 先验训练样本。块 0 的决策已在 fileDecisionProc 完成，这里对所有
+ * 预训练块（含块 0）追加 QUAL，累积到目标块数或 45 MB 上限后训练并发布。
+ */
+void CompressEngine::pretrainBlockProc(RoughIOBlock* blockPtr) {
+    if (!pretraining) {
+        return;
+    }
+    ++pretrainBlockCount;
+    CodecSelector::accumulateQualPrior(blockPtr, qualPriorAccum);
+    if (pretrainBlockCount >= pretrainTarget || qualPriorAccum.full()) {
+        finalizePretrain();
+    }
+}
+
+/*
+ * 训练累积的 QUAL、把先验作为辅助块发布落盘、置 DONE，并通知等待中的 coder 线程。
+ * 调用点：预训练块数够/45 MB 满（读循环中），或文件读完仍不足时（readLoopPostProc）。
+ * 数据块要引用先验，先验就必须先于一切数据块被压缩完成；发布在本函数内同步完成。
+ */
+void CompressEngine::finalizePretrain() {
+    if (!pretraining) {
+        return;
+    }
+    pretraining = false;
+
+    uint64_t trainedBytes = 0;
+    QualFcv2Params qualParams;
+    const FieldCodecSelection* qualSel =
+        (preprocessInfo.fields.size() > (size_t)SAM_QUAL)
+            ? &preprocessInfo.fields[SAM_QUAL] : nullptr;
+    if (qualSel != nullptr && qualSel->selectedCoder == CoderType::FCV2) {
+        qualParams = qualSel->fcv2Params;   /* 与压缩端同档位训练，先验才用得上 */
+    }
+    std::vector<uint8_t> snapshot =
+        CodecSelector::trainQualPriorModel(qualPriorAccum, qualParams, &trainedBytes);
+    qualPriorAccum = {};   /* 释放训练样本内存 */
+
+    if (!snapshot.empty()) {
+        preprocessInfo.setQualPrior(std::move(snapshot), trainedBytes);
+        if (parameter.verbose) {
+            fprintf(stderr, "  QUAL 先验：跨块训练 %llu 字节，快照 %zu 字节\n",
+                    (unsigned long long)trainedBytes,
+                    preprocessInfo.qualPrior().size());
+        }
+    }
+
+    emitQualPrior();
+    preprocessInfo.markDone();
+    signalPriorSettled();
+
+    if (parameter.verbose) {
+        fprintf(stderr, "[流水线] 先验发布完成，开始并行压缩（%u 线程）\n", parameter.threadNum);
+    }
+}
+
+/* 读循环结束兜底：预训练未完成（文件不足目标块数）则收尾；无先验/空文件也放行。 */
+void CompressEngine::readLoopPostProc() {
+    if (pretraining) {
+        finalizePretrain();
+    }
+    signalPriorSettled();
+}
+
+/* coder 线程启动门闩：等读线程发布先验（或判定无先验）的通知。 */
+void CompressEngine::workStartBarrier() {
+    std::unique_lock<std::mutex> lk(priorMutex);
+    priorCv.wait(lk, [this] { return priorSettled; });
 }
 
 void CompressEngine::emitQualPrior() {

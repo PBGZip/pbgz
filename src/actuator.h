@@ -41,6 +41,14 @@ public:
 
     virtual int32_t cleanup() { return 0; }
 
+    /*
+     * 首块串行化标记：引擎用 id==0 的 coder 线程先处理完第 0 块（含 preAnalysis，
+     * 会填充 SamInfo 这类进程级共享状态）后再放行其余线程。默认返回 true，表示
+     * 该块处理完即可放行；SAM 覆盖为按 notifyFlag 返回（压缩走到一半才置位，
+     * 保证放行发生在 preAnalysis 之后）。只放行一次，见 PbgzEngine::firstCoderNotify。
+     */
+    virtual bool getNotifyFlag() { return true; }
+
     Actuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr): inBlockPtr(inPtr), outBlockPtr(outPtr), pbgzEngine(engine) {};
 
     virtual ~Actuator() {

@@ -28,6 +28,7 @@
 #include "coder/coder_fc.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_affix_match.h"
+#include "coder/coder_qname.h"
 #include "coder/coder_qual.h"
 #include "coder/coder_fcv2.h"
 #include "utils/md5_util.h"
@@ -98,6 +99,8 @@ SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Pb
     refPosChrIndex = 65535;
     refPosBegin = 0;
     refPosEnd = 0;
+    optionCacheEmpty = true;
+    optionRecLines.clear();
 }
 
 SamCodecActuator::~SamCodecActuator() {
@@ -261,7 +264,7 @@ int32_t SamCodecActuator::preAnalysis() {
                         if (pRefeGene != nullptr) {
                             std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
                             if (refFileName != inputFastq) {
-                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s. \n", refFileName.c_str(), inputFastq.c_str());
+                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s. \n", refFileName.c_str(), inputFastq.c_str());
                                 isCheckUR = true;
                             }
                         }
@@ -312,7 +315,7 @@ int32_t SamCodecActuator::preAnalysis() {
                                         inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
                                     }
                                     if (refGeneName != inputFastq) {
-                                        fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fastq is %s \n", refGeneName.c_str(), inputFastq.c_str());
+                                        fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s \n", refGeneName.c_str(), inputFastq.c_str());
                                         isCheckPG = true;
                                     }
                                 }
@@ -587,8 +590,29 @@ int32_t SamCodecActuator::compressSamByFields() {
                     LOG_DEBUG("Id will compress in all.");
                     fieldDstLen = compressIdFieldInAll(fieldSrcLen, fieldMeta);
                 } else {
-                    LOG_DEBUG("Id will compress in split.");
-                    fieldDstLen = compressIdFieldSplit(fieldSrcLen, fieldMeta);
+                    /*
+                     * QNAME 试压选型：affix 分段 vs coder_qname（跨行去重）。
+                     * 多 FASTQ 拼接（前缀交替、数字全局随机）时 qname 更优；
+                     * 单 FASTQ（前缀恒定、片段号局部有序）时 affix 的相邻共享前缀
+                     * 更优。两个编码器各对前 QNAME_TRIAL_LINES 行试压、回滚，取
+                     * 实测较小者，再正式全量编码。
+                     */
+                    const uint32_t QNAME_TRIAL_LINES = 20000;
+                    const int64_t startLen = outBlockPtr->getDataLen();
+                    Json::Value metaAffix, metaQname;
+                    uint32_t srcAffix = 0, srcQname = 0;
+                    int32_t lenAffix = compressIdFieldSplit(srcAffix, metaAffix, QNAME_TRIAL_LINES);
+                    outBlockPtr->setDataLen(startLen);
+                    int32_t lenQname = compressIdFieldQname(srcQname, metaQname, QNAME_TRIAL_LINES);
+                    outBlockPtr->setDataLen(startLen);
+                    const bool useAffix = (lenQname < 0) || (lenAffix >= 0 && lenAffix <= lenQname);
+                    if (useAffix) {
+                        LOG_DEBUG("QNAME: affix=%d qname=%d -> affix", lenAffix, lenQname);
+                        fieldDstLen = compressIdFieldSplit(fieldSrcLen, fieldMeta);
+                    } else {
+                        LOG_DEBUG("QNAME: affix=%d qname=%d -> qname", lenAffix, lenQname);
+                        fieldDstLen = compressIdFieldQname(fieldSrcLen, fieldMeta);
+                    }
                 }
                 break;
             case 1: // FLAG
@@ -650,8 +674,8 @@ int32_t SamCodecActuator::compressSamByFields() {
             case 10: // QUAL
                 fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
-            case 11: // Optional fields
-                 fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+            case 11: // Optional fields (all tags)
+                fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
         }
 
@@ -836,7 +860,8 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
     return fieldIo->data_len;
 }
 
-int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
+                                               uint32_t trialLines) {
     // Similar to FastqActuator::compressIdInSplit, create multiple streams for each split symbol
     Json::Value streamMeta;
     uint32_t totalSrcLength = 0;
@@ -844,45 +869,18 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
 
     // Process each split symbol (similar to FastqActuator)
     for (uint32_t i = 0; i < idSplitSymbols.size(); ++i) {
-        std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME sub-stream");
-        std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
-
-        /*
-         * 纯数字段检测（取首行）：排除行尾分隔符，否则像 "265269\t" 这样的纯数字列
-         * 永远判不出来。检测结果只用于日志——实测 affix 压这类短列段比 bwt_cm 文本
-         * 和逐行 delta 都更好，所以所有段统一用 affix，不做分支。
-         */
         std::vector<size_t>& npos = inBlockPtr->getNpos();
         uint32_t lineNum = npos.size();
         uint8_t* buffer = inBlockPtr->getBuffer();
-        bool idDigit = false;
-        if (idSplitMaxLen[i] != idSplitMinLen[i]) {
-            uint32_t lineStart = (headEndLine == 0) ? 0 : npos[headEndLine - 1] + 1;
-            uint8_t* line = buffer + lineStart;
-            uint8_t* segPtr = nullptr;
-            uint32_t segLen = 0;
-            if (i == 0) {
-                segPtr = line;
-                segLen = idSplitPos[0][0] + 1;
-            } else {
-                uint32_t prevPos = idSplitPos[0][i - 1];
-                uint32_t currPos = idSplitPos[0][i];
-                segPtr = line + prevPos + 1;
-                segLen = currPos - prevPos;
-            }
-            idDigit = (segLen > 1);
-            for (uint32_t j = 0; idDigit && j + 1 < segLen; ++j) {
-                if ((segPtr[j] & 0xF0) != 0x30) {
-                    idDigit = false;
-                    break;
-                }
-            }
-        }
-        LOG_DEBUG("SAM QNAME split column(%u) uses coder_affix_match (idDigit=%d)", i, (int)idDigit);
 
+        std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME sub-stream");
+        std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
         uint32_t srcLength = 0;
         // Process each line and compress the specific split segment
         for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+            if (trialLines != 0 && lineIdx - headEndLine >= trialLines) {
+                break;
+            }
             uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
             uint8_t* line = buffer + lineStart;
 
@@ -948,6 +946,59 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
             totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
 
     return totalDstLength;
+}
+
+int32_t SamCodecActuator::compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
+                                               uint32_t trialLines) {
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME");
+    std::shared_ptr<coder_qname> qnameCoder = std::make_shared<coder_qname>(fieldIo.get());
+
+    fieldSrcLen = 0;
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        if (trialLines != 0 && lineIdx - headEndLine >= trialLines) {
+            break;
+        }
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        if (buffer[lineStart] == '@') {
+            continue;
+        }
+        uint32_t contentId = lineIdx - headEndLine;
+        uint8_t* idStart = buffer + lineStart;
+        /* QNAME 字段到第一个 tab 为止（含 tab，与 compressIdFieldInAll 一致）。 */
+        uint32_t idLength = contentPos[contentId][0] + 1;
+        qnameCoder->encode_line(idStart, idLength);
+        fieldSrcLen += idLength;
+    }
+
+    qnameCoder->encode_flush();
+    if (fieldIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode QNAME (coder_qname) overflow: output buffer too small");
+        return -1;
+    }
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
+
+    Json::Value streamMeta;
+    Json::Value tmpMeta;
+    tmpMeta["srclen"] = fieldSrcLen;
+    tmpMeta["dstlen"] = fieldIo->data_len;
+    tmpMeta["coder"] = fieldIo->meta;
+    tmpMeta["splitidx"] = 0;
+    streamMeta.append(tmpMeta);
+
+    fieldMeta["totalsrclen"] = fieldSrcLen;
+    fieldMeta["totaldstlen"] = fieldIo->data_len;
+    fieldMeta["streams"] = streamMeta;
+    fieldMeta["splitsym"] = "\t";
+    fieldMeta["field"] = 0;
+
+    LOG_INFO("SAM QNAME (coder_qname) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
+            fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
+
+    return fieldIo->data_len;
 }
 
 int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
@@ -1166,6 +1217,187 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
     return fieldIo->data_len;
 }
 
+/*
+ * OPTION 字段（第 12 列起的全部 tag）按 CRAM 式 tag 列化压缩。
+ *
+ * 思路：OPTION 文本 = 恒定的 tag 结构（名字/冒号/类型）+ 变化的值。通用字节流压缩
+ * （affix/bwt）靠前缀匹配吃掉 tag 结构，但值仍按文本数字存，浪费一半。这里把结构
+ * 和值分开：
+ *   1. 块内建 tag 字典（name+type 各一次）。
+ *   2. 每条记录只存 tag 的 id 序列（顺序）。
+ *   3. 每个 tag 的值单独成列：整数按 delta + 定宽二进制，其余按长度前缀字节流。
+ *   4. 各列各自走 bwt_cm。
+ */
+int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    /* 逐行解析 OPTION，建 tag 字典 + 每行 id 序列 + 每 tag 值列。 */
+    std::vector<std::pair<std::string, std::string>> tagDict;
+    std::map<std::string, int> tagId;
+    std::vector<std::vector<uint8_t>> recIds;
+    std::vector<std::vector<std::string>> tagVals;
+    fieldSrcLen = 0;
+
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        uint32_t lineEnd = npos[lineIdx] - lineStart;
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+        uint32_t contentIdx = lineIdx - headEndLine;
+        uint32_t fieldStartPos = contentPos[contentIdx][10] + 1;
+        uint32_t fieldLen = lineEnd - fieldStartPos;
+        if (fieldLen == 0) {
+            recIds.push_back({});
+            continue;
+        }
+        fieldSrcLen += fieldLen;
+
+        std::vector<uint8_t> ids;
+        const uint8_t* p = line + fieldStartPos;
+        uint32_t segStart = 0;
+        for (uint32_t i = 0; i <= fieldLen; ++i) {
+            bool isEnd = (i == fieldLen) || (p[i] == '\t');
+            if (isEnd) {
+                uint32_t segLen = i - segStart;
+                if (segLen > 0 && p[segStart] != '\n') {
+                    const uint8_t* ts = p + segStart;
+                    const uint8_t* colon1 = nullptr, *colon2 = nullptr;
+                    for (uint32_t j = 1; j < segLen; ++j) {
+                        if (ts[j] == ':' && colon1 == nullptr) colon1 = ts + j;
+                        else if (ts[j] == ':' && colon2 == nullptr) colon2 = ts + j;
+                    }
+                    if (colon2 != nullptr) {
+                        std::string name((char*)ts, colon1 - ts);
+                        std::string type((char*)(colon1 + 1), colon2 - colon1 - 1);
+                        std::string value((char*)(colon2 + 1), ts + segLen - colon2 - 1);
+                        int id;
+                        auto it = tagId.find(name);
+                        if (it == tagId.end()) {
+                            id = (int)tagDict.size();
+                            tagDict.push_back({name, type});
+                            tagId[name] = id;
+                            tagVals.push_back({});
+                        } else {
+                            id = it->second;
+                        }
+                        ids.push_back((uint8_t)id);
+                        tagVals[id].push_back(value);
+                    }
+                }
+                segStart = i + 1;
+            }
+        }
+        recIds.push_back(ids);
+    }
+
+    const uint32_t nTag = (uint32_t)tagDict.size();
+    if (nTag == 0) {
+        fieldMeta["mode"] = "tag_split";
+        fieldMeta["srclen"] = 0;
+        fieldMeta["dstlen"] = 0;
+        fieldMeta["tags"] = Json::Value(Json::arrayValue);
+        return 0;
+    }
+
+    Json::Value streams(Json::arrayValue);
+    uint32_t totalDst = 0;
+
+    Json::Value tags(Json::arrayValue);
+    for (uint32_t t = 0; t < nTag; ++t) {
+        Json::Value e(Json::arrayValue);
+        e.append(tagDict[t].first);
+        e.append(tagDict[t].second);
+        tags.append(e);
+    }
+
+    /*
+     * 所有列都按"逐行 + 分隔符"编码，用 bwt_cm 逐行方式压缩。
+     * 不能用一次性大块：bwt_cm 对近恒定大块（id 序列几乎恒定、整数列 delta 几乎全 0）
+     * 解码会挂，而逐行 + '\n' 分隔是验证过不挂的用法。
+     */
+
+    /* id 列：每条记录一行，id 逗号分隔，行尾 '\n'。 */
+    {
+        std::vector<uint8_t> idStream;
+        for (size_t r = 0; r < recIds.size(); ++r) {
+            for (size_t k = 0; k < recIds[r].size(); ++k) {
+                if (k) idStream.push_back(',');
+                uint32_t v = recIds[r][k];
+                char buf[4];
+                int n = snprintf(buf, sizeof(buf), "%u", v);
+                for (int b = 0; b < n; ++b) idStream.push_back((uint8_t)buf[b]);
+            }
+            idStream.push_back('\n');
+        }
+        std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "OPTION ids");
+        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
+        size_t pos = 0;
+        for (size_t r = 0; r < recIds.size(); ++r) {
+            /* 逐行喂，保持 bwt_cm 行模式语义。 */
+            size_t start = pos;
+            while (pos < idStream.size() && idStream[pos] != '\n') pos++;
+            pos++;
+            if (pos > start) c->encode_line(idStream.data() + start, (uint32_t)(pos - start));
+        }
+        c->encode_flush();
+        if (io->err != coder_io::IO_OK) return -1;
+        Json::Value s;
+        s["sname"] = "ids";
+        s["srclen"] = (Json::Value::UInt)idStream.size();
+        s["dstlen"] = (Json::Value::UInt)io->data_len;
+        s["coder"] = io->meta;
+        streams.append(s);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + io->data_len);
+        totalDst += io->data_len;
+    }
+
+    /* 各 tag 值列：每值一行，行尾 '\n'（SAM 值不含 '\n'）。整数列按文本存，绕开 bwt 大块缺陷。 */
+    for (uint32_t t = 0; t < nTag; ++t) {
+        const std::vector<std::string>& vals = tagVals[t];
+        std::vector<uint8_t> col;
+        for (size_t k = 0; k < vals.size(); ++k) {
+            col.insert(col.end(), vals[k].begin(), vals[k].end());
+            col.push_back('\n');
+        }
+        std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "OPTION tag");
+        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
+        size_t pos = 0;
+        for (size_t k = 0; k < vals.size(); ++k) {
+            size_t start = pos;
+            while (pos < col.size() && col[pos] != '\n') pos++;
+            pos++;
+            if (pos > start) c->encode_line(col.data() + start, (uint32_t)(pos - start));
+        }
+        c->encode_flush();
+        if (io->err != coder_io::IO_OK) return -1;
+        Json::Value s;
+        s["sname"] = "tag";
+        s["tag"] = tagDict[t].first;
+        s["type"] = tagDict[t].second;
+        s["srclen"] = (Json::Value::UInt)col.size();
+        s["dstlen"] = (Json::Value::UInt)io->data_len;
+        s["coder"] = io->meta;
+        streams.append(s);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + io->data_len);
+        totalDst += io->data_len;
+    }
+
+    fieldMeta["mode"] = "tag_split";
+    fieldMeta["tags"] = tags;
+    fieldMeta["streams"] = streams;
+    fieldMeta["srclen"] = fieldSrcLen;
+    fieldMeta["dstlen"] = totalDst;
+    fieldMeta["field"] = 11;
+
+    LOG_INFO("SAM OPTION tag-split compression completed: %u bytes -> %u bytes, %u tags, ratio = %.2f%%",
+        fieldSrcLen, totalDst, nTag, (double)(totalDst * 100) / (double)(fieldSrcLen ? fieldSrcLen : 1));
+    return (int32_t)totalDst;
+}
+
 int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
@@ -1272,7 +1504,7 @@ uint32_t SamCodecActuator::parseCigarRefConsumed(uint8_t* cigarString, uint32_t 
  * 左侧片段为正、右侧片段为负。pos < pnext 时本读在左，右端 = pnext + 伙伴参考跨度 - 1；
  * pos > pnext 时本读在右，左端 = pos，模板长为负。
  */
-int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx) {
+int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
     /* 非配对（FLAG bit0）或任一端未比对（bit2/bit3），TLEN 定为 0。 */
     auto flagIt = mappedFlag.find(lineIdx);
     if (flagIt == mappedFlag.end() || !(flagIt->second & 0x1) ||
@@ -1320,12 +1552,20 @@ int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx) {
     }
 
     int64_t templateLen;
+    /*
+     * TLEN 的模板长度约定因比对工具而异，恰好相差 1：
+     *   bwa 写的是 右端pos + 右端读长 - 左端pos - 1（minusOne=true）
+     *   minimap2 写的是 右端pos + 右端读长 - 左端pos     （minusOne=false）
+     * 没有哪个是"标准"，必须按块自适应选（compressTLen 里统计哪种匹配更多）。
+     * 选错约定会让 99%+ 的记录被判为异常，异常流退化为存全量 TLEN。
+     */
+    const int64_t conv = minusOne ? 1 : 0;
     if (pos < pnext) {
-        templateLen = pnext + (int64_t)mateRefSpan - pos;
+        templateLen = pnext + (int64_t)mateRefSpan - pos - conv;
     } else if (pos > pnext) {
-        templateLen = -(pos + (int64_t)refSpan - pnext);
+        templateLen = -(pos + (int64_t)refSpan - pnext - conv);
     } else {
-        templateLen = pnext + (int64_t)mateRefSpan - pos;
+        templateLen = pnext + (int64_t)mateRefSpan - pos - conv;
     }
     return (int32_t)templateLen;
 }
@@ -1354,6 +1594,36 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         tlenMateIndex[std::make_pair(posIt2->second, entry.second)] = entry.first;
     }
 
+    /*
+     * 第一遍：统计两种模板长度约定（bwa 减 1 / minimap2 不减）分别匹配多少记录，
+     * 取匹配多的那个作为本块约定。约定存进 meta，解压侧照读。
+     */
+    uint64_t convMinus1 = 0, convPlain = 0;
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        uint32_t lineEnd = npos[lineIdx] - lineStart;
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+        uint32_t contentIdx = lineIdx - headEndLine;
+        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
+        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
+        uint8_t* fieldStart = line + prevTabPos + 1;
+        uint32_t fieldLength = currTabPos - prevTabPos;
+        if (fieldLength > 1) {
+            std::string tlenStr = std::string((char*)fieldStart, fieldLength - 1);
+            int32_t currentTLEN = (int32_t)std::stoll(tlenStr);
+            if (computeTLEN(lineIdx, true) == currentTLEN) convMinus1++;
+            if (computeTLEN(lineIdx, false) == currentTLEN) convPlain++;
+        }
+    }
+    const bool minusOne = (convMinus1 >= convPlain);
+    fieldMeta["tlen_conv"] = minusOne ? 1 : 0;
+    LOG_INFO("TLEN convention: minusOne=%d (matches %llu vs %llu)",
+             (int)minusOne, (unsigned long long)convMinus1, (unsigned long long)convPlain);
+
+    /* 第二遍：按选定的约定收集推不上的行。 */
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
@@ -1373,7 +1643,7 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         if (fieldLength > 1) {
             std::string tlenStr = std::string((char*)fieldStart, fieldLength - 1);
             int32_t currentTLEN = (int32_t)std::stoll(tlenStr);
-            int32_t computedTLEN = computeTLEN(lineIdx);
+            int32_t computedTLEN = computeTLEN(lineIdx, minusOne);
             if (computedTLEN != currentTLEN) {
                 tlenExceptions.push_back(std::make_pair(contentIdx, currentTLEN));
             }
@@ -1753,6 +2023,24 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     std::shared_ptr<coder_fcv2> fcv2Coder;
     std::shared_ptr<coder_bwt_cm> qualCmCoder;
     if (useFcv2) {
+        /*
+         * 预处理若选中 fcv2，会把上下文参数档位一并交出来；编码端用与先验训练相同的
+         * 档位创建编码器，档位本身还会写进码流头部，解码端自行读回。未接通预处理时
+         * 退回默认档位，与冷启动行为一致。
+         */
+        Fcv2Cfg fcv2Cfg;
+        const FieldCodecSelection* qualSel =
+            (qualPreInfo != nullptr) ? qualPreInfo->getField(SAM_QUAL) : nullptr;
+        if (qualSel != nullptr && qualSel->selectedCoder == CoderType::FCV2) {
+            fcv2Cfg.cycleMax = qualSel->fcv2Params.cycleMax;
+            fcv2Cfg.cycleBucket = qualSel->fcv2Params.cycleBucket;
+            fcv2Cfg.deltaMax = qualSel->fcv2Params.deltaMax;
+            fcv2Cfg.deltaBucket = qualSel->fcv2Params.deltaBucket;
+            fcv2Cfg.prevShift = qualSel->fcv2Params.prevShift;
+            fcv2Cfg.useDelta = qualSel->fcv2Params.useDelta;
+            fcv2Cfg.useDedup = qualSel->fcv2Params.useDedup;
+            fcv2Cfg.useQa = qualSel->fcv2Params.useQa;
+        }
         std::vector<uint32_t> freqByByte(256, 0);
         for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
             uint32_t b = (uint32_t)qualFreqTable[i].first + (uint32_t)'!';
@@ -1775,10 +2063,10 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
             (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(0) : AuxPayloadPtr();
         bool priorLoaded = false;
         if (priorBlob && !priorBlob->empty()) {
-            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte,
+            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte, fcv2Cfg,
                                                      *priorBlob, &priorLoaded);
         } else {
-            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte);
+            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte, fcv2Cfg);
         }
         if (!priorLoaded) {
             qualPriorAddress = -1;
@@ -1828,8 +2116,10 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
 
         // Get SEQ field for quality compression context (field 9)
         uint8_t* seqStart = nullptr;
+        uint32_t seqLen = 0;
         if (fieldIdx >= 1 && contentPos[contentIdx].size() >= fieldIdx) {
             seqStart = line + contentPos[contentIdx][fieldIdx - 2] + 1;
+            seqLen = contentPos[contentIdx][fieldIdx - 1] - contentPos[contentIdx][fieldIdx - 2] - 1;
         }
 
         if (useFcv2) {
@@ -1851,7 +2141,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
                 }
                 rev = (flagVal & 16) != 0;
             }
-            fcv2Coder->encode_record(qualStart, qualLength, rev);
+            fcv2Coder->encode_record(qualStart, qualLength, rev, seqStart, seqLen);
         } else if (useBwtCm) {
             qualCmCoder->encode_line(qualStart, qualLength);
         } else {
@@ -1981,6 +2271,8 @@ int32_t SamCodecActuator::decompress() {
     }
     // Reset read offset before decompression
     readOffset = 0;
+    optionCacheEmpty = true;
+    optionRecLines.clear();
     // Parse meta information
     initMetaInfo();
 
@@ -2198,6 +2490,8 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                     uint8_t* pEnd = outputBlock->getCurrent();
                     *(pEnd - 1) = '\n';
                 }
+            } else if (fieldIdx == 11) {   /// OPTION（全部 tag）
+                decoderLen = decompressOptionField(lineNo, '\n', outputBlock, streams[11]);
             } else {   /// Optional fields
                 // Decode field until tab or end
                 if (fieldIdx + 1 == fieldCount) {
@@ -2326,6 +2620,9 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 } else if (coderName == "coder_bwt_cm") {
                     idDecoders.push_back(std::make_shared<coder_bwt_cm>(io.get()));
                     idDecoders.back()->set_level(idStreamMeta[i]["coder"]["level"].asInt());
+                } else if (coderName == "coder_qname") {
+                    idUsesQnameCoder = true;
+                    idDecoders.push_back(std::make_shared<coder_qname>(io.get()));
                 } else {
                     LOG_ERROR("Unsupport coder name:%s", coderName.c_str());
                     return -1;
@@ -2594,6 +2891,17 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
                 readOffset += dstLen;
             }
+        } else if (idx == 11 && streamMeta[idx].isMember("mode") &&
+                   streamMeta[idx]["mode"].asString() == "tag_split") {
+            /*
+             * OPTION tag-split：不在 initDecoder 建解码器，也不推进 readOffset——
+             * 记下本字段流的起点，decompressOptionField 在首个 OPTION 行时按
+             * streams 数组惰性解全部列。
+             * 不能直接用 readOffset：decompressIdField 等逐行解码会推进 readOffset，
+             * 到 OPTION 行时已偏移（实测多出 ID 字段 dstlen）。
+             */
+            fieldIoStart[idx] = readOffset;
+            continue;
         } else {
             std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
             uint32_t dstLen = streamMeta[idx]["dstlen"].asUInt();
@@ -2651,6 +2959,146 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lin
         }
     }
     return fieldLen;
+}
+
+/*
+ * OPTION 字段的解压侧：先在整个块解码前把 id 序列列和各 tag 值列全部解出来缓存，
+ * 逐行输出时按该行的 id 序列拼回 `NAME:TYPE:VALUE`，与压缩侧完全对称。
+ *
+ * 压缩时 OPTION 整块作为一个字段（field 11），解压也一次性解完所有行，输出从
+ * 块起始按行推进。首次调用（lineNo==0 且缓存空）时惰性解全部。
+ */
+int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFlag,
+                                                RoughIOBlock* outputBlock,
+                                                const Json::Value& fieldMeta) {
+    if (!fieldMeta.isMember("tags") || fieldMeta["mode"].asString() != "tag_split") {
+        return decompressRegularField(11, lineNo, splitFlag, outputBlock);
+    }
+
+    /* 惰性：整个 OPTION 列一次解出。 */
+    if (optionCacheEmpty) {
+        if (0 != decodeOptionColumn(fieldMeta)) {
+            return -1;
+        }
+    }
+    if (lineNo < optionRecLines.size()) {
+        const std::string& content = optionRecLines[lineNo];
+        if (!content.empty()) {
+            memcpy(outputBlock->getCurrent(), content.data(), content.size());
+            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)content.size());
+            *(outputBlock->getCurrent()) = splitFlag;
+            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+            return (int32_t)content.size() + 1;
+        }
+    }
+    /* 本行没有 OPTION：把 QUAL 之后刚追加的 '\t' 转回 '\n'（与旧逻辑一致）。 */
+    uint8_t* pEnd = outputBlock->getCurrent();
+    if (pEnd > outputBlock->getBuffer()) {
+        *(pEnd - 1) = '\n';
+    }
+    return 0;
+}
+
+int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
+    optionRecLines.clear();
+    optionCacheEmpty = false;
+
+    /* 本字段流起点：initDecoder 已记录；不能用 readOffset（被逐行解码推进过）。 */
+    uint32_t optBase = readOffset;
+    auto optIt = fieldIoStart.find(11);
+    if (optIt != fieldIoStart.end()) {
+        optBase = optIt->second;
+    }
+
+    const Json::Value& streams = fieldMeta["streams"];
+    if (!streams.isArray()) {
+        return -1;
+    }
+
+    const Json::Value& tags = fieldMeta["tags"];
+    const uint32_t nTag = (uint32_t)tags.size();
+
+    /* 解 id 序列列（逐行文本，逗号分隔）。 */
+    std::vector<std::vector<uint8_t>> recIds;
+    uint32_t idStreamDst = 0;
+    for (uint32_t i = 0; i < streams.size(); ++i) {
+        if (streams[i]["sname"].asString() == "ids") {
+            idStreamDst = streams[i]["dstlen"].asUInt();
+            break;
+        }
+    }
+    {
+        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + optBase, idStreamDst, "OPTION ids");
+        ioVector.push_back(io);
+        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
+        uint8_t tmp[1 << 16];
+        int32_t n;
+        std::string line;
+        std::vector<std::vector<uint8_t>> lines;
+        while ((n = c->decode_line(tmp, sizeof(tmp), '\n', false)) > 0) {
+            line.assign((char*)tmp, (size_t)n);
+            if (!line.empty() && line.back() == '\n') line.pop_back();
+            std::vector<uint8_t> ids;
+            size_t p = 0;
+            while (p < line.size()) {
+                size_t q = line.find(',', p);
+                if (q == std::string::npos) q = line.size();
+                std::string tok = line.substr(p, q - p);
+                if (!tok.empty()) ids.push_back((uint8_t)atoi(tok.c_str()));
+                p = q + 1;
+            }
+            lines.push_back(ids);
+        }
+        recIds.swap(lines);
+        optBase += idStreamDst;
+    }
+
+    /* 解各 tag 值列（逐行文本）。 */
+    std::vector<std::vector<std::string>> tagVals(nTag);
+    uint32_t colIdx = 0;
+    for (uint32_t i = 0; i < streams.size(); ++i) {
+        const Json::Value& s = streams[i];
+        if (s["sname"].asString() != "tag") continue;
+        uint32_t tagIdx = 0;
+        for (uint32_t t = 0; t < nTag; ++t) {
+            if (tags[t][0].asString() == s["tag"].asString()) { tagIdx = t; break; }
+        }
+        uint32_t dstlen = s["dstlen"].asUInt();
+        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + optBase, dstlen, "OPTION tag");
+        ioVector.push_back(io);
+        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
+        uint8_t tmp[1 << 16];
+        int32_t n;
+        while ((n = c->decode_line(tmp, sizeof(tmp), '\n', false)) > 0) {
+            size_t tlen = (size_t)n;
+            if (tlen > 0 && tmp[tlen-1] == '\n') tlen--;
+            tagVals[tagIdx].emplace_back((char*)tmp, tlen);
+        }
+        optBase += dstlen;
+        colIdx++;
+    }
+
+    /* 逐行拼回 OPTION 文本。 */
+    const uint32_t lines = (uint32_t)recIds.size();
+    optionRecLines.resize(lines);
+    std::vector<size_t> colPos(nTag, 0);
+    for (uint32_t r = 0; r < lines; ++r) {
+        std::string out;
+        const auto& ids = recIds[r];
+        for (size_t k = 0; k < ids.size(); ++k) {
+            uint32_t tid = ids[k];
+            if (tid >= nTag || colPos[tid] >= tagVals[tid].size()) continue;
+            const std::string& v = tagVals[tid][colPos[tid]++];
+            if (k) out += '\t';
+            out += tags[tid][0].asString();
+            out += ':';
+            out += tags[tid][1].asString();
+            out += ':';
+            out += v;
+        }
+        optionRecLines[r] = out;
+    }
+    return 0;
 }
 
 int32_t SamCodecActuator::decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
@@ -2715,7 +3163,8 @@ int32_t SamCodecActuator::decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uin
         if (cacheIt != tlenCache.end()) {
             val = cacheIt->second;
         } else {
-            val = computeTLEN(lineNo);
+            bool minusOne = !fieldMeta.isMember("tlen_conv") || fieldMeta["tlen_conv"].asInt() != 0;
+            val = computeTLEN(lineNo, minusOne);
         }
     } else {
         std::string mode = fieldMeta.isMember("mode") ? fieldMeta["mode"].asString() : "";
@@ -2869,6 +3318,20 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
     // Handle ID field with split compression
     Json::Value& idStreams = fieldMeta["streams"];
     uint32_t idLength = 0;
+
+    if (idUsesQnameCoder && !idDecoders.empty()) {
+        /* 单流 coder_qname：逐行解一整条 QNAME（含末尾 '\t'）。 */
+        int32_t segLen = idDecoders[0]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
+            UINT8_MAX, false);
+        if (segLen < 0) {
+            LOG_ERROR("Decode QNAME (coder_qname) failed: %d", segLen);
+            return -1;
+        }
+        readOffset += idStreams[0]["dstlen"].asUInt();
+        outputBlock->setDataLen(outputBlock->getDataLen() + segLen);
+        return (int32_t)idStreams[0]["dstlen"].asUInt();
+    }
+
     // Reconstruct ID from split segments
     for (uint32_t splitIdx = 0; splitIdx < idStreams.size(); ++splitIdx) {
         Json::Value& splitMeta = idStreams[splitIdx];
@@ -3077,8 +3540,9 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 
 int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
     if (qualFcv2Decoder != nullptr) {
-        /* fcv2 不需要 SEQ 作为上下文，链方向也由它自己的码流带着，只要长度。 */
-        if (qualFcv2Decoder->decode_record(outputBlock->getCurrent(), actualBaseLen) < 0) {
+        /* 链方向由码流自带；碱基上下文用本记录已经解出的 SEQ（basePtr），
+           与压缩侧传 seqStart 对应。 */
+        if (qualFcv2Decoder->decode_record(outputBlock->getCurrent(), actualBaseLen, basePtr, actualBaseLen) < 0) {
             LOG_ERROR("Decode quality by fcv2 failed, len = %u", actualBaseLen);
             return -1;
         }

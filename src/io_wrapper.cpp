@@ -516,7 +516,15 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     }
     fo.fileSize = newSize;
     fo.position = fo.fileSize;
-    return newSize;
+    /*
+     * 返回本次实际写入的字节数，而不是累计文件位置 newSize。
+     *
+     * writeIO 的契约是"返回写入字节数（PipeWriter/GzFileWriter 均如此），调用方求和
+     * 得到总长"。原先返回 newSize 会让 writeBlockData 里 7 次调用之和 ≈ 7×文件位置，
+     * 一旦输出文件超过 ~2^31/7 ≈ 307MB，uint32 累加再转 int32 就溢出成负数，
+     * 被误判为"Write block failed"。
+     */
+    return writeLen;
 }
 
 int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen) {

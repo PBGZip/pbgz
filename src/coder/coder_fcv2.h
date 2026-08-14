@@ -31,6 +31,41 @@
 
 class fcv2_impl;
 
+/*
+ * fcv2 上下文模型的参数档位。默认值即历史固定常量；QualSelector 按数据特征（质量值
+ * 字母表大小、样本量、平均读长）选定一组参数参与试压，选中的档位随 PreprocessInfo
+ * 传给编码端与先验训练，解码端从码流头部读回同一组参数（见 encode_record/begin_decode）。
+ *
+ * 含义：
+ *   cycleMax   / cycleBucket  记录内位置（测序循环序号）的取值上限与分档数
+ *   deltaMax   / deltaBucket  read 内质量跳变次数的取值上限与分档数（策略 1）
+ *   prevShift  m3 里前驱质量值的量化右移位数，越大越粗（字母表大时上下文更稀疏）
+ *   useDelta   是否启用 m5 跳变次数上下文；置 false 时 deltaBucket 归一为 1
+ *   useDedup   是否启用相邻重复 read 去重（策略 3，fqzcomp 的 do_dedup）：
+ *              每条记录先与上一条比对，完全相同就只写 1 bit，整条质量串跳过。
+ *   useQa      是否启用 read 平均质量分 bin 上下文（策略 4，fqzcomp 的 do_qa）：
+ *              每条记录先算平均质量、量化成 4 档写进码流，档位作为 m6 上下文。
+ */
+struct Fcv2Cfg {
+    int  cycleMax    = 96;
+    int  cycleBucket = 16;
+    int  deltaMax    = 32;
+    int  deltaBucket = 8;
+    int  prevShift   = 1;
+    bool useDelta    = true;
+    bool useDedup    = false;
+    bool useQa       = false;
+
+    bool operator==(const Fcv2Cfg& o) const
+    {
+        return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
+               deltaMax == o.deltaMax && deltaBucket == o.deltaBucket &&
+               prevShift == o.prevShift && useDelta == o.useDelta &&
+               useDedup == o.useDedup && useQa == o.useQa;
+    }
+    bool operator!=(const Fcv2Cfg& o) const { return !(*this == o); }
+};
+
 class coder_fcv2 {
 public:
     /*
@@ -41,6 +76,9 @@ public:
      */
     coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable);
 
+    /* 带上下文参数档位的版本；cfg 会原样写进码流头部供解码端读回。 */
+    coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, const Fcv2Cfg& cfg);
+
     /*
      * 从先前导出的模型快照创建编码器。modelLoaded 非空时会写入实际加载结果：只有快照
      * 的版本、编译期尺寸参数、字母表和全部模型数组都通过校验时才为 true。任何损坏或不
@@ -48,6 +86,10 @@ public:
      * 调用方可以把快照当作可选的性能优化，而不把错误处理扩散到压缩主流程。
      */
     coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable,
+               const std::vector<uint8_t>& modelBlob, bool* modelLoaded);
+
+    /* 带上下文参数档位 + 先验快照的版本。 */
+    coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, const Fcv2Cfg& cfg,
                const std::vector<uint8_t>& modelBlob, bool* modelLoaded);
     ~coder_fcv2();
 
@@ -77,17 +119,29 @@ public:
      *
      * 未比对的数据（FASTQ 转来的 uBAM）该位恒为 0，此时存储顺序就是原始顺序，
      * 传 false 即可。
+     *
+     * seq 是对应位置的碱基序列（ACGTN），seqLen 是其长度，用作第五个上下文模型的
+     * 条件（当前碱基 + 循环序号）。反向链时按与循环序号一致的映射取碱基，即取存储序里
+     * 位置 len-1-i 的碱基，因为那才是产生本质量值的那个循环。seq 传 nullptr 或
+     * seqLen 不足以覆盖 mapped 位置时，该位置碱基上下文归入"未知"档，行为与无碱基
+     * 版本一致。
      */
-    void encode_record(const uint8_t* qual, uint32_t len, bool rev);
+    void encode_record(const uint8_t* qual, uint32_t len, bool rev,
+                       const uint8_t* seq = nullptr, uint32_t seqLen = 0);
 
     /* 编码收尾，返回写入 io 的字节数。 */
     int32_t encode_flush();
 
     /*
-     * 解码一条记录的质量值到 dst。只需要长度，不需要再传链方向——它已经随码流写出，
-     * 解码时自行读回。这样解压侧不必为了解 QUAL 去跟踪 FLAG 字段。
+     * 解码一条记录的质量值到 dst。链方向由码流自带、解码时自行读回，只需要长度，
+     * 这样解压侧不必为了解 QUAL 去跟踪 FLAG 字段。
+     *
+     * seq 是已经解出的对应记录碱基序列（长度 seqLen），作为碱基上下文模型的条件；
+     * 传 nullptr 时归入"未知"档，必须与编码侧一致（编码侧也应传空，否则两端上下文
+     * 不一致）。
      */
-    int32_t decode_record(uint8_t* dst, uint32_t len);
+    int32_t decode_record(uint8_t* dst, uint32_t len,
+                          const uint8_t* seq = nullptr, uint32_t seqLen = 0);
 
     /* 解码前调用一次，读取码流头部的字母表等信息。 */
     int32_t begin_decode();

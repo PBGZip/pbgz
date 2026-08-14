@@ -67,6 +67,31 @@ enum class FieldStatus : uint8_t {
     SKIPPED        /* field not analyzed (empty / too small / n-a)     */
 };
 
+/*
+ * fcv2 质量编码器的上下文参数档位。QualSelector 按数据特征（质量字母表大小、样本量、
+ * 平均读长）选定并参与试压，选中后随 PreprocessInfo 交给压缩端与先验训练；解码端从
+ * 码流头部读回同一组参数，不依赖本结构。字段语义见 coder_fcv2.h 的 Fcv2Cfg。
+ */
+struct QualFcv2Params {
+    int  cycleMax    = 96;
+    int  cycleBucket = 16;
+    int  deltaMax    = 32;
+    int  deltaBucket = 8;
+    int  prevShift   = 1;
+    bool useDelta    = true;
+    bool useDedup    = false;
+    bool useQa       = false;
+
+    bool operator==(const QualFcv2Params& o) const
+    {
+        return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
+               deltaMax == o.deltaMax && deltaBucket == o.deltaBucket &&
+               prevShift == o.prevShift && useDelta == o.useDelta &&
+               useDedup == o.useDedup && useQa == o.useQa;
+    }
+    bool operator!=(const QualFcv2Params& o) const { return !(*this == o); }
+};
+
 /* Codec selection result for one field. */
 struct FieldCodecSelection {
     FieldStatus status;
@@ -115,6 +140,9 @@ struct FieldCodecSelection {
      */
     uint32_t    decidedLen = 0;
     uint32_t    rounds = 0;
+
+    /* 选中 fcv2 时携带的上下文参数档位；其他编码器下无意义。 */
+    QualFcv2Params fcv2Params;
 
     FieldCodecSelection()
         : status(FieldStatus::SKIPPED),
@@ -189,7 +217,8 @@ struct PreprocessInfo {
     std::vector<FieldCodecSelection> fields;
 
     /*
-     * fcv2 由首块完整 QUAL 训练出的模型快照及其训练量。
+     * fcv2 由跨块累积的 QUAL（最多 45 MB，首块 + 后续预训练块）训练出的模型快照
+     * 及其训练量。
      *
      * 先验跟随预处理结果保存，而不是交给某个编码器实例：PreprocessInfo 是流水线和
      * 编码器决策之间唯一的交接点，编码器层因此无需知道数据块或文件偏移，继续保持
@@ -199,8 +228,15 @@ struct PreprocessInfo {
     std::vector<uint8_t> qualPriorSnapshot;
     uint64_t qualPriorTrainingBytes;
 
+    /*
+     * analyze 判定本文件值得训练并发布 QUAL 先验。决策产出于预处理（RUNNING 阶段），
+     * 只被读线程读取；实际训练推迟到读线程读完预训练块之后（跨块累积），见
+     * CompressEngine::finalizePretrain。
+     */
+    bool qualPriorRequested;
+
     PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
-                       qualPriorTrainingBytes(0) {}
+                       qualPriorTrainingBytes(0), qualPriorRequested(false) {}
 
     void reset(BlockType type)
     {
@@ -211,6 +247,7 @@ struct PreprocessInfo {
         fields.clear();
         qualPriorSnapshot.clear();
         qualPriorTrainingBytes = 0;
+        qualPriorRequested = false;
     }
 
     bool isDone() const
@@ -257,6 +294,10 @@ struct PreprocessInfo {
         }
         return fallback;
     }
+
+    bool wantQualPrior() const { return qualPriorRequested; }
+
+    void setQualPriorRequested(bool v) { qualPriorRequested = v; }
 
     const std::vector<uint8_t>& qualPrior() const
     {

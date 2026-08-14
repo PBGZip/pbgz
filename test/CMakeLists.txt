@@ -74,30 +74,6 @@ target_link_libraries(fcv2_model_roundtrip PRIVATE
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
-# 先验快照落盘工具：用真实 SAM 训练并导出模型快照，供评估通用压缩器对快照的压缩效果。
-# 仅用于评估，不加入 add_test，也不参与产品功能。
-add_executable(fcv2_prior_dump fcv2_prior_dump.cpp)
-target_link_libraries(fcv2_prior_dump PRIVATE
-    pbgz_coder
-    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
-)
-
-# 先验收益实测工具：对照"无先验整段/无先验分片/有先验分片"三种模式，量出先验在本树
-# fcv2 上的实际收益。仅用于评估，不加入 add_test，也不参与产品功能。
-add_executable(fcv2_prior_gain fcv2_prior_gain.cpp)
-target_link_libraries(fcv2_prior_gain PRIVATE
-    pbgz_coder
-    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
-)
-
-# QUAL 列编码器横向实测：补上 coder_bwt_cm 这个当前不在 QualSelector 候选集里的对照。
-# 仅用于评估，不加入 add_test，也不参与产品功能。
-add_executable(qual_coder_bench qual_coder_bench.cpp)
-target_link_libraries(qual_coder_bench PRIVATE
-    pbgz_coder
-    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
-)
-
 # coder_bwt_cm 逐记录定长往返验证：用于定位 QUAL 走 bwt_cm 时的解压失败根因。
 add_executable(bwtcm_record_roundtrip bwtcm_record_roundtrip.cpp)
 target_link_libraries(bwtcm_record_roundtrip PRIVATE
