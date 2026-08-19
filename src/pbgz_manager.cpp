@@ -109,11 +109,17 @@ void PbgzManager::updateWriteDataLen(RoughIOBlock* blockPtr) {
 }   
 
 void PbgzManager::updateDataInfo() {
-    fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\r", "from/to", totalReadLen, totalWriteLen);
+    /*
+     * 进度条原地刷新：先清行（\033[K）再写内容，末尾 \r 回到行首。
+     * 不用清行的话，较长的上一次内容会残留，且与其他 stderr 输出（如 File type）
+     * 交错时会把对方末尾盖在行尾，出现 "File type: SAM40/0]---" 这类乱码。
+     */
+    fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\r", totalReadLen, totalWriteLen);
 }
 
 void PbgzManager::printFileType(BlockType blockType) {
-    fprintf(stderr, "File type: %s\n", BlockUtil::getBlockTypeName(blockType).c_str());
+    /* 可能插在进度条之后打印：先回行首并清行，避免覆盖进度条残留 */
+    fprintf(stderr, "\r\033[KFile type: %s\n", BlockUtil::getBlockTypeName(blockType).c_str());
 }
 
 void PbgzManager::printHeadInfo(PbgzParameter& para) {
@@ -122,7 +128,7 @@ void PbgzManager::printHeadInfo(PbgzParameter& para) {
 }
 
 void PbgzManager::printTailInfo(Timer costTime, bool isPrintRatio) {
-    fprintf(stderr, "\033[37m%-s ---[%ld/%ld]---\033[0m\n", "from/to", totalReadLen, totalWriteLen);
+    fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\033[0m\n", totalReadLen, totalWriteLen);
     if (isPrintRatio) {
         fprintf(stderr, "\nCompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
         fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%%\n", totalReadLen, totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen);

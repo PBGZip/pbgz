@@ -56,7 +56,7 @@ void CompressEngine::initStatsBasedOnFileType(BlockType fileType) {
         return;
     }
 
-    if (BlockUtil::isSAMBlock(fileType)) {
+    if (BlockUtil::isSAMBlock(fileType) || BlockUtil::isBAMBlock(fileType)) {
         stats = std::make_unique<SamStat>();
         if (stats->init() != 0) {
             LOG_ERROR("Failed to initialize SamStat");
@@ -90,27 +90,19 @@ CompressEngine::~CompressEngine() {
 }
 
 BlockReader* CompressEngine::createBlockReader() {
-    BlockReader* blockReader = MemoryUtil::safeNewClass<BlockReader>(ioReader);
+    BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel);
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
-        return nullptr;
     }
-    if (0 != blockReader->init()) {
-        LOG_ERROR("BlockReader init failed");
-        MemoryUtil::safeDeleteClass(blockReader);
-        return nullptr;
-    }
-
     return blockReader;
 }
 
 BlockWriter* CompressEngine::createBlockWriter() {
-   PbgzBlockWriter* blockWriter = MemoryUtil::safeNewClass<PbgzBlockWriter>(ioWriter);
+    PbgzBlockWriter* blockWriter = BlockFactory::createPbgzBlockWriter(ioWriter);
     if (blockWriter == nullptr) {
         LOG_ERROR("pbgzWriter is NULL.");
         return nullptr;
     }
-    blockWriter->init();
     blockWriter->setBaseFileMeta(baseFileMeta);
     blockWriter->writeBaseFileMeta();
     return blockWriter;
@@ -125,12 +117,14 @@ void CompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
+    /* 预分析在 coder 侧执行：状态（idSplitSymbols/contentPos/qualFreqTable 等）留在 actuator 里供压缩使用 */
     FastqCompressActuator* fastqActuator = dynamic_cast<FastqCompressActuator*>(actuator);
     if (fastqActuator != nullptr) {
         FastqCodecActuator* fastqCodecActuator = fastqActuator->getCodecActuator();
         if (0 != fastqCodecActuator->preAnalysis()) {
             LOG_INFO("Fastq preAnalysis failed");
             MemoryUtil::safeDeleteClass(fastqActuator);
+            inBlockPtr->setBlockType(BINARY);
             BinaryCompressActuator* binaryActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
             if (binaryActuator == nullptr) {
                 return nullptr;
@@ -146,6 +140,7 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
         if (0 != samCodecActuator->preAnalysis()) {
             LOG_INFO("sam preAnalysis failed");
             MemoryUtil::safeDeleteClass(samActuator);
+            inBlockPtr->setBlockType(BINARY);
             BinaryCompressActuator* binaryActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
             if (binaryActuator == nullptr) {
                 return nullptr;
@@ -211,7 +206,7 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
             "ID", "SEQ", "QUAL", "COMMENT"
         };
 
-        bool isSam = (preprocessInfo.fileType == SAM);
+        bool isSam = BlockUtil::isSAMBlock(preprocessInfo.fileType) || BlockUtil::isBAMBlock(preprocessInfo.fileType);
         uint32_t fieldCount = isSam ? SAM_FIELD_COUNT_SELECT : FQ_FIELD_COUNT;
         const char* const* names = isSam ? samFieldNames : fqFieldNames;
 
@@ -456,8 +451,17 @@ bool CompressEngine::initReference() {
     }
     if (pRefGene) {
         pRefGene->setNiFile(parameter.niIndexFile);
-        /* 参考是用户明确下的指令, 用不了就得停下, 悄悄改成无参考等于压出另一份东西。 */
-        if (!pRefGene->makeIndex()) {
+        /*
+         * SAM/BAM 自带比对位置（RNAME/POS），压缩 SEQ 只取参考碱基序列，无需 makeIndex
+         * 的读映射哈希表（那只对 FASTQ 的 read 定位有用）。管道输入拿不到类型，落回
+         * 建索引的保守路径。参考是用户明确下的指令, 用不了就得停下, 悄悄改成无参考
+         * 等于压出另一份东西。
+         */
+        const bool needIndex =
+            (parameter.inputFile == STDIN) ||
+            !BlockUtil::isSAMBlock(BlockUtil::detectInputFileType(parameter.inputFile));
+        const bool ok = needIndex ? pRefGene->makeIndex() : pRefGene->makeSquashIndex();
+        if (!ok) {
             LOG_ERROR("Build reference index from %s failed.", parameter.referenceGenic.c_str());
             MemoryUtil::safeDeleteClass(pRefGene);
             pRefGene = nullptr;
@@ -687,7 +691,7 @@ Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock*
             parameter.isMakeIndex = false;
         }
         pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
-    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType()) || BlockUtil::isBAMBlock(inBlockPtr->getBlockType())) {
         pActuator = MemoryUtil::safeNewClass<SamCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (inBlockPtr->getBlockType() == BINARY) {
         pActuator = MemoryUtil::safeNewClass<BinaryCompressActuator>(inBlockPtr, outBlockPtr, this);
@@ -705,7 +709,8 @@ Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock*
         return nullptr;
     }
 
-    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType()) || BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+    if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType()) || BlockUtil::isSAMBlock(inBlockPtr->getBlockType())
+       || BlockUtil::isBAMBlock(inBlockPtr->getBlockType())) {
         pActuator = actuatorPreProc(pActuator, inBlockPtr, outBlockPtr);
     }
 

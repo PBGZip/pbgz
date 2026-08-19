@@ -122,31 +122,19 @@ void SortEngine::printTailInfo(Timer& costTimer) {
 }
 
 BlockReader* SortEngine::createBlockReader() {
-    BlockReader* blockReader = MemoryUtil::safeNewClass<BlockReader>(ioReader);
+    /* 排序需要块内自含 @SQ（SAMSortActuator 逐块解析染色体），头部不独立成块 */
+    BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel, false);
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
         return nullptr;
     }
-
-    if (blockReader->init() != 0) {
-        LOG_ERROR("BlockReader init failed.");
-        MemoryUtil::safeDeleteClass(blockReader);
-        return nullptr;
-    }
-
     return blockReader;
 }
 
 BlockWriter* SortEngine::createBlockWriter() {
-    BlockWriter* blockWriter = MemoryUtil::safeNewClass<BlockWriter>(ioWriter);
+    BlockWriter* blockWriter = BlockFactory::createBlockWriter(ioWriter);
     if (blockWriter == nullptr) {
         LOG_ERROR("Create block writer failed.");
-        return nullptr;
-    }
-
-    if (blockWriter->init() != 0) {
-        LOG_ERROR("BlockWriter init failed.");
-        MemoryUtil::safeDeleteClass(blockWriter);
         return nullptr;
     }
     return blockWriter;

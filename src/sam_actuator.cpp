@@ -383,8 +383,13 @@ int32_t SamCodecActuator::preAnalysis() {
                     } else if (linePos.size() == 10) {  // Quality value is the 11th field
                         uint32_t qualityLen = i - linePos.at(9) - 1;
                         if (baseLen != qualityLen) {
-                            LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
-                            return -1;
+                            /* QUAL 为单个 '*' 表示缺失质量，长度不必等于 SEQ 长度 */
+                            const bool missingQual = (qualityLen == 1 &&
+                                                      line.at(linePos.at(9) + 1) == '*');
+                            if (!missingQual) {
+                                LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
+                                return -1;
+                            }
                         }
                     }
                     linePos.push_back(i);
@@ -1699,7 +1704,8 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
     fieldSrcLen = 0;
-    std::unique_ptr<uint8_t[]> tmpBuffer = std::make_unique<uint8_t[]>(outBlockPtr->getBlockSize());
+    /* 按实际块数据长度预分配（SAM 数据块可能按 read 行数分块而超过 byte block_size）。 */
+    std::unique_ptr<uint8_t[]> tmpBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen());
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -2122,6 +2128,17 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
             seqLen = contentPos[contentIdx][fieldIdx - 1] - contentPos[contentIdx][fieldIdx - 2] - 1;
         }
 
+        /*
+         * 缺失质量（单个 '*'）的读：按 SEQ 长度展开成等长 '*' 再进码流，否则每条记录
+         * 进码流的长度（1）与解压侧按 SEQ/CIGAR 长度（seqLen）取回对不上，整条质量列
+         * 会错位。解码侧再折叠回单个 '*'（见 decompressQuality）。
+         */
+        if (qualLength == 1 && qualStart[0] == '*' && seqLen > 0) {
+            qualMissingBuf.assign(seqLen, '*');
+            qualStart = qualMissingBuf.data();
+            qualLength = seqLen;
+        }
+
         if (useFcv2) {
             /*
              * 从 FLAG 字段取链方向。按 SAM 规范，0x10 置位表示 SEQ 和 QUAL 在文件里
@@ -2287,8 +2304,17 @@ int32_t SamCodecActuator::decompress() {
     if (bs == 0) {
         bs = ConfigManager::getInstance().getBlockSizeByCompressLevel(pbgzEngine->getParameter().compressLevel);
     }
-    if (outBlockPtr->ensureCapacity(bs * 2) != 0) {
-        LOG_ERROR("preallocate output buffer failed, block_size=%zu", bs);
+    /*
+     * 输出缓冲按"块大小上界 ×2"与"本块实际数据长度"取大预分配：SAM 数据块可能按 read
+     * 行数分块而超过 byte block_size（如 -l 1 时 10000 read ≈ 1.8MB > 512KB 的块上界）。
+     * inBlockPtr->getDataLen() 来自块 meta 的 datalen，即压缩前的原始长度，是输出上界。
+     */
+    size_t outCapacity = bs * 2;
+    if ((size_t)inBlockPtr->getDataLen() > outCapacity) {
+        outCapacity = (size_t)inBlockPtr->getDataLen();
+    }
+    if (outBlockPtr->ensureCapacity(outCapacity) != 0) {
+        LOG_ERROR("preallocate output buffer failed, need=%zu", outCapacity);
         return -1;
     }
 
@@ -2972,7 +2998,20 @@ int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFl
                                                 RoughIOBlock* outputBlock,
                                                 const Json::Value& fieldMeta) {
     if (!fieldMeta.isMember("tags") || fieldMeta["mode"].asString() != "tag_split") {
-        return decompressRegularField(11, lineNo, splitFlag, outputBlock);
+        /*
+         * affix 形态：整块所有行的 OPTION 作为一列。某行没有 OPTION 时解码结果为空，
+         * 只追加了分隔符（fieldLen==1），需去掉 QUAL 之后刚追加的 '\t'（与 tag_split
+         * 空行的处理一致）。块内字段数取全块最大值，无 OPTION 的行也会走到这里。
+         */
+        const int32_t fieldLen = decompressRegularField(11, lineNo, splitFlag, outputBlock);
+        if (fieldLen == 1) {
+            uint8_t* pEnd = outputBlock->getCurrent();
+            if (pEnd - 2 >= outputBlock->getBuffer()) {
+                *(pEnd - 2) = '\n';
+                outputBlock->setDataLen(outputBlock->getDataLen() - 1);
+            }
+        }
+        return fieldLen;
     }
 
     /* 惰性：整个 OPTION 列一次解出。 */
@@ -3469,11 +3508,11 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             // Not matched
             if (mapFlag & 0x04) {
                 decoderLen = fieldDecoders[fieldIdx]->decode_line(baseSquashBuffer, actualBaseLen, UINT8_MAX, false);
-                if (decoderLen != actualBaseLen) {
+                if ((uint32_t)decoderLen != actualBaseLen) {
                     LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                     return -1;
                 }
-                for (uint32_t o = 0; o < decoderLen; ++o) {
+                for (int32_t o = 0; o < decoderLen; ++o) {
                     outputBlock->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
                 }
             } else {
@@ -3499,16 +3538,16 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 
                 if (!findMappedPos) {
                     decoderLen = fieldDecoders[fieldIdx]->decode_line(baseSquashBuffer, actualBaseLen, UINT8_MAX, false);
-                    if (decoderLen != actualBaseLen) {
+                    if ((uint32_t)decoderLen != actualBaseLen) {
                         LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                         return -1;
                     }
-                    for (uint32_t o = 0; o < decoderLen; ++o) {
+                    for (int32_t o = 0; o < decoderLen; ++o) {
                         outputBlock->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
                     }
                 } else {
                     decoderLen = fieldDecoders[fieldIdx]->decode_line(baseDiffSquashBuffer, actualBaseLen, UINT8_MAX, false);
-                    if (decoderLen != actualBaseLen) {
+                    if ((uint32_t)decoderLen != actualBaseLen) {
                         LOG_ERROR("base decode failed in block %llu, line %d,expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                         return -1;
                     }
@@ -3539,10 +3578,11 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 }
 
 int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
+    uint8_t* dst = outputBlock->getCurrent();
     if (qualFcv2Decoder != nullptr) {
         /* 链方向由码流自带；碱基上下文用本记录已经解出的 SEQ（basePtr），
            与压缩侧传 seqStart 对应。 */
-        if (qualFcv2Decoder->decode_record(outputBlock->getCurrent(), actualBaseLen, basePtr, actualBaseLen) < 0) {
+        if (qualFcv2Decoder->decode_record(dst, actualBaseLen, basePtr, actualBaseLen) < 0) {
             LOG_ERROR("Decode quality by fcv2 failed, len = %u", actualBaseLen);
             return -1;
         }
@@ -3551,14 +3591,31 @@ int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBas
          * bwt_cm 同样不需要 SEQ 上下文。压缩侧是按记录逐条 encode_line 喂进去的，
          * 这里也按同样的长度逐条取回；不传分隔符，长度由调用方给定。
          */
-        if (qualCmDecoder->decode_line(outputBlock->getCurrent(), actualBaseLen) < 0) {
+        if (qualCmDecoder->decode_line(dst, actualBaseLen) < 0) {
             LOG_ERROR("Decode quality by bwt_cm failed, len = %u", actualBaseLen);
             return -1;
         }
     } else {
-        qualCoder->decode_qual_gen2(basePtr, outputBlock->getCurrent(), actualBaseLen);
+        qualCoder->decode_qual_gen2(basePtr, dst, actualBaseLen);
     }
-    outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
+
+    /*
+     * 缺失质量（原文件里是单个 '*'）的读在压缩侧被展开成 seqLen 个 '*' 进码流，
+     * 这里解出来再折叠回单个 '*'，保证还原结果与原文一致。
+     */
+    bool missing = true;
+    for (uint32_t i = 0; i < actualBaseLen; ++i) {
+        if (dst[i] != '*') {
+            missing = false;
+            break;
+        }
+    }
+    if (missing) {
+        dst[0] = '*';
+        outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+    } else {
+        outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
+    }
     *(outputBlock->getCurrent()) = '\t';
     outputBlock->setDataLen(outputBlock->getDataLen() + 1);
     return actualBaseLen;

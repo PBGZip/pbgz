@@ -82,12 +82,20 @@ BlockReader* DecompressEngine::createBlockReader() {
 }
 
 BlockWriter* DecompressEngine::createBlockWriter() {
-    BlockWriter* blockWriter = MemoryUtil::safeNewClass<BlockWriter>(ioWriter);
+    if (parameter.isDecToBam) {
+        /* -b：把解压出的 SAM 文本转成标准 BAM 写出 */
+        BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(ioWriter);
+        if (blockWriter == nullptr) {
+            LOG_ERROR("Failed to create bam writer.");
+            return nullptr;
+        }
+        return blockWriter;
+    }
+    BlockWriter* blockWriter = BlockFactory::createBlockWriter(ioWriter);
     if (blockWriter == nullptr) {
         LOG_ERROR("Failed to create block writer.");
         return nullptr;
     }
-    blockWriter->init();
     return blockWriter;
 }
 
@@ -95,8 +103,13 @@ void DecompressEngine::releaseBlockReader(BlockReader* &blockReader) {
     MemoryUtil::safeDeleteClass(blockReader);
 }
 
-void DecompressEngine::releaseBlockWriter(BlockWriter* &BlockWriter) {
-    MemoryUtil::safeDeleteClass(BlockWriter);
+void DecompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
+    /* -b 的 BamWriter 需要收尾：flush BGZF 残留块并追加 EOF 标记 */
+    BamWriter* bamWriter = dynamic_cast<BamWriter*>(blockWriter);
+    if (bamWriter != nullptr && 0 != bamWriter->finish()) {
+        LOG_ERROR("Bam writer finish failed.");
+    }
+    MemoryUtil::safeDeleteClass(blockWriter);
 }
 
 /*
@@ -523,7 +536,7 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
     Actuator* pActuator = nullptr;
     if (BlockUtil::isFastqBlock(inBlockPtr->getBlockType())) {
         pActuator = MemoryUtil::safeNewClass<FastqDecompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
-    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType())) {
+    } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType()) || BlockUtil::isBAMBlock(inBlockPtr->getBlockType())) {
         pActuator = MemoryUtil::safeNewClass<SamDecompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (inBlockPtr->getBlockType() == BINARY) {
         pActuator = MemoryUtil::safeNewClass<BinaryDecompressActuator>(inBlockPtr, outBlockPtr, this);

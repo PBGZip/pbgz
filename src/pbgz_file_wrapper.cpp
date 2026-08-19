@@ -46,6 +46,38 @@ uint8_t* PbgzFileReader::getFileReadBuffer(){
     return pReadBuffer.get();
 }
 
+void PbgzFileReader::setPreReadData(const uint8_t* data, size_t len) {
+    preReadPos = 0;
+    preReadSize = 0;
+    if (data != nullptr && len > 0) {
+        const size_t toCopy = (len <= sizeof(preReadBuf)) ? len : sizeof(preReadBuf);
+        memcpy(preReadBuf, data, toCopy);
+        preReadSize = toCopy;
+    }
+}
+
+/*
+ * 常规读取入口：先消费预读缓冲（Creator 探测读走的字节），再读 ioReader。
+ * 管道输入不可 seek，探测数据必须由此交还；seek 场景（动态元信息回读）不走这里。
+ */
+size_t PbgzFileReader::readFromSource(void* pBuffer, size_t n) {
+    size_t got = 0;
+    if (pBuffer == nullptr) {
+        return 0;
+    }
+    while (got < n && preReadSize > 0) {
+        const size_t toCopy = (n - got < preReadSize) ? (n - got) : preReadSize;
+        memcpy((uint8_t*)pBuffer + got, preReadBuf + preReadPos, toCopy);
+        preReadPos += toCopy;
+        preReadSize -= toCopy;
+        got += toCopy;
+    }
+    if (got < n) {
+        got += ioReader->readIO((uint8_t*)pBuffer + got, n - got);
+    }
+    return got;
+}
+
 int32_t PbgzFileReader::open() {
      // Implement the read logic for PBGZ file format
     if (0 != initFileHeadAndMeta()) {
@@ -66,13 +98,17 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
      *
      * isCheckMagic 为真时表示调用方已经把 4 字节文件魔数读走了（见 readDataBlock 里
      * 发现新包头的那条分支），此时当前位置已经越过包头，要退回魔数长度才是真正的起点。
+     *
+     * 位置一律以"真实源位置"计算：ioReader 可能已被 Creator 预读消费过 preReadSize
+     * 个字节，ioReader->getCurrentPos() 会虚高，减去未消费的预读长度才是真实位置。
      */
     uint64_t fileStartPos = 0;
     FileReader* posReader = dynamic_cast<FileReader*>(ioReader);
     if (posReader != nullptr) {
         const uint64_t curPos = (uint64_t)posReader->getCurrentPos();
+        const uint64_t realPos = (curPos >= preReadSize) ? (curPos - preReadSize) : 0;
         const uint64_t consumed = isCheckMagic ? PBGZ_FILE_MAGIC_LENGTH : 0;
-        fileStartPos = (curPos >= consumed) ? (curPos - consumed) : 0;
+        fileStartPos = (realPos >= consumed) ? (realPos - consumed) : 0;
     }
 
     // Read the file header
@@ -87,7 +123,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     size_t readLen = 0;
     // If isCheckMagic is true, we will not read the magic value again
     if (!isCheckMagic) {
-        readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_MAGIC_LENGTH);
+        readLen = readFromSource(pReadBuffer, PBGZ_FILE_MAGIC_LENGTH);
         if (readLen !=  PBGZ_FILE_MAGIC_LENGTH) {
             LOG_ERROR("Failed to read file header from io, readLen=%d", readLen);
             return -1; // File read error
@@ -101,7 +137,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     fileHeader.setBlockType(FILE_HEADER);
 
     // Read the version number, 3 byte
-    readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_VERSION_LENGTH);
+    readLen = readFromSource(pReadBuffer, PBGZ_FILE_VERSION_LENGTH);
     if (readLen != PBGZ_FILE_VERSION_LENGTH) {
         LOG_ERROR("Failed to read file version from IO");
         return -1; // File read error
@@ -110,11 +146,11 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     fileHeader.setVersion(pReadBuffer + PBGZ_FILE_MAGIC_LENGTH, PBGZ_FILE_VERSION_LENGTH);
     
     // Read file header extension part
-    readLen = ioReader->readIO(pReadBuffer, sizeof(uint32_t));
+    readLen = readFromSource(pReadBuffer, sizeof(uint32_t));
     if (readLen > 0) {    
         uint32_t fileHeadSize = *(uint32_t*)pReadBuffer;
         if (fileHeadSize > 0) {
-            readLen = ioReader->readIO(pReadBuffer, fileHeadSize);
+            readLen = readFromSource(pReadBuffer, fileHeadSize);
             if (readLen >= sizeof(uint64_t)) {
                 fileHeader.setDynamicMetaOffset(*(uint64_t*)pReadBuffer);
             }
@@ -152,7 +188,8 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
 
     PbgzFileMeta dyncFileMeta;
     dyncFileMeta.setMetaType(DYNAMIC_FILE_META);
-    if (0 != readFileMeta(dyncFileMeta)) {
+    /* 已 seek 到动态元信息处，直接读 ioReader，不经过预读缓冲 */
+    if (0 != readFileMeta(dyncFileMeta, true, false)) {
         LOG_ERROR("Read dynamic file meta failed. offset = %llu", dynamicOffset);
         return -1;
     }
@@ -162,7 +199,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     return 0;
 }       
 
-int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic) {
+int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic, bool usePreRead) {
      if (ioReader == nullptr) {
         LOG_ERROR("IO reader is NULL.");
         return -1;
@@ -178,7 +215,8 @@ int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic) 
 
     // read file meta magic
     if (isCheckMagic) {
-        readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH);
+        readLen = usePreRead ? readFromSource(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH)
+                             : ioReader->readIO(pReadBuffer, PBGZ_FILE_META_MAGIC_LENGTH);
         if (readLen == 0) {
             LOG_INFO("No file meta information found in IO");
             return 0; // No file meta information, not an error
@@ -196,7 +234,8 @@ int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic) 
     fileMeta.setBlockType(FILE_META);
 
     // read file meta length
-    readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_SIZE_LENGTH);
+    readLen = usePreRead ? readFromSource(pReadBuffer, PBGZ_FILE_META_SIZE_LENGTH)
+                         : ioReader->readIO(pReadBuffer, PBGZ_FILE_META_SIZE_LENGTH);
     if (readLen != PBGZ_FILE_META_SIZE_LENGTH) {
         LOG_ERROR("Failed to read file meta length from IO.");
         return -1; // File read error       
@@ -204,7 +243,8 @@ int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic) 
 
     const uint32_t metaLength = (uint32_t)(*(uint32_t*)(pReadBuffer));
     // read the the meta data 
-    readLen = ioReader->readIO(pReadBuffer, metaLength);
+    readLen = usePreRead ? readFromSource(pReadBuffer, metaLength)
+                         : ioReader->readIO(pReadBuffer, metaLength);
     if (readLen != metaLength) {
         LOG_ERROR("Failed to read file meta data from IO.");
         return -1; // File read error   
@@ -212,7 +252,8 @@ int32_t PbgzFileReader::readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic) 
     coder_json fileMetaCoder;
     fileMetaCoder.decoder(pReadBuffer, metaLength, fileMeta.getMetaData());
 
-    readLen = ioReader->readIO(pReadBuffer, PBGZ_FILE_META_CHECKSUM_LENGTH);
+    readLen = usePreRead ? readFromSource(pReadBuffer, PBGZ_FILE_META_CHECKSUM_LENGTH)
+                         : ioReader->readIO(pReadBuffer, PBGZ_FILE_META_CHECKSUM_LENGTH);
     if (readLen != PBGZ_FILE_META_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read file meta data from IO.");
         return -1; // File read error   
@@ -283,10 +324,15 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     }
 
     FileReader* seekableReader = dynamic_cast<FileReader*>(ioReader);
-    currentBlockStart = (seekableReader != nullptr) ? (uint64_t)seekableReader->getCurrentPos() : 0;
+    if (seekableReader != nullptr) {
+        const uint64_t curPos = (uint64_t)seekableReader->getCurrentPos();
+        currentBlockStart = (curPos >= preReadSize) ? (curPos - preReadSize) : 0;
+    } else {
+        currentBlockStart = 0;
+    }
 
     // Read the data block magic value, 4byte
-    size_t readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
+    size_t readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
     if (readLen == 0) { // Indicates read completion
         return 0;
     }
@@ -322,7 +368,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     dataBlock.setBlockType(FILE_DATA);
 
     // Read the meta length, 4byte
-    readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
+    readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_META_SIZE_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block meta size.");
         return -1; // File read error           
@@ -333,7 +379,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
         return -1; // Invalid meta length       
     }
     // Read the meta data
-    readLen = ioReader->readIO(pReadBuffer, metaLength);
+    readLen = readFromSource(pReadBuffer, metaLength);
     if (readLen != metaLength) {
         LOG_ERROR("Failed to read PBGZ data block meta data."); 
         return -1; // File read error   
@@ -342,7 +388,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     blockMetaCoder.decoder(pReadBuffer, metaLength, dataBlock.getMetaData());
    
     // Read the meta checksum, 8byte
-    readLen = ioReader->readIO(pReadBuffer , PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
+    readLen = readFromSource(pReadBuffer , PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block meta checksum.");
         return -1; // File read error
@@ -350,7 +396,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     dataBlock.setMetaCheckSum(*(uint64_t*)pReadBuffer);
 
     // Read the data length, 4byte
-    readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
+    readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block data length.");
         return -1; // File read error
@@ -377,14 +423,14 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
 
     // Read the block data
     // PbgzDataBlock data storage is not memory allocated by itself, the address is passed in from external, reducing copying
-    readLen = ioReader->readIO(dataBlock.getDataPtr(), dataLength);
+    readLen = readFromSource(dataBlock.getDataPtr(), dataLength);
     if (readLen != dataLength) {
         LOG_ERROR("Failed to read PBGZ data block data. expect %d, actual %d", dataLength, readLen);
         return -1; // File read error
     }
 
     // Read the data block checksum, 8byte
-    readLen = ioReader->readIO(pReadBuffer, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
+    readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block checksum.");
         return -1; // File read error

@@ -48,14 +48,9 @@ BlockReader* IndexEngine::createBlockReader() {
 }
 
 BlockWriter* IndexEngine::createBlockWriter() {
-    BlockWriter* blockWriter = MemoryUtil::safeNewClass<BlockWriter>(ioWriter);
+    BlockWriter* blockWriter = BlockFactory::createBlockWriter(ioWriter);
     if (blockWriter == nullptr) {
         LOG_ERROR("Failed to create block writer.");
-        return nullptr;
-    }
-    if (0 != blockWriter->init()) {
-        LOG_ERROR("Block writer init fail.");
-        MemoryUtil::safeDeleteClass(blockWriter);
         return nullptr;
     }
     return blockWriter;
@@ -91,7 +86,7 @@ void IndexEngine::readBlockPreProc(BlockReader* /*blockReader*/) {
 
 PbgzEngine::BlockIntake IndexEngine::intakeBlock(BlockReader* /*blockReader*/, RoughIOBlock* blockPtr) {
     if (!IndexActuator::supports(blockPtr->getBlockType())) {
-        fprintf(stderr, "The index command is only valid for SAM pbgz files.\n");
+        fprintf(stderr, "The index command is only valid for SAM/BAM pbgz files.\n");
         return BlockIntake::ABORT;
     }
 

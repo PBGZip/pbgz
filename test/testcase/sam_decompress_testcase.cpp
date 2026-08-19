@@ -131,10 +131,60 @@ public:
             }
         }
 
-        BlockReader* pBlockReader = new BlockReader(pIoReader);
-        pBlockReader->readBlock(pInBlock, TYPE_UNKNOW);
+        /*
+         * 直接按原始内容载入整块（含 @SQ 头部），并记录换行符位置。
+         * 头部在 reader 里独立成块后，actuator 测试需要一个自含头部的完整块。
+         */
+        const size_t blockSize = pInBlock->getBlockSize();
+        const size_t readLen = pIoReader->readIO(pInBlock->getBuffer(), blockSize);
+        pInBlock->setDataLen((int64_t)readLen);
+        pInBlock->setBlockType(SAM);
+        std::vector<size_t>& npos = pInBlock->getNpos();
+        const char* buf = reinterpret_cast<const char*>(pInBlock->getBuffer());
+        for (size_t i = 0; i < readLen; ++i) {
+            if (buf[i] == '\n') {
+                npos.push_back(i);
+            }
+        }
 
-        delete pBlockReader;
+        delete pIoReader;
+    }
+
+    /*
+     * 直接按原始内容载入块并记录换行符位置，不做格式探测。
+     * 用于故意构造"结构上像 SAM 但内容非法"的输入，绕过 BlockFactory 的严格格式
+     * 判定，直接验证 actuator 预分析对非法内容的拒绝逻辑。
+     */
+    void loadSamDataRaw(const std::string& filename) {
+        pInBlock->reset();
+        pOutBlock->reset();
+
+        std::vector<std::string> paths = { filename, "./test/" + filename, "../test/" + filename };
+        IOReader* pIoReader = nullptr;
+        for (const auto& path : paths) {
+            pIoReader = new FileReader(path);
+            if (pIoReader->openIO() == 0) {
+                break;
+            }
+            delete pIoReader;
+            pIoReader = nullptr;
+        }
+        if (pIoReader == nullptr) {
+            return;
+        }
+
+        const size_t blockSize = pInBlock->getBlockSize();
+        const size_t readLen = pIoReader->readIO(pInBlock->getBuffer(), blockSize);
+        pInBlock->setDataLen((int64_t)readLen);
+        pInBlock->setBlockType(SAM);
+        std::vector<size_t>& npos = pInBlock->getNpos();
+        const char* buf = reinterpret_cast<const char*>(pInBlock->getBuffer());
+        for (size_t i = 0; i < readLen; ++i) {
+            if (buf[i] == '\n') {
+                npos.push_back(i);
+            }
+        }
+
         delete pIoReader;
     }
 
@@ -513,8 +563,8 @@ TEST_F(SamDecompressTest, TestIDFieldSeparators) {
 TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
     generateSamFileWithMissingFields("test_missing_fields.sam");
         // After optimization, only verify compression and decompression return codes, no longer compare file content
-        // Load input file
-        loadSamData("test_missing_fields.sam");
+        // Load input file（非法内容直接按原始字节载入，验证 actuator 预分析拒绝逻辑）
+        loadSamDataRaw("test_missing_fields.sam");
 
         // Create compressor
         Reference ref = createTestReference();
@@ -566,6 +616,24 @@ TEST_F(SamDecompressTest, TestNoOptionalFields) {
     EXPECT_NO_THROW(compressAndDecompress("test_no_optional_fields.sam"));
 }
 
+/* 缺失质量（单个 '*'）的读：压缩侧按 SEQ 长度展开、解压侧折叠回 '*',
+ * 保证质量值码流不因记录长度错位。回归用：此前 `*` 读会让整条 QUAL 列错乱。 */
+TEST_F(SamDecompressTest, TestMissingQuality) {
+    std::ofstream file("test_missing_quality.sam");
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    file << "m1\t0\tchr1\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII\n";
+    file << "u1\t4\t*\t0\t0\t*\t*\t0\t0\tACGTACGTAC\t*\n";
+    file << "u2\t4\t*\t0\t0\t*\t*\t0\t0\tTTTTTTTTTT\t*\tXA:B:i,1,2,3\n";
+    file << "s1\t0\tchr1\t21\t60\t2S2M\t*\t0\t0\tACGT\t*\n";
+    file.close();
+
+    EXPECT_NO_THROW(compressAndDecompress("test_missing_quality.sam"));
+    std::remove("test_missing_quality.sam");
+}
+
+
 // Comprehensive test: Mix all scenarios
 TEST_F(SamDecompressTest, TestMixedScenarios) {
     std::ofstream file("test_mixed.sam");
@@ -588,8 +656,8 @@ TEST_F(SamDecompressTest, TestMixedScenarios) {
     file.close();
 
     // After optimization, only verify compression and decompression return codes, no longer compare file content
-    // Load input file
-    loadSamData("test_mixed.sam");
+    // Load input file（含非法缺字段记录，直接按原始字节载入，验证 actuator 预分析拒绝逻辑）
+    loadSamDataRaw("test_mixed.sam");
 
     // Create compressor
     Reference ref = createTestReference();
@@ -666,8 +734,8 @@ TEST_F(SamDecompressTest, TestFieldCountTooFew) {
     file << "read3\t0\tchr2\t3\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\n";
     file.close();
 
-    // Load input file
-    loadSamData("test_field_count_too_few.sam");
+    // Load input file（含缺字段记录，直接按原始字节载入，验证 actuator 预分析拒绝逻辑）
+    loadSamDataRaw("test_field_count_too_few.sam");
 
     // Create compressor
     Reference ref = createTestReference();

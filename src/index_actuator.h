@@ -46,7 +46,8 @@ public:
      * 哪些类型取决于本执行器实现了哪些解码分支。引擎侧只查询，不重复判断。
      */
     static bool supports(BlockType type) {
-        return type == SAM;
+        /* BAM 块内容为 SAM 文本，同样可建索引 */
+        return type == SAM || type == SAM_GZIP || type == BAM;
     }
 
     virtual int32_t initial() override;

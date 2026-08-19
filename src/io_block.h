@@ -34,6 +34,12 @@
 
 const size_t BLOCK_SIZE = 268435456;
 
+/* Creator 预读用于判定文件格式的字节数。该数据随后并入首个块/首个包头部，不浪费。 */
+const size_t BLOCK_TYPE_DETECT_SIZE = 1 << 20;
+
+/* 输入块初始分配大小：不再按 -l 一次性分配大缓冲，固定 1MB 起步，读取时按需 realloc 扩容。 */
+const size_t FIXED_INPUT_BLOCK_SIZE = 1 << 20;
+
 typedef enum
 {
     TYPE_UNKNOW = 0,                // Unknown block type (0)
@@ -48,6 +54,7 @@ typedef enum
     REFERENCE = (1 << 5),           // 
     REFERENCE_INDEX = 1 << 6,       //
     SAM = 1 << 7, 
+    SAM_GZIP = (SAM | GZIP),        // SAM block with GZIP compression (129)
     QUAL_PRIOR = 1 << 8,            // Pre-trained QUAL model snapshot (256)
     PBGZFILE = UINT32_MAX           // Special value for PBGZ file type (4294967295)
 } BlockType;
@@ -59,7 +66,7 @@ public:
     RoughIOBlock(size_t len = BLOCK_SIZE) {
         blockSize = len;
         bufferSize = blockSize * 2; // Extra space to handle cases where compressed data is larger than original
-        buffer =  MemoryUtil::safeAlloc<uint8_t>(bufferSize); //static_cast<uint8_t*>(calloc(bufferSize, sizeof(int8_t)));
+        buffer =  MemoryUtil::safeAlloc<uint8_t>(bufferSize);
         reset();
     }
 

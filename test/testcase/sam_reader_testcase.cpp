@@ -144,7 +144,7 @@ public:
         
         IOReader* pIoReader = new FileReader(filename);
         pIoReader->openIO();
-        BlockReader* pBlockReader = new BlockReader(pIoReader);
+        BlockReader* pBlockReader = BlockFactory::createBlockReader(pIoReader);
         
         pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
         
@@ -176,7 +176,7 @@ TEST_F(SamReaderTest, TestSamFileReading) {
     
     IOReader* pIoReader = new FileReader(SamReaderTestData::smallSamFile);
     pIoReader->openIO();
-    BlockReader* pBlockReader = new BlockReader(pIoReader);
+    BlockReader* pBlockReader = BlockFactory::createBlockReader(pIoReader);
     
     int32_t result = pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
     
@@ -195,26 +195,30 @@ TEST_F(SamReaderTest, TestSamFileReading) {
 }
 
 TEST_F(SamReaderTest, TestLargeSamFileReading) {
-    // Test reading large SAM file and verify block type
+    // Test reading large SAM file: 头部独立成块（block 0 只含 @ 行），数据块随后
     RoughIOBlock* pBlock = new RoughIOBlock(SamReaderTestData::MAX_BLOCK_SIZE);
     
     IOReader* pIoReader = new FileReader(SamReaderTestData::largeSamFile);
     pIoReader->openIO();
-    BlockReader* pBlockReader = new BlockReader(pIoReader);
+    BlockReader* pBlockReader = BlockFactory::createBlockReader(pIoReader);
     
     int32_t result = pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
     
     // Verify successful reading
     EXPECT_GT(result, 0) << "Reading large SAM file should succeed";
     
-    // Verify block type is SAM
-    EXPECT_EQ(pBlock->getBlockType(), SAM) << "Read block type should be SAM";
+    // 首块为头部块：类型是 SAM 且只含 @ 行
+    EXPECT_EQ(pBlock->getBlockType(), SAM) << "Header block type should be SAM";
+    EXPECT_GT(pBlock->getDataLen(), 0) << "Header block should have data";
+    EXPECT_FALSE(pBlockReader->blockHasData(pBlock)) << "First block should be header-only";
     
-    // Verify block has data
-    EXPECT_GT(pBlock->getDataLen(), 0) << "Block should have data";
-    
-    // Large file should have more data
-    EXPECT_GT(pBlock->getDataLen(), 1000) << "Large SAM file should contain more data";
+    // 第二个块为数据块，包含大量数据
+    pBlock->reset();
+    result = pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
+    EXPECT_GT(result, 0) << "Reading SAM data block should succeed";
+    EXPECT_EQ(pBlock->getBlockType(), SAM) << "Data block type should be SAM";
+    EXPECT_TRUE(pBlockReader->blockHasData(pBlock)) << "Data block should contain reads";
+    EXPECT_GT(pBlock->getDataLen(), 1000) << "SAM data block should contain more data";
     
     delete pBlockReader;
     delete pIoReader;

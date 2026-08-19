@@ -82,11 +82,11 @@ void CoderFactory::applyLevel(coder_io* io, CoderType type, uint8_t compressLeve
 bool CoderFactory::coderSupports(CoderType type, uint32_t fileType, uint32_t fieldIdx)
 {
     if (type == CoderType::FCV2) {
-        return fileType == (uint32_t)SAM && fieldIdx == (uint32_t)SAM_QUAL;
+        return (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) && fieldIdx == (uint32_t)SAM_QUAL;
     }
     if (type == CoderType::AFFIX_MATCH) {
         /* 是否候选由配置表统一判定，避免与预处理试压范围两处维护。 */
-        return fileType == (uint32_t)SAM && samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH);
+        return (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) && samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH);
     }
     return true;
 }

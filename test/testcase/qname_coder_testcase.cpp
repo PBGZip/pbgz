@@ -135,7 +135,9 @@ TEST_F(QNameCoderTest, RealisticRoundTripAndRatio)
 /* 小窗口远距离重复：内容仍须无损（copy 未命中时退化为 NEW）。 */
 TEST_F(QNameCoderTest, FarApartDuplicateStillLossless)
 {
-    std::vector<std::string> lines = makeRealisticNames(300, 3);
+    /* 行距须 > RING_SIZE(4096)，生成足够行后再插一个重复对 */
+    std::vector<std::string> lines = makeRealisticNames(6000, 3);
+    ASSERT_GT(lines.size(), 5000u);
     /* 造一个距离远超 RING_SIZE 的重复对 */
     std::string first = lines[0];
     lines.insert(lines.begin() + 5000, first);

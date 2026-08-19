@@ -50,6 +50,13 @@ public:
     /// @return  bool true for success / false for failure
     bool makeIndex();
 
+    /// @brief Load reference squash (NI or FASTA) without building the read-mapping
+    /// hash table.
+    /// SAM/BAM 自带比对位置（RNAME/POS），压缩 SEQ 时只用参考碱基序列，不需要
+    /// makeIndex 的哈希表（那个只对 FASTQ 的 read 定位有用）。FASTQ 仍走 makeIndex。
+    /// @return  bool true for success / false for failure
+    bool makeSquashIndex();
+
     /// @brief Query position information in reference genome based on hash value
     /// @param hash Input hash value
     /// @param length Output parameter, returns the number of position information in this hash bucket
@@ -173,6 +180,12 @@ private:
     /// Verify key parameters like baseGroupStep and baseGroupLen meet requirements
     /// @return PBGZ_ERR_OK for success, error code for failure
     int32_t referencCheck();
+
+    /// @brief Load reference squash (NI first, then FASTA) and allocate the matched
+    /// tracking buffer, printing the supported size.
+    /// Shared by makeIndex() and makeSquashIndex(); does not touch the hash table.
+    /// @return true for success, false for failure
+    bool loadSquashAndMatched();
 
     /// @brief Extract base groups from reference genome and calculate hash values
     /// Multi-threaded processing, split reference genome into base groups of baseGroupLen length with baseGroupStep step,

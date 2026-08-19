@@ -493,7 +493,6 @@ bool Reference::isNiFile(const std::string& file) {
 
 bool Reference::makeIndex() {
     Timer cost_ms(true);
-    int64_t supportMax = ((int64_t)2 << 30) * baseGroupStep;
     BaseGroupHash *bgHash;
     HashTable hashTable;
     std::string tips;
@@ -502,21 +501,9 @@ bool Reference::makeIndex() {
 
     hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
     /* 索引信不过就退回读 fasta: 参考基因组由 -r 决定, 索引只是省一遍解析。 */
-    bool squashReady = !niIndexFile.empty() && loadFromNiFile(niIndexFile);
-    if (!squashReady) {
-        squashReady = initSquashFromFasta();
-    }
-    if (!squashReady) {
-        LOG_ERROR("initialize reference failed");
+    if (!loadSquashAndMatched()) {
         MemoryUtil::safeFree(hashBucketCurpos);
         return false;
-    }
-    if ((refGeneSquashlen << 2) >= supportMax) {
-        LOG_ERROR("Reference max support %lu(M), current size %ld(M)\n",
-                   supportMax / 1024 / 1024, (refGeneSquashlen << 2) / 1024 / 1024);
-    } else {
-        fprintf(stderr, "Reference max support %lu(M), current size %ld(M)\n",
-                supportMax / 1024 / 1024, (refGeneSquashlen << 2) / 1024 / 1024);
     }
 
     cost_ms.reset();
@@ -533,9 +520,44 @@ bool Reference::makeIndex() {
 
     MemoryUtil::safeFree(bgHash);
     MemoryUtil::safeFree(hashBucketCurpos);
+    return true;
+}
+
+/*
+ * 加载参考 squash（NI 优先，其次 FASTA），分配 matched 跟踪缓冲，打印支持上限。
+ * makeIndex 与 makeSquashIndex 共用；不碰哈希表。
+ */
+bool Reference::loadSquashAndMatched() {
+    const int64_t supportMax = ((int64_t)2 << 30) * baseGroupStep;
+    /* 索引信不过就退回读 fasta: 参考基因组由 -r 决定, 索引只是省一遍解析。 */
+    bool squashReady = !niIndexFile.empty() && loadFromNiFile(niIndexFile);
+    if (!squashReady) {
+        squashReady = initSquashFromFasta();
+    }
+    if (!squashReady) {
+        LOG_ERROR("initialize reference failed");
+        return false;
+    }
+    if ((refGeneSquashlen << 2) >= supportMax) {
+        LOG_ERROR("Reference max support %lu(M), current size %ld(M)\n",
+                   supportMax / 1024 / 1024, (refGeneSquashlen << 2) / 1024 / 1024);
+    } else {
+        fprintf(stderr, "Reference max support %lu(M), current size %ld(M)\n",
+                supportMax / 1024 / 1024, (refGeneSquashlen << 2) / 1024 / 1024);
+    }
 
     refGeneSquashMatchedlen = refGeneSquashlen; /* One byte indicates whether a squash byte is matched */
     refGeneSquashMatched = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashMatchedlen);
+    return true;
+}
+
+/* 只加载参考 squash，不建读映射哈希表：SAM/BAM 压缩用。 */
+bool Reference::makeSquashIndex() {
+    Timer cost_ms(true);
+    if (!loadSquashAndMatched()) {
+        return false;
+    }
+    fprintf(stderr, "Reference squash ready, elapsed ms: %ld\n", (long)cost_ms.elapsed());
     return true;
 }
 
@@ -919,7 +941,7 @@ const uint32_t* Reference::queryPosition(const uint32_t &hash, uint32_t &length)
 }
 
 void Reference::updateMatchedGene(uint64_t actgPos, uint32_t matchLength) {
-    if (matchLength == 0 || actgPos == 0) {
+    if (matchLength == 0) {
         return;
     }
     uint64_t sposStart = actgPos >> 2;

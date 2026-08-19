@@ -75,7 +75,7 @@ public:
 
         IOReader* pIoReader = new FileReader(filename);
         pIoReader->openIO(); 
-        BlockReader*  pBlockReader = new BlockReader(pIoReader); 
+        BlockReader*  pBlockReader = BlockFactory::createBlockReader(pIoReader, 3); 
         pBlockReader->readBlock(pInBlock, TYPE_UNKNOW);
         
         // Clean up allocated resources

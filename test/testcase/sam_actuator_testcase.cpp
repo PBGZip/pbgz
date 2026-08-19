@@ -116,10 +116,22 @@ public:
             }
         }
 
-        BlockReader* pBlockReader = new BlockReader(pIoReader);
-        pBlockReader->readBlock(pInBlock, TYPE_UNKNOW);
+        /*
+         * 直接按原始内容载入整块（含 @SQ 头部），并记录换行符位置。
+         * 头部在 reader 里独立成块后，actuator 测试需要一个自含头部的完整块。
+         */
+        const size_t blockSize = pInBlock->getBlockSize();
+        const size_t readLen = pIoReader->readIO(pInBlock->getBuffer(), blockSize);
+        pInBlock->setDataLen((int64_t)readLen);
+        pInBlock->setBlockType(SAM);
+        std::vector<size_t>& npos = pInBlock->getNpos();
+        const char* buf = reinterpret_cast<const char*>(pInBlock->getBuffer());
+        for (size_t i = 0; i < readLen; ++i) {
+            if (buf[i] == '\n') {
+                npos.push_back(i);
+            }
+        }
 
-        delete pBlockReader;
         delete pIoReader;
     }
 

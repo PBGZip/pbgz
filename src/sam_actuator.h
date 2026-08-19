@@ -333,6 +333,9 @@ private:
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;
     uint8_t* refeStrecchBuffer;
+    /* QUAL 缺失（*）的读：压缩时展开成 seqLen 个 '*'，保证每条记录进质量值码流的
+       长度与解压侧一致（解压侧按 SEQ/CIGAR 长度逐条取回）。 */
+    std::vector<uint8_t> qualMissingBuf;
 
     /* OPTION tag-split 列化：整块解一次，逐行从缓存取。当前未启用，保留代码。 */
     int32_t decodeOptionColumn(const Json::Value& fieldMeta);

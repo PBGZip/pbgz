@@ -165,6 +165,58 @@ TEST_F(ReferenceTest, ReferenceMakeIndex) {
 }
 
 /*
+ * makeSquashIndex() 只加载 squash 与 matched 缓冲，不建读映射哈希表：
+ * 供 SAM/BAM 压缩使用。squash 内容必须与 makeIndex 完全一致。
+ */
+TEST_F(ReferenceTest, MakeSquashIndexMatchesMakeIndex) {
+    Reference withIndex(testFastaFile, 1);
+    ASSERT_TRUE(withIndex.makeIndex());
+
+    Reference squashOnly(testFastaFile, 1);
+    ASSERT_TRUE(squashOnly.makeSquashIndex());
+
+    EXPECT_EQ(squashOnly.getSquashLength(), withIndex.getSquashLength());
+    EXPECT_NE(squashOnly.getSquash(), nullptr);
+    EXPECT_EQ(0, memcmp(squashOnly.getSquash(), withIndex.getSquash(), withIndex.getSquashLength()));
+    EXPECT_EQ(squashOnly.getFastaChecksum(), withIndex.getFastaChecksum());
+
+    /* NI 优先：makeSquashIndex 也应能吃 --ni 提供的预建索引 */
+    const std::string niFile = testDir + "/squash.ni";
+    Reference maker(testFastaFile, 1);
+    ASSERT_TRUE(maker.makeNiFile(niFile));
+
+    Reference fromNi(testFastaFile, 1);
+    fromNi.setNiFile(niFile);
+    ASSERT_TRUE(fromNi.makeSquashIndex());
+    EXPECT_EQ(fromNi.getSquashLength(), withIndex.getSquashLength());
+    EXPECT_EQ(0, memcmp(fromNi.getSquash(), withIndex.getSquash(), withIndex.getSquashLength()));
+    std::remove(niFile.c_str());
+}
+
+/*
+ * updateMatchedGene 不能因为 actgPos == 0 就提前返回：参考位置 0（如 chr1 的第一条
+ * 比对的 1-based 位置 1）是合法位置，跳过它会让 sanitizeRefSquash 把该区清零，解压时
+ * 还原成全 A 或全 N。回归用：此前 chr1 位置 1 的读压缩后解压 MD5 必失败。
+ */
+TEST_F(ReferenceTest, UpdateMatchedGeneAtPositionZero) {
+    Reference ref(testFastaFile, 1);
+    ASSERT_TRUE(ref.makeIndex());
+
+    const int64_t len = ref.getSquashLength();
+    ASSERT_GT(len, 16);
+
+    /* 位置 0 覆盖 16 个碱基（4 个 squash 字节） */
+    ref.updateMatchedGene(0, 16);
+
+    uint8_t before[8];
+    memcpy(before, ref.getSquash(), 8);
+    ref.sanitizeRefSquash(0, 8);
+
+    /* 标记过的区域不能被清零 */
+    EXPECT_EQ(0, memcmp(before, ref.getSquash(), 4));
+}
+
+/*
  * 索引只是省一遍 fasta 解析: 对得上就该给出与直接读 fasta 完全相同的 squash, 对不上就
  * 该退回去读 fasta——不能拿一份来历不明的参考把数据压错。
  */

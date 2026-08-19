@@ -71,7 +71,7 @@ public:
 
         IOReader* pIoReader = new FileReader(filename);
         pIoReader->openIO(); 
-        BlockReader*  pBlockReader = new BlockReader(pIoReader); 
+        BlockReader*  pBlockReader = BlockFactory::createBlockReader(pIoReader); 
         pBlockReader->readBlock(pInBlock, TYPE_UNKNOW);
         
         // Clean up allocated resources
@@ -100,67 +100,67 @@ public:
         file << "@chr1_41586121_41586549_15:5:0_10:3:2_0/1\n";
         file << "TGTCCAGTCAGATCCCTGGGTATTCACTGGAAATATGGGGGTCATTTCCCTCACTTGGAGGAGCAAAGGTGTACTGCATATAGCCCCACGTGTGTGCCTCCTCCTCGTGCCCGCTTCAAGCAGGGCAGTCTCAGCTTGCAGGGCTCAGGT\n";
         file << "+\n";
-        file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_152370116_152370409_20:3:3_17:3:3_1/1\n";
         file << "TATAATGGCTGCATACAACTCATCCTTTTTTATGGCTGGATAGTATTCCATGGTGACTATGTGTCACAATTTCATAATCCAGTCTGATCATTTTTGGACATTTGGGTTGTGTTACAACGAGCCAATCCGCGAATAGACCCCAATTGTCCT\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_17297153_17297533_17:5:3_19:4:0_2/1\n";
         file << "TCAGTAAAACTTGGGTCAAGTCCTTATCTATTTTACTGAGCGATTTGTGATCATGGATGGGACATTCCAGTTCTCTGATCCTATATCGTTGCCCTACAAAATGGGGTCAATAATGCCTTCCTCATGGGGTTTAGATAAGAATTTATGAGC\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_55329955_55330247_22:2:3_15:2:1_3/1\n";
         file << "TTTTCCTGCAAGCTCCCGTCTTGCATTGTCAACAACTCATCAATACATAACTTTGTTTTATGTATTTCTGATTCAACACACCTTATTAAACAAATACTGTTGATTTATTAAACATAGAACTCACATCCAATAGGCGTGCAGCATATACAC\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_11312507_11312801_22:3:1_15:2:2_4/1\n";
         file << "GACTCTATTAGATGACCGACCGCTGCCAGCTCTGGCGGTGAGTAGGGCTGAGCCGCTCACCGCAGCCAGGCGGCCCTGAGAACGCAGCATAGTGATGACAAAAAGACCTGAAGGTCGTGGGCGATGTTTTTCGGTGAGTTGGGAGGTGCC\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_205902928_205903303_11:1:1_18:6:0_5/1\n";
         file << "AAGCAGGAAGAAGTCGCATCACTGACTAGACCAATAACAGGTTCTGAAATTGATGCAATAATTGCCTACCAACCAACAAAAGTCCAGGACCAGATGGATTCCCAGGTTAATTGTACGAGAGGTACAAAGAGGAGCTGGTACCCTTCCTTC\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_67278157_67278448_15:1:2_17:4:1_6/1\n";
         file << "TACTAGTCTTCCACTGGGACCCGTTTGATTCATAAAGAAGTCCTCAAAAAAGATCTTCAAAGAAGTCACATGAAAATGGGTCCCTTCCAACAAAAAAATCCGTGACTACCTCATGTGTGTTACAGAATGTGCAGCCAAACTGAAAAGGAC\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_225077116_225077417_15:4:1_9:3:0_7/1\n";
         file << "TAGTTTATATTATCAATGAATTATCTCAAATGGTTATTCAATACATCTATTGCGAAAATCTTGCAGTTGTTTTCCTTTAATCTTTTACTGAGTGGAGATATCTTAATAGACTTACTAAGGATAATCTCACATCCACATTGATCCGATTTA\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_221304894_221305124_17:4:1_20:2:0_8/1\n";
         file << "ACACAAGTAGTCTCAGGTCGGAGCATATATTTATATTCAAGCTGGGAAAACCATGCTATGAATCCTTTAAAAACTAAAAATGCGTATACATAGATGTTCATTTAAAAATGGAAGAATGGTTTATCAGTGCCAATCCATCATCTTGTCTTT\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_172301339_172301575_15:1:1_17:2:1_9/1\n";
         file << "TATTAATTTCAGAAGAAGTATTCCTCTAAATCGAGTTACAGGAACAAAAGGTATTTTGTTTTTGATTATTGATAGAGACATGATGTCTCCTGATGCCTGAGCTGGAGTTCAGTGGCACAGTGATAGCTCACTTTAGGCTCCAACTCCTGG\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_158527486_158527796_13:8:3_16:3:1_a/1\n";
         file << "CTACTCCAGATACTACAGTTGCACCACTTCGAGAAGACACGGAAAGGAAAACAATAAATCAGGAAAGAAAAGAAAATCCTATCCACCCAAAAATAATTACAAAAATTAGAAGAGCCATGCACTCCAGAAGACCCGGAGCCGTATAAGTAT\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_157144833_157145062_18:4:1_15:6:2_b/1\n";
         file << "TACATGGAGTAAATGAGAAGCAGGGGGTGCAACAAACTCAGAGTAACTCCAAGTACCTGGTACCCAGCAGCAGTGTACTTGGGCACCGTCGGACAACCTGTGTTAACTGATAGATGATTCTTCTCTGGGCTAAACTCAGACCCAAGGGTC\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file << "@chr1_107966086_107966417_14:2:1_12:6:0_c/1\n";
         file << "GCGATTCTCCAACCTCAGCCTCCCGATCCGCTGGGACTACAGGTGCGTGCCACCACGGCCGGCCAATCTTTTGTAATATTAGTAGAGTCGGGATTTCACCGTCTTAGCCCGGATTCTCTCGATCTCCTGAGCTCGAGATCCGCCCGCGTC\n";
         file << "+\n";
-        file << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
+file << "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n";
         
         file.close();
     }

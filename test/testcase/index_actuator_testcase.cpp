@@ -203,13 +203,14 @@ TEST_F(IndexActuatorTest, Initial_InvalidBlockType_ReturnsError) {
     EXPECT_EQ(-1, result);
 }
 
-TEST_F(IndexActuatorTest, Initial_BAMBlockType_ReturnsError) {
+TEST_F(IndexActuatorTest, Initial_BAMBlockType_Allowed) {
     createValidSamFile();
     pInBlock->setBlockType(BAM);
 
     IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
-    EXPECT_EQ(-1, result);
+    // BAM 块内容为 SAM 文本，同样支持建索引（与 SAM 行为一致）
+    EXPECT_EQ(0, result);
 }
 
 TEST_F(IndexActuatorTest, Initial_GZIPBlockType_ReturnsError) {

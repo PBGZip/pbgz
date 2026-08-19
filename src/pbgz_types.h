@@ -30,6 +30,7 @@
 typedef struct PbgzParameter{
     std::string inputFile;
     bool isDecToGZ;   // Whether to decompress to GZ format
+    bool isDecToBam;  // Whether to decompress SAM to BAM format
     std::string outputFile;  // 
     std::string outputDir;   // 
     bool isOverwriteOutFile;         // Whether to force overwrite output file
@@ -49,6 +50,7 @@ typedef struct PbgzParameter{
 
     PbgzParameter() {
         isDecToGZ = false;
+        isDecToBam = false;
         isOverwriteOutFile = false;
         isUnpackRef = false;
         threadNum = sysconf(_SC_NPROCESSORS_ONLN);

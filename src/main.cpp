@@ -52,6 +52,7 @@ typedef std::vector<Arg> PbgzArg;
 static PbgzArg pbgzArgs =
 {
     {'z', "gz", no_argument, "decompress to gz format"},
+    {'b', "bam", no_argument, "decompress SAM to bam format"},
     {'o', "outfile", required_argument, "<outfile> specify output filename for compress/decompress, - means output to pipe"},
     {'O', "outdir", required_argument, "<outdir> specify output directory for compress/decompress"},
     {'f', "force", no_argument, "force overwrite of output file. use for compress/decompress"},
@@ -350,14 +351,30 @@ public:
                 return -1;
             }
             name.resize(name.length() - 5);
+
+            /*
+             * 扩展名按输出格式定，在 name 上直接调整（不能再拼接到完整路径后再追加，
+             * 那会产出 con_sorted.bam.bam 这类双后缀）：
+             *   - -b：输出 BAM，统一 .bam（源名是 .sam/.bam 时替换扩展名）；
+             *   - 默认：输出 SAM 文本，源文件是 .bam（.bam.pbgz）时扩展名改回 .sam。
+             * FASTQ 源（如 .fq.gz.pbgz）保持原名不变。
+             */
+            if (parameter.isDecToBam) {
+                if (PathUtil::suffixCheck(name, ".sam") || PathUtil::suffixCheck(name, ".bam")) {
+                    name.resize(name.length() - 4);
+                }
+                name += ".bam";
+            } else if (parameter.isDecToGZ) {
+                name += ".gz";
+            } else if (PathUtil::suffixCheck(name, ".bam")) {
+                name.resize(name.length() - 4);
+                name += ".sam";
+            }
+
             if (parameter.outputDir.empty()) {
                 parameter.outputFile = PathUtil::getFilePath(parameter.inputFile) + name;
             } else {
                 parameter.outputFile = PathUtil::getAbsPath(parameter.outputDir) + name;
-            }
-
-            if (parameter.isDecToGZ) {
-                parameter.outputFile = parameter.outputFile + ".gz";
             }
         }
 
@@ -366,6 +383,10 @@ public:
 
     int32_t checkProc() override {
         if (0 != CommandProc::checkProc()) {
+            return -1;
+        }
+        if (parameter.isDecToGZ && parameter.isDecToBam) {
+            fprintf(stdout, "-z and -b cannot be used together.\n");
             return -1;
         }
         if (STDIN != parameter.inputFile) {
@@ -608,7 +629,7 @@ static std::vector<SubCommand> subCommands = {
     {
         "decompress",
         "Decompress file from pbgz file",
-        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 't', 'e', 'p', 'g', 'G', 'z'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 't', 'e', 'p', 'g', 'G', 'z', 'b'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<DecompressCmdProc>(para);
         },
@@ -706,7 +727,8 @@ void printUsage(const std::string& subCommandName = "") {
         } else if (subCommandName == "decompress") {
             fprintf(fp, "\nExample:\n");
             fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
-            fprintf(fp, "  pbgz decompress input.pbgz -O /output \n\n");
+            fprintf(fp, "  pbgz decompress input.pbgz -O /output \n");
+            fprintf(fp, "  pbgz decompress input.sam.pbgz -b\n\n");
         } else if (subCommandName == "index") {
             fprintf(fp, "\nExample:\n");
             fprintf(fp, "  pbgz index human.sam.gz.pbgz\n");
@@ -817,6 +839,10 @@ int main(int argc, char** argv) {
         switch (opt) {
         case 'z':{
             parameter.isDecToGZ = true;
+            break;
+        }
+        case 'b': {
+            parameter.isDecToBam = true;
             break;
         }
         case 'o': {

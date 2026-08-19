@@ -257,6 +257,9 @@ public:
      */
     std::atomic<bool> taskFailed{false};
 
+    /* 文件级决策（编码器选型等）是否已执行；SAM 头部块不携带数据，决策推迟到首个数据块。 */
+    bool fileDecisionInvoked = false;
+
     /* 同步辅助块发射的交接槽位，由发射者与写线程共用，受 auxEmitMutex 保护。 */
     mutable std::mutex auxEmitMutex;
     mutable std::condition_variable auxEmitCond;

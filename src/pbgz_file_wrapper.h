@@ -28,6 +28,7 @@
 
 #include "pbgz_file.h"
 #include "io_wrapper.h"
+#include "io_block.h"
 
 class RoughIOBlock;
 
@@ -42,6 +43,15 @@ public:
     PbgzFileMeta& getBaseFileMeta();
 
     PbgzFileMeta& getDynamicFileMeta();
+
+    /*
+     * 预读的格式探测数据（BlockFactory 在创建 reader 前从 ioReader 读出的字节）。
+     *
+     * 管道输入不可 seek，探测读走的字节必须以本接口交还给读取方，否则文件头就会丢。
+     * 这些字节按序在常规读取之前先被消费；seek 场景（动态元信息回读）直接读 ioReader，
+     * 不经过预读缓冲，seek 复位后预读缓冲继续生效。
+     */
+    void setPreReadData(const uint8_t* data, size_t len);
 
     /*
      * 当前正在读的那个 pbgz 包在整个输入流里的起始字节位置。
@@ -81,6 +91,8 @@ public:
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
         currentFileIndex = -1;  // Initialize file index to -1, indicating no file has been read yet
         currentBlockStart = 0;
+        preReadSize = 0;
+        preReadPos = 0;
     }
 
     void close();
@@ -94,7 +106,10 @@ private:
 
     static uint8_t* getFileReadBuffer();
 
-    int32_t readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic = true);
+    int32_t readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic = true, bool usePreRead = true);
+
+    /* 先消费预读缓冲，再读 ioReader；动态元信息回读（已 seek）时走直接 ioReader 读取 */
+    size_t readFromSource(void* pBuffer, size_t n);
 
 private:
     std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers, a file may consist of multiple compressed packages concatenated together
@@ -103,6 +118,11 @@ private:
     std::map<int32_t, uint64_t> fileStartMap;             // 每个拼接包在输入流里的起始位置，用于把包内相对偏移还原成真实位置
     int32_t currentFileIndex; // Current file sequence number, indicating which file is currently being read
     IOReader* ioReader;
+
+    /* 预读的格式探测数据：ioReader 已被 Creator 消费掉的字节，读回时按序先消费 */
+    uint8_t preReadBuf[BLOCK_TYPE_DETECT_SIZE];
+    size_t preReadSize;   // 尚未消费的预读字节数
+    size_t preReadPos;    // 预读缓冲内的消费位置
 };
 
 /// @brief Writer for pbgz format files

@@ -103,15 +103,26 @@ int32_t PbgzEngine::init() {
     coder_ns::initFcCoder();
 
     // Create queues
-    freeInputPool->setCapility(parameter.threadNum);
-    inputDataPool->setCapility(parameter.threadNum);
+    /*
+     * 输入侧容量取 threadNum + 1：SAM 头部独立成块后不参与 QUAL 先验预训练计数，
+     * 若容量恰为 threadNum，读线程在读满队列后阻塞于取空闲块，永远凑不满预训练目标
+     * 块数，finalizePretrain 不触发、coder 线程等不到 priorSettled -> 死锁。
+     * 多出一个槽位让读线程能比 coder 多读一块，预训练在队列满前即可收尾。
+     */
+    freeInputPool->setCapility(parameter.threadNum + 1);
+    inputDataPool->setCapility(parameter.threadNum + 1);
     freeOutputPool->setCapility(parameter.threadNum << 1);
     outputDataPool->setCapility(parameter.threadNum << 1);
 
     uint32_t blockBufferSize = getBlockSize();
     // First push empty blocks to free queue
+    /*
+     * 输入块初始只分配固定 1MB；读取时按 -l 决定的读取目标（getBlockSize()）读，
+     * 容量不足由 reader 的 ensureCapacity 按需 realloc 扩容，避免按 -l 一次性分配
+     * 大内存（如 -l 9 的 512MB×N）。输出块与文件头 block_size 仍按 -l。
+     */
     for (uint32_t i = 0; i < freeInputPool->getCapility(); ++i) {
-        RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(blockBufferSize);
+        RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(FIXED_INPUT_BLOCK_SIZE);
         if (inPtr == nullptr) {
             LOG_ERROR("PbgzEngine init failed.");
             return -1;
@@ -133,16 +144,29 @@ int32_t PbgzEngine::init() {
         LOG_INFO("Create PipeReader.");
     } else {
         if (PathUtil::isGzFile(parameter.inputFile)) {
-            bool isSupportSimd = false;
-#ifdef __SSE4_2__
-            isSupportSimd = Hardware().isSupportSimd();
-#endif
-            if (isSupportSimd) {
-                ioReader = MemoryUtil::safeNewClass<FastGzFileReader>(parameter.inputFile);
-                LOG_INFO("Create FastGzFileReader.");
+            /*
+             * 标准 BAM 是 BGZF（gzip）流，逐字节看和 .gz 文件无法区分。但它的 gzip 是
+             * 格式内层，不该走"透明 gz 解压"：透明解压用的是 Gz/FastGz reader，拿不到
+             * 输入文件总长（fileDecisionProc 里 dynamic_cast<FileReader*> 失败），QUAL
+             * 先验的"值不值得写"判据会退化，BAM 输入就会白白多写一个先验辅助块。
+             * 因此 BAM 一律交给 FileReader + BamGzBlockReader（后者内部自行 inflate），
+             * 块类型仍是 BAM，压缩行为与 SAM 输入对齐。
+             */
+            if (BlockUtil::isBamFile(parameter.inputFile)) {
+                ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
+                LOG_INFO("Create FileReader (BAM).");
             } else {
-                ioReader = MemoryUtil::safeNewClass<GzFileReader>(parameter.inputFile, parameter.threadNum);
-                LOG_INFO("Create GzFileReader.");
+                bool isSupportSimd = false;
+#ifdef __SSE4_2__
+                isSupportSimd = Hardware().isSupportSimd();
+#endif
+                if (isSupportSimd) {
+                    ioReader = MemoryUtil::safeNewClass<FastGzFileReader>(parameter.inputFile);
+                    LOG_INFO("Create FastGzFileReader.");
+                } else {
+                    ioReader = MemoryUtil::safeNewClass<GzFileReader>(parameter.inputFile, parameter.threadNum);
+                    LOG_INFO("Create GzFileReader.");
+                }
             }
         } else {
             ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
@@ -321,7 +345,15 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
 
     if (blockPtr->getBlockId() == 0 && blockPtr->getTotalDataLen() > 0){
         fileType = blockPtr->getBlockType();
-        /* 必须在 push 之前：入队即意味着某个工作线程可能立刻开始处理这个块。 */
+    }
+
+    /*
+     * 文件级决策必须发生在 push 之前（入队即意味着某个工作线程可能立刻开始处理）。
+     * SAM 头部块（只含 @ 行、无数据行）不触发决策，推迟到首个数据块，否则编码器选型
+     * 采不到字段样本只能退到默认编码器。必须在 push 之前调用，其余引擎行为不变。
+     */
+    if (!fileDecisionInvoked && blockReader->blockHasData(blockPtr)) {
+        fileDecisionInvoked = true;
         fileDecisionProc(blockPtr);
     }
 
@@ -500,10 +532,14 @@ int32_t PbgzEngine::startWorkTask() {
          * 首块串行化（perf 分支机制，见 firstCoderNotify）：id==0 的线程直接开始，
          * 其余线程等第 0 块处理完（preAnalysis 填充 SamInfo 等共享状态）再放行，
          * 避免并发 preAnalysis 在染色体表未就绪时把块误降级为 BINARY。
+         *
+         * 等待必须带谓词：第 0 块如果建不出执行器（如格式不支持的块类型），
+         * 处理会立刻失败、放行通知可能早于其它线程开始等待而错过——不带谓词的裸等待
+         * 会永久阻塞，让整个流水线死锁。谓词在持锁下复查 coderStartSync，先置位先得。
          */
         if (id > 0) {
             std::unique_lock<std::mutex> lock(coderStartMutex);
-            coderStartCond.wait(lock);
+            coderStartCond.wait(lock, [this] { return coderStartSync; });
         }
 
         while (true) {
@@ -610,6 +646,7 @@ int32_t PbgzEngine::startWorkTask() {
 }
 
 bool PbgzEngine::firstCoderNotify(bool flag) {
+    std::lock_guard<std::mutex> lock(coderStartMutex);
     if (flag && !coderStartSync) {
         coderStartSync = true;
         return true;
