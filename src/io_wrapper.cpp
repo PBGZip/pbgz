@@ -958,11 +958,15 @@ bool FastGzFileReader::readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen,
 
     int64_t readLen = isalExtraEach;
     size_t in2CacheLen = isalInLen + readLen;
-    isalExtraBuffer = MemoryUtil::safeRealloc<uint8_t>((size_t&)isalExtraLen, isalExtraBuffer, in2CacheLen);
+    size_t extraLen = isalExtraLen;
+    isalExtraBuffer = MemoryUtil::safeRealloc<uint8_t>(extraLen, isalExtraBuffer, in2CacheLen);
+    isalExtraLen = (uint32_t)extraLen;
     memcpy(isalExtraBuffer, isalIn, isalInLen);
     size_t actualReadLen = fileReader.readIO(isalExtraBuffer + isalInLen, readLen);
 
-    isalInputBuffer = MemoryUtil::safeRealloc<uint8_t>((size_t&)isalInputLength, isalInputBuffer, in2CacheLen);
+    size_t inputLength = isalInputLength;
+    isalInputBuffer = MemoryUtil::safeRealloc<uint8_t>(inputLength, isalInputBuffer, in2CacheLen);
+    isalInputLength = (int64_t)inputLength;
     memcpy(isalInputBuffer, isalExtraBuffer, in2CacheLen);
 
     isalState.avail_in = isalInLen + actualReadLen;

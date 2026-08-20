@@ -75,7 +75,7 @@ public:
     }
 
     /* 编码一行 QNAME（含末尾 '\t'）。 */
-    void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold = false)
+    void encode_line(const uint8_t *in, const uint32_t in_len, [[maybe_unused]] bool need2hold = false)
     {
         check_exit(in_len <= MAX_POS, coder_ns::CODER_ERR_BAD_ARGS,
             "coder_qname: QNAME too long (%u)", in_len);
@@ -128,8 +128,8 @@ public:
 
     /* 解码一行 QNAME（含末尾 '\t'），返回写入 out 的字节数。 */
     int32_t decode_line(uint8_t *out, uint32_t out_len,
-                        uint8_t split_ch = UINT8_MAX,
-                        bool need2hold = false)
+                        [[maybe_unused]] uint8_t split_ch = UINT8_MAX,
+                        [[maybe_unused]] bool need2hold = false)
     {
         if (io->m != coder_io::MDEC) {
             rc.input((char *)io->data, (char *)io->data + io->data_capacity);

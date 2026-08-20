@@ -86,7 +86,8 @@ void* safe_realloc_init(uint32_t& size, uint8_t* ptr, size_t new_size, char ch) 
     }
 
     if (new_size > size) {
-        uint8_t* temp_ptr = realloc_proc((size_t&)size, ptr, new_size);
+        size_t actualSize = size;
+        uint8_t* temp_ptr = realloc_proc(actualSize, ptr, new_size);
         if (temp_ptr == nullptr) {
             return ptr;
         }

@@ -169,6 +169,8 @@ TEST_F(BlockWrapperTest, TestBlockReaderTwoBlock) {
     pBlockReader->readBlock(pInBlock);
     BlockType fileType = pInBlock->getBlockType();
     EXPECT_EQ(pInBlock->getBlockId(), 0);
+    EXPECT_EQ(pInBlock->getBlockType(), FASTQ_GEN2);
+    const size_t firstBlockRecords = pInBlock->getNpos().size() / 4;
 
     // second block
     pInBlock->reset();
@@ -178,14 +180,17 @@ TEST_F(BlockWrapperTest, TestBlockReaderTwoBlock) {
     EXPECT_EQ(pInBlock->getBlockType(), FASTQ_GEN2);
     EXPECT_EQ(pInBlock->getNpos().size() % 4, 0);
 
-    // @SRR12922210.25411 25411/1
-    EXPECT_EQ(pInBlock->getNpos()[0], 26);
-    EXPECT_EQ(pInBlock->getNpos()[1], 177);
-    EXPECT_EQ(pInBlock->getNpos()[2], 179);
-    EXPECT_EQ(pInBlock->getNpos()[3], 330);
-
-    const char* line = "@SRR12922210.25411 25411/1\n";
-    EXPECT_EQ(memcmp(pInBlock->getBuffer(), line, pInBlock->getNpos()[0]),  0);
+    // 块 2 从块 1 之后的第一条记录开始：块 1 从文件头连续读入 1..N 条记录，
+    // 故块 2 首条记录编号为 N+1，边界由实际数据推导，不依赖压缩等级块大小配置。
+    const size_t firstRecord = firstBlockRecords + 1;
+    const std::string line = "@SRR12922210." + std::to_string(firstRecord)
+                           + " " + std::to_string(firstRecord) + "/1\n";
+    const size_t headerLen = line.size();
+    EXPECT_EQ(pInBlock->getNpos()[0], headerLen - 1);
+    EXPECT_EQ(pInBlock->getNpos()[1], headerLen - 1 + 151);
+    EXPECT_EQ(pInBlock->getNpos()[2], headerLen - 1 + 153);
+    EXPECT_EQ(pInBlock->getNpos()[3], headerLen - 1 + 304);
+    EXPECT_EQ(memcmp(pInBlock->getBuffer(), line.c_str(), headerLen - 1), 0);
 
     delete pIoReader;
     delete pBlockReader;

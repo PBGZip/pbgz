@@ -108,7 +108,7 @@ public:
 
         // Then compress
         uint8_t *fc_buff;
-        bool need_alloc = (lzSize + 4096) > in_len;
+        bool need_alloc = (static_cast<uint32_t>(lzSize) + 4096) > in_len;
         if (need_alloc)
         {
             fc_buff = static_cast<uint8_t*>(safe_alloc((lzSize << 1) + 4096));
@@ -166,7 +166,7 @@ public:
 
         int result = fc_decode(io->data + 1, lout);
         int lzSize = result;
-        check_exit(lzSize > 0 && lzSize <= out_len, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, lzSize);
+        check_exit(lzSize > 0 && static_cast<uint32_t>(lzSize) <= out_len, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, lzSize);
 
         index = io->meta["coder"]["bi"].asInt();
         num_indexes = io->meta["coder"]["bn"].asInt();

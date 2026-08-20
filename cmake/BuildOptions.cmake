@@ -71,18 +71,21 @@ endif()
 if(PBGZ_COMPILER STREQUAL "gcc")
     # GCC specific flags
     set(COMPILER_FLAGS "-Wall -Wextra -fpermissive")
+    set(COMPILER_FLAGS_C "-Wall -Wextra")
     set(OPTIMIZATION_DEBUG "-O0")
     set(OPTIMIZATION_RELEASE "-O3")
 
 elseif(PBGZ_COMPILER STREQUAL "clang")
     # Clang specific flags
     set(COMPILER_FLAGS "-Wall -Wextra -fpermissive -Wno-deprecated-register")
+    set(COMPILER_FLAGS_C "-Wall -Wextra -Wno-deprecated-register")
     set(OPTIMIZATION_DEBUG "-O0")
     set(OPTIMIZATION_RELEASE "-O3")
 
 elseif(PBGZ_COMPILER STREQUAL "icc")
     # Intel compiler specific flags
     set(COMPILER_FLAGS "-Wall -fpermissive")
+    set(COMPILER_FLAGS_C "-Wall")
     set(OPTIMIZATION_DEBUG "-O0")
     set(OPTIMIZATION_RELEASE "-O3 -ipo") # Intel-specific optimization
 endif()
@@ -98,9 +101,10 @@ set(CMAKE_C_FLAGS_RELEASE "${OPTIMIZATION_RELEASE} -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASEPROFILE "${OPTIMIZATION_RELEASE} -g -DNDEBUG")
 set(CMAKE_C_FLAGS_RELEASEPROFILE "${OPTIMIZATION_RELEASE} -g -DNDEBUG")
 
-# Apply common flags, architecture flags, and compiler flags
+# Apply common flags, architecture flags, and compiler flags.
+# -fpermissive is C++-only; C files must not receive it.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${PBGZ_COMMON_FLAGS} ${PBGZ_ARCH_FLAGS} ${COMPILER_FLAGS}")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${PBGZ_COMMON_FLAGS} ${PBGZ_ARCH_FLAGS} ${COMPILER_FLAGS}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${PBGZ_COMMON_FLAGS} ${PBGZ_ARCH_FLAGS} ${COMPILER_FLAGS_C}")
 
 # Address Sanitizer option
 option(ENABLE_SANITIZER "Enable Address Sanitizer" OFF)

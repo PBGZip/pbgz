@@ -464,8 +464,8 @@ public:
     bool modelLoaded;
 
     explicit fcv2_impl(coder_io* ioPtr, const Fcv2Cfg& cfgIn)
-        : io(ioPtr), cfg(normalizeCfg(cfgIn)), revCounter(COUNTER_INIT),
-          dupCounter(COUNTER_INIT), alphaSize(0),
+        : io(ioPtr), revCounter(COUNTER_INIT),
+          dupCounter(COUNTER_INIT), cfg(normalizeCfg(cfgIn)), alphaSize(0),
           encodeStarted(false), flushed(false), modelLoaded(false)
     {
         initTables();

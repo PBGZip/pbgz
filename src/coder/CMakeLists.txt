@@ -12,6 +12,10 @@ set(CODER_SOURCES
 add_subdirectory(ppmd)
 add_subdirectory(fc)
 
+# bcm_libsais.cpp is vendored third-party (libsais); suppress warnings that
+# come from upstream code we don't maintain.
+set_source_files_properties(bcm_libsais.cpp PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter")
+
 # Create coder library
 add_library(pbgz_coder STATIC ${CODER_SOURCES})
 

@@ -37,7 +37,7 @@
 #include <arm_neon.h>
 #endif
 
-BlockType BlockReader::analyzeBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/) {
+BlockType BlockReader::analyzeBlock(RoughIOBlock* /*blockPtr*/, BlockType /*fileType*/) {
     return BINARY;
 }
 
@@ -327,7 +327,7 @@ BlockType FastqBlockReader::analyzeBlock(RoughIOBlock* blockPtr, BlockType /*fil
  *   2. 数据区按 readsPerBlock 条 read 分块（由压缩级别决定 10000/25000/100000）。
  * 块大小由 read 行数决定，不再受 byte blockSize 约束，缓冲不足时按需扩容。
  */
-int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
+int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/) {
     if (ioReader == nullptr || blockPtr == nullptr) {
         LOG_ERROR("IO reader or block pointer is null.");
         return -1;
@@ -1409,8 +1409,7 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
 
     PbgzDataBlock pbgzDataBlock;
     pbgzDataBlock.setDataPtr(blockPtr->getBuffer());
-    if (0 != pbgzFileReader->readDataBlock(pbgzDataBlock, blockPtr)) {
-        LOG_ERROR("Read Pbgz data block failed.");
+    if (0 != pbgzFileReader->readDataBlock(pbgzDataBlock, blockPtr)) {        LOG_ERROR("Read Pbgz data block failed.");
         return -1;
     }
 

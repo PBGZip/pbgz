@@ -250,6 +250,18 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     }
 
     /*
+     * 管道输入在 prepareFileMeta 时探测不到源类型，baseFileMeta 里没有 srcFileType；
+     * 到这里首个数据块的类型已知，补记进动态元信息，解压侧据此免建读映射索引。
+     */
+    if (parameter.inputFile == STDIN) {
+        const BlockType t = preprocessInfo.fileType;
+        if (t == SAM || t == BAM || t == FASTQ_GEN2 || t == FASTQ_GEN3 || t == BINARY) {
+            std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
+            dynamicFileMeta.setMetaData("srcFileType", (Json::Value::UInt)t);
+        }
+    }
+
+    /*
      * 先验值得训练：进入跨块预训练。块 0 由随后的 pretrainBlockProc 累积 QUAL，
      * 读完目标块数（=并发度）或 45 MB 上限后由 finalizePretrain 统一训练、发布，
      * 届时才通知 coder 线程开始压缩。此处先不 emit、不 markDone。
@@ -539,7 +551,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 /* Write compressed stream of current block's meta */
                 outBlock->reset();
                 int64_t currBlockLen = metaString.length() + refeIo.data_len;
-                if (currBlockLen >= outBlock->getRemain()) {
+                if ((size_t)currBlockLen >= outBlock->getRemain()) {
                     LOG_ERROR("reference block pack failed");
                     break;
                 }
@@ -642,6 +654,18 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
      * 字段越界的主防线；coder_io 的 putc 检查与 decode 错误返回链作兜底。
      */
     baseFileMeta.setMetaData("block_size", getBlockSize());
+
+    /*
+     * 源文件类型写进文件头，解压侧据此决定参考基因只需加载 squash（SAM/BAM）还是
+     * 要建读映射索引（FASTQ）。管道输入拿不到类型，不写（解压侧按未知保守处理）。
+     */
+    if (parameter.inputFile != STDIN) {
+        const BlockType srcType = BlockUtil::detectInputFileType(parameter.inputFile);
+        if (srcType == BINARY || srcType == FASTQ_GEN2 || srcType == FASTQ_GEN3 ||
+            srcType == SAM || srcType == BAM) {
+            baseFileMeta.setMetaData("srcFileType", (Json::Value::UInt)srcType);
+        }
+    }
 
     if (pRefGene == nullptr) {
         return 0;

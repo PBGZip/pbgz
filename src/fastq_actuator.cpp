@@ -744,7 +744,7 @@ int32_t FastqCodecActuator::compressIdInAll() {
     // Record statistics for ID compression
     recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_ID, srcDataLen, idIo->data_len);
 
-    return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
+    return (size_t)outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
 int32_t FastqCodecActuator::compressIdInSplit() {
@@ -820,7 +820,7 @@ int32_t FastqCodecActuator::compressIdInSplit() {
     // Record statistics for ID compression
     recordFastqFieldStats(pbgzEngine, StatObjectId::FASTQ_ID, totalSrcLength, totalDstLength);
 
-    return outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
+    return (size_t)outBlockPtr->getDataLen() > outBlockPtr->getBufferSize() ? -1 : 0;
 }
 
 int32_t FastqCodecActuator::compressId() {

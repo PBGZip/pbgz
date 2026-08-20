@@ -232,7 +232,7 @@ public:
         return dataLen + metaLen;
     }
 
-    size_t getBlockSize() {
+    size_t getBlockSize() const {
         return blockSize;
     }
     

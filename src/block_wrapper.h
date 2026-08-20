@@ -153,7 +153,7 @@ public:
         : BlockReader(reader, preReadData, preReadLen) { }
 
 protected:
-    virtual BlockType analyzeBlock(RoughIOBlock* blockPtr, BlockType fileType) override {
+    virtual BlockType analyzeBlock(RoughIOBlock* /*blockPtr*/, BlockType /*fileType*/) override {
         return BINARY;
     }
 };

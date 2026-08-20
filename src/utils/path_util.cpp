@@ -175,7 +175,10 @@ namespace PathUtil {
         // Check if file has at least 3 bytes for gzip header magic number
         if (fileSize > 3) {
             uint8_t tmpBuf[3] = {0};
-            fread(tmpBuf, 3, 1, fp);
+            if (fread(tmpBuf, 3, 1, fp) != 1) {
+                fclose(fp);
+                return false;
+            }
             fclose(fp);
             // Check for gzip magic bytes: 0x1F 0x8B
             return (tmpBuf[0] == 0x1F && tmpBuf[1] == 0x8B);

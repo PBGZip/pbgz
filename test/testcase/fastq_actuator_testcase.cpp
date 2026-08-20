@@ -244,9 +244,13 @@ TEST_F(FastQActuatorTest, testPreAnalysis) {
     EXPECT_EQ(actuator.idSplitMinLen[3], 1);
 
     
-    EXPECT_EQ(actuator.idSplitMaxLen[0], 12);    
-    EXPECT_EQ(actuator.idSplitMaxLen[1], 5);
-    EXPECT_EQ(actuator.idSplitMaxLen[2], 5);
+    // 编号段（段 1/2）最大长度 = 块内最大记录编号的位数：块内编号从 1 递增，
+    // 最大编号即块内记录数，随压缩等级块大小配置变化，由实际数据推导。
+    const uint32_t maxRecordDigits = static_cast<uint32_t>(
+        std::to_string(pInBlock->getNpos().size() / 4).size());
+    EXPECT_EQ(actuator.idSplitMaxLen[0], 12);
+    EXPECT_EQ(actuator.idSplitMaxLen[1], maxRecordDigits);
+    EXPECT_EQ(actuator.idSplitMaxLen[2], maxRecordDigits);
     EXPECT_EQ(actuator.idSplitMaxLen[3], 1);
 
     EXPECT_EQ(actuator.idPositions[4], 12);

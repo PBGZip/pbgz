@@ -222,9 +222,38 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
         return false;
     }
     pRefGene->setNiFile(parameter.niIndexFile);
-    if (!pRefGene->makeIndex()) {
+    /*
+     * SAM/BAM 解压只取参考碱基序列（getSquash/getStretch 等），不需要 makeIndex 的
+     * 读映射哈希表（那只对 FASTQ 的 read 定位有用）。压缩侧把源文件类型写进
+     * srcFileType（文件输入在 baseFileMeta，管道输入在 dynamicFileMeta）。
+     *
+     * 老版本文件、或管道输入压缩的文件可能没有这个字段：getMetaData 会对缺失键造出
+     * null，asUInt() 返回 0。这里显式兼容——只有识别为已知类型才采用，否则按未知
+     * 保守处理（走 makeIndex）。参考是用户明确下的指令, 用不了就得停下, 悄悄改成
+     * 无参考等于解出另一份东西。
+     */
+    BlockType srcType = TYPE_UNKNOW;
+    {
+        const Json::Value* meta = nullptr;
+        if (baseFileMeta.getMetaData().isMember("srcFileType")) {
+            meta = &baseFileMeta.getMetaData();
+        } else if (dynamicFileMeta.getMetaData().isMember("srcFileType")) {
+            meta = &dynamicFileMeta.getMetaData();
+        }
+        if (meta != nullptr) {
+            const uint32_t v = (*meta)["srcFileType"].asUInt();
+            if (v == (uint32_t)SAM || v == (uint32_t)BAM || v == (uint32_t)FASTQ_GEN2 ||
+                v == (uint32_t)FASTQ_GEN3 || v == (uint32_t)BINARY) {
+                srcType = (BlockType)v;
+            }
+        }
+    }
+    const bool needIndex = !(srcType == SAM || srcType == BAM);
+    const bool ok = needIndex ? pRefGene->makeIndex() : pRefGene->makeSquashIndex();
+    if (!ok) {
         LOG_ERROR("initialize reference failed");
         MemoryUtil::safeDeleteClass(pRefGene);
+        pRefGene = nullptr;
         return false;
     }
 
