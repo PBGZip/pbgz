@@ -206,21 +206,21 @@ TEST_F(SamSortCombineTest, SamSortCombineFile) {
 }
 
 TEST_F(SamSortCombineTest, SamSortSingleFile) {
-    // 测试单个文件的合并场景
+    // Test the merge scenario for a single file
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "100:read1\t0\tchr1\t100\t60\t76M\t*\t0\t0\tATATCGATCGATCGATCGATCGATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
         "200:read2\t0\tchr1\t200\t60\t76M\t*\t0\t0\tACGTACGTACGTACGTACGTACGT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
     PbgzParameter para;
     MockSortEngine* engine = MemoryUtil::safeNewClass<MockSortEngine>(para);
     engine->init(SamSortTestData::mergedOutputFile);
-    engine->blockCount = 1;  // 只有一个文件需要合并
+    engine->blockCount = 1;  // only one file needs merging
     int32_t result = engine->startEnginePostProc();
     engine->finish();
     EXPECT_EQ(result, 0);
@@ -229,7 +229,7 @@ TEST_F(SamSortCombineTest, SamSortSingleFile) {
 }
 
 TEST_F(SamSortCombineTest, SamSortWithUnmappedRecords) {
-    // 测试包含 unmapped (referencePos < 0) 记录的场景
+    // Test the scenario with unmapped (referencePos < 0) records
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "100:read1\t0\tchr1\t100\t60\t76M\t*\t0\t0\tATATCGATCGATCGATCGATCGATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -239,7 +239,7 @@ TEST_F(SamSortCombineTest, SamSortWithUnmappedRecords) {
         "200:read2\t0\tchr1\t200\t60\t76M\t*\t0\t0\tACGTACGTACGTACGTACGTACGT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -255,7 +255,7 @@ TEST_F(SamSortCombineTest, SamSortWithUnmappedRecords) {
 }
 
 TEST_F(SamSortCombineTest, SamSortSameChromosomeDifferentPositions) {
-    // 测试同一条染色体上不同位置的排序
+    // Test sorting of different positions on the same chromosome
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "500:read_pos500\t0\tchr1\t500\t60\t76M\t*\t0\t0\tPOS500SEQUENCE\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -267,7 +267,7 @@ TEST_F(SamSortCombineTest, SamSortSameChromosomeDifferentPositions) {
         "300:read_pos300\t0\tchr1\t300\t60\t76M\t*\t0\t0\tPOS300SEQUENCE\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -280,7 +280,7 @@ TEST_F(SamSortCombineTest, SamSortSameChromosomeDifferentPositions) {
     EXPECT_EQ(result, 0);
     verifyOutputContent(SamSortTestData::mergedOutputFile, 4, 3);
 
-    // 验证输出顺序正确（按位置升序）
+    // Verify the output order is correct (ascending by position)
     std::ifstream file(SamSortTestData::mergedOutputFile);
     std::string line;
     int recordIndex = 0;
@@ -297,14 +297,14 @@ TEST_F(SamSortCombineTest, SamSortSameChromosomeDifferentPositions) {
 }
 
 TEST_F(SamSortCombineTest, SamSortMultipleChromosomes) {
-    // 测试跨染色体的记录排序
+    // Test sorting records across chromosomes
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "248956522:read_chr2\t0\tchr2\t100\t60\t76M\t*\t0\t0\tCHR2POS100SEQUENCE\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
         "50:read_chr1\t0\tchr1\t50\t60\t76M\t*\t0\t0\tCHR1POS50SEQUENCE\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息（chr2 的位置应该在 chr1 之后）
+    // Initialize chromosome info (chr2's position should come after chr1)
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().addChromosomeInfo("chr2", 242193529);
     SamInfo::getInstance().calculateChromosomePositions();
@@ -321,10 +321,10 @@ TEST_F(SamSortCombineTest, SamSortMultipleChromosomes) {
 }
 
 TEST_F(SamSortCombineTest, SamSortNoInputFiles) {
-    // 测试没有输入文件的场景（blockCount = 0）
+    // Test the scenario with no input files (blockCount = 0)
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().addChromosomeInfo("chr2", 242193529);
     SamInfo::getInstance().calculateChromosomePositions();
@@ -332,7 +332,7 @@ TEST_F(SamSortCombineTest, SamSortNoInputFiles) {
     PbgzParameter para;
     MockSortEngine* engine = MemoryUtil::safeNewClass<MockSortEngine>(para);
     engine->init(SamSortTestData::mergedOutputFile);
-    engine->blockCount = 0;  // 没有输入文件需要处理
+    engine->blockCount = 0;  // no input files to process
     int32_t result = engine->startEnginePostProc();
     engine->finish();
     EXPECT_EQ(result, 0);
@@ -341,7 +341,7 @@ TEST_F(SamSortCombineTest, SamSortNoInputFiles) {
 }
 
 TEST_F(SamSortCombineTest, SamSortLargeVolumeRecords) {
-    // 测试大量记录的场景，验证分块功能
+    // Test a scenario with many records to verify the chunking behavior
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
 
     std::vector<std::string> records0, records1;
@@ -352,7 +352,7 @@ TEST_F(SamSortCombineTest, SamSortLargeVolumeRecords) {
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, records0);
     createTestSortedSamFile(SamSortTestData::sortedSamFile1, records1);
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -368,14 +368,14 @@ TEST_F(SamSortCombineTest, SamSortLargeVolumeRecords) {
 }
 
 TEST_F(SamSortCombineTest, SamsortMultipleUnmappedInSingleFile) {
-    // 测试单个文件中有多行未map记录的场景
+    // Test the scenario where a single file contains multiple unmapped records
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "-1:unmapped1\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPEDSEQUENCE1\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
         "-1:unmapped2\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPEDSEQUENCE2\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -387,7 +387,7 @@ TEST_F(SamSortCombineTest, SamsortMultipleUnmappedInSingleFile) {
     engine->finish();
     EXPECT_EQ(result, 0);
 
-    // 验证包含2条未map记录
+    // Verify the output contains 2 unmapped records
     std::ifstream file(SamSortTestData::mergedOutputFile);
     std::string line;
     int unmappedCount = 0;
@@ -405,7 +405,7 @@ TEST_F(SamSortCombineTest, SamsortMultipleUnmappedInSingleFile) {
 }
 
 TEST_F(SamSortCombineTest, SamSortMultipleFilesWithMultipleUnmapped) {
-    // 测试多个文件中都包含多行未map记录的场景
+    // Test the scenario where multiple files each contain multiple unmapped records
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "-1:unmapped_f1_1\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPEDF1SEQ1\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -423,7 +423,7 @@ TEST_F(SamSortCombineTest, SamSortMultipleFilesWithMultipleUnmapped) {
         "-1:unmapped_f3_2\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPEDF3SEQ2\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().addChromosomeInfo("chr2", 242193529);
     SamInfo::getInstance().calculateChromosomePositions();
@@ -436,10 +436,10 @@ TEST_F(SamSortCombineTest, SamSortMultipleFilesWithMultipleUnmapped) {
     engine->finish();
     EXPECT_EQ(result, 0);
 
-    // 验证输出：3条mapped + 6条unmapped = 9条记录
+    // Verify output: 3 mapped + 6 unmapped = 9 records
     verifyOutputContent(SamSortTestData::mergedOutputFile, 4, 9);
 
-    // 验证unmapped记录是否正确处理
+    // Verify unmapped records are handled correctly
     std::ifstream file(SamSortTestData::mergedOutputFile);
     std::string line;
     int unmappedCount = 0;
@@ -461,7 +461,7 @@ TEST_F(SamSortCombineTest, SamSortMultipleFilesWithMultipleUnmapped) {
 }
 
 TEST_F(SamSortCombineTest, SamSortMixedMappedAndUnmappedInSequence) {
-    // 测试单个文件中 mapped 和 unmapped 记录交替出现的场景
+    // Test the scenario where mapped and unmapped records alternate within a single file
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "-1:unmapped_1\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPED1\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -471,7 +471,7 @@ TEST_F(SamSortCombineTest, SamSortMixedMappedAndUnmappedInSequence) {
         "-1:unmapped_3\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPED3\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -483,7 +483,7 @@ TEST_F(SamSortCombineTest, SamSortMixedMappedAndUnmappedInSequence) {
     engine->finish();
     EXPECT_EQ(result, 0);
 
-    // 验证输出
+    // Verify the output
     std::ifstream file(SamSortTestData::mergedOutputFile);
     std::string line;
     int unmappedCount = 0;
@@ -505,10 +505,10 @@ TEST_F(SamSortCombineTest, SamSortMixedMappedAndUnmappedInSequence) {
 }
 
 TEST_F(SamSortCombineTest, SamSortEmptyHeaderFile) {
-    // 测试返回空文件时首行是unmapped记录的场景
+    // Test the scenario where the first line read back is an unmapped record
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
 
-    // 文件0的第一行就是unmapped记录
+    // File 0's first line is an unmapped record
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "-1:first_line_unmapped\t4\t*\t0\t0\t76M\t*\t0\t0\tFIRSTUNMAPPED\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
         "100:mapped_after\t0\tchr1\t100\t60\t76M\t*\t0\t0\tMAPPEDAFTER\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -517,7 +517,7 @@ TEST_F(SamSortCombineTest, SamSortEmptyHeaderFile) {
         "50:second_file_mapped\t0\tchr1\t50\t60\t76M\t*\t0\t0\tSECONDMAPPED\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -529,7 +529,7 @@ TEST_F(SamSortCombineTest, SamSortEmptyHeaderFile) {
     engine->finish();
     EXPECT_EQ(result, 0);
 
-    // 验证包含1条未map记录和2条映射记录
+    // Verify the output contains 1 unmapped and 2 mapped records
     std::ifstream file(SamSortTestData::mergedOutputFile);
     std::string line;
     int recordCount = 0;
@@ -550,7 +550,7 @@ TEST_F(SamSortCombineTest, SamSortEmptyHeaderFile) {
 }
 
 TEST_F(SamSortCombineTest, SamSortAllUnmappedRecords) {
-    // 测试所有记录都是unmapped的场景
+    // Test the scenario where all records are unmapped
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "-1:unmapped1\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPED1\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -561,7 +561,7 @@ TEST_F(SamSortCombineTest, SamSortAllUnmappedRecords) {
         "-1:unmapped4\t4\t*\t0\t0\t76M\t*\t0\t0\tUNMAPPED4\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -573,14 +573,14 @@ TEST_F(SamSortCombineTest, SamSortAllUnmappedRecords) {
     engine->finish();
     EXPECT_EQ(result, 0);
 
-    // 验证所有4条记录都是unmapped
+    // Verify all 4 records are unmapped
     verifyOutputContent(SamSortTestData::mergedOutputFile, 4, 4);
 
     MemoryUtil::safeDeleteClass(engine);
 }
 
 TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInSingleFile) {
-    // 测试单个文件中同一位置有多个不同ID的记录
+    // Test records with different IDs at the same position within a single file
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "100:read_id1\t0\tchr1\t100\t60\t76M\t*\t0\t0\tATATCGATCGATCGATCGATCGATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -589,7 +589,7 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInSingleFile) {
         "200:read_id4\t0\tchr1\t200\t60\t76M\t*\t0\t0\tTCGATCGATCGATCGATCGATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -602,7 +602,7 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInSingleFile) {
     EXPECT_EQ(result, 0);
     verifyOutputContent(SamSortTestData::mergedOutputFile, 4, 4);
 
-    // 验证输出中包含所有四条记录，并且按照原始顺序排列
+    // Verify the output contains all four records in their original order
     std::ifstream file(SamSortTestData::mergedOutputFile);
     std::string line;
     std::vector<std::string> foundIds;
@@ -619,8 +619,8 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInSingleFile) {
     }
     file.close();
     EXPECT_EQ(foundIds.size(), 4);
-    // 验证顺序：位置100的三条记录应该保持原始顺序，然后是位置100的记录（重复），最后是位置200的记录
-    // 由于它们的位置相同（100），按照文件中的原始顺序：read_id1, read_id2, read_id3, read_id4
+    // Verify order: the records at position 100 keep their original order, followed by the record at position 200
+    // Since they share the same position (100), they follow the file's original order: read_id1, read_id2, read_id3, read_id4
     std::vector<std::string> expectedIds = {"read_id1", "read_id2", "read_id3", "read_id4"};
     for (size_t i = 0; i < expectedIds.size(); ++i) {
         EXPECT_EQ(foundIds[i], expectedIds[i])
@@ -631,7 +631,7 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInSingleFile) {
 }
 
 TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInMultipleFiles) {
-    // 测试多个文件中同一位置有多个不同ID的记录
+    // Test records with different IDs at the same position across multiple files
     createTestSortedHeadFile(SamSortTestData::sortedHeadFile);
     createTestSortedSamFile(SamSortTestData::sortedSamFile0, {
         "100:read_f1_id1\t0\tchr1\t100\t60\t76M\t*\t0\t0\tATATCGATCGATCGATCGATCGATC\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -646,7 +646,7 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInMultipleFiles) {
         "100:read_f3_id6\t0\tchr1\t100\t60\t76M\t*\t0\t0\tCTAGCTAGCTAGCTAGCTAGCTAT\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     });
 
-    // 初始化染色体信息
+    // Initialize chromosome info
     SamInfo::getInstance().addChromosomeInfo("chr1", 248956422);
     SamInfo::getInstance().calculateChromosomePositions();
 
@@ -659,7 +659,7 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInMultipleFiles) {
     EXPECT_EQ(result, 0);
     verifyOutputContent(SamSortTestData::mergedOutputFile, 4, 6);
 
-    // 验证输出中包含所有六条记录，并且按照原始顺序排列
+    // Verify the output contains all six records in their original order
     std::ifstream file(SamSortTestData::mergedOutputFile);
     std::string line;
     std::vector<std::string> foundIds;
@@ -676,8 +676,8 @@ TEST_F(SamSortCombineTest, SamSortSamePositionDifferentIdsInMultipleFiles) {
     }
     file.close();
     EXPECT_EQ(foundIds.size(), 6);
-    // 验证顺序：位置100的五条记录按照文件读取顺序排列，然后是位置200的记录
-    // 文件读取顺序：file0 -> file1 -> file2
+    // Verify order: the five records at position 100 follow the file read order, then the record at position 200
+    // File read order: file0 -> file1 -> file2
     std::vector<std::string> expectedIds = {"read_f1_id1", "read_f1_id2", "read_f2_id3", "read_f2_id4", "read_f3_id5", "read_f3_id6"};
     for (size_t i = 0; i < expectedIds.size(); ++i) {
         EXPECT_EQ(foundIds[i], expectedIds[i])
@@ -710,7 +710,7 @@ TEST_F(SamSortCombineTest, CombineSamFileWithFileWriter) {
     EXPECT_EQ(result, 0);
     verifyOutputContent(outputFile, 0, 6);
 
-    // 验证合并后的顺序是否正确
+    // Verify the merged order is correct
     std::ifstream file(outputFile);
     std::string line;
     std::vector<std::string> sortedLines;

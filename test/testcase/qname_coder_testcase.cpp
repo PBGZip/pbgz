@@ -58,7 +58,7 @@ public:
     uint8_t* compressed_data = nullptr;
     uint8_t* decompressed_data = nullptr;
 
-    /* 编码所有 QNAME（含末尾 '\t'），返回编码器输出长度。 */
+    /* Encode all QNAMEs (including the trailing '\t') and return the encoder's output length. */
     int32_t encodeAll(std::vector<std::string>& lines)
     {
         coder_io io(compressed_data, BUFFER_SIZE);
@@ -86,7 +86,7 @@ public:
     }
 };
 
-/* 真实结构的 QNAME：固定 9 字符前缀（5 值）+ '.' + 7~8 位数字，成对重复但不相邻。 */
+/* Realistic QNAMEs: a fixed 9-char prefix (5 values) + '.' + a 7~8 digit number, repeated in pairs but never adjacent. */
 static std::vector<std::string> makeRealisticNames(int pairs, unsigned seed)
 {
     const char* prefixes[5] = {"ERR013136", "ERR015528", "ERR156633", "ERR162873", "ERR162876"};
@@ -98,7 +98,7 @@ static std::vector<std::string> makeRealisticNames(int pairs, unsigned seed)
         int id = 1000000 + rand() % 20000000;
         std::string n = std::string(prefixes[p]) + "." + std::to_string(id) + "\t";
         names.push_back(n);
-        /* 同片段 R1/R2 同名，但坐标排序后相隔约 1~60 行。 */
+        /* R1/R2 of the same fragment share a name but are separated by about 1~60 lines after coordinate sorting. */
         int gap = 1 + rand() % 60;
         for (int g = 0; g < gap && (int)names.size() < pairs * 2; g++) {
             int p2 = rand() % 5;
@@ -119,7 +119,7 @@ TEST_F(QNameCoderTest, BasicRoundTrip)
     EXPECT_TRUE(roundtrip(lines));
 }
 
-/* 大量记录（含跨行重复）往返一致 + 压缩率低于原始 50%。 */
+/* Round-trip consistency across many records (including cross-line duplicates) and a compression ratio below 50% of the raw size. */
 TEST_F(QNameCoderTest, RealisticRoundTripAndRatio)
 {
     std::vector<std::string> lines = makeRealisticNames(4000, 7);
@@ -129,22 +129,22 @@ TEST_F(QNameCoderTest, RealisticRoundTripAndRatio)
     size_t raw = 0;
     for (auto& s : lines) raw += s.size();
     int32_t packed = encodeAll(lines);
-    EXPECT_LT((size_t)packed, raw / 2) << "前缀固定+成对重复的数据应压到 50% 以下";
+    EXPECT_LT((size_t)packed, raw / 2) << "Fixed prefix + paired-redundant data must compress below 50%";
 }
 
-/* 小窗口远距离重复：内容仍须无损（copy 未命中时退化为 NEW）。 */
+/* Widely separated duplicates beyond the small window: the content must still be lossless (a copy miss degrades to NEW). */
 TEST_F(QNameCoderTest, FarApartDuplicateStillLossless)
 {
-    /* 行距须 > RING_SIZE(4096)，生成足够行后再插一个重复对 */
+    /* The line distance must exceed RING_SIZE (4096); generate enough lines first, then insert a duplicate pair. */
     std::vector<std::string> lines = makeRealisticNames(6000, 3);
     ASSERT_GT(lines.size(), 5000u);
-    /* 造一个距离远超 RING_SIZE 的重复对 */
+    /* Create a duplicate pair whose distance far exceeds RING_SIZE. */
     std::string first = lines[0];
     lines.insert(lines.begin() + 5000, first);
     EXPECT_TRUE(roundtrip(lines));
 }
 
-/* 大量唯一名字（无可 copy）：往返一致且不死循环。 */
+/* Many unique names (no copy possible): round-trip is consistent and no infinite loop occurs. */
 TEST_F(QNameCoderTest, ManyUniqueNames)
 {
     std::vector<std::string> lines;

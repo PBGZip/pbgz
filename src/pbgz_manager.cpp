@@ -54,7 +54,7 @@ void PbgzManager::exitProc(int errorCode, const char* errorMessage){
 }
 
 void PbgzManager::addOutputFile(const std::string& fileName) {
-    /* second 置 false：异常退出（errorCode < 0）时删除该输出文件。 */
+    /* second is set to false: delete this output file on abnormal exit (errorCode < 0). */
     outfiles.push_back(std::make_pair(fileName, false));
 }
 
@@ -110,15 +110,18 @@ void PbgzManager::updateWriteDataLen(RoughIOBlock* blockPtr) {
 
 void PbgzManager::updateDataInfo() {
     /*
-     * 进度条原地刷新：先清行（\033[K）再写内容，末尾 \r 回到行首。
-     * 不用清行的话，较长的上一次内容会残留，且与其他 stderr 输出（如 File type）
-     * 交错时会把对方末尾盖在行尾，出现 "File type: SAM40/0]---" 这类乱码。
+     * Refresh the progress bar in place: clear the line (\033[K) first, then write the
+     * content, with a trailing \r to return to the start of the line. Without clearing
+     * the line, leftover bytes of the previous (longer) content persist, and when
+     * interleaved with other stderr output (such as "File type"), the tail of the other
+     * output gets covered at the end of the line, producing garbled text like
+     * "File type: SAM40/0]---".
      */
     fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\r", totalReadLen, totalWriteLen);
 }
 
 void PbgzManager::printFileType(BlockType blockType) {
-    /* 可能插在进度条之后打印：先回行首并清行，避免覆盖进度条残留 */
+    /* May print right after the progress bar: return to the start of the line and clear it first, to avoid covering leftover progress-bar output */
     fprintf(stderr, "\r\033[KFile type: %s\n", BlockUtil::getBlockTypeName(blockType).c_str());
 }
 

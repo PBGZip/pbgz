@@ -30,41 +30,52 @@
 #include "io_block.h"
 
 /*
- * 辅助块的认领者。
+ * Claimant for auxiliary blocks.
  *
- * 块读者不认识任何具体的辅助块类型，它只负责在路过辅助块时逐个询问已注册的认领者，
- * 由认领者自己判断这块是不是给它的。新增一种辅助块因此只需要多注册一个认领者，
- * 读者一行都不用改；没有人认领的辅助块被安静跳过，这正是老版本读到新格式时
- * 需要的前向兼容行为。
+ * The block reader knows nothing about any concrete auxiliary block type; when it
+ * passes an auxiliary block it simply asks each registered claimant in turn, and the
+ * claimant itself decides whether the block is meant for it. Adding a new auxiliary
+ * block type therefore only requires registering one more claimant - the reader does
+ * not change a line. Auxiliary blocks no one claims are silently skipped, which is
+ * exactly the forward-compatible behavior old versions need when they encounter the
+ * new format.
  *
- * 线程约定：claim 只在读线程里被调用，认领者之间不会并发。但认领者写下的状态
- * 会被工作线程读取，所以跨线程可见性由认领者自己负责。
+ * Threading contract: claim is only called on the reader thread, so claimants never
+ * run concurrently with each other. However, the state a claimant writes is read by
+ * worker threads, so cross-thread visibility is the claimant's own responsibility.
  */
 class AuxBlockConsumer {
 public:
     virtual ~AuxBlockConsumer() { }
 
     /*
-     * 返回 true 表示本块已被认领；返回 false 表示不感兴趣，继续问下一个认领者。
+     * Returning true means this block has been claimed; false means the claimant is
+     * not interested and the next claimant should be asked.
      *
-     * packageIndex 是本块所属 pbgz 包的序号，也就是辅助块的身份。多个包 cat 到一起
-     * 之后同一种辅助块会出现多份，认领者必须按包分别保存，不能用后来的覆盖先前的——
-     * 数据块是边读边并行解的，后一个包的辅助块落地时前一个包的块往往还在解，
-     * 覆盖会让它们用错数据且不报错。
+     * packageIndex is the sequence number of the pbgz package this block belongs to,
+     * i.e. the auxiliary block's identity. Once multiple packages are cat-concatenated,
+     * the same auxiliary block type appears more than once, so a claimant must keep
+     * them per package and must not let a later one overwrite an earlier one - data
+     * blocks are decoded in parallel as they are read, and when a later package's
+     * auxiliary block lands, the earlier package's blocks are often still being decoded.
+     * Overwriting would silently make them use the wrong data.
      *
-     * 这里曾经用"绝对文件偏移"当身份，那是错的：偏移在不可 seek 的管道输入下
-     * 退化为 0，认领者登记在 0、数据块却按包内相对偏移去查，全部落空。
-     * 包序号只依赖已解析的包头个数，文件和管道下同样成立。
+     * The "absolute file offset" used to serve as the identity here, and that was
+     * wrong: under a non-seekable pipe input the offset collapses to 0, the claimant
+     * registers under 0 while data blocks look up by in-package relative offset, and
+     * every lookup misses. The package sequence number depends only on the number of
+     * parsed package headers, so it holds equally for files and pipes.
      *
-     * 当前假定"一个包里每种辅助块至多一份"，这在先验分片之前都成立。
-     * 分片落地后键要扩成 (包序号, 该种辅助块在包内的序号)，
-     * 且数据块 meta 要改为记录这个序号；块 meta 里的偏移只作 seek 手段与校验，
-     * 不承担索引职责。
+     * It is currently assumed that a package contains at most one auxiliary block of
+     * each kind, which holds until priors are sharded. Once sharding lands, the key
+     * must be extended to (packageIndex, ordinal of this auxiliary block type within
+     * the package), and the data block meta must record that ordinal; the offset in the
+     * block meta serves only as a seek mechanism and for verification, not as an index.
      */
     virtual bool claim(RoughIOBlock* blockPtr, int64_t packageIndex) = 0;
 };
 
-/* 辅助块载荷按引用共享：解码中的数据块必须能让它引用的那份数据活到自己解完。 */
+/* Auxiliary block payload shared by reference: a decoding data block must keep the payload it references alive until it finishes decoding. */
 using AuxPayloadPtr = std::shared_ptr<const std::vector<uint8_t> >;
 
 #endif

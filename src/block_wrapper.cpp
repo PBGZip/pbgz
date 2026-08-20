@@ -55,7 +55,7 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 
     prependBufferedData(blockPtr, totalLen);
 
-    /* 输入块按需扩容：初始只分配 1MB，读取目标（-l）更大时 realloc */
+    /* Grow the input block on demand: it initially allocates only 1MB, and is realloc'd when the read target (-l) is larger */
     buffer = blockPtr->getBuffer();
     if (blockPtr->getBufferSize() < target) {
         if (0 != blockPtr->ensureCapacity(target)) {
@@ -79,7 +79,7 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 
     blockPtr->setDataLen(static_cast<int64_t>(totalLen));
 
-    // 子类完成格式预分析（换行符位置记录、Fastq/Sam actuator 预分析等）
+    // Subclass performs format pre-analysis (newline position recording, Fastq/Sam actuator pre-analysis, etc.)
     BlockType type = analyzeBlock(blockPtr, fileType);
     blockPtr->setBlockType(type);
 
@@ -91,14 +91,16 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 
 size_t BlockReader::prependBufferedData(RoughIOBlock* blockPtr, size_t& totalLen, bool capAtBlockSize) {
     uint8_t* buffer = blockPtr->getBuffer();
-    /* 封顶按读取目标（-l）而非块自身 blockSize（输入块只分配 1M，读取目标可能更大/更小） */
+    /* Cap by the read target (-l) rather than the block's own blockSize (the input block only allocates 1M; the read target may be larger or smaller) */
     const size_t capSize = capAtBlockSize ? readTargetBytes(blockPtr) : (size_t)-1;
     size_t placed = 0;
 
     /*
-     * 上一块对齐遗留的 cache 先并入：它在文件里的位置先于剩余的预读数据（detect）。
-     * 若先并入 detect，当 detect 超过读取目标（如 -l 1 的 512KB < 1MB 预读）时，
-     * 上一块拆到 cache 的跨块记录会被丢在块边界后面，造成数据错乱。
+     * The cache left over from the previous block's alignment is merged first, since it precedes
+     * the remaining prefetch data (detect) in the file. If detect were merged first, then when
+     * detect exceeds the read target (e.g. 512KB prefetch under -l 1), cross-block records moved
+     * into the cache by the previous block would be left behind the block boundary, corrupting
+     * the data.
      */
     if (cacheLen > 0 && (!capAtBlockSize || totalLen < capSize)) {
         size_t toCopy = cacheLen;
@@ -120,7 +122,7 @@ size_t BlockReader::prependBufferedData(RoughIOBlock* blockPtr, size_t& totalLen
         }
     }
 
-    // Creator 预读的格式探测数据并入（排在 cache 之后）
+    // Merge in the format-detection data prefetched by the Creator (appended after cache)
     if (detectLen > 0) {
         size_t toCopy = detectLen;
         if (capAtBlockSize && toCopy > capSize - totalLen) {
@@ -157,7 +159,7 @@ bool BlockReader::alignToRecordBoundary(RoughIOBlock* blockPtr, bool isFastq) {
         if (isFastq) {
             const int32_t completeLines = (lineNum >> 2) << 2;
             if (completeLines == 0) {
-                // 整块连一条完整 FASTQ 记录都不够，无法对齐
+                // The whole block cannot hold even one complete FASTQ record; cannot align
                 return false;
             }
             remainLen = totalLen - npos[completeLines - 1] - 1;
@@ -185,11 +187,12 @@ bool BlockReader::alignToRecordBoundary(RoughIOBlock* blockPtr, bool isFastq) {
     }
 
     /*
-     * 末尾块（totalLen < 读取目标，EOF）：结构化编码要求块恰好落在记录
-     * 边界上——SAM 以 \n 收尾，FASTQ 还需行数为 4 的倍数（完整记录）。
-     * 不满足即数据不合规（缺结尾换行、记录被截断），绝不能篡改数据去凑
-     * 格式（旧实现会补一个 \n，还原后多出一字节），而是把本块降级为
-     * BINARY 通用压缩：压缩率让位于忠实还原。
+     * Tail block (totalLen < read target, EOF): structured coding requires the block to end
+     * exactly on a record boundary — SAM must end with \n, FASTQ also needs a line count that
+     * is a multiple of 4 (a complete record). If not, the data is malformed (missing trailing
+     * newline or truncated record), and we must never tamper with it to force the format (an
+     * old implementation appended \n, adding an extra byte on restore); the block is instead
+     * degraded to BINARY general compression, with compression ratio yielding to fidelity.
      */
     bool clean = false;
     if (lineNum > 0 && npos[lineNum - 1] == (size_t)(totalLen - 1)) {
@@ -308,24 +311,27 @@ BlockType FastqBlockReader::analyzeBlock(RoughIOBlock* blockPtr, BlockType /*fil
     blockPtr->setMaxLineLen(maxBaseLen);
     BlockType baseType = (maxBaseLen > GENE2_MAX_BASE) ? FASTQ_GEN3 : FASTQ_GEN2;
 
-    // 块尾记录对齐（把不完整记录移入缓存）
+    // Align the tail of the block to a record boundary (move the incomplete record into cache)
     if (!alignToRecordBoundary(blockPtr, true)) {
         return BINARY;
     }
 
     /*
-     * 预分析在 coder 侧 actuator 中执行并持有其状态（压缩需要），这里只做换行符位置
-     * 记录与结构校验，不重复运行 FastqCodecActuator::preAnalysis。
-     * GZ 输入时块类型仍按非 GZ 的 FASTQ 类型设置，由 io 层透明解压负责还原。
+     * Pre-analysis runs in the coder-side actuator, which owns its state (required for
+     * compression); here we only record newline positions and validate structure, without
+     * rerunning FastqCodecActuator::preAnalysis. For GZ input the block type is still set to
+     * the non-GZ FASTQ type; restoration is handled by transparent decompression in the io layer.
      */
     return baseType;
 }
 
 /*
- * SAM/SAM-GZ 块读取：
- *   1. 头部（@ 行）独立成一个块返回；
- *   2. 数据区按 readsPerBlock 条 read 分块（由压缩级别决定 10000/25000/100000）。
- * 块大小由 read 行数决定，不再受 byte blockSize 约束，缓冲不足时按需扩容。
+ * SAM/SAM-GZ block reading:
+ *   1. The header (@ lines) is returned as its own block;
+ *   2. The data region is split into blocks of readsPerBlock reads (10000/25000/100000
+ *      depending on the compression level).
+ * Block size is determined by the read line count and is no longer bounded by byte blockSize;
+ * the buffer grows on demand when it is insufficient.
  */
 int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/) {
     if (ioReader == nullptr || blockPtr == nullptr) {
@@ -338,13 +344,13 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     npos.clear();
 
     size_t totalLen = 0;
-    /* SAM 块按 read 行数分块，不受 byte blockSize 约束，一次性并入全部预读数据与缓存 */
+    /* SAM blocks are split by read line count, unconstrained by byte blockSize; merge all prefetch data and cache at once */
     prependBufferedData(blockPtr, totalLen, false);
 
     uint8_t* buffer = blockPtr->getBuffer();
     const size_t chunkSize = 1 << 20;
 
-    /* 缓冲为空（无预读数据，如测试直接构造）时先读一段，才能判断是否以 @ 头部开头 */
+    /* When the buffer is empty (no prefetch data, e.g. constructed directly in tests), read a chunk first so we can tell whether it starts with @ header lines */
     if (totalLen == 0) {
         if (totalLen + chunkSize > blockPtr->getBufferSize()) {
             if (0 != blockPtr->ensureCapacity(totalLen + chunkSize)) {
@@ -360,12 +366,13 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     }
 
     const bool startsWithHeader = (totalLen > 0 && buffer[0] == '@');
-    /* 只有"纯头部块"不含数据行；其余块（数据块、降级块、未拆分头部的块）都携带数据 */
+    /* Only a "pure header block" carries no data lines; all other blocks (data blocks, degraded blocks, blocks with an unsplit header) carry data */
     lastBlockHasData = !(startsWithHeader && splitHeader);
 
     /*
-     * splitHeader 且块以 @ 开头（头部块）：读到第一条数据行即停，本块只返回头部行。
-     * 否则：读到 readsPerBlock 条数据行（或 EOF）为止，头部行并入首个数据块。
+     * With splitHeader and a block starting with @ (header block): stop at the first data line,
+     * returning only the header lines. Otherwise: read up to readsPerBlock data lines (or EOF);
+     * header lines are merged into the first data block.
      */
     const size_t readTarget = (splitHeader && startsWithHeader) ? 1 : readsPerBlock;
 
@@ -374,7 +381,7 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     size_t scanPos = 0;
 
     while (dataLineCount < readTarget) {
-        // 先扫描当前缓冲里已有的字节
+        // First scan the bytes already present in the current buffer
         size_t i = scanPos;
         while (i < totalLen) {
             if (buffer[i] == '\n') {
@@ -394,7 +401,7 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
             break;
         }
 
-        // 需要更多数据：按需扩容后继续读
+        // Need more data: grow the buffer on demand and continue reading
         if (totalLen + chunkSize > blockPtr->getBufferSize()) {
             if (0 != blockPtr->ensureCapacity(totalLen + chunkSize)) {
                 break;
@@ -412,11 +419,11 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         return 0; // EOF
     }
 
-    // ---- 块尾是否落在完整的行边界上 ----
+    // ---- Whether the end of the block falls on a complete line boundary ----
     const bool stoppedAtTarget = (dataLineCount >= readTarget);
     const bool endsWithNewline = (buffer[totalLen - 1] == '\n');
     if (!stoppedAtTarget && !endsWithNewline) {
-        /* 末尾记录被截断（无结尾换行）：整块按二进制压缩，保证数据不丢 */
+        /* The trailing record is truncated (no ending newline): compress the whole block as binary so no data is lost */
         LOG_INFO("SAM tail block not aligned to record boundary, fallback to binary codec (blockId=%ld).",
                  (long)blockPtr->getBlockId());
         blockPtr->setDataLen((int64_t)totalLen);
@@ -424,10 +431,10 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         return (int64_t)totalLen;
     }
 
-    // ---- 确定本块保留到第几行 ----
+    // ---- Determine up to which line this block keeps ----
     size_t keepLines = 0;
     if (startsWithHeader && splitHeader) {
-        /* 头部块：只保留所有 @ 头部行，数据行留给后续块 */
+        /* Header block: keep only all @ header lines; data lines are left for subsequent blocks */
         size_t lineStartPos = 0;
         for (size_t idx = 0; idx < npos.size(); ++idx) {
             if (buffer[lineStartPos] != '@') {
@@ -437,7 +444,7 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
             lineStartPos = npos[idx] + 1;
         }
     } else {
-        /* 数据块：保留头部行（若有）+ readsPerBlock 条数据行（不足则全保留） */
+        /* Data block: keep header lines (if any) + readsPerBlock data lines (keep all if fewer remain) */
         size_t lineStartPos = 0;
         size_t dataLines = 0;
         for (size_t idx = 0; idx < npos.size(); ++idx) {
@@ -453,7 +460,7 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     }
 
     if (keepLines == 0 || keepLines > npos.size()) {
-        /* 防御：没有完整行，整块按二进制 */
+        /* Defensive: no complete line found; treat the whole block as binary */
         LOG_INFO("SAM block has no complete line, fallback to binary codec (blockId=%ld).",
                  (long)blockPtr->getBlockId());
         blockPtr->setDataLen((int64_t)totalLen);
@@ -461,7 +468,7 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         return (int64_t)totalLen;
     }
 
-    // ---- 块尾对齐：保留行之后的内容移入缓存，供下一块使用 ----
+    // ---- Align the block tail: move the content after the kept lines into cache for the next block ----
     const size_t keepLen = npos[keepLines - 1] + 1;
     if (keepLen < totalLen) {
         const size_t tailLen = totalLen - keepLen;
@@ -478,9 +485,10 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     blockPtr->setDataLen((int64_t)totalLen);
 
     /*
-     * 预分析在 coder 侧 actuator 中执行并持有其状态（压缩需要），这里只做换行符位置
-     * 记录与结构校验，不重复运行 SamCodecActuator::preAnalysis。
-     * GZ 输入时块类型仍按非 GZ 的 SAM 类型设置，由 io 层透明解压负责还原。
+     * Pre-analysis runs in the coder-side actuator, which owns its state (required for
+     * compression); here we only record newline positions and validate structure, without
+     * rerunning SamCodecActuator::preAnalysis. For GZ input the block type is still set to
+     * the non-GZ SAM type; restoration is handled by transparent decompression in the io layer.
      */
     blockPtr->setBlockType(SAM);
     return (int64_t)totalLen;
@@ -491,7 +499,7 @@ BlockType SamBlockReader::analyzeBlock(RoughIOBlock* blockPtr, BlockType /*fileT
     const int64_t dataLen = blockPtr->getDataLen();
     const char* bufPtr = reinterpret_cast<const char*>(buffer);
 
-    // 记录换行符位置（memchr 自带 SIMD 优化）
+    // Record newline positions (memchr has built-in SIMD optimization)
     const char* searchStart = bufPtr;
     while (true) {
         const char* newlinePtr = static_cast<const char*>(memchr(searchStart, '\n',
@@ -507,21 +515,22 @@ BlockType SamBlockReader::analyzeBlock(RoughIOBlock* blockPtr, BlockType /*fileT
         return BINARY;
     }
 
-    // 块尾对齐到完整行
+    // Align the block tail to a complete line
     if (!alignToRecordBoundary(blockPtr, false)) {
         return BINARY;
     }
 
     /*
-     * 结构校验兜底路径（SamBlockReader::readBlock 已覆写，通常不会走到这里）：
-     * 不做全量 actuator 预分析，SAM 深校验与 BINARY 回落由 coder 侧 actuatorPreProc 负责。
+     * Fallback path for structural validation (SamBlockReader::readBlock is overridden, so this
+     * is usually not reached): full actuator pre-analysis is not run; deep SAM validation and
+     * BINARY fallback are handled by the coder-side actuatorPreProc.
      */
     return SAM;
 }
 
 namespace {
 
-    /* ---- BAM 二进制字段解析（小端） ---- */
+    /* ---- BAM binary field parsing (little-endian) ---- */
     inline int32_t bamI32(const uint8_t*& p) {
         int32_t v;
         memcpy(&v, p, 4);
@@ -536,7 +545,7 @@ namespace {
     }
 
     const char* const BAM_CIGAR_OPS = "MIDNSHP=XB";
-    /* BAM 4-bit 碱基编码：索引 0..15 -> "=ACMGRSVTWYHKDBN" */
+    /* BAM 4-bit base encoding: index 0..15 -> "=ACMGRSVTWYHKDBN" */
     const char BAM_BASE_MAP[16] = {'=', 'A', 'C', 'M', 'G', 'R', 'S', 'V',
                                    'T', 'W', 'Y', 'H', 'K', 'D', 'B', 'N'};
 
@@ -544,8 +553,8 @@ namespace {
         for (uint16_t i = 0; i < nCigarOp; ++i) {
             uint32_t op;
             memcpy(&op, data + i * 4, 4);
-            const uint32_t len = op >> 4;      /* 高 28 位是长度 */
-            const unsigned code = op & 0xF;    /* 低 4 位是操作码 */
+            const uint32_t len = op >> 4;      /* Upper 28 bits are the length */
+            const unsigned code = op & 0xF;    /* Lower 4 bits are the opcode */
             out += std::to_string(len);
             out += (code < 11) ? BAM_CIGAR_OPS[code] : 'M';
         }
@@ -567,11 +576,11 @@ namespace {
             }
         }
         if (missing) {
-            return;  /* 调用方统一输出 '*' */
+            return;  /* The caller uniformly outputs '*' */
         }
         /*
-         * BAM 里 QUAL 存的是 phred 分数（htslib/samtools 写 BAM 时对 SAM 的 phred+33
-         * 减 33 再存），转回 SAM 需加回 33。
+         * In BAM, QUAL stores raw phred scores (htslib/samtools subtract 33 from SAM's
+         * phred+33 when writing BAM); converting back to SAM requires adding 33 again.
          */
         for (int32_t i = 0; i < lSeq; ++i) {
             out += (char)(data[i] + 33);
@@ -587,14 +596,14 @@ namespace {
             line += tag;
             line += ":";
             /*
-             * SAM 的辅助类型只有 A/i/f/Z/H/B。BAM 里整数子类型 c/C/s/S/i/I 一律按
-             * 'i' 输出（与 samtools view 一致），数值原样保留。
+             * SAM auxiliary types are only A/i/f/Z/H/B. Integer subtypes c/C/s/S/i/I in BAM
+             * are always printed as 'i' (matching samtools view), with values preserved as-is.
              */
             line += 'i';
             line += ":";
             switch (type) {
             case 'A':
-                /* 字符型，SAM 用 'A' */
+                /* Character type; SAM uses 'A' */
                 line[line.size() - 2] = 'A';
                 line += (char)*p;
                 p += 1;
@@ -676,7 +685,7 @@ namespace {
                 break;
             }
             default:
-                return;   /* 未知类型，跳过剩余 */
+                return;   /* Unknown type; skip the rest */
             }
         }
     }
@@ -720,7 +729,7 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
         const int rc = inflate(&inflateState, Z_NO_FLUSH);
         got = n - inflateState.avail_out;
         if (rc == Z_STREAM_END) {
-            /* BGZF 是多个 gzip 成员拼接，重置后继续 inflate 剩余输入 */
+            /* BGZF is a concatenation of multiple gzip members; reset and continue inflating the remaining input */
             if (inflateState.avail_in > 0) {
                 inflateReset(&inflateState);
                 continue;
@@ -728,7 +737,7 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
             break;
         }
         if (rc != Z_OK && rc != Z_BUF_ERROR) {
-            break;   /* 数据损坏 */
+            break;   /* Corrupted data */
         }
         if (inflateState.avail_in == 0) {
             if (gzInEof) {
@@ -792,7 +801,7 @@ int32_t BamBlockReader::parseBamHeader() {
         refs.push_back({name, refLen});
     }
 
-    /* 以 BAM 头文本为基础，缺 @SQ 的参考序列补上 @SQ 行 */
+    /* Build on the BAM header text, appending @SQ lines for reference sequences that lack them */
     std::set<std::string> sqRefs;
     headerText.clear();
     {
@@ -911,9 +920,10 @@ int32_t BamBlockReader::parseBamRecord(const uint8_t* data, int32_t size, std::s
 }
 
 /*
- * BAM 读取：头部作为独立块返回（转成 SAM 头），数据区按 readsPerBlock 条 read
- * 解压成 SAM 行组成一个 SAM 块，交由 SAM 压缩器压缩。块类型统一标记为 BAM，
- * 打印 FileType 显示 BAM，内容与处理路径与 SAM 一致。
+ * BAM reading: the header is returned as an independent block (converted to a SAM header);
+ * alignment reads are decompressed into SAM lines and grouped into a SAM block of
+ * readsPerBlock reads, which is compressed by the SAM compressor. The block type is always
+ * marked BAM (so FileType prints BAM), but the content and processing path match SAM.
  */
 int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/) {
     if (ioReader == nullptr || blockPtr == nullptr) {
@@ -936,7 +946,7 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         headerParsed = true;
     }
 
-    // 写入头部（若尚未写）
+    // Write the header (if not yet written)
     if (!headerWritten) {
         if (headerText.empty()) {
             headerText = "@HD\tVN:1.6\n";
@@ -963,7 +973,7 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         }
     }
 
-    // 数据区：逐条 read 解压成 SAM 行，凑满 readsPerBlock 条
+    // Data region: decompress each read into a SAM line until readsPerBlock reads are filled
     uint32_t reads = 0;
     while (reads < readsPerBlock) {
         int32_t blockSize = 0;
@@ -997,7 +1007,7 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     }
 
     if (outLen == 0) {
-        return 0;   // EOF（头部已在之前块输出）
+        return 0;   // EOF (the header was already emitted in a previous block)
     }
 
     blockPtr->setDataLen((int64_t)outLen);
@@ -1011,7 +1021,7 @@ namespace BlockUtil {
     }
 
     bool isSAMBlock(BlockType type) {
-        /* BAM 块内容是 SAM 文本，当作 SAM 处理，因此 SAM 支持的能力 BAM 一并支持 */
+        /* BAM blocks contain SAM text and are treated as SAM, so every capability supported for SAM is also supported for BAM */
         return (type == SAM || type == SAM_GZIP || type == BAM);
     }
 
@@ -1065,12 +1075,12 @@ namespace {
         return len >= 4 && buf[0] == 'B' && buf[1] == 'A' && buf[2] == 'M' && buf[3] == 1;
     }
 
-    /* BGZF 魔数：1f 8b 08 04（BAM 本身就是 BGZF 流） */
+    /* BGZF magic: 1f 8b 08 04 (BAM itself is a BGZF stream) */
     bool isBgzfStream(const uint8_t* buf, size_t len) {
         return len >= 4 && buf[0] == 0x1f && buf[1] == 0x8b && buf[2] == 0x08 && (buf[3] & 0x04) == 0x04;
     }
 
-    /* 解压首个 gzip/BGZF 块；成功时 out 为解压后的字节，返回 true */
+    /* Inflate the first gzip/BGZF block; on success out holds the inflated bytes and true is returned */
     bool inflateFirstBlock(const uint8_t* buf, size_t len, std::vector<uint8_t>& out) {
         if (len < 20) {
             return false;
@@ -1091,7 +1101,7 @@ namespace {
         return (rc == Z_OK || rc == Z_STREAM_END) && !out.empty();
     }
 
-    /* 检查解压后是否以 BAM 魔数开头 */
+    /* Check whether the inflated data starts with the BAM magic number */
     bool isBamByInflate(const uint8_t* buf, size_t len) {
         std::vector<uint8_t> out;
         return inflateFirstBlock(buf, len, out) && out.size() >= 4 &&
@@ -1108,8 +1118,10 @@ namespace {
         return false;
     }
 
-    /* 校验整个探测长度内的每一行，防止"首个记录像 FASTQ/SAM、其后全不是"的文件误入对应 reader。
-     * 若样本内出现任何一行不合规，即整体判为 BINARY，交给 analyzeBlock 兜底的场景不复存在。 */
+    /* Validate every line within the entire detection length, preventing a file whose first
+     * record looks like FASTQ/SAM but whose remainder does not from entering the corresponding
+     * reader. If any line in the sample is malformed, the whole sample is judged BINARY, so the
+     * analyzeBlock fallback scenario no longer arises. */
     bool isSamSample(const uint8_t* buf, size_t len) {
         if (len < 4 || buf[0] != '@') {
             return false;
@@ -1124,10 +1136,10 @@ namespace {
             }
             const size_t lineLen = i - lineStart;
             if (lineLen == 0) {
-                return false;   // 空行不是合法的 SAM 行
+                return false;   // An empty line is not a valid SAM line
             }
             if (buf[lineStart] == '@') {
-                // 头部行：必须是已知的 SAM 头部类型
+                // Header line: must be a known SAM header type
                 bool known = false;
                 for (const char* head : samHeads) {
                     if (lineLen >= 3 && memcmp(buf + lineStart, head, 3) == 0) {
@@ -1139,7 +1151,7 @@ namespace {
                     return false;
                 }
             } else {
-                // 数据行：SAM 至少 11 个必选字段（QNAME..QUAL），即至少 10 个制表符
+                // Data line: SAM requires at least 11 mandatory fields (QNAME..QUAL), i.e. at least 10 tabs
                 int tabs = 0;
                 for (size_t k = lineStart; k < i; ++k) {
                     if (buf[k] == '\t') {
@@ -1156,8 +1168,10 @@ namespace {
         return lineCount >= 1;
     }
 
-    /* 校验整个探测长度内的每一行 FASTQ 结构（@ID/碱基/+/质量行），任一行不合规即判 BINARY。
-     * 要求首条完整记录存在（line >= 4），防止首个记录像 FASTQ、其后全不是的文件误入 Fastq reader。 */
+    /* Validate the FASTQ structure (@ID/base/+/quality lines) of every line within the detection
+     * length; any malformed line makes the whole sample BINARY, and at least one complete record
+     * (line >= 4) is required so that a file resembling FASTQ only at the first record does not
+     * slip into the Fastq reader. */
     bool isFastqSample(const uint8_t* buf, size_t len) {
         if (len < 2 || buf[0] != '@') {
             return false;
@@ -1229,8 +1243,9 @@ namespace {
 }  // namespace
 
 /*
- * 判定文件是否为 BAM：原始 BAM 魔数，或 BGZF/gzip 流解压后以 BAM 魔数开头。
- * 供引擎在创建 ioReader 时区分"透明 gz 解压"与"交给 FileReader + BamGzBlockReader"。
+ * Determine whether a file is BAM: a raw BAM magic number, or a BGZF/gzip stream that inflates
+ * to data beginning with the BAM magic. The engine uses this when creating an ioReader to choose
+ * between "transparent gz decompression" and "FileReader + BamGzBlockReader".
  */
 bool BlockUtil::isBamFile(const std::string& fileName) {
     FILE* fp = fopen(fileName.c_str(), "rb");
@@ -1243,7 +1258,7 @@ bool BlockUtil::isBamFile(const std::string& fileName) {
     return isBamSample(buf.data(), len);
 }
 
-/* 按文件内容探测输入格式：gz/BGZF 自动解压后再判。仅用于普通文件，管道/STDIN 勿用。 */
+/* Detect the input format from file content: gz/BGZF is automatically inflated before judging. Only for regular files; do not use with pipes/STDIN. */
 BlockType BlockUtil::detectInputFileType(const std::string& fileName) {
     FILE* fp = fopen(fileName.c_str(), "rb");
     if (fp == nullptr) {
@@ -1261,13 +1276,13 @@ BlockType BlockUtil::detectInputFileType(const std::string& fileName) {
     if (startsWithBamMagic(buf.data(), len)) {
         return BAM;
     }
-    /* 通用 gzip 魔数（不要求 BGZF 的 FEXTRA 标志，普通 .gz 也要能解） */
+    /* Generic gzip magic (does not require BGZF's FEXTRA flag; plain .gz must also be inflatable) */
     if (len >= 2 && buf[0] == 0x1f && buf[1] == 0x8b) {
         std::vector<uint8_t> plain;
         if (!inflateFirstBlock(buf.data(), len, plain)) {
             return BINARY;
         }
-        /* 外层 gzip 解开后可能仍是 BGZF（如 gzip 过的 BAM），再解一层 */
+        /* After inflating the outer gzip the result may still be BGZF (e.g. a gzipped BAM); inflate one more layer */
         if (plain.size() >= 2 && plain[0] == 0x1f && plain[1] == 0x8b) {
             std::vector<uint8_t> plain2;
             if (inflateFirstBlock(plain.data(), plain.size(), plain2)) {
@@ -1306,8 +1321,9 @@ BlockType BlockUtil::detectInputFileType(const std::string& fileName) {
 }
 
 /*
- * 读取一小部分数据解析文件格式，按格式创建对应的 BlockReader 子类。
- * 预读数据交给子类并入首个块；PBGZ 需要回到文件起点由 PbgzBlockReader 自行解析。
+ * Read a small amount of data to determine the file format, then create the matching BlockReader
+ * subclass. Prefetched data is handed to the subclass to merge into the first block; for PBGZ the
+ * file must return to its start so PbgzBlockReader can parse it itself.
  */
 BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compressLevel, bool splitSamHeader) {
     if (ioReader == nullptr) {
@@ -1315,7 +1331,7 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
         return nullptr;
     }
 
-    /* SAM 数据块按 read 行数分块：1-5 -> 10000，6-7 -> 25000，8-9 -> 100000 */
+    /* SAM data blocks are split by read line count: 1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000 */
     uint32_t samReadsPerBlock = 10000;
     if (compressLevel >= 8) {
         samReadsPerBlock = 100000;
@@ -1338,16 +1354,16 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
     BlockReader* reader = nullptr;
     if (startsWithPbgz(detectBuf, detectLen)) {
         /*
-         * PBGZ：预读字节交还给 PbgzBlockReader（管道输入不可 seek 回退），
-         * 头部解析由 PbgzBlockReader::init() 从预读缓冲消费。
+         * PBGZ: prefetched bytes are returned to PbgzBlockReader (piped input cannot be seeked
+         * back), and header parsing is done by PbgzBlockReader::init() consuming the prefetch buffer.
          */
         reader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader, detectBuf, detectLen);
     } else if (isBamSample(detectBuf, detectLen)) {
         if (startsWithBamMagic(detectBuf, detectLen)) {
-            /* 已是原始 BAM 字节流（io 层已解 BGZF，如 .bam） */
+            /* Already a raw BAM byte stream (the io layer has inflated BGZF, e.g. .bam) */
             reader = MemoryUtil::safeNewClass<BamBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
         } else {
-            /* 内层仍是 BGZF（如 .bam.gz），需先 inflate 成原始 BAM */
+            /* The inner layer is still BGZF (e.g. .bam.gz); inflate it to raw BAM first */
             reader = MemoryUtil::safeNewClass<BamGzBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
         }
     } else if (isSamSample(detectBuf, detectLen)) {
@@ -1364,7 +1380,7 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
         LOG_ERROR("Create block reader failed.");
         return nullptr;
     }
-    /* 读取目标按 -l 决定（输入块只分配 1MB，读时按此目标按需扩容） */
+    /* The read target is set by -l (the input block only allocates 1MB and is grown to this target on demand) */
     reader->setReadBlockBytes(ConfigManager::getInstance().getBlockSizeByCompressLevel(compressLevel));
     if (0 != reader->init()) {
         LOG_ERROR("Create block reader init failed.");
@@ -1422,15 +1438,16 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
     blockPtr->setMetaLen(pbgzDataBlock.getMetaData("metalen").asInt64());
     blockPtr->setBlockId(pbgzDataBlock.getMetaData("blockid").asInt64());
     /*
-     * "本块属于哪个包"是块的固有属性，必须由唯一的生产者写入。
-     * 放在各调用点去设，只要漏掉一处（区域查询、头部预读等），
-     * 该路径上的块就会拿 0 当包起点，把辅助块的相对地址错译成别包的地址。
+     * "Which package this block belongs to" is an intrinsic property of the block and must be
+     * written by its sole producer. If it were set at each call site, missing even one path
+     * (region queries, header prefetch, etc.) would make blocks on that path treat 0 as the
+     * package start and misinterpret an auxiliary block's relative offset as another package's.
      */
     blockPtr->setPackageStart((int64_t)pbgzFileReader->getCurrentFileStart());
     blockPtr->setPackageIndex(pbgzFileReader->getCurrentFileIndex());
     std::string blockType = pbgzDataBlock.getMetaData("blocktype").asString();
     if (blockType == "fastq_gen2" || blockType == "fastq_gen2_gzip") {
-        /* 旧文件里 *_gzip 块类型是"原始输入为 GZ"的标记；统一按非 GZ 类型处理 */
+        /* In old files the *_gzip block type marks "the raw input was GZ"; uniformly treat it as the non-GZ type */
         blockPtr->setBlockType(FASTQ_GEN2);
     } else if (blockType == "fastq_gen3" || blockType == "fastq_gen3_gzip") {
         blockPtr->setBlockType(FASTQ_GEN3);
@@ -1567,11 +1584,11 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
     return pbgzFileWriter->writeBlockData(dataBlock);
 }
 
-/* ==================== BamWriter（解压 -b：SAM -> BAM） ==================== */
+/* ==================== BamWriter (decompress -b: SAM -> BAM) ==================== */
 
 namespace {
 
-    /* ---- 小端字节流写出 ---- */
+    /* ---- Little-endian byte stream output ---- */
     inline void putU8(std::vector<uint8_t>& out, uint8_t v) {
         out.push_back(v);
     }
@@ -1590,7 +1607,7 @@ namespace {
         putI32(out, (int32_t)v);
     }
 
-    /* ---- BAM CIGAR 操作码（与 BAM_CIGAR_OPS "MIDNSHP=XB" 的索引一致） ---- */
+    /* ---- BAM CIGAR opcodes (indices match BAM_CIGAR_OPS "MIDNSHP=XB") ---- */
     int cigarOpCode(char c) {
         switch (c) {
         case 'M': return 0;
@@ -1606,12 +1623,12 @@ namespace {
         }
     }
 
-    /* 参考序列上消耗长度的 CIGAR 操作：M/D/N/=/X */
+    /* CIGAR operations that consume reference length: M/D/N/=/X */
     bool cigarConsumesRef(int code) {
         return code == 0 || code == 2 || code == 3 || code == 7 || code == 8;
     }
 
-    /* 解析 CIGAR 字符串（"*" 或空时返回 true 且无操作）；refSpan 为参考序列消耗长度 */
+    /* Parse a CIGAR string (returns true with no ops for "*" or empty); refSpan is the reference length consumed */
     bool parseCigar(const char* s, size_t n, std::vector<uint32_t>& ops, int64_t& refSpan) {
         ops.clear();
         refSpan = 0;
@@ -1622,14 +1639,14 @@ namespace {
                 ++j;
             }
             if (j == i) {
-                return false;   // 缺少长度
+                return false;   // Missing length
             }
             uint32_t len = 0;
             for (size_t k = i; k < j; ++k) {
                 len = len * 10 + (uint32_t)(s[k] - '0');
             }
             if (j >= n) {
-                return false;   // 缺少操作符
+                return false;   // Missing operator
             }
             const int code = cigarOpCode(s[j]);
             if (code < 0) {
@@ -1644,7 +1661,7 @@ namespace {
         return true;
     }
 
-    /* BAM 4-bit 碱基编码：字符 -> 索引（与读取侧 BAM_BASE_MAP 互逆） */
+    /* BAM 4-bit base encoding: char -> index (inverse of the read-side BAM_BASE_MAP) */
     int baseNibble(char c) {
         switch (c) {
         case '=': return 0;
@@ -1667,7 +1684,7 @@ namespace {
         }
     }
 
-    /* 经典 reg2bin：beg 0-based 起点，end 0-based 终点（不含） */
+    /* Classic reg2bin: beg is the 0-based start, end is the 0-based exclusive end */
     uint16_t samReg2Bin(int64_t beg, int64_t end) {
         const int64_t e = end - 1;
         if ((beg >> 14) == (e >> 14)) {
@@ -1688,7 +1705,7 @@ namespace {
         return 0;
     }
 
-    /* 从 @SQ 行里取 TAG 字段值（"SN:" / "LN:"） */
+    /* Extract the value of a TAG field from an @SQ line ("SN:" / "LN:") */
     std::string sqFieldValue(const std::string& line, const char* tag) {
         const size_t pos = line.find(tag);
         if (pos == std::string::npos) {
@@ -1703,8 +1720,9 @@ namespace {
     }
 
     /*
-     * 把一条 SAM 可选字段 "TAG:TYPE:VALUE" 转成 BAM aux 字节（含 TAG 与类型），
-     * 失败返回 -1（调用方跳过该字段）。命名区别于读取侧的 appendBamAux（BAM->SAM）。
+     * Convert one SAM optional field "TAG:TYPE:VALUE" into BAM aux bytes (including TAG and
+     * type); returns -1 on failure (the caller skips that field). Named differently from the
+     * read-side appendBamAux (BAM->SAM).
      */
     int appendSamAuxToBam(const char* opt, size_t n, std::vector<uint8_t>& out) {
         size_t p = 0;
@@ -1712,10 +1730,10 @@ namespace {
             ++p;
         }
         if (p != 2) {
-            return -1;   // TAG 必须是 2 字符
+            return -1;   // TAG must be 2 characters
         }
         if (p + 3 > n || opt[p + 2] != ':') {
-            return -1;   // 期待 "TAG:TYPE:VALUE"
+            return -1;   // Expected "TAG:TYPE:VALUE"
         }
         const char type = opt[p + 1];
         const char* value = opt + p + 3;
@@ -1777,7 +1795,7 @@ namespace {
             break;
         }
         case 'B': {
-            /* VALUE 形如 "SUBTYPE,V1,V2,..." */
+            /* VALUE has the form "SUBTYPE,V1,V2,..." */
             if (vlen < 3 || value[1] != ',') {
                 return -1;
             }
@@ -1801,7 +1819,7 @@ namespace {
             putU8(out, (uint8_t)'B');
             putU8(out, (uint8_t)sub);
             const size_t countPos = out.size();
-            putI32(out, 0);   // 计数占位，随后回填
+            putI32(out, 0);   // Count placeholder, backfilled below
             for (double dv : vals) {
                 switch (sub) {
                 case 'c': putU8(out, (uint8_t)(int8_t)dv); break;
@@ -1847,7 +1865,7 @@ BamWriter::BamWriter(IOWriter* pIoWriter) : BlockWriter(pIoWriter) {
 
 BamWriter::~BamWriter() {
     if (bgzfReady) {
-        (void)finish();   // 兜底：残留块与 EOF 标记写出
+        (void)finish();   // Fallback: flush the remaining block and the EOF marker
         deflateEnd(&bgzfZs);
     }
 }
@@ -1870,7 +1888,7 @@ int32_t BamWriter::bgzfFlushBlock() {
     }
     if (!bgzfReady) {
         memset(&bgzfZs, 0, sizeof(bgzfZs));
-        /* 原始 deflate 流：gzip 头/尾由 BGZF 块自己拼 */
+        /* Raw deflate stream: the gzip header/trailer is assembled by the BGZF block itself */
         if (deflateInit2(&bgzfZs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
             LOG_ERROR("BamWriter: deflateInit2 failed.");
             return -1;
@@ -1882,7 +1900,7 @@ int32_t BamWriter::bgzfFlushBlock() {
     std::vector<uint8_t> comp(deflateBound(&bgzfZs, (uLong)uncomprLen) + 64);
     bgzfZs.next_in = bgzfBuf;
     bgzfZs.avail_in = (uInt)uncomprLen;
-    bgzfZs.next_out = comp.data() + 18;   // 18 字节 gzip 头留白
+    bgzfZs.next_out = comp.data() + 18;   // Leave room for the 18-byte gzip header
     bgzfZs.avail_out = (uInt)(comp.size() - 18);
     const int rc = deflate(&bgzfZs, Z_FINISH);
     if (rc != Z_STREAM_END) {
@@ -1945,12 +1963,12 @@ int32_t BamWriter::finish() {
     }
     finished = true;
     if (passThrough) {
-        return 0;   // 透传模式没有 BGZF 状态
+        return 0;   // Pass-through mode has no BGZF state
     }
     if (0 != bgzfFlushBlock()) {
         return -1;
     }
-    /* BGZF EOF 标记（空块），标准 BAM 的收尾块 */
+    /* BGZF EOF marker (empty block), the terminating block of a standard BAM */
     static const uint8_t kEofBlock[28] = {
         0x1f, 0x8b, 0x08, 0x04, 0, 0, 0, 0, 0, 0xff,
         0x06, 0x00, 0x42, 0x43, 0x02, 0x00, 0x1b, 0x00,
@@ -2022,7 +2040,7 @@ int32_t BamWriter::writeBamHeader(const uint8_t* data, size_t len, size_t& dataS
 }
 
 int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
-    /* 去掉行尾换行/回车 */
+    /* Strip trailing newline/carriage return */
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
         --len;
     }
@@ -2030,7 +2048,7 @@ int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
         return 0;
     }
 
-    /* 按 \t 切字段 */
+    /* Split fields on \t */
     std::vector<const char*> fields;
     std::vector<size_t> flens;
     {
@@ -2062,7 +2080,7 @@ int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
     const size_t qlen2 = flens[10];
 
     if (qlen == 0) {
-        return 0;   // QNAME 不能为空，非法记录跳过
+        return 0;   // QNAME must not be empty; skip the invalid record
     }
 
     const uint16_t flag = (uint16_t)strtoul(fields[1], nullptr, 10);
@@ -2071,7 +2089,7 @@ int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
     const int64_t pnext1 = strtoll(fields[7], nullptr, 10);    // 1-based
     const int32_t btlen = (int32_t)strtol(fields[8], nullptr, 10);
 
-    /* refID：RNAME '*' / 空 -> -1，否则查参考序列表 */
+    /* refID: RNAME '*' / empty -> -1, otherwise look up the reference sequence list */
     int32_t refId = -1;
     if (rlen > 0 && !(rlen == 1 && rname[0] == '*')) {
         const std::string nm(rname, rlen);
@@ -2086,7 +2104,7 @@ int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
 
     int32_t nextRefId = -1;
     if (rnextLen == 1 && rnext[0] == '=') {
-        nextRefId = refId;   // '=' 表示与 RNAME 同参考序列
+        nextRefId = refId;   // '=' means the same reference as RNAME
     } else if (rnextLen > 0 && !(rnextLen == 1 && rnext[0] == '*')) {
         const std::string nm(rnext, rnextLen);
         std::map<std::string, int32_t>::const_iterator it = refIndex.find(nm);
@@ -2131,7 +2149,7 @@ int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
         }
     }
 
-    /* QUAL：缺失（*）时全 0xFF；否则逐字节 ascii-33 */
+    /* QUAL: all 0xFF when missing (*); otherwise per-byte ascii-33 */
     std::vector<uint8_t> quals;
     const bool qualMissing = (qlen2 == 0) || (qlen2 == 1 && qualStr[0] == '*');
     if (!qualMissing) {
@@ -2149,14 +2167,14 @@ int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
         }
     }
 
-    /* read_name（BAM 规定 l_read_name <= 255，含结尾 \0） */
+    /* read_name (BAM requires l_read_name <= 255, including the trailing \0) */
     size_t qn = (qlen < 254) ? qlen : 254;
     const uint8_t lReadName = (uint8_t)(qn + 1);
 
-    /* 组装记录 */
+    /* Assemble the record */
     std::vector<uint8_t> rec;
     rec.reserve(32 + qn + cigarOps.size() * 4 + packedSeq.size() + quals.size() + 16);
-    putI32(rec, 0);   // block_size 占位
+    putI32(rec, 0);   // block_size placeholder
     putI32(rec, refId);
     putI32(rec, bpos);
     putU8(rec, lReadName);
@@ -2174,7 +2192,7 @@ int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
         putU32(rec, cigarOps[i]);
     }
     rec.insert(rec.end(), packedSeq.begin(), packedSeq.end());
-    /* QUAL：有值时逐字节追加；缺失（*）或短于 SEQ 时补 0xFF，保证记录长度与 BAM 布局一致 */
+    /* QUAL: append per byte when present; pad with 0xFF when missing (*) or shorter than SEQ, keeping the record length consistent with the BAM layout */
     if (!quals.empty()) {
         rec.insert(rec.end(), quals.begin(), quals.end());
     }
@@ -2228,7 +2246,7 @@ int32_t BamWriter::writeBlock(RoughIOBlock* blockPtr) {
                 return -1;
             }
             headerWritten = true;
-            /* 头部行之后可能还跟着数据行（头部未独立成块的块） */
+            /* Data lines may follow the header lines (blocks whose header was not split into its own block) */
             if (dataStart < (size_t)dataLen) {
                 return writeDataLines(buffer, dataStart, (size_t)dataLen);
             }
@@ -2236,7 +2254,7 @@ int32_t BamWriter::writeBlock(RoughIOBlock* blockPtr) {
         }
         LOG_WARNING("BamWriter: block type %d is not SAM/BAM, pass through raw output.", type);
         passThrough = true;
-        /* 落到下面的透传分支，把当前块也原样写出 */
+        /* Fall through to the pass-through branch below to write the current block as-is */
     }
 
     if (passThrough) {

@@ -42,9 +42,11 @@ public:
         coder_ns::register_free_func(MemoryUtil::safeFree<void>);
 
         /*
-         * 分配量必须就是告诉 coder_io 的容量。此前这里分配 10 MB 却只声明 1 MB，
-         * 不可压数据把编码器逼到 1 MB 以外时没人察觉——那 9 MB 余量把越界盖住了。
-         * 生产上 coder_io 拿的是块的真实剩余量，同样的写法就是堆溢出。
+         * The allocation size must match the capacity reported to coder_io. Previously this
+         * code allocated 10 MB but declared only 1 MB, so when incompressible data pushed the
+         * encoder beyond 1 MB nobody noticed: the extra 9 MB of headroom masked the overflow.
+         * In production coder_io receives the block's true remaining size, so the same pattern
+         * would become a heap overflow.
          */
         test_data = (uint8_t*) malloc(BUFFER_SIZE);
         compressed_data = (uint8_t*) malloc(BUFFER_SIZE);

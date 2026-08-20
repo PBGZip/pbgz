@@ -58,9 +58,9 @@ namespace coder_ns {
         CODER_ERR_MEM_ALLOC_FAIL = (CODER_ERR_BAD_ARGS) - 1,
         CODER_ERR_INNER = (CODER_ERR_MEM_ALLOC_FAIL) -1,
         CODER_ERR_INVALID_STATE = CODER_ERR_INNER - 1,
-        /* 输出缓冲不足：写入被容量检查拦下（io->err = IO_BUF_FULL），数据未写全。 */
+        /* Output buffer too small: writes were stopped by the capacity check (io->err = IO_BUF_FULL), and the data was not fully written. */
         CODER_ERR_BUF_SMALL = CODER_ERR_INVALID_STATE - 1,
-        /* 输入码流提前耗尽：读到末尾仍不够（io->err = IO_READ_EMPTY），码流损坏或长度元数据有误。 */
+        /* Input stream exhausted early: the end was reached with data still missing (io->err = IO_READ_EMPTY); the stream is corrupt or the length metadata is wrong. */
         CODER_ERR_STREAM_END = CODER_ERR_BUF_SMALL - 1,
 
     };
@@ -89,13 +89,17 @@ void safe_free(void** ptr) ;
 void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...);
 
 /*
- * coder 层的错误出口。
+ * Error exit path for the coder layer.
  *
- * 以前 coder_exit/check_exit 最终走 _Exit()，在库函数深处直接杀进程：
- * 既不经过 LOG_ERROR，也绕开了引擎的 taskFailed 汇总，外面只能看到一个
- * 光秃的退出码（实测过 253）。而 69 处 check_exit 都在模板/热路径里，逐个改成
- * 返回值会穿透整个编解码链。所以改成抛异常：调用点一行不动，错误却能
- * 沿栈上抛，在 PbgzEngine 的单块处理边界被接住、转成普通的失败返回值。
+ * Previously coder_exit/check_exit eventually called _Exit(), killing the process
+ * deep inside a library function: it neither went through LOG_ERROR nor the
+ * engine's taskFailed aggregation, so all the caller could see was a bare exit
+ * code (empirically observed to be 253). And the 69 check_exit sites all live in
+ * template/hot paths; converting each one to a return value would thread through
+ * the entire encode/decode chain. So instead it throws an exception: the call
+ * sites stay untouched, while the error propagates up the stack and is caught at
+ * PbgzEngine's single-block processing boundary, where it is turned into an
+ * ordinary failed return value.
  */
 class coder_exception : public std::exception {
 public:
@@ -111,7 +115,7 @@ private:
     std::string message;
 };
 
-// 下面两个函数抛 coder_exception，调用后不会返回
+// The two functions below throw coder_exception and never return after being called
 [[noreturn]] void coder_exit(int16_t exit_code, const char* exit_msg_format, ...);
 
 void check_exit(bool condition, int16_t exit_code, const char* exit_msg_format, ...);
@@ -123,45 +127,58 @@ public:
     virtual ~coder() {}
 
     /*
-     * 编码一段数据。
+     * Encode a piece of data.
      *
-     * 统一取三参数形式：coder_bwt_cm 原本只有两个参数，为了能通过基类指针调用而补齐，
-     * 它内部并不使用 need2hold。第三个参数有默认值，两参数的调用方式不受影响。
+     * A unified three-parameter form is used: coder_bwt_cm originally took only
+     * two parameters, and the third was added so it can be called through a
+     * base-class pointer; it does not use need2hold internally. The third
+     * parameter has a default value, so two-argument callers are unaffected.
      *
-     * 默认空实现：只做解码、不做编码的子类不必覆盖。
+     * Default empty implementation: subclasses that only decode and never encode
+     * need not override it.
      */
     virtual void encode_line([[maybe_unused]] const uint8_t *in,
                              [[maybe_unused]] const uint32_t in_len,
                              [[maybe_unused]] bool need2hold = false) {}
 
-    /* 编码收尾，把残留在内部缓冲里的数据全部吐出去。默认空实现。 */
+    /* Encoding finish: flush all data left in the internal buffer. Default empty implementation. */
     virtual void encode_flush() {}
 
     /*
-     * 本编码器能否以"逐行累积"的方式使用，即对同一个 coder_io 反复调用 encode_line，
-     * 最后统一 encode_flush。
+     * Whether this codec can be used in "line-by-line accumulation" mode, i.e.,
+     * calling encode_line repeatedly on the same coder_io and finishing with a
+     * single encode_flush.
      *
-     * 这不是可有可无的偏好，而是硬约束。有的编码器（如 coder_fc）在内部一次性完成
-     * 预处理、变换和熵编码，第二次调用 encode_line 会直接报错退出，输入太短也会报错。
-     * 执行器里各字段的用法并不统一：QNAME、RNAME、CIGAR 这些是按行循环喂进去的，
-     * 而 SEQ 是先拼进一块临时缓冲再整块喂一次。
+     * This is not an optional preference but a hard constraint. Some codecs
+     * (e.g., coder_fc) do preprocessing, transform and entropy coding in one shot
+     * internally; a second encode_line call fails immediately, and input that is
+     * too short also errors out. Field usage inside the executor is not uniform:
+     * QNAME, RNAME and CIGAR are fed in a per-line loop, while SEQ is first
+     * assembled into a temporary buffer and fed once as a whole block.
      *
-     * 预处理阶段试压时统一按整块方式测量，所以试压结果不能无条件套用到逐行字段上，
-     * 必须先用本函数过滤掉不支持逐行的编码器。
+     * The pre-processing phase measures compression on a whole-block basis, so
+     * its results cannot be unconditionally applied to line-mode fields; codecs
+     * that do not support line mode must first be filtered out with this
+     * function.
      */
     virtual bool supportsLineMode() const { return true; }
 
     /*
-     * 声明本编码器适用于哪种文件类型的哪个字段。
+     * Declares which field of which file type this codec is suitable for.
      *
-     * 绝大多数编码器是通用的字节流压缩器，放到哪个字段上都能跑，所以默认返回 true。
-     * 少数编码器有额外的前置依赖——比如质量值上下文混合编码器需要每条记录的读长和
-     * 链方向，只有 SAM 的 QUAL 列能提供——这类编码器覆盖本函数，把自己的适用范围
-     * 声明清楚，预处理阶段试压时会先问一句，不适用就直接跳过，不会被误选。
+     * Most codecs are general-purpose byte-stream compressors and work on any
+     * field, so the default returns true. A few codecs have extra
+     * prerequisites—for example, the quality-value context mixer codec needs
+     * each record's read length and strand direction, which only the QUAL column
+     * of SAM can provide. Such codecs override this function to state their
+     * applicability clearly; the pre-processing phase asks this question during
+     * trial compression and simply skips codecs that do not apply, so they are
+     * never mis-selected.
      *
-     * fileType 取 BlockType 的值，这里用 uint32_t 是为了避免 coder 层反向依赖
-     * io_block.h。fieldIdx 的含义随 fileType 而定：SAM 用 SamField，FASTQ 用
-     * FastqField，两套编号各自独立。
+     * fileType takes a BlockType value; uint32_t is used here to avoid the coder
+     * layer depending back on io_block.h. The meaning of fieldIdx depends on
+     * fileType: SAM uses SamField, FASTQ uses FastqField; the two numbering
+     * schemes are independent.
      */
     virtual bool supports([[maybe_unused]] uint32_t fileType,
                           [[maybe_unused]] uint32_t fieldIdx) const { return true; }

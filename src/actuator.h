@@ -42,10 +42,13 @@ public:
     virtual int32_t cleanup() { return 0; }
 
     /*
-     * 首块串行化标记：引擎用 id==0 的 coder 线程先处理完第 0 块（含 preAnalysis，
-     * 会填充 SamInfo 这类进程级共享状态）后再放行其余线程。默认返回 true，表示
-     * 该块处理完即可放行；SAM 覆盖为按 notifyFlag 返回（压缩走到一半才置位，
-     * 保证放行发生在 preAnalysis 之后）。只放行一次，见 PbgzEngine::firstCoderNotify。
+     * First-block serialization flag: the engine lets the coder thread with id==0
+     * finish processing block 0 first (including preAnalysis, which fills
+     * process-wide shared state such as SamInfo) before releasing the other threads.
+     * Defaults to true, meaning the block can be released as soon as it is done; SAM
+     * overrides it to return based on notifyFlag (set halfway through compression, so
+     * release is guaranteed to happen after preAnalysis). Release happens only once;
+     * see PbgzEngine::firstCoderNotify.
      */
     virtual bool getNotifyFlag() { return true; }
 
@@ -57,20 +60,26 @@ public:
     }
 
     /*
-     * 本次块处理期间所有 coder_io 的越界错误都汇到这里。引擎在 actuatorProc 返回后
-     * 问一次即可——那里本来就是所有执行器共用的收口，与 taskFailed、零长块补位这些
-     * 既有的失败处置在同一处，不必每种执行器各自再造一遍。
+     * All coder_io out-of-range errors during this block's processing funnel here. The
+     * engine asks once after actuatorProc returns - that is already the shared choke
+     * point for every actuator, sitting alongside existing failure handling like
+     * taskFailed and zero-length block padding, so each actuator type does not need to
+     * reinvent it.
      *
-     * 声明为虚函数是因为 SAM/FASTQ/二进制这三种走的是 CodecActuator 那套平行基类，
-     * 由适配器桥接过来；真正开 coder_io 的是被适配者，所以适配器要把这一问转下去。
+     * It is virtual because SAM/FASTQ/binary all go through the parallel CodecActuator
+     * base classes and are bridged in by adapters; the entity that actually opens
+     * coder_io is the adaptee, so the adapter must forward this query down.
      */
     virtual const coder_err_sink& ioError() const { return ioErrSink; }
 
 protected:
     /*
-     * 构造 coder_io 的唯一入口。走这里出来的视图自带汇聚点，越界必然被引擎看到；
-     * 直接 make_shared<coder_io> 则不带，那是留给试压和单测的——试压时装不下只是
-     * "这个编码器不合适"的选择依据，不是故障，不该让整块失败。
+     * The only entry point for constructing a coder_io. Views created through here
+     * carry the error sink, so out-of-range access is guaranteed to be seen by the
+     * engine; calling make_shared<coder_io> directly does not, and that is reserved
+     * for trial compression and unit tests - in trial compression "does not fit" is
+     * just a selection signal that this coder is unsuitable, not a failure, and must
+     * not abort the whole block.
      */
     std::shared_ptr<coder_io> makeCoderIo(const uint8_t* buff, int32_t len, const char* name) {
         return std::make_shared<coder_io>(buff, len, &ioErrSink, name);

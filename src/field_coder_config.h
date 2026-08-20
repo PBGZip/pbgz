@@ -1,5 +1,5 @@
 /*
- * field_coder_config.h - SAM 字段编码器配置表
+ * field_coder_config.h - Per-field encoder configuration table for SAM
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -30,23 +30,28 @@
 #include "preprocess_info.h"
 
 /*
- * SAM 每字段的编码器配置表：候选编码器（预处理阶段逐字段试压比较）与默认编码器
- * （未选择 / 选择失败 / 未接通选择时执行器的兜底）。修改某个字段的候选或默认编码器
- * 只动这一张表，预处理试压范围与执行器默认值都从这里读，无需再改两处代码。
+ * Per-field encoder configuration table for SAM: candidate coders (trial-compressed
+ * and compared per field during preprocessing) and the default coder (the actuator's
+ * fallback when nothing is selected / selection failed / selection was not wired up).
+ * Changing a field's candidates or default touches only this table; both the
+ * preprocessing trial scope and the actuator defaults are read from here, so there is
+ * no need to edit two places.
  *
- * 特例：
- *  - QUAL(10)：走 QualSelector 专用路径（coder_qual / fcv2 / bwt_cm），不参与
- *    通用试压，这里只登记默认值。
- *  - POS(3) / PNEXT(7) / TLEN(8)：固定走差分 / 推算压缩（见 compressPosFieldDelta /
- *    compressPNextFieldDelta / compressTLen），无通用候选，默认值是底层 bwt_cm。
+ * Special cases:
+ *  - QUAL(10): goes through the QualSelector-specific path (coder_qual / fcv2 /
+ *    bwt_cm), does not participate in generic trial compression; only a default is
+ *    registered here.
+ *  - POS(3) / PNEXT(7) / TLEN(8): always use delta / inferred compression (see
+ *    compressPosFieldDelta / compressPNextFieldDelta / compressTLen); no generic
+ *    candidates, the default is the underlying bwt_cm.
  */
 
 struct FieldCoderConfig {
-    std::vector<CoderType> candidates; /* 可选编码器，按序试压比较 */
-    CoderType fallback;                /* 默认编码器 */
+    std::vector<CoderType> candidates; /* candidate coders, trial-compressed in order */
+    CoderType fallback;                /* default coder */
 };
 
-/* 参与编码器选择的 SAM 字段数：11 个必选字段 + 第 12 列 OPTION。 */
+/* Number of SAM fields participating in coder selection: 11 mandatory fields + the 12th OPTION column. */
 static const uint32_t SAM_FIELD_COUNT_SELECT = SAM_FIELD_COUNT + 1;
 
 inline const FieldCoderConfig kSamFieldCoderConfig[SAM_FIELD_COUNT_SELECT] = {
@@ -72,7 +77,7 @@ inline const FieldCoderConfig* samFieldCoderConfig(uint32_t fieldIdx)
     return &kSamFieldCoderConfig[fieldIdx];
 }
 
-/* 某字段是否把指定编码器列为候选。 */
+/* Whether a field lists the given coder as a candidate. */
 inline bool samFieldCandidate(uint32_t fieldIdx, CoderType type)
 {
     const FieldCoderConfig* cfg = samFieldCoderConfig(fieldIdx);
@@ -82,7 +87,7 @@ inline bool samFieldCandidate(uint32_t fieldIdx, CoderType type)
     return std::find(cfg->candidates.begin(), cfg->candidates.end(), type) != cfg->candidates.end();
 }
 
-/* 默认编码器；未登记时返回调用方给的兜底。 */
+/* Default coder; returns the caller-supplied fallback when nothing is registered. */
 inline CoderType samFieldDefaultCoder(uint32_t fieldIdx, CoderType fallback)
 {
     const FieldCoderConfig* cfg = samFieldCoderConfig(fieldIdx);

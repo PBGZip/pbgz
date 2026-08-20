@@ -219,8 +219,9 @@ TEST_F(CodecSelectorTest, QualitySampleIsSelectedAndCompresses)
 }
 
 /*
- * coder_affix_match 按行编解码的往返一致性。它是逐行编码器，前后缀匹配依赖上一行，
- * 这一行一行喂数据的用法正是 SAM 常规字段（FLAG/POS/CIGAR 等）选它时的实际喂法。
+ * Line-by-line encode/decode round-trip consistency of coder_affix_match. It is a per-line
+ * encoder whose prefix/suffix matching depends on the previous line; feeding data line by line
+ * is exactly how the SAM regular fields (FLAG/POS/CIGAR, etc.) are fed when it is selected.
  */
 TEST_F(CodecSelectorTest, AffixCoderLineRoundTrip)
 {
@@ -258,9 +259,10 @@ TEST_F(CodecSelectorTest, AffixCoderLineRoundTrip)
 }
 
 /*
- * affix 参与试压的机制验证：打开 trialAffix 且提供按行样本时，选择结果只会更好
- * （bestCompLen 不大于不试 affix 时的结果）；不打开时 AFFIX_MATCH 永远不会被选中，
- * 行为与既有路径一致。affix 是否胜出取决于数据本身，这里不预设具体数据一定胜出。
+ * Verifies the mechanism by which affix takes part in trial compression: with trialAffix enabled
+ * and line samples provided, the selection can only improve (bestCompLen no larger than when affix
+ * is not tried); with it disabled, AFFIX_MATCH is never selected, matching the existing path.
+ * Whether affix wins depends on the data itself; no specific dataset is assumed to win here.
  */
 TEST_F(CodecSelectorTest, AffixTrialMechanism)
 {
@@ -270,7 +272,7 @@ TEST_F(CodecSelectorTest, AffixTrialMechanism)
         parts.push_back("chr1:1000000" + std::to_string(i % 100) + "\t");
         total += (uint32_t)parts.back().size();
     }
-    /* 先一次性预留缓冲，保证 LineSample 里的指针在拼接后仍然有效。 */
+    /* Reserve the buffer up front so the pointers in LineSample remain valid after concatenation. */
     std::string column;
     column.reserve(total);
     std::vector<LineSample> lines;
@@ -294,7 +296,7 @@ TEST_F(CodecSelectorTest, AffixTrialMechanism)
     ASSERT_EQ(withoutAffix.status, FieldStatus::SELECTED);
     EXPECT_NE(withoutAffix.selectedCoder, CoderType::AFFIX_MATCH);
     EXPECT_LE(withAffix.bestCompLen, withoutAffix.bestCompLen)
-        << "加入 affix 候选不应让选中的压缩结果变差";
+        << "Adding the affix candidate must not make the selected result worse";
 }
 
 /*
@@ -371,8 +373,9 @@ TEST_F(CodecSelectorTest, AnalyzeFastqBlockSelectsSeqAndQual)
 }
 
 /*
- * 先验是一次固定支出，只有 QUAL 总量足够大时才摊得回来。小输入必须不训练，
- * 否则每个小文件都白白多背一个辅助块。
+ * The prior is a one-time fixed cost that pays off only when the total QUAL volume is large
+ * enough. Small inputs must not train, otherwise every small file carries an auxiliary block
+ * for nothing.
  */
 TEST_F(CodecSelectorTest, QualPriorSkippedForSmallInput)
 {
@@ -385,7 +388,7 @@ TEST_F(CodecSelectorTest, QualPriorSkippedForSmallInput)
     EXPECT_EQ(info.qualPriorTrainedBytes(), 0u);
 }
 
-/* 输入长度不可知（管道）时按"写"处理：漏写的损失没有上界，误写的成本有。 */
+/* When the input length is unknown (pipe), treat it as needing the prior: skipping the prior risks unbounded loss, whereas writing it unnecessarily has only a bounded cost. */
 TEST_F(CodecSelectorTest, QualPriorKeptWhenInputSizeUnknown)
 {
     RoughIOBlock blockSmall(1 << 20);
@@ -419,9 +422,11 @@ TEST_F(CodecSelectorTest, CoderForFallsBackWhenNotSelected)
 }
 
 /*
- * 配置表是各字段候选编码器与默认编码器的唯一来源，试压范围与执行器兜底都读它。
- * 断言几个代表性字段：FLAG 有 affix 候选、默认 bwt_cm；SEQ 默认 fc；PNEXT/TLEN/QUAL
- * 无通用候选（固定策略/专用路径）；OPTION（第 12 列）纳入 affix 候选。
+ * The config table is the single source of candidate and default coders for each field; both the
+ * trial-compression scope and the actuator fallback read from it. Asserts a few representative
+ * fields: FLAG has an affix candidate and defaults to bwt_cm; SEQ defaults to fc; PNEXT/TLEN/QUAL
+ * have no generic candidates (fixed strategy / dedicated path); OPTION (column 12) is included in
+ * the affix candidates.
  */
 TEST_F(CodecSelectorTest, SamFieldCoderConfigTable)
 {
@@ -436,5 +441,5 @@ TEST_F(CodecSelectorTest, SamFieldCoderConfigTable)
     ASSERT_EQ(samFieldCoderConfig(SAM_QUAL)->fallback, CoderType::QUAL);
     ASSERT_TRUE(samFieldCandidate(11u, CoderType::AFFIX_MATCH));   /* OPTION */
     ASSERT_EQ(samFieldDefaultCoder(SAM_CIGAR, CoderType::BWT_CM), CoderType::BWT_CM);
-    ASSERT_EQ(samFieldDefaultCoder(999, CoderType::FC), CoderType::FC);   /* 越界走兜底 */
+    ASSERT_EQ(samFieldDefaultCoder(999, CoderType::FC), CoderType::FC);   /* out-of-range falls through to the fallback */
 }

@@ -104,10 +104,13 @@ int32_t PbgzEngine::init() {
 
     // Create queues
     /*
-     * 输入侧容量取 threadNum + 1：SAM 头部独立成块后不参与 QUAL 先验预训练计数，
-     * 若容量恰为 threadNum，读线程在读满队列后阻塞于取空闲块，永远凑不满预训练目标
-     * 块数，finalizePretrain 不触发、coder 线程等不到 priorSettled -> 死锁。
-     * 多出一个槽位让读线程能比 coder 多读一块，预训练在队列满前即可收尾。
+     * Input-side capacity is threadNum + 1: once the SAM header is isolated as its
+     * own block it no longer contributes to the QUAL prior pre-training count. If the
+     * capacity were exactly threadNum, the reader thread would block on the free-block
+     * queue once it filled the queue and could never accumulate the target number of
+     * pre-training blocks; finalizePretrain would never fire and the coder threads
+     * would wait forever for priorSettled -> deadlock. The extra slot lets the reader
+     * get one block ahead of the coders, so pre-training finishes before the queue fills.
      */
     freeInputPool->setCapility(parameter.threadNum + 1);
     inputDataPool->setCapility(parameter.threadNum + 1);
@@ -117,9 +120,11 @@ int32_t PbgzEngine::init() {
     uint32_t blockBufferSize = getBlockSize();
     // First push empty blocks to free queue
     /*
-     * 输入块初始只分配固定 1MB；读取时按 -l 决定的读取目标（getBlockSize()）读，
-     * 容量不足由 reader 的 ensureCapacity 按需 realloc 扩容，避免按 -l 一次性分配
-     * 大内存（如 -l 9 的 512MB×N）。输出块与文件头 block_size 仍按 -l。
+     * Input blocks are initially allocated with a fixed 1MB; reads target the size
+     * chosen by -l (getBlockSize()), and when capacity is insufficient the reader's
+     * ensureCapacity reallocs on demand. This avoids allocating large memory up front
+     * based on -l (e.g. 512MB x N at -l 9). Output blocks and the header block_size
+     * still follow -l.
      */
     for (uint32_t i = 0; i < freeInputPool->getCapility(); ++i) {
         RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(FIXED_INPUT_BLOCK_SIZE);
@@ -145,12 +150,16 @@ int32_t PbgzEngine::init() {
     } else {
         if (PathUtil::isGzFile(parameter.inputFile)) {
             /*
-             * 标准 BAM 是 BGZF（gzip）流，逐字节看和 .gz 文件无法区分。但它的 gzip 是
-             * 格式内层，不该走"透明 gz 解压"：透明解压用的是 Gz/FastGz reader，拿不到
-             * 输入文件总长（fileDecisionProc 里 dynamic_cast<FileReader*> 失败），QUAL
-             * 先验的"值不值得写"判据会退化，BAM 输入就会白白多写一个先验辅助块。
-             * 因此 BAM 一律交给 FileReader + BamGzBlockReader（后者内部自行 inflate），
-             * 块类型仍是 BAM，压缩行为与 SAM 输入对齐。
+             * Standard BAM is a BGZF (gzip) stream that is indistinguishable from a .gz
+             * file byte by byte. But its gzip is the inner layer of the format and must
+             * not go through "transparent gz decompression": transparent decompression
+             * uses the Gz/FastGz readers, which cannot obtain the total length of the
+             * input file (the dynamic_cast<FileReader*> in fileDecisionProc fails), so
+             * the "is it worth writing" criterion of the QUAL prior degrades and a BAM
+             * input ends up writing a needless prior auxiliary block. Therefore BAM is
+             * always handed to FileReader + BamGzBlockReader (the latter inflates
+             * internally), the block type remains BAM, and compression behavior is
+             * aligned with SAM input.
              */
             if (BlockUtil::isBamFile(parameter.inputFile)) {
                 ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
@@ -203,7 +212,7 @@ int32_t PbgzEngine::init() {
     }
     ioWriter->openIO();
 
-    /* 注册输出文件：异常退出（如缺参考基因）时由 PbgzManager 清理删除。 */
+    /* Register the output file so PbgzManager can clean it up on abnormal exit (e.g. missing reference genome). */
     if (parameter.outputFile != STDOUT && parameter.outputFile != "-") {
         PbgzManager::getInstance().addOutputFile(parameter.outputFile);
     }
@@ -281,9 +290,10 @@ int32_t PbgzEngine::start() {
     writeThread.join();
 
     /*
-     * 落盘必须在这里完成并检查。closeIO 里的 msync 是 mmap 写出真正回写磁盘的时机，
-     * 原来只在析构里做，比 start() 返回还晚，失败无处可报。重复调用无害：
-     * closeIO 会把 mappedAddress 和 fd 置空。
+     * Writing to disk must be completed and checked here. The msync inside closeIO is
+     * the point where mmap output is actually flushed back to disk; it used to run only
+     * in the destructor, later than start() returning, leaving no way to report failure.
+     * Calling it again is harmless: closeIO nulls out mappedAddress and fd.
      */
     if (ioWriter != nullptr) {
         ioWriter->closeIO();
@@ -296,8 +306,10 @@ int32_t PbgzEngine::start() {
     }
 
     /*
-     * 块级错误的最终处理：任何一块压/解失败，整体结果都不可信。
-     * 零长块只是保流水线不死锁的过渡，绝不能让进程以成功退出、留下残缺文件。
+     * Final handling of block-level errors: if any block fails to compress/decompress,
+     * the overall result cannot be trusted. Zero-length blocks are only a stopgap to
+     * keep the pipeline from deadlocking; the process must never exit successfully and
+     * leave a truncated file behind.
      */
     if (taskFailed.load()) {
         LOG_ERROR("Some blocks failed during processing; result is incomplete.");
@@ -327,8 +339,10 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     }
 
     /*
-     * 辅助块按定义就不属于数据流，对所有引擎都一样，所以规则只能写在这里。
-     * 没人认领不是错误：那是旧版本读新格式时需要的前向兼容行为。
+     * By definition an auxiliary block is not part of the data stream and behaves the
+     * same for every engine, so this rule can only live here. An auxiliary block that
+     * no one claims is not an error: it is the forward-compatible behavior an old
+     * version needs when reading a newer format.
      */
     if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
         PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
@@ -348,16 +362,18 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     }
 
     /*
-     * 文件级决策必须发生在 push 之前（入队即意味着某个工作线程可能立刻开始处理）。
-     * SAM 头部块（只含 @ 行、无数据行）不触发决策，推迟到首个数据块，否则编码器选型
-     * 采不到字段样本只能退到默认编码器。必须在 push 之前调用，其余引擎行为不变。
+     * The file-level decision must happen before push (enqueueing means some worker
+     * thread may start processing immediately). A SAM header block (only @ lines, no
+     * data lines) does not trigger the decision; it is deferred to the first data block,
+     * otherwise codec selection would collect no field samples and fall back to the
+     * default codec. It must be called before push; behavior of other engines is unchanged.
      */
     if (!fileDecisionInvoked && blockReader->blockHasData(blockPtr)) {
         fileDecisionInvoked = true;
         fileDecisionProc(blockPtr);
     }
 
-    /* 跨块预训练等按块累积工作（压缩引擎用），也在入队前执行。 */
+    /* Per-block accumulation work such as cross-block pre-training (used by the compression engine) is also executed before enqueueing. */
     pretrainBlockProc(blockPtr);
 
     updateInputStatics(blockPtr);
@@ -370,9 +386,10 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
 }
 
 /*
- * 返回最后一次 readOneBlock 的结果：> 0 或 -2 不会出现（循环会继续），
- * 0 是干净 EOF，-1 是读错误。调用方必须据此区分"读完"与"读坏"——
- * 截断/损坏的输入绝不允许被当成正常 EOF 静默收尾。
+ * Returns the result of the last readOneBlock: > 0 or -2 never reach here (the loop
+ * continues in those cases), 0 is a clean EOF, and -1 is a read error. Callers must
+ * use this to distinguish "read to the end" from "read corrupted data" - a truncated
+ * or damaged input must never be silently treated as a normal EOF.
  */
 int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
     BlockType fileType = TYPE_UNKNOW;
@@ -381,7 +398,7 @@ int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
         ret = readOneBlock(blockReader, fileType);
     } while(ret > 0 || ret == -2);
 
-    /* EOF/错误后收尾未完成的预处理（如跨块先验训练），必须在推终止符之前。 */
+    /* Finish any incomplete preprocessing after EOF/error (e.g. cross-block prior training); this must happen before pushing the termination markers. */
     readLoopPostProc();
     return ret;
 }
@@ -436,9 +453,11 @@ int32_t PbgzEngine::startWriteTask() {
                 break;
             } else if (outBlockPtr->isSyncAux()) {
                 /*
-                 * 辅助块位置寻址，必须抢在 writeBlockPreProc / 顺序重排 / blockId2Write
-                 * 之前处理：它不属于数据块 id 序列，一旦落进下面那套排序逻辑，
-                 * 就会顶掉一个数据块的位置并让写指针永久错位。
+                 * Auxiliary blocks are position-addressed and must be handled ahead of
+                 * writeBlockPreProc / the reordering / blockId2Write: they do not belong
+                 * to the data-block id sequence, and once they slip into the sorting
+                 * logic below they would displace a data block and permanently misalign
+                 * the write pointer.
                  */
                 completeSyncAuxBlock(blockWriter, outBlockPtr);
             } else {
@@ -482,15 +501,16 @@ void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockP
 
 void PbgzEngine::completeSyncAuxBlock(BlockWriter* blockWriter, RoughIOBlock* block) {
     /*
-     * 取位置必须紧贴 writeBlock 之前：writeBlock 写出的第一个字节就是容器魔数，
-     * 所以此刻的写指针正是解压侧 readBlock 需要的那个偏移。
+     * The position must be captured immediately before writeBlock: the first byte
+     * written by writeBlock is the container magic number, so the write pointer at this
+     * instant is exactly the offset that the decompression side's readBlock needs.
      */
     FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
     const int64_t offset = (fileWriter != nullptr) ? (int64_t)fileWriter->getCurrentPos() : -1;
 
     blockWriter->writeBlock(block);
     updateOutputStatics(block);
-    /* 归还必须早于唤醒：发射者被唤醒后可能立刻再申请空闲块。 */
+    /* Return to the free pool must precede the wake-up: the emitter, once woken, may immediately request another free block. */
     freeOutputPool->push(block);
 
     {
@@ -525,17 +545,22 @@ int32_t PbgzEngine::startWorkTask() {
 
         LOG_INFO("Coder task (%d) begin to running!", id);
 
-        /* 压缩引擎的先验发布门闩：发布前 coder 线程等待通知，发布后才开始拉块压缩。 */
+        /* Prior-release latch of the compression engine: coder threads wait for notification before the prior is released, and only then start pulling blocks to compress. */
         workStartBarrier();
 
         /*
-         * 首块串行化（perf 分支机制，见 firstCoderNotify）：id==0 的线程直接开始，
-         * 其余线程等第 0 块处理完（preAnalysis 填充 SamInfo 等共享状态）再放行，
-         * 避免并发 preAnalysis 在染色体表未就绪时把块误降级为 BINARY。
+         * First-block serialization (a perf-branch mechanism, see firstCoderNotify):
+         * the thread with id==0 starts directly; the others wait until block 0 has been
+         * processed (preAnalysis populates shared state such as SamInfo) before being
+         * released, so that concurrent preAnalysis cannot downgrade a block to BINARY
+         * while the chromosome table is not yet ready.
          *
-         * 等待必须带谓词：第 0 块如果建不出执行器（如格式不支持的块类型），
-         * 处理会立刻失败、放行通知可能早于其它线程开始等待而错过——不带谓词的裸等待
-         * 会永久阻塞，让整个流水线死锁。谓词在持锁下复查 coderStartSync，先置位先得。
+         * The wait must use a predicate: if no actuator can be built for block 0 (e.g. an
+         * unsupported block type), processing fails immediately and the release
+         * notification may be emitted before the other threads start waiting, thus being
+         * missed - a bare wait without a predicate would then block forever and deadlock
+         * the whole pipeline. The predicate re-checks coderStartSync while holding the
+         * lock; whoever sets it first wins.
          */
         if (id > 0) {
             std::unique_lock<std::mutex> lock(coderStartMutex);
@@ -545,7 +570,7 @@ int32_t PbgzEngine::startWorkTask() {
         while (true) {
             RoughIOBlock* inBlockPtr = inputDataPool->get();
             if (inBlockPtr == nullptr) {  // Got null pointer, indicating end marker
-                /* 第 0 块未能完成（读错/全错）时也要放行，否则其余线程永久阻塞。 */
+                /* Even when block 0 was not completed (read error / all-failed), release the others, otherwise they would block forever. */
                 if (firstCoderNotify(true)) {
                     coderStartCond.notify_all();
                 }
@@ -563,10 +588,13 @@ int32_t PbgzEngine::startWorkTask() {
             Actuator* pActuator = createActuator(inBlockPtr, outBlockPtr);
             if (pActuator == nullptr) {
                 /*
-                 * 单个块建不出执行器，绝不能退出循环：工作线程一旦提前结束，
-                 * 剩余线程要独自消化整条输入队列，全部退出则读线程会永远阻塞在
-                 * 有界队列上。这里与下面 actuatorProc 失败走完全相同的收尾——
-                 * 归还输入块、推一个同 id 的零长块让写线程继续推进，然后继续取下一块。
+                 * Failing to build an actuator for a single block must never exit the
+                 * loop: if a worker thread ends early, the remaining threads have to
+                 * drain the entire input queue by themselves, and if all of them exit,
+                 * the reader thread blocks forever on the bounded queue. This path takes
+                 * exactly the same cleanup as an actuatorProc failure below - return the
+                 * input block, push a zero-length block with the same id so the writer
+                 * can keep advancing, then continue with the next block.
                  */
                 LOG_ERROR("Create actuator failed for block(%ld)", inBlockPtr->getBlockId());
                 taskFailed.store(true);
@@ -578,10 +606,12 @@ int32_t PbgzEngine::startWorkTask() {
             }
 
             /*
-             * coder 层的 check_exit/coder_exit 现在抛 coder_exception（以前是在库里
-             * 直接 _Exit 杀进程，不留日志）。这里是它的最终处理地：接住并转成
-             * 与其它失败完全一致的返回值，汇入 taskFailed。catch(...) 也一并拦住：
-             * 工作线程里漏出异常会直接 std::terminate，比丢块更难查。
+             * The coder layer's check_exit/coder_exit now throw coder_exception (they
+             * used to kill the process directly with _Exit inside the library, leaving
+             * no log). This is their final handling point: catch and convert them into
+             * return values identical to any other failure, funneling into taskFailed.
+             * catch(...) is also included: an exception escaping a worker thread would
+             * invoke std::terminate directly, which is harder to debug than a dropped block.
              */
             int32_t ret = 0;
             try {
@@ -598,13 +628,18 @@ int32_t PbgzEngine::startWorkTask() {
             }
 
             /*
-             * 越界错误的唯一查处点。coder_io 越界只置标志、不中断，执行器不一定把它
-             * 转成返回值——原来 SAM 查了 12 处、FASTQ 和索引一处没查，越界写坏的数据
-             * 就这样被当成"成功"写了出去。现在所有 coder_io 的错误都汇到执行器身上，
-             * 这里问一次就覆盖全部流、全部执行器，新增的流也不会漏。
+             * The single place that checks out-of-bounds errors. A coder_io overflow
+             * only sets a flag without aborting, and the actuator does not necessarily
+             * turn it into a return value - previously SAM was checked in 12 places
+             * while FASTQ and the index were never checked, so data corrupted by an
+             * out-of-bounds write was silently written out as "success". Now all
+             * coder_io errors are funneled onto the actuator, and asking once here
+             * covers every stream and every actuator, so newly added streams cannot
+             * be missed either.
              *
-             * 放在 ret 判断之前而不是合并进去：ret 已经是 0 时才需要补这一问，
-             * ret 非 0 时失败原因更具体，不该被覆盖。
+             * This sits before the ret check rather than merged into it: this extra
+             * question is only needed when ret is already 0; when ret is non-zero the
+             * failure cause is more specific and must not be overwritten.
              */
             if (ret == 0 && !pActuator->ioError().ok()) {
                 LOG_ERROR("Stream '%s' out of bounds on block(%ld): %s", pActuator->ioError().what,
@@ -628,7 +663,7 @@ int32_t PbgzEngine::startWorkTask() {
 
             outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
-            /* 首个完成的块放行其余 coder 线程（通常是第 0 块）。 */
+            /* The first block that completes releases the other coder threads (usually block 0). */
             if (firstCoderNotify(pActuator->getNotifyFlag())) {
                 coderStartCond.notify_all();
             }

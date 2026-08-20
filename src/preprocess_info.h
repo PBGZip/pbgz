@@ -39,10 +39,10 @@
 enum class CoderType : uint8_t {
     BWT_CM = 0,   /* coder_bwt_cm: BWT + context model (current default)   */
     FC,           /* coder_fc:     LZP + BWT + MTF + context range coder   */
-    SIMPLE_RC,    /* coder_simple_rc: 有损，已从编解码路径移除，仅保留枚举占位 */
-    FCV2,         /* coder_fcv2:   质量值上下文混合编码器，仅适用于 SAM 的 QUAL 列 */
+    SIMPLE_RC,    /* coder_simple_rc: lossy, removed from the encode/decode path, kept only as an enum placeholder */
+    FCV2,         /* coder_fcv2:   context-mixing coder for quality values, only for the SAM QUAL column */
     QUAL,         /* coder_qual:   quality-specific context model coder    */
-    AFFIX_MATCH,  /* coder_affix_match: 前后缀匹配列编码器，适用于 SAM 的常规字段 */
+    AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder, for regular SAM fields */
     COUNT
 };
 
@@ -68,9 +68,12 @@ enum class FieldStatus : uint8_t {
 };
 
 /*
- * fcv2 质量编码器的上下文参数档位。QualSelector 按数据特征（质量字母表大小、样本量、
- * 平均读长）选定并参与试压，选中后随 PreprocessInfo 交给压缩端与先验训练；解码端从
- * 码流头部读回同一组参数，不依赖本结构。字段语义见 coder_fcv2.h 的 Fcv2Cfg。
+ * Context parameter tier for the fcv2 quality coder. QualSelector picks it based on
+ * data characteristics (quality alphabet size, sample size, mean read length) and
+ * includes it in trial compression; once selected it travels with PreprocessInfo to
+ * the compression side and prior training. The decoder reads the same parameter set
+ * back from the stream header and does not rely on this struct. Field semantics are
+ * defined in Fcv2Cfg in coder_fcv2.h.
  */
 struct QualFcv2Params {
     int  cycleMax    = 96;
@@ -100,18 +103,24 @@ struct FieldCodecSelection {
     uint32_t    bestCompLen;
 
     /*
-     * 各候选编码器的试压结果：分别是哪个编码器、压出多少字节、花了多少微秒。
+     * Trial-compression results for each candidate coder: which coder, how many bytes
+     * it produced, and how many microseconds it took.
      *
-     * 原先是两个写死的字段对（trialBwtCmLen / trialFcLen），因为通用路径恰好只有
-     * bwt_cm 和 fc 两个候选。质量值列的候选不同，只好把同一对字段拿去装别的编码器，
-     * 再靠打印时换标签来纠正——候选一旦超过两个，这种复用就自相矛盾了。
-     * 改成数组之后，各字段的候选各是谁由它自己声明，打印端照着念即可。
+     * This used to be two hard-coded field pairs (trialBwtCmLen / trialFcLen) because
+     * the generic path happened to have only two candidates, bwt_cm and fc. The QUAL
+     * column has a different candidate set, so the same field pair had to be repurposed
+     * for other coders and the labels swapped at print time - once there are more than
+     * two candidates, that reuse becomes self-contradictory. With an array, each field
+     * declares its own candidate set and the print side just reads them off.
      *
-     * 试压耗时的用途是让选择策略能在压缩率和速度之间做取舍，而不是无条件取最小：
-     * 两个编码器压缩率差不到一个百分点、吞吐却差好几倍的情况很常见。
-     * 但要注意样本只有几百 KB 到一两 MB，单次计时的相对误差不小（同一二进制重复
-     * 测量的波动在百分之几的量级），所以这个数字适合看数量级差异，不适合拿来比较
-     * 两个相差百分之几的编码器。
+     * The trial time exists so the selection policy can trade off compression ratio
+     * against speed instead of always picking the minimum: it is common for two coders
+     * to differ by under a percentage point in ratio while differing severalfold in
+     * throughput. Note however that the sample is only a few hundred KB to 1-2 MB, so
+     * the relative error of a single timing is not small (repeat runs of the same binary
+     * fluctuate on the order of a few percent). Treat this number as indicative of
+     * order-of-magnitude differences, not suitable for comparing two coders that differ
+     * by a few percent.
      */
     static const uint32_t TRIAL_MAX = 3;
     CoderType   trialCoder[TRIAL_MAX] = { CoderType::BWT_CM, CoderType::BWT_CM, CoderType::BWT_CM };
@@ -119,7 +128,7 @@ struct FieldCodecSelection {
     uint32_t    trialUs[TRIAL_MAX] = { 0, 0, 0 };
     uint32_t    trialCount = 0;
 
-    /* 记下一个候选的试压结果；超出 TRIAL_MAX 直接丢弃，不影响选择本身。 */
+    /* Record one candidate's trial result; results beyond TRIAL_MAX are dropped outright and do not affect selection itself. */
     void addTrial(CoderType coder, uint32_t len, uint32_t usec)
     {
         if (trialCount >= TRIAL_MAX) {
@@ -132,16 +141,19 @@ struct FieldCodecSelection {
     }
 
     /*
-     * 实际用于定案的样本字节数，以及为此跑了几轮。
+     * Number of sample bytes actually used to finalize the decision, and how many
+     * rounds were run to get there.
      *
-     * 评估不再是"把整个采样压一遍"，而是从小样本起步逐轮加倍，一旦领先者拉开足够
-     * 差距就立刻收手。多数字段在头一两轮就能分出胜负，剩下的预算留给真正难分的字段。
-     * decidedLen 小于 sampleLen 就说明这个字段提前定案了。
+     * Evaluation no longer "compresses the whole sample"; instead it starts from a
+     * small sample and doubles it each round, stopping as soon as the leader opens up
+     * enough of a gap. Most fields are decided within the first round or two, leaving
+     * the remaining budget for the genuinely hard-to-separate fields. decidedLen being
+     * smaller than sampleLen means this field was finalized early.
      */
     uint32_t    decidedLen = 0;
     uint32_t    rounds = 0;
 
-    /* 选中 fcv2 时携带的上下文参数档位；其他编码器下无意义。 */
+    /* Context parameter tier carried when fcv2 is selected; meaningless for other coders. */
     QualFcv2Params fcv2Params;
 
     FieldCodecSelection()
@@ -208,30 +220,35 @@ struct PreprocessInfo {
     BlockType fileType;
     std::atomic<PreprocessState> state;
 
-    /* 各字段样本长度之和，不含 tab 分隔符、换行符和头部行。 */
+    /* Sum of the per-field sample lengths, excluding tab separators, newlines, and header lines. */
     uint32_t  sampleBytes;
 
-    /* 为做分析实际扫过的原始数据字节数，也就是从数据块头部截下来的那一段的大小。 */
+    /* Raw data bytes actually scanned for analysis, i.e. the size of the slice taken from the head of the data block. */
     uint32_t  scannedBytes;
 
     std::vector<FieldCodecSelection> fields;
 
     /*
-     * fcv2 由跨块累积的 QUAL（最多 45 MB，首块 + 后续预训练块）训练出的模型快照
-     * 及其训练量。
+     * Snapshot of the model trained by fcv2 on QUAL accumulated across blocks
+     * (up to 45 MB: first block plus subsequent pre-training blocks), together with
+     * the amount of data it was trained on.
      *
-     * 先验跟随预处理结果保存，而不是交给某个编码器实例：PreprocessInfo 是流水线和
-     * 编码器决策之间唯一的交接点，编码器层因此无需知道数据块或文件偏移，继续保持
-     * coder/ 不反向依赖 src/ 的分层。空快照明确表示本次没有可用先验，调用方可无条件
-     * 退回既有的冷启动行为。
+     * The prior travels with the preprocessing result rather than being handed to some
+     * coder instance: PreprocessInfo is the only hand-off point between the pipeline and
+     * the coder decision, so the coder layer need not know about data blocks or file
+     * offsets, preserving the layering where coder/ never depends back on src/. An empty
+     * snapshot unambiguously means no prior is available this run, letting the caller
+     * unconditionally fall back to the existing cold-start behavior.
      */
     std::vector<uint8_t> qualPriorSnapshot;
     uint64_t qualPriorTrainingBytes;
 
     /*
-     * analyze 判定本文件值得训练并发布 QUAL 先验。决策产出于预处理（RUNNING 阶段），
-     * 只被读线程读取；实际训练推迟到读线程读完预训练块之后（跨块累积），见
-     * CompressEngine::finalizePretrain。
+     * analyze decides this file is worth training and publishing a QUAL prior for.
+     * The decision is produced during preprocessing (the RUNNING stage) and read only
+     * by the reader thread; the actual training is deferred until the reader thread has
+     * consumed the pre-training blocks (cross-block accumulation); see
+     * CompressEngine::finalizePretrain.
      */
     bool qualPriorRequested;
 

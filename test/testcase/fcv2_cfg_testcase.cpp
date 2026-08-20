@@ -1,11 +1,13 @@
 /*
- * fcv2_cfg_testcase.cpp - fcv2 上下文参数档位（策略 1/2）的单元测试。
+ * fcv2_cfg_testcase.cpp - Unit tests for the fcv2 context parameter presets (strategies 1/2).
  *
- * 覆盖三件事：
- *   1) 非默认档位（细档/粗档/关闭跳变上下文）下的编解码往返一致；
- *   2) 先验快照携带档位：同档位加载往返、不同档位训练的先验被正确采用（先验决定档位）；
- *   3) QualSelector 选中 fcv2 时把胜出档位写进 FieldCodecSelection.fcv2Params，
- *      且该档位确实能跑通往返。
+ * Covers three things:
+ *   1) encode/decode round-trip consistency under non-default presets (fine/coarse/delta context
+ *      disabled);
+ *   2) the prior snapshot carries the preset: loading under the same preset round-trips, and a
+ *      prior trained under a different preset is correctly adopted (the prior decides the preset);
+ *   3) when QualSelector picks fcv2, the winning preset is written into
+ *      FieldCodecSelection.fcv2Params, and that preset actually round-trips.
  */
 
 #include <gtest/gtest.h>
@@ -32,7 +34,7 @@ struct Rec {
     bool rev;
 };
 
-/* 与 fcv2_cfg_bench 同款生成器：循环下降 + 游程 + 不稳定度 + 反向链反转。 */
+/* Generator of the same style as fcv2_cfg_bench: cycle decline + runs + instability + reverse-chain reversal. */
 std::vector<Rec> makeRecords(size_t n, uint32_t readLen, uint32_t seed)
 {
     std::mt19937 rng(seed);
@@ -74,10 +76,12 @@ std::vector<Rec> makeRecords(size_t n, uint32_t readLen, uint32_t seed)
 }
 
 /*
- * fcv2 友好的生成器：正向链的质量在测序序中随循环下降，反向链在存储序中因此呈现
- * 随位置上升的剖面。两条链在同一文件里交替出现，拼起来的字节流每隔 readLen 就有一个
- * 方向翻转的"折点"，bwt_cm 的 MTF 无从借力；而 fcv2 按 rev 把循环序号还原后，所有
- * read 都是同一张下降剖面，循环上下文（m1/m5）正对着这种结构，通常选中 fcv2。
+ * fcv2-friendly generator: forward-strand quality declines with cycle in sequencing order, so the
+ * reverse strand shows a rising profile with position in stored order. The two strands alternate
+ * in the same file, so the concatenated byte stream has a direction-reversing "fold" every
+ * readLen, leaving bwt_cm's MTF nothing to exploit; once fcv2 restores the cycle index using rev,
+ * every read shares the same declining profile, and the cycle context (m1/m5) directly targets
+ * this structure, so fcv2 is usually selected.
  */
 std::vector<Rec> makeCycleRecords(size_t n, uint32_t readLen, uint32_t seed)
 {
@@ -93,14 +97,14 @@ std::vector<Rec> makeCycleRecords(size_t n, uint32_t readLen, uint32_t seed)
         std::string seq(readLen, 'A');
         for (uint32_t c = 0; c < readLen; c++) {
             seq[c] = bases[rng() % 4];
-            /* 测序序里随循环从 ~Q40 单调降到 ~Q28 */
+            /* in sequencing order, quality declines monotonically from ~Q40 to ~Q28 across the cycle */
             int qi = (int)std::lround(40.0 - 12.0 * (double)c / (double)readLen + noise(rng));
             if (qi < 0) qi = 0;
             if (qi > 40) qi = 40;
             qual[c] = (char)('!' + qi);
         }
         if (rec.rev) {
-            /* 存储序相对测序序反转 */
+            /* stored order is reversed relative to sequencing order */
             std::reverse(qual.begin(), qual.end());
             std::reverse(seq.begin(), seq.end());
         }
@@ -216,15 +220,16 @@ Fcv2Cfg qaCfg()
 }
 
 /*
- * 造一批含相邻重复 read 的数据：每隔若干条就复制上一条的 QUAL/SEQ。
- * 有重复时 dedup 应该明显省字节；无重复时也不该破坏往返。
+ * Build a batch of records containing adjacent duplicate reads: every few records, the previous
+ * record's QUAL/SEQ is copied. With duplicates, dedup should clearly save bytes; without them it
+ * must not break the round trip.
  */
 std::vector<Rec> makeDupRecords(size_t n, uint32_t readLen, uint32_t dupEvery, uint32_t seed)
 {
     std::vector<Rec> recs = makeRecords(n, readLen, seed);
     for (size_t i = 1; i < recs.size(); i++) {
         if (dupEvery > 0 && (i % dupEvery) == 0) {
-            recs[i] = recs[i - 1];   /* 与上一条完全相同 */
+            recs[i] = recs[i - 1];   /* identical to the previous record */
         }
     }
     return recs;
@@ -246,20 +251,20 @@ protected:
 TEST_F(Fcv2CfgTest, RoundTripUnderNonDefaultConfigs)
 {
     std::vector<Rec> recs = makeRecords(4000, 151, 7);
-    EXPECT_TRUE(roundtripWithCfg(recs, Fcv2Cfg()));        /* 默认档 */
-    EXPECT_TRUE(roundtripWithCfg(recs, fineCfg()));        /* 细档 */
-    EXPECT_TRUE(roundtripWithCfg(recs, coarseCfg()));      /* 粗档 */
-    EXPECT_TRUE(roundtripWithCfg(recs, noDeltaCfg()));     /* 关闭跳变上下文 */
-    EXPECT_TRUE(roundtripWithCfg(recs, dedupCfg()));       /* 去重（无重复数据） */
-    EXPECT_TRUE(roundtripWithCfg(recs, qaCfg()));          /* 平均质量档 */
+    EXPECT_TRUE(roundtripWithCfg(recs, Fcv2Cfg()));        /* default preset */
+    EXPECT_TRUE(roundtripWithCfg(recs, fineCfg()));        /* fine preset */
+    EXPECT_TRUE(roundtripWithCfg(recs, coarseCfg()));      /* coarse preset */
+    EXPECT_TRUE(roundtripWithCfg(recs, noDeltaCfg()));     /* delta context disabled */
+    EXPECT_TRUE(roundtripWithCfg(recs, dedupCfg()));       /* dedup (no duplicate data) */
+    EXPECT_TRUE(roundtripWithCfg(recs, qaCfg()));          /* average-quality preset */
 }
 
-/* 去重往返：含相邻重复 read 时必须逐字节还原。 */
+/* Dedup round trip: with adjacent duplicate reads, the result must be restored byte for byte. */
 TEST_F(Fcv2CfgTest, DedupRoundTripWithDuplicates)
 {
-    std::vector<Rec> recs = makeDupRecords(4000, 151, 3, 5);   /* 每 3 条重复一条 */
+    std::vector<Rec> recs = makeDupRecords(4000, 151, 3, 5);   /* duplicate one in every 3 records */
     EXPECT_TRUE(roundtripWithCfg(recs, dedupCfg()));
-    /* 有重复时 dedup 应比不去重更省（至少不比不去重差太多）。 */
+    /* With duplicates present, dedup should save more bytes than no dedup (at least not be much worse). */
     std::vector<uint32_t> freq = frequencies(recs);
     size_t total = 0;
     for (const Rec& r : recs) total += r.qual.size();
@@ -271,10 +276,10 @@ TEST_F(Fcv2CfgTest, DedupRoundTripWithDuplicates)
     coder_fcv2 e2(&io2, freq, dedupCfg());
     ASSERT_TRUE(encodeAll(e2, recs));
     int32_t n1 = e1.encode_flush(), n2 = e2.encode_flush();
-    EXPECT_LT((size_t)n2, (size_t)n1) << "含 1/3 重复的数据，去重应更省字节";
+    EXPECT_LT((size_t)n2, (size_t)n1) << "Data with 1/3 duplicates must compress fewer bytes with dedup on";
 }
 
-/* 去重 + 先验：快照携带 useDedup，加载后往返一致。 */
+/* Dedup + prior: the snapshot carries useDedup, and the round trip is consistent after loading. */
 TEST_F(Fcv2CfgTest, DedupPriorRoundTrip)
 {
     std::vector<Rec> recs = makeDupRecords(4000, 151, 2, 11);
@@ -298,10 +303,10 @@ TEST_F(Fcv2CfgTest, DedupPriorRoundTrip)
     ASSERT_TRUE(decodeAll(dec, recs));
 }
 
-/* 平均质量档（策略 4）：read 间平均质量差异大时，质量档应比不去分档更省。 */
+/* Average-quality preset (strategy 4): when the mean quality differs widely between reads, the quality preset should save more than not bucketing by quality. */
 TEST_F(Fcv2CfgTest, QaSavesBytesOnVariedQuality)
 {
-    /* 混合两批 read：一批高质量（Q38~40）、一批低质量（Q15~20），平均质量差异大。 */
+    /* Mix two batches of reads: one high-quality (Q38~40) and one low-quality (Q15~20), with large mean-quality differences. */
     std::vector<Rec> high = makeRecords(3000, 151, 21);
     std::vector<Rec> low = makeRecords(3000, 151, 22);
     for (Rec& r : low) {
@@ -326,7 +331,7 @@ TEST_F(Fcv2CfgTest, QaSavesBytesOnVariedQuality)
     coder_fcv2 e2(&io2, freq, qaCfg());
     ASSERT_TRUE(encodeAll(e2, recs));
     int32_t n1 = e1.encode_flush(), n2 = e2.encode_flush();
-    EXPECT_LT((size_t)n2, (size_t)n1) << "平均质量差异大的数据，质量档应更省字节";
+    EXPECT_LT((size_t)n2, (size_t)n1) << "Data with widely differing mean quality must compress fewer bytes with the quality tier";
 }
 
 TEST_F(Fcv2CfgTest, PriorCarriesConfigAndAdoptsIt)
@@ -334,13 +339,14 @@ TEST_F(Fcv2CfgTest, PriorCarriesConfigAndAdoptsIt)
     std::vector<Rec> recs = makeRecords(4000, 151, 9);
     std::vector<uint32_t> freq = frequencies(recs);
 
-    /* 用细档训练先验。 */
+    /* Train the prior with the fine preset. */
     std::vector<uint8_t> blob = trainPrior(recs, fineCfg());
     ASSERT_FALSE(blob.empty());
 
     /*
-     * 构造时用粗档，但先验是细档训练的：loadModel 采用先验自带的细档，编码端与码流
-     * 头部都以细档为准，解码端读回一致，往返必须成立。
+     * The coder is constructed with the coarse preset, but the prior was trained with the fine
+     * one: loadModel adopts the prior's own fine preset, so both the encoder and the stream header
+     * use the fine preset, and the decoder reads it back consistently, so the round trip must hold.
      */
     size_t total = 0;
     for (const Rec& r : recs) total += r.qual.size();
@@ -348,7 +354,7 @@ TEST_F(Fcv2CfgTest, PriorCarriesConfigAndAdoptsIt)
     coder_io io(comp.data(), (int32_t)comp.size());
     bool loaded = false;
     coder_fcv2 enc(&io, freq, coarseCfg(), blob, &loaded);
-    ASSERT_TRUE(loaded) << "同档位布局的先验应被加载（先验决定档位）";
+    ASSERT_TRUE(loaded) << "A prior with the same tier layout must be loaded (the prior determines the tier)";
     ASSERT_TRUE(encodeAll(enc, recs));
     int32_t packed = enc.encode_flush();
 
@@ -366,7 +372,7 @@ TEST_F(Fcv2CfgTest, StreamHeaderCarriesConfigSelfDescribe)
     size_t total = 0;
     for (const Rec& r : recs) total += r.qual.size();
 
-    /* 编码端用细档，解码端不知道档位、以默认档构造，begin_decode 应从码流读回细档。 */
+    /* The encoder uses the fine preset; the decoder does not know the preset and is constructed with the default, so begin_decode must read the fine preset back from the stream. */
     std::vector<uint8_t> comp(total * 2 + (1u << 16), 0);
     coder_io io(comp.data(), (int32_t)comp.size());
     coder_fcv2 enc(&io, freq, fineCfg());
@@ -385,7 +391,7 @@ TEST_F(Fcv2CfgTest, StreamHeaderCarriesConfigSelfDescribe)
     }
 }
 
-/* 采样足够大时，QualSelector 应选中某个候选并把胜出的档位带回。 */
+/* With a large enough sample, QualSelector should select a candidate and bring back the winning preset. */
 TEST_F(Fcv2CfgTest, QualSelectorCarriesWinningConfig)
 {
     RoughIOBlock block(8 << 20);
@@ -416,13 +422,13 @@ TEST_F(Fcv2CfgTest, QualSelectorCarriesWinningConfig)
                  qualSel.trialCount > 0 ? qualSel.trialLen[0] : 0,
                  qualSel.trialCount > 1 ? qualSel.trialLen[1] : 0,
                  qualSel.trialCount > 2 ? qualSel.trialLen[2] : 0);
-        GTEST_SKIP() << "该合成样本未选中 fcv2（实际 " << coderTypeToMagic(qualSel.selectedCoder)
-                     << "，" << buf << "），档位回传无从验证";
+        GTEST_SKIP() << "This synthetic sample did not select fcv2 (selected " << coderTypeToMagic(qualSel.selectedCoder)
+                     << ", " << buf << "), so tier feedback cannot be verified";
     }
-    /* 档位必须是候选里的三档之一，且带档位能跑通往返。 */
+    /* The preset must be one of the three candidates, and it must round-trip with the preset applied. */
     const QualFcv2Params& p = qualSel.fcv2Params;
     bool isKnownPreset = (p == QualFcv2Params()) ||
         (p.cycleBucket == 24 && p.deltaBucket == 12 && p.prevShift == 0 && p.useDelta) ||
         (p.cycleBucket == 8 && p.deltaBucket == 4 && p.prevShift == 2 && p.useDelta);
-    EXPECT_TRUE(isKnownPreset) << "fcv2Params 不是已知候选档位";
+    EXPECT_TRUE(isKnownPreset) << "fcv2Params is not one of the known candidate tiers";
 }

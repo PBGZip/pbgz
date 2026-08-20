@@ -1474,9 +1474,11 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
 
         uint32_t qualFreqSrcLen = streamsMeta[1]["srclen"].asUInt();
         /*
-         * 元素个数必须用 uint32_t: 数组按这个数分配, 而 decode_line 按未截断的
-         * qualFreqSrcLen 字节写入。原来是 uint8_t, 一旦质量值字母表超过 127 个符号
-         * (qualFreqSrcLen > 510) 计数就回绕, 分配变小而写入不变, 直接堆越界。
+         * The element count must be uint32_t: the array is allocated by this count,
+         * while decode_line writes the untruncated qualFreqSrcLen bytes. It used to be
+         * uint8_t; once the quality-value alphabet exceeded 127 symbols
+         * (qualFreqSrcLen > 510) the count wrapped, the allocation shrank but the
+         * write did not, overflowing the heap.
          */
         uint32_t qualFreqArrLen = qualFreqSrcLen / sizeof(uint16_t);
         uint16_t* qualFreqArray = new uint16_t[qualFreqArrLen];
@@ -1522,12 +1524,14 @@ int32_t FastqCodecActuator::decompress() {
     }
 
     /*
-     * 块入口预分配：按文件头的 block_size（压缩时确定的上界）×2——确定值，不是估算。
-     * 与 SAM 侧同一套（见 SamCodecActuator::decompress）：头部输出 ≤ block_size，
-     * coder_fc 的 SEQ 尾部暂存 ≤ block_size，正好 2 倍。
-     * block_size 为 0（老文件没写）时落回按压缩级别的默认块大小。
-     * ensureCapacity 必须在 initDecoder 之前：initDecoder 里 coder_fc 会把 SEQ
-     * 数据写到缓冲尾部，realloc 之后成悬空。
+     * Pre-allocation at the block entry: block_size from the file header (the upper
+     * bound determined during compression) x 2 — a definite value, not an estimate.
+     * Same scheme as on the SAM side (see SamCodecActuator::decompress): header output
+     * <= block_size, and coder_fc's trailing SEQ staging <= block_size, exactly twice.
+     * When block_size is 0 (not written by old files), fall back to the default block
+     * size for the compression level.
+     * ensureCapacity must run before initDecoder: inside initDecoder, coder_fc writes
+     * the SEQ data at the end of the buffer, which would dangle after a realloc.
      */
     {
         size_t bs = pbgzEngine->getFileBlockSize();

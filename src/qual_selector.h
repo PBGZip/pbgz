@@ -1,19 +1,25 @@
 /*
- * qual_selector.h - 质量值列的编码器评估
+ * qual_selector.h - encoder evaluation for the quality-value column
  *
- * 质量值列不能走通用的评估路径，原因有三个。
+ * The quality-value column cannot go through the generic evaluation path, for
+ * three reasons.
  *
- * 一是候选不同。通用字段的候选是 coder_bwt_cm 和 coder_fc 这类字节流压缩器，而质量值
- * 实际使用的是 coder_qual 和 fcv2。此前预处理一直在拿 bwt_cm 和 fc 评估质量值列，
- * 而 compressQuality 用的是另外两个，评估结果实际上没有被使用。
+ * First, the candidates differ. Generic fields are evaluated with byte-stream
+ * compressors such as coder_bwt_cm and coder_fc, while quality values are
+ * actually compressed with coder_qual and fcv2. Previously the preprocessing
+ * evaluated the quality-value column with bwt_cm and fc, but compressQuality
+ * used the other two, so the evaluation result was never actually used.
  *
- * 二是输入形态不同。通用评估把整列拼成一段连续字节，记录边界就丢了；而这两个候选都
- * 需要记录级信息——fcv2 需要每条记录的长度来还原测序循环序号，coder_qual 需要对应的
- * 碱基序列作为上下文。
+ * Second, the input shape differs. Generic evaluation concatenates the whole
+ * column into one contiguous byte stream, losing record boundaries; but both of
+ * these candidates need record-level information — fcv2 needs each record's
+ * length to recover the sequencing cycle index, and coder_qual needs the
+ * corresponding base sequence as context.
  *
- * 三是编译约束。coder_qual.h 会间接引入 clr.h，其中的 RangeCoder 与 coder_fc.h 引入的
- * fc/rangecoder.h 里的同名类冲突，两者不能出现在同一个编译单元，所以质量值的评估必须
- * 单独成一个文件。
+ * Third, a compilation constraint. coder_qual.h brings in clr.h indirectly,
+ * whose RangeCoder conflicts with the same-named class in fc/rangecoder.h
+ * (brought in by coder_fc.h); the two cannot appear in the same translation
+ * unit, so the quality-value evaluation must live in its own file.
  */
 
 #pragma once
@@ -24,27 +30,33 @@
 
 #include "preprocess_info.h"
 
-/* 采样得到的一条记录，评估两个候选都需要这些信息。 */
+/* One record from the sample; both evaluated candidates need this information. */
 struct QualSampleRecord {
-    std::string qual;   /* 质量值 */
-    std::string seq;    /* 对应的碱基序列，coder_qual 用作上下文 */
-    bool        rev;    /* 链方向，取自 FLAG 的 0x10 位，fcv2 用来还原循环序号 */
+    std::string qual;   /* quality value */
+    std::string seq;    /* corresponding base sequence, used by coder_qual as context */
+    bool        rev;    /* strand direction, taken from bit 0x10 of FLAG, used by fcv2 to recover the cycle index */
 };
 
 class QualSelector {
 public:
     /*
-     * 在采样记录上试压 coder_qual、fcv2（多个上下文参数档位）与 bwt_cm，返回压缩后
-     * 更小的那个。freqByByte 是质量值的出现次数，下标为原始字节值。三个候选都需要它：
-     * coder_qual 用它建自己的频率表，fcv2 用它建哈夫曼树。
+     * Trial-compress coder_qual, fcv2 (over several context parameter tiers)
+     * and bwt_cm on the sampled records and return the one with the smaller
+     * compressed size. freqByByte counts quality-value occurrences, indexed by
+     * raw byte value. All three candidates need it: coder_qual builds its own
+     * frequency table from it, and fcv2 builds its Huffman tree from it.
      *
-     * 评估走多轮收敛：从 64KB 起步逐轮翻倍样本量，领先者拉开 3% 以上差距即定案
-     * （见 codec_selector.cpp 的 SETTLE_MARGIN）。选中的 fcv2 参数档位（若有）随
-     * FieldCodecSelection.fcv2Params 返回，压缩端与先验训练据此保持一致；解码端从
-     * fcv2 码流头部读回同一组参数。
+     * Evaluation uses multi-round convergence: start at 64 KB and double the
+     * sample each round, finalizing once the leader opens a gap of more than 3%
+     * (see SETTLE_MARGIN in codec_selector.cpp). The winning fcv2 parameter tier
+     * (if any) is returned via FieldCodecSelection.fcv2Params so the compression
+     * side and prior training stay consistent with it; the decoder reads the
+     * same parameter set back from the fcv2 bitstream header.
      *
-     * 样本太少时返回 SKIPPED，由调用方沿用默认编码器。评估失败（所有候选都跑不通）
-     * 时返回 FAILED，同样退回默认，绝不会因为评估出问题而让压缩无法进行。
+     * If the sample is too small, SKIPPED is returned and the caller keeps its
+     * default encoder. If evaluation fails (none of the candidates runs),
+     * FAILED is returned and the default is used as well; an evaluation problem
+     * must never make compression impossible.
      */
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
                                       const std::vector<uint32_t>& freqByByte);

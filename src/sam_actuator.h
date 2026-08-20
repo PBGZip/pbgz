@@ -42,7 +42,7 @@
 // Forward declaration
 class CompressEngine;
 
-/* TLEN 伙伴索引用 (pos, pnext) 作键的哈希函数。 */
+/* Hash function for the TLEN mate index keyed by (pos, pnext). */
 struct PairInt64Hash {
     std::size_t operator()(const std::pair<int64_t, int64_t>& key) const {
         return std::hash<int64_t>()(key.first) ^ (std::hash<int64_t>()(key.second) << 1);
@@ -67,14 +67,16 @@ public:
     int32_t initDecoder(RoughIOBlock* outputBlock);
 
     /*
-     * 先解码全块的 POS/CIGAR/PNEXT，把完整伙伴索引与参考跨度建好，主循环再逐行
-     * 输出时 TLEN 才能用 computeTLEN 还原，异常值因此可以压到接近零。
+     * Pre-decode the whole block's POS/CIGAR/PNEXT so that the full mate index
+     * and reference spans are ready; only then can the main loop reconstruct
+     * TLEN via computeTLEN while emitting lines, allowing exceptional values to
+     * compress to near zero.
      */
     int32_t preDecodeForTLEN();
 
     int32_t decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
-    /* OPTION 字段（第 12 列起的所有 tag）按 CRAM 式 tag 列化压缩/解压。当前未启用（OPTION 走 affix），保留代码。 */
+    /* The OPTION field (all tags from column 12 on) is compressed/decompressed by CRAM-style tag columnization. Currently disabled (OPTION goes through affix); code kept for future use. */
     int32_t compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
     int32_t decompressOptionField(uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock,
                                   const Json::Value& fieldMeta);
@@ -147,7 +149,7 @@ private:
     // ID field split compression
     int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
                                  uint32_t trialLines = 0);
-    /* QNAME 专用：跨行去重 + 按位置建模（见 coder_qname.h）。trialLines>0 时只压前 N 行（选型试压用）。 */
+    /* QNAME-specific: cross-line deduplication + position-based modeling (see coder_qname.h). When trialLines > 0, only the first N lines are compressed (used for trial-based selection). */
     int32_t compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
                                  uint32_t trialLines = 0);
 
@@ -159,23 +161,23 @@ private:
 
     int32_t compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    /* 预处理选出的编码器类型；引擎不提供或尚未决出时返回 fallback。 */
+    /* The coder type chosen by preprocessing; returns fallback when the engine provides none or the decision is not yet made. */
     CoderType pickedCoderFor(uint32_t fieldIdx, CoderType fallback) const;
 
     uint32_t parseCigar(uint8_t* cigarString, uint32_t cigarLength);
 
-    /* 只统计消耗参考序列的 CIGAR 操作（M/D/N/=/X），用于 TLEN 推算。 */
+    /* Only counts CIGAR operations that consume reference sequence (M/D/N/=/X); used for TLEN reconstruction. */
     uint32_t parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength);
 
-    /* PNEXT 按 (PNEXT - POS) 差值文本压缩；连续行的差值远小于原始值，bwt_cm 压得更小。 */
+    /* PNEXT is compressed as (PNEXT - POS) delta text; the deltas of consecutive lines are far smaller than the raw values, so bwt_cm compresses them better. */
     template<typename CoderType>
     int32_t compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    /* POS 按与上一行 POS 的差值文本压缩；实测优于定宽二进制和文本 affix。 */
+    /* POS is compressed as text deltas against the previous line's POS; empirically better than fixed-width binary and textual affix. */
     template<typename CoderType>
     int32_t compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    /* TLEN 不存原值，解压时按 POS/PNEXT/CIGAR 推算，只对推算不上的行存异常。 */
+    /* TLEN is not stored verbatim; it is reconstructed from POS/PNEXT/CIGAR on decompression, storing exceptions only for lines that cannot be reconstructed. */
     template<typename CoderType>
     int32_t compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
@@ -213,8 +215,10 @@ private:
             std::string str = std::string((char*)fieldStart, fieldLength);
             T value = (T)std::stoll(str);
             /*
-             * fieldSrcLen 记录的是原始文本占用（含行尾 tab，即 currTabPos - prevTabPos）；
-             * 转成数字后压缩流里只有定宽二进制，其总空间记在 meta["srclen"]（srcLen）。
+             * fieldSrcLen records the raw text size (including the trailing tab,
+             * i.e. currTabPos - prevTabPos); once converted to numbers, the stream
+             * holds only fixed-width binary, whose total size is recorded in
+             * meta["srclen"] (srcLen).
              */
             fieldSrcLen += fieldLength + 1;
             // Encode the field data
@@ -242,9 +246,11 @@ private:
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
         /*
-         * 数值字段有两种压缩形态：这里按定宽二进制编码；当预处理选出 affix 时，
-         * compressSamByFields 会改走文本形态（compressRegularField，mode="string"）。
-         * mode 写进 meta，解压侧据此选择解码路径。
+         * Numeric fields have two compression forms: fixed-width binary here;
+         * when preprocessing selects affix, compressSamByFields switches to the
+         * textual form (compressRegularField, mode="string"). mode is written
+         * into meta, and the decompression side selects the decode path
+         * accordingly.
          */
         fieldMeta["mode"] = "number";
 
@@ -288,19 +294,19 @@ private:
     std::map<uint32_t, int64_t> nextMappedPos;
     std::map<uint32_t, uint16_t> nextMappedChr;
     std::map<uint32_t, uint16_t> mappedFlag;
-    /* 每条记录消耗的参考序列长度（CIGAR 的 M/D/N/=/X 之和），TLEN 推算用。 */
+    /* Reference sequence length consumed per record (sum of CIGAR M/D/N/=/X); used for TLEN reconstruction. */
     std::map<uint32_t, uint32_t> cigarReadLen;
-    /* TLEN 伙伴索引，键为 (pos, pnext)，值为行号。 */
+    /* TLEN mate index; key is (pos, pnext), value is the line number. */
     std::unordered_map<std::pair<int64_t, int64_t>, uint32_t, PairInt64Hash> tlenMateIndex;
-    /* initDecoder 记下的各字段压缩流位置，供 preDecodeForTLEN 重建解码器。 */
+    /* Per-field compressed stream positions recorded by initDecoder, used by preDecodeForTLEN to rebuild decoders. */
     std::map<uint32_t, uint32_t> fieldIoStart;
     std::map<uint32_t, uint32_t> fieldIoDstLen;
     std::map<uint32_t, int32_t> fieldIoLevel;
-    /* preDecodeForTLEN 预解码的字段内容（POS/CIGAR/PNEXT），主循环直接拷贝。 */
+    /* Field contents pre-decoded by preDecodeForTLEN (POS/CIGAR/PNEXT); the main loop copies them directly. */
     std::map<uint32_t, std::vector<std::string>> tlenPreDecodedFields;
-    /* 解压侧 TLEN 推算异常的缓存行。 */
+    /* Cached lines whose TLEN reconstruction on the decompression side failed. */
     std::map<uint32_t, int32_t> tlenCache;
-    /* POS 差值解码时的上一行 POS（主循环兜底路径用，preDecodeForTLEN 用局部变量）。 */
+    /* Previous line's POS for delta decoding (used by the main-loop fallback path; preDecodeForTLEN uses a local variable). */
     int64_t posDeltaPrev = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
@@ -321,23 +327,24 @@ private:
 
     std::vector<std::shared_ptr<coder_io>> ioVector;
     std::vector<std::shared_ptr<coder>> idDecoders;
-    /* QNAME 用 coder_qname 压缩/解压时为 true（见 decompressIdField）。 */
+    /* True when QNAME is compressed/decompressed with coder_qname (see decompressIdField). */
     bool idUsesQnameCoder = false;
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     std::shared_ptr<coder_qual> qualCoder;
-    /* QUAL 用 fcv2 压缩时的解码器；用其他编码器压缩时保持为空。 */
+    /* Decoder for QUAL when compressed with fcv2; kept null when another coder was used. */
     std::shared_ptr<coder_fcv2> qualFcv2Decoder;
-    /* QUAL 用 bwt_cm 压缩时的解码器；用其他编码器压缩时保持为空。 */
+    /* Decoder for QUAL when compressed with bwt_cm; kept null when another coder was used. */
     std::shared_ptr<coder_bwt_cm> qualCmDecoder;
 
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;
     uint8_t* refeStrecchBuffer;
-    /* QUAL 缺失（*）的读：压缩时展开成 seqLen 个 '*'，保证每条记录进质量值码流的
-       长度与解压侧一致（解压侧按 SEQ/CIGAR 长度逐条取回）。 */
+    /* Reads with missing QUAL (*): expanded into seqLen '*' on compression so that
+       each record's length in the quality stream matches the decompression side
+       (which fetches each record by SEQ/CIGAR length). */
     std::vector<uint8_t> qualMissingBuf;
 
-    /* OPTION tag-split 列化：整块解一次，逐行从缓存取。当前未启用，保留代码。 */
+    /* OPTION tag-split columnization: decodes the whole block once and serves lines from cache. Currently disabled; code kept for future use. */
     int32_t decodeOptionColumn(const Json::Value& fieldMeta);
     std::vector<std::string> optionRecLines;
     bool optionCacheEmpty = true;

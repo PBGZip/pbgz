@@ -117,7 +117,7 @@ void CompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    /* 预分析在 coder 侧执行：状态（idSplitSymbols/contentPos/qualFreqTable 等）留在 actuator 里供压缩使用 */
+    /* Pre-analysis is done on the coder side: state (idSplitSymbols/contentPos/qualFreqTable etc.) stays in the actuator for use during compression */
     FastqCompressActuator* fastqActuator = dynamic_cast<FastqCompressActuator*>(actuator);
     if (fastqActuator != nullptr) {
         FastqCodecActuator* fastqCodecActuator = fastqActuator->getCodecActuator();
@@ -154,28 +154,42 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
 }
 
 /*
- * 编码器试压/挑选与 QUAL 先验决策，整个文件生命周期内只跑一次。
+ * Codec trial compression/selection and QUAL prior decision, run only once over the
+ * entire file lifetime.
  *
- * 由读线程在派发第 0 块之前调用（PbgzEngine::readOneBlock）。之所以钉在这个位置：
+ * Called by the reader thread before dispatching block 0 (PbgzEngine::readOneBlock).
+ * It is pinned to this position for three reasons:
  *
- * 一是**决策必须先于任何块的压缩**。放在入队之前，这条先后关系由数据流位置保证，
- *   不再依赖"其余工作线程还挂在条件变量上"这种时序巧合。
- * 二是**决策结果必须确定可复现**。读线程是唯一的数据源头，被采样的永远是第 0 块的
- *   同一段字节，各字段试压信号一致，全文件后续所有块选到的 coder 稳定不变，
- *   压缩产物达到字节级可复现。此前若首块的 preAnalysis 失败，本函数会改由某个并行
- *   工作线程在它自己那一块上触发，采样内容随调度漂移——那才是真正的隐患。
- * 三是**读线程手上有文件级信息**（输入总长、可否 seek），先验是否划算这类按全文件
- *   数据量做的判断才有立足点。
+ * First, the decision must precede the compression of any block. Placing it before
+ * the block is enqueued guarantees this ordering through the data-flow position,
+ * rather than relying on a timing coincidence such as "the remaining worker threads
+ * are still waiting on a condition variable".
+ * Second, the decision must be deterministic and reproducible. The reader thread is
+ * the sole source of data, so the sampled bytes are always the same segment of block 0;
+ * the trial-compression signal for every field is identical, the coder selected for
+ * all subsequent blocks is stable across the file, and the compressed output is
+ * reproducible at the byte level. Previously, if the preAnalysis of the first block
+ * failed, this function would instead be triggered by some parallel worker thread on
+ * its own block, so the sampled content drifted with scheduling — that was the real
+ * hazard.
+ * Third, only the reader thread holds file-level information (total input length,
+ * whether the input is seekable), which grounds whole-file judgments such as whether
+ * a prior is worthwhile.
  *
- * 注意：这里只做**决策**。QUAL 先验的训练和发布被推迟到跨块预训练完成
- * （finalizePretrain）——首块通常只有 ~9 MB QUAL，跨块累积到 45 MB 才能逼近
- * 先验收益的收敛点。发布期间 coder 线程在 workStartBarrier 门闩上等待。
+ * Note: only the decision is made here. QUAL prior training and publication are
+ * deferred until cross-block pretraining completes (finalizePretrain) — the first
+ * block usually carries only ~9 MB of QUAL, and accumulating across blocks up to
+ * 45 MB is needed to approach the convergence point of the prior's benefit. While the
+ * prior is being published, coder threads wait at the workStartBarrier latch.
  *
- * tryClaim（IDLE→RUNNING 的无锁 CAS）现在纯属兜底：调用方只有读线程一个，且只在
- * 第 0 块调，重入不可能发生。
+ * tryClaim (an IDLE→RUNNING lock-free CAS) is now purely a safety net: the only
+ * caller is the reader thread, and it is invoked only on block 0, so re-entrancy
+ * cannot occur.
  *
- * 预处理内部另有一个**正交**的并发维度："同一份样本、不同 coder 并行试压"
- * （各 coder 相互独立、无副作用），与流水线"不同数据块、不同工作线程"不是一回事。
+ * Preprocessing has another orthogonal concurrency dimension internally:
+ * "trial-compressing the same sample with different coders in parallel" (each coder
+ * is independent and side-effect free), which is not the same as the pipeline's
+ * "different data blocks on different worker threads".
  */
 void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     CodecEngine::fileDecisionProc(inBlockPtr);
@@ -188,8 +202,10 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     }
 
     /*
-     * 文件总长只有读线程手上有，也只有在这里才谈得上"按全文件摊销划不划算"。
-     * 管道输入拿不到长度，返回 0 表示不可知，由判决器自己决定怎么处理。
+     * Only the reader thread knows the total file length, and only here does it make
+     * sense to ask "is it worth amortizing across the whole file". Piped input has no
+     * length available; returning 0 means unknown, and the decision logic decides how
+     * to handle it.
      */
     FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
     const uint64_t inputTotalBytes = (fileReader != nullptr && fileReader->getFileSize() > 0)
@@ -219,9 +235,11 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
                                  (sel.status == FieldStatus::SKIPPED) ? "skipped" : "failed";
             if (sel.status == FieldStatus::SELECTED) {
                 /*
-                 * 候选是谁由 FieldCodecSelection 自己声明，这里照着念即可。
-                 * 早先是两个写死的槽位加上"质量值行换标签"的补丁，候选超过两个之后
-                 * 那种写法就不成立了。吞吐按 样本字节 / 试压耗时 折算成 MB/s。
+                 * The candidate coders are declared by FieldCodecSelection itself; here
+                 * we simply echo them. Previously this was two hardcoded slots plus a
+                 * patch that relabeled the quality-value line; that approach broke once
+                 * there were more than two candidates. Throughput is derived as sample
+                 * bytes / trial-compression time, in MB/s.
                  */
                 std::string trials;
                 for (uint32_t t = 0; t < sel.trialCount; ++t) {
@@ -235,7 +253,7 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
                              mbps);
                     trials += one;
                 }
-                fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)  [%s] %u轮\n",
+                fprintf(stderr, "  %-6s -> %-14s  %u -> %u (%.2f%%)  [%s] %u rounds\n",
                         names[i], coderTypeToMagic(sel.selectedCoder),
                         sel.decidedLen, sel.bestCompLen,
                         sel.decidedLen ? 100.0 * sel.bestCompLen / sel.decidedLen : 0.0,
@@ -250,8 +268,10 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     }
 
     /*
-     * 管道输入在 prepareFileMeta 时探测不到源类型，baseFileMeta 里没有 srcFileType；
-     * 到这里首个数据块的类型已知，补记进动态元信息，解压侧据此免建读映射索引。
+     * For piped input the source type cannot be detected in prepareFileMeta, so
+     * baseFileMeta has no srcFileType. By this point the type of the first data block
+     * is known, so it is recorded in the dynamic metadata; the decompressor then does
+     * not need to build the read-mapping index.
      */
     if (parameter.inputFile == STDIN) {
         const BlockType t = preprocessInfo.fileType;
@@ -262,9 +282,11 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     }
 
     /*
-     * 先验值得训练：进入跨块预训练。块 0 由随后的 pretrainBlockProc 累积 QUAL，
-     * 读完目标块数（=并发度）或 45 MB 上限后由 finalizePretrain 统一训练、发布，
-     * 届时才通知 coder 线程开始压缩。此处先不 emit、不 markDone。
+     * The prior is worth training: enter cross-block pretraining. Block 0 accumulates
+     * QUAL via the subsequent pretrainBlockProc; once the target block count
+     * (= concurrency) or the 45 MB cap is reached, finalizePretrain trains and
+     * publishes it, and only then notifies the coder threads to start compressing.
+     * Nothing is emitted or marked done here.
      */
     if (preprocessInfo.wantQualPrior()) {
         pretrainTarget = (parameter.threadNum > 0) ? parameter.threadNum : 1;
@@ -273,19 +295,21 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         return;
     }
 
-    /* 无先验：保持原行为——发射（空先验时为 no-op）、标记完成、放行 coder 线程。 */
+    /* No prior: keep the original behavior — emit (a no-op when the prior is empty), mark done, and release the coder threads. */
     emitQualPrior();
     preprocessInfo.markDone();
     signalPriorSettled();
 
     if (parameter.verbose) {
-        fprintf(stderr, "[流水线] 编码器决策完成，开始并行压缩（%u 线程）\n", parameter.threadNum);
+        fprintf(stderr, "[pipeline] coder decision complete, starting parallel compression (%u threads)\n", parameter.threadNum);
     }
 }
 
 /*
- * 逐块累积 QUAL 先验训练样本。块 0 的决策已在 fileDecisionProc 完成，这里对所有
- * 预训练块（含块 0）追加 QUAL，累积到目标块数或 45 MB 上限后训练并发布。
+ * Accumulate QUAL prior training samples block by block. The block-0 decision is
+ * already made in fileDecisionProc; here QUAL is appended for every pretraining block
+ * (including block 0), and once the target block count or the 45 MB cap is reached the
+ * prior is trained and published.
  */
 void CompressEngine::pretrainBlockProc(RoughIOBlock* blockPtr) {
     if (!pretraining) {
@@ -299,9 +323,12 @@ void CompressEngine::pretrainBlockProc(RoughIOBlock* blockPtr) {
 }
 
 /*
- * 训练累积的 QUAL、把先验作为辅助块发布落盘、置 DONE，并通知等待中的 coder 线程。
- * 调用点：预训练块数够/45 MB 满（读循环中），或文件读完仍不足时（readLoopPostProc）。
- * 数据块要引用先验，先验就必须先于一切数据块被压缩完成；发布在本函数内同步完成。
+ * Train on the accumulated QUAL, publish the prior to disk as an auxiliary block,
+ * set DONE, and notify the waiting coder threads.
+ * Call sites: once the pretraining block count is reached / 45 MB is full (in the read
+ * loop), or when the file ends before enough blocks were read (readLoopPostProc).
+ * Because data blocks reference the prior, the prior must be fully compressed before
+ * any data block; publication completes synchronously within this function.
  */
 void CompressEngine::finalizePretrain() {
     if (!pretraining) {
@@ -315,16 +342,16 @@ void CompressEngine::finalizePretrain() {
         (preprocessInfo.fields.size() > (size_t)SAM_QUAL)
             ? &preprocessInfo.fields[SAM_QUAL] : nullptr;
     if (qualSel != nullptr && qualSel->selectedCoder == CoderType::FCV2) {
-        qualParams = qualSel->fcv2Params;   /* 与压缩端同档位训练，先验才用得上 */
+        qualParams = qualSel->fcv2Params;   /* train with the same parameter tier as the compression side, otherwise the prior is unusable */
     }
     std::vector<uint8_t> snapshot =
         CodecSelector::trainQualPriorModel(qualPriorAccum, qualParams, &trainedBytes);
-    qualPriorAccum = {};   /* 释放训练样本内存 */
+    qualPriorAccum = {};   /* release training-sample memory */
 
     if (!snapshot.empty()) {
         preprocessInfo.setQualPrior(std::move(snapshot), trainedBytes);
         if (parameter.verbose) {
-            fprintf(stderr, "  QUAL 先验：跨块训练 %llu 字节，快照 %zu 字节\n",
+            fprintf(stderr, "  QUAL prior: %llu bytes trained across blocks, snapshot %zu bytes\n",
                     (unsigned long long)trainedBytes,
                     preprocessInfo.qualPrior().size());
         }
@@ -335,11 +362,11 @@ void CompressEngine::finalizePretrain() {
     signalPriorSettled();
 
     if (parameter.verbose) {
-        fprintf(stderr, "[流水线] 先验发布完成，开始并行压缩（%u 线程）\n", parameter.threadNum);
+        fprintf(stderr, "[pipeline] prior published, starting parallel compression (%u threads)\n", parameter.threadNum);
     }
 }
 
-/* 读循环结束兜底：预训练未完成（文件不足目标块数）则收尾；无先验/空文件也放行。 */
+/* Read-loop fallback at end: finalize if pretraining did not complete (fewer blocks than target in the file); files without a prior / empty files are also released. */
 void CompressEngine::readLoopPostProc() {
     if (pretraining) {
         finalizePretrain();
@@ -347,7 +374,7 @@ void CompressEngine::readLoopPostProc() {
     signalPriorSettled();
 }
 
-/* coder 线程启动门闩：等读线程发布先验（或判定无先验）的通知。 */
+/* coder thread startup latch: waits for the reader thread's notification that the prior is published (or decided absent). */
 void CompressEngine::workStartBarrier() {
     std::unique_lock<std::mutex> lk(priorMutex);
     priorCv.wait(lk, [this] { return priorSettled; });
@@ -359,13 +386,13 @@ void CompressEngine::emitQualPrior() {
         return;
     }
 
-    /* 管道输出无法 seek，解压侧取不到先验，写了也是净损失。 */
+    /* Piped output cannot be seeked, so the decompressor could never retrieve the prior; writing it would be a net loss. */
     FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
     if (fileWriter == nullptr) {
         return;
     }
 
-    /* bzip2 的最坏膨胀是 1% + 600 字节，官方接口要求调用方按此备足。 */
+    /* bzip2's worst-case expansion is 1% + 600 bytes; the official API requires callers to size the buffer accordingly. */
     unsigned int dstLen = (unsigned int)(prior.size() + prior.size() / 100 + 600);
     std::vector<uint8_t> comp(dstLen);
     int rc = BZ2_bzBuffToBuffCompress((char*)comp.data(), &dstLen,
@@ -404,19 +431,21 @@ void CompressEngine::emitQualPrior() {
     outBlock->setMetaLen(metaString.length());
     outBlock->setBlockType(QUAL_PRIOR);
     /*
-     * 不给辅助块分配数据块 id：它位置寻址，写线程见到即写。
-     * 早先这里做的是 blockId2Write++，那是把写线程的游标当作发号器用，
-     * 在数据块开写之前发射就会直接顶掉第 0 块的位置。
+     * The auxiliary block gets no data-block id: it is addressed by position, and the
+     * writer thread writes it as soon as it is seen. Previously this did
+     * blockId2Write++, using the writer thread's cursor as an id generator; emitting
+     * before any data block had been written would directly overwrite the position of
+     * block 0.
      */
     outBlock->setBlockId(-1);
 
-    /* 落盘与取址都发生在写线程内，返回后 outBlock 已被归还，不可再触碰。 */
+    /* Both the write-to-disk and the address retrieval happen on the writer thread; after this returns, outBlock has been returned to the pool and must not be touched. */
     const int64_t offset = emitSyncAuxBlock(outBlock);
     if (offset < 0) {
         LOG_ERROR("Emit qual prior block failed");
         return;
     }
-    /* 先发布内容再发布地址：取用方以地址原子量的 acquire 作为两者的可见性关口。 */
+    /* Publish the content before the address: consumers use the acquire load of the address atomic as the visibility barrier for both. */
     qualPriorBlob = std::make_shared<const std::vector<uint8_t> >(prior);
     qualPriorOffset.store(offset, std::memory_order_release);
 
@@ -464,10 +493,12 @@ bool CompressEngine::initReference() {
     if (pRefGene) {
         pRefGene->setNiFile(parameter.niIndexFile);
         /*
-         * SAM/BAM 自带比对位置（RNAME/POS），压缩 SEQ 只取参考碱基序列，无需 makeIndex
-         * 的读映射哈希表（那只对 FASTQ 的 read 定位有用）。管道输入拿不到类型，落回
-         * 建索引的保守路径。参考是用户明确下的指令, 用不了就得停下, 悄悄改成无参考
-         * 等于压出另一份东西。
+         * SAM/BAM carry their own alignment positions (RNAME/POS); compressing SEQ only
+         * needs the reference base sequence, so the read-mapping hash table from
+         * makeIndex (useful only for locating FASTQ reads) is unnecessary. Piped input
+         * has no type available, so it falls back to the conservative index-building
+         * path. If an explicitly specified reference cannot be loaded, compression must
+         * abort, otherwise it would produce data that does not match expectations.
          */
         const bool needIndex =
             (parameter.inputFile == STDIN) ||
@@ -632,32 +663,44 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
  }
 
  /*
-  * 只负责把参考基因组的描述填进基础文件元信息，不产生任何 IO。
+  * This only fills the reference genome description into the base file metadata; it
+  * performs no I/O.
   *
-  * 这段内容原先和下面 startWorkPreProc 里的 packReference 写在一起，而
-  * startWorkPreProc 是在写线程启动之后才执行的。写线程一起来就会把 baseFileMeta
-  * 落盘，于是"主线程填 refe"和"写线程写 baseFileMeta"变成了两个线程对同一份
-  * JSON 的赛跑：写线程赢，文件头里就没有 refe；主线程赢，就有。
+  * This content used to be written together with packReference in startWorkPreProc
+  * below, but startWorkPreProc runs only after the writer thread has started. As soon
+  * as the writer thread starts it writes baseFileMeta to disk, so "the main thread
+  * filling in refe" and "the writer thread writing baseFileMeta" became two threads
+  * racing over the same JSON: if the writer thread won, the file header had no refe;
+  * if the main thread won, it did.
   *
-  * 后果是同一份输入压两次得到的字节不同（实测两个稳定变体相差 128 字节，正好是
-  * refe 这个 JSON 成员压缩后的长度），后续所有内容整体偏移。两个结果都能正确解压，
-  * 因为解压侧对 refe 缺失做了兼容（见 decompress_engine.cpp 里关于 refe 可能落在
-  * baseFileMeta 或 dynamicFileMeta 的说明），所以这个问题一直没有暴露出来。
+  * The consequence was that compressing the same input twice produced different bytes
+  * (two stable variants were measured to differ by 128 bytes, exactly the compressed
+  * length of the refe JSON member), shifting everything downstream. Both results
+  * decompress correctly, because the decompressor tolerates a missing refe (see the
+  * note in decompress_engine.cpp about refe possibly living in baseFileMeta or
+  * dynamicFileMeta), which is why the problem never surfaced.
   *
-  * 现在把纯元信息的构造提前到写线程启动之前，竞争消失；真正需要写线程就绪才能做的
-  * packReference 留在 startWorkPreProc 不动。
+  * Now the construction of this pure metadata is moved before the writer thread starts,
+  * eliminating the race; packReference, which genuinely needs the writer thread to be
+  * ready, stays in startWorkPreProc.
   */
  int32_t CompressEngine::prepareFileMeta() {
     /*
-     * 块大小是压缩时输入分块的上界，写进文件头让解压侧按它预分配 block_size*2
-     * 的输出缓冲——确定上界，不是估算，不受 fieldcount/读长影响。这是堵所有
-     * 字段越界的主防线；coder_io 的 putc 检查与 decode 错误返回链作兜底。
+     * The block size is the upper bound for splitting the input during compression; it
+     * is written into the file header so the decompressor can pre-allocate a
+     * block_size*2 output buffer. This is a definite upper bound, not an estimate,
+     * unaffected by field count / read length. It is the primary defense against every
+     * field overflowing its buffer; coder_io's putc checks and the decode error-return
+     * chain act as fallbacks.
      */
     baseFileMeta.setMetaData("block_size", getBlockSize());
 
     /*
-     * 源文件类型写进文件头，解压侧据此决定参考基因只需加载 squash（SAM/BAM）还是
-     * 要建读映射索引（FASTQ）。管道输入拿不到类型，不写（解压侧按未知保守处理）。
+     * The source file type is written into the file header so the decompressor can
+     * decide whether the reference only needs to load its squash (SAM/BAM) or must
+     * build the read-mapping index (FASTQ). Piped input has no type available and it
+     * is not written (the decompressor then treats the type as unknown,
+     * conservatively).
      */
     if (parameter.inputFile != STDIN) {
         const BlockType srcType = BlockUtil::detectInputFileType(parameter.inputFile);
@@ -689,11 +732,13 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
  }
 
  /*
-  * 参考基因组打包在文件头的场景下，把参考块写往下游。
+  * In the scenario where the reference genome is packed in the file header, push the
+  * reference blocks downstream.
   *
-  * 这一步必须留在写线程启动之后，因为 packReference 会把参考块推进输出队列。
-  * 元信息本身已经在 prepareFileMeta 里填好，这里不再触碰 baseFileMeta——
-  * 一旦在这里改它，就会重新引入上面描述的那个竞争。
+  * This step must stay after the writer thread starts, because packReference pushes
+  * reference blocks into the output queue. The metadata itself is already filled in by
+  * prepareFileMeta; baseFileMeta must not be touched here — modifying it here would
+  * reintroduce the race described above.
   */
  int32_t CompressEngine::startWorkPreProc() {
     if (pRefGene == nullptr || !isPackRefeInHeader()) {
@@ -722,7 +767,7 @@ Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock*
     }
 
     if (pActuator == nullptr) {
-        /* 失败时一律不释放任何块，收尾统一由 startWorkTask 负责，避免两处各归还一次。 */
+        /* On failure, never release any block here; cleanup is uniformly handled by startWorkTask to avoid each block being returned twice. */
         LOG_ERROR("Not support block type: %d, blockId=%ld", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
         return nullptr;
     }

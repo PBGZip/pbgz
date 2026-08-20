@@ -42,13 +42,17 @@
 typedef unsigned char uc;
 
 /*
- * 边界与错误处理照 htscodecs/c_range_coder.h：本类与它同源（Shelwien 原版），
- * 但那边由 Bonfield 加固过，这边一直用的是未加固版——没有端点、没有错误标志，
- * 越界直接读写。
+ * Boundary and error handling follow htscodecs/c_range_coder.h: this class
+ * shares its origin (Shelwien's original), but that one was hardened by
+ * Bonfield while this one has always been the unhardened version—no end markers,
+ * no error flag, reads and writes go straight past the boundary.
  *
- * 三条纪律：端点存在编码器自己身上，不靠调用方口头约定；越界置粘性 err 并立即
- * 停止推进；错误只在 FinishEncode/FinishDecode 一处取走。因为 err 粘住之后不再
- * 推进，末尾查一次等价于每个符号都查，热路径因此不需要任何检查。
+ * Three disciplines: the endpoints live on the coder itself, not as a verbal
+ * convention for the caller; overflow sets a sticky err and immediately stops
+ * advancing; errors are picked up at exactly one place, FinishEncode/
+ * FinishDecode. Because err, once latched, stops all further progress, checking
+ * once at the end is equivalent to checking every symbol, so the hot path needs
+ * no checks at all.
  */
 class RangeCoder {
     uint64_t low;
@@ -66,7 +70,7 @@ public:
                    in_buf(nullptr), out_buf(nullptr),
                    in_end(nullptr), out_end(nullptr), err(0) {}
 
-    /* 端点是必填参数：不说清楚到哪里结束，就无法设置缓冲。 */
+    /* Endpoints are required parameters: without knowing where it ends, the buffer cannot be set up. */
     void input(char *in, char *end) { out_buf = in_buf = (uc *) in; in_end = (uc *) end; }
 
     void output(char *out, char *end) { in_buf = out_buf = (uc *) out; out_end = (uc *) end; }
@@ -91,7 +95,7 @@ public:
         err = 0;
         if (in_buf + 8 > in_end) {
             err = -1;
-            in_buf = in_end;   /* 推到末尾，后续解码全部立刻停在边界检查上 */
+            in_buf = in_end;   /* Push to the end so all subsequent decoding stops immediately at the boundary check */
             return;
         }
         DO(8) code = (code << 8) | *in_buf++;
@@ -111,8 +115,11 @@ public:
         if (err) return;
 
         /*
-         * 原本这里是 abort()：在库函数深处直接杀进程，既无日志也绕开引擎的错误
-         * 汇总。改为置错——模型自相矛盾说明数据或状态已经坏了，交给外围决策。
+         * This used to be abort(): killing the process deep inside a library
+         * function, with no logging and bypassing the engine's error
+         * aggregation. Changed to setting an error—a contradictory model means
+         * the data or state is already corrupt, and it is left to the surrounding
+         * code to decide.
          */
         if (!totFreq || cumFreq + freq > totFreq) { err = -1; return; }
 
@@ -139,7 +146,7 @@ public:
     }
 
     uint GetFreq(uint totFreq) {
-        /* 损坏的码流会让 totFreq 为 0 或 range 塌陷，不防就是 SIGFPE。 */
+        /* A corrupt code stream can make totFreq 0 or collapse range; without this guard it would be a SIGFPE. */
         if (err || !totFreq || range < totFreq) { err = -1; return 0; }
         return code / (range /= totFreq);
     }

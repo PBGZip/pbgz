@@ -54,18 +54,19 @@ public:
 
 protected:
     /*
-     * 读线程逐块累积 QUAL 先验训练样本；累积到目标块数（=并发度）或 45 MB 上限后
-     * 统一训练并发布。
+     * The reader thread accumulates QUAL prior training samples block by block; once
+     * the target block count (= concurrency) or the 45 MB cap is reached, the prior is
+     * trained and published in one pass.
      */
     virtual void pretrainBlockProc(RoughIOBlock* blockPtr) override;
 
-    /* 读循环结束（EOF/错误）时收尾未完成的预训练。 */
+    /* Finalize any incomplete pretraining when the read loop ends (EOF/error). */
     virtual void readLoopPostProc() override;
 
-    /* coder 线程启动门闩：等待先验发布（或判定无先验）的通知后才开始拉块压缩。 */
+    /* coder thread startup latch: starts pulling and compressing blocks only after being notified that the prior is published (or decided absent). */
     virtual void workStartBarrier() override;
 
-    /* 训练累积的 QUAL、发布先验辅助块、置 DONE 并通知等待中的 coder 线程。 */
+    /* Train on the accumulated QUAL, publish the prior auxiliary block, set DONE, and notify the waiting coder threads. */
     void finalizePretrain();
     virtual BlockReader* createBlockReader() override;
 
@@ -85,13 +86,18 @@ protected:
 
 
     /*
-     * 把训练出的 QUAL 先验发射成一个 QUAL_PRIOR 辅助块，并记下其容器头绝对偏移。
+     * Emit the trained QUAL prior as a QUAL_PRIOR auxiliary block and record the
+     * absolute offset of its container header.
      *
-     * 调用点在 finalizePretrain（跨块预训练完成后），而不是文件收尾：数据块要引用
-     * 先验，先验就必须先于一切数据块被压缩完成。由于 coder 线程在发布前被门闩挡住，
-     * 这里可以放心让先验落盘后再放行——连第 0 块自己都能用上先验，不必为它开特例。
+     * The call site is finalizePretrain (after cross-block pretraining completes), not
+     * file end: because data blocks reference the prior, the prior must be fully
+     * compressed before any data block. Since coder threads are held at the latch
+     * until the prior is published, it is safe to write the prior to disk before
+     * releasing them — even block 0 can use the prior, with no special case needed for
+     * it.
      *
-     * 实际落盘由写线程经 emitSyncAuxBlock 完成，本函数只负责构块与登记元信息。
+     * The actual write to disk is done by the writer thread via emitSyncAuxBlock; this
+     * function only builds the block and records the metadata.
      */
     void emitQualPrior();
 
@@ -130,7 +136,7 @@ private:
 
     uint32_t calcPackRefeBlockSize();
 
-    /* 参考基因组是否随文件头一起打包：输出到管道且未要求外挂参考时为真。 */
+    /* Whether the reference genome is packed with the file header: true when output goes to a pipe and an external reference is not requested. */
     bool isPackRefeInHeader() const {
         return !parameter.isUnpackRef && parameter.outputFile == STDOUT;
     }
@@ -146,18 +152,22 @@ private:
     PreprocessInfo preprocessInfo;
 
     /*
-     * QUAL 先验块容器头的绝对文件偏移，-1 表示本次压缩没有可用先验。
-     * 读线程在派发首块前写入，随后被全部工作线程读取。队列的入队/出队已经建立了
-     * happens-before，这里用原子量只是为了让这条发布关系在类型上自明。
+     * Absolute file offset of the QUAL prior block's container header; -1 means this
+     * compression has no usable prior. It is written by the reader thread before the
+     * first block is dispatched and then read by all worker threads. The queue's
+     * enqueue/dequeue already establish happens-before; the atomic is used only to
+     * make this publication relationship self-documenting at the type level.
      */
     std::atomic<int64_t> qualPriorOffset{-1};
 
-    /* 训练出的先验快照，构块时做一次拷贝后只读共享，供全部工作线程零拷贝取用。 */
+    /* The trained prior snapshot; copied once when building the block, then shared read-only so all worker threads can use it with zero copies. */
     AuxPayloadPtr qualPriorBlob;
 
     /*
-     * 跨块预训练状态（仅读线程访问）：累积器 + 已喂块计数 + 目标块数 + 是否在预训练。
-     * 目标块数取并发度，45 MB 上限由累积器自身保证。
+     * Cross-block pretraining state (accessed only by the reader thread): the
+     * accumulator, the count of blocks fed, the target block count, and whether
+     * pretraining is active. The target block count is the concurrency; the 45 MB cap
+     * is enforced by the accumulator itself.
      */
     CodecSelector::QualPriorAccum qualPriorAccum;
     uint32_t pretrainBlockCount = 0;
@@ -165,9 +175,11 @@ private:
     bool pretraining = false;
 
     /*
-     * coder 线程的发布门闩：读线程训练并发布先验后置位并通知，coder 线程在
-     * workStartBarrier 等待。无先验的文件在 fileDecisionProc 里立即置位，不拖慢
-     * 任何非先验路径；空文件由 readLoopPostProc 兜底置位。
+     * Publication latch for coder threads: set and signaled by the reader thread after
+     * it trains and publishes the prior; coder threads wait in workStartBarrier. For
+     * files without a prior it is set immediately in fileDecisionProc, so no non-prior
+     * path is slowed down; for empty files it is set as a fallback in
+     * readLoopPostProc.
      */
     std::mutex priorMutex;
     std::condition_variable priorCv;
@@ -186,7 +198,7 @@ public:
     }
 
     AuxPayloadPtr getQualPrior(int64_t /*packageIndex*/) override {
-        /* 首块派发前写入，随后只读；地址原子量的 acquire 同时为它建立可见性。 */
+        /* Written before the first block is dispatched, then read-only; the acquire load of the address atomic also establishes its visibility. */
         return (getQualPriorAddress() < 0) ? AuxPayloadPtr() : qualPriorBlob;
     }
 };

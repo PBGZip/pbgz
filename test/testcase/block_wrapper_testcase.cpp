@@ -180,8 +180,9 @@ TEST_F(BlockWrapperTest, TestBlockReaderTwoBlock) {
     EXPECT_EQ(pInBlock->getBlockType(), FASTQ_GEN2);
     EXPECT_EQ(pInBlock->getNpos().size() % 4, 0);
 
-    // 块 2 从块 1 之后的第一条记录开始：块 1 从文件头连续读入 1..N 条记录，
-    // 故块 2 首条记录编号为 N+1，边界由实际数据推导，不依赖压缩等级块大小配置。
+    // Block 2 starts at the first record after block 1: block 1 reads records 1..N consecutively
+    // from the file head, so the first record of block 2 is numbered N+1; the boundary is derived
+    // from the actual data and does not depend on the compress-level block size configuration.
     const size_t firstRecord = firstBlockRecords + 1;
     const std::string line = "@SRR12922210." + std::to_string(firstRecord)
                            + " " + std::to_string(firstRecord) + "/1\n";
@@ -214,7 +215,7 @@ namespace {
         bgzf_close(f);
     }
 
-    /* 普通 gzip（非 BGZF）：zlib gzopen 写出的 .gz 没有 FEXTRA 标志 */
+    /* Plain gzip (not BGZF): a .gz written via zlib gzopen carries no FEXTRA flag. */
     void writePlainGzipFile(const std::string& path, const std::string& data) {
         gzFile f = gzopen(path.c_str(), "wb");
         ASSERT_NE(f, nullptr);
@@ -253,7 +254,7 @@ namespace {
         return s;
     }
 
-    /* 最小 BAM（头部 + 2 条记录） */
+    /* Minimal BAM (header + 2 records). */
     std::string makeBam() {
         std::string bam = "BAM\x1";
         const std::string header = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:100000\n";
@@ -269,7 +270,7 @@ namespace {
         bam.append(reinterpret_cast<char*>(&refLen), 4);
         for (int i = 0; i < 2; ++i) {
             std::string rec;
-            rec.append(4, '\0');                       // block_size 占位
+            rec.append(4, '\0');                       // block_size placeholder
             int32_t refID = 0;
             int32_t pos = i * 2;
             rec.append(reinterpret_cast<char*>(&refID), 4);
@@ -311,7 +312,7 @@ namespace {
                            static_cast<size_t>(block.getDataLen()));
     }
 
-    /* ---- BamWriter 测试辅助 ---- */
+    /* ---- BamWriter test helpers ---- */
 
     const std::string kSamHeader =
         "@HD\tVN:1.6\n"
@@ -324,7 +325,7 @@ namespace {
                kQual76 + "\tNM:i:0\tAS:i:" + std::to_string(60 + i) + "\n";
     }
 
-    /* 把 SAM 文本填入一个类型为 SAM 的块 */
+    /* Fill a block typed SAM with SAM text. */
     void fillSamBlock(RoughIOBlock* block, const std::string& text) {
         block->reset();
         ASSERT_GE(block->getBufferSize(), text.size());
@@ -347,7 +348,7 @@ namespace {
 
 }  // namespace
 
-/* ---- BlockFactory 格式探测 ---- */
+/* ---- BlockFactory format detection ---- */
 
 TEST(BlockFactoryFormatTest, DetectFastq) {
     writeFile("ut_f.fq", makeFastq(4));
@@ -373,7 +374,7 @@ TEST(BlockFactoryFormatTest, DetectGzFastq) {
     EXPECT_NE(dynamic_cast<FastqBlockReader*>(reader), nullptr);
     RoughIOBlock block(kBlockSize);
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
-    /* GZ 输入由 io 层透明解压，块类型仍按非 GZ 的 FASTQ 设置 */
+    /* GZ input is transparently decompressed by the io layer; the block type is still set as for non-GZ FASTQ. */
     EXPECT_EQ(block.getBlockType(), FASTQ_GEN2);
     delete reader;
     delete io;
@@ -390,7 +391,7 @@ TEST(BlockFactoryFormatTest, DetectSam) {
     RoughIOBlock block(kBlockSize);
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getBlockType(), SAM);
-    EXPECT_FALSE(reader->blockHasData(&block));   // 首块是纯头部块
+    EXPECT_FALSE(reader->blockHasData(&block));   // the first block is header-only
     delete reader;
     delete io;
     std::remove("ut_s.sam");
@@ -405,7 +406,7 @@ TEST(BlockFactoryFormatTest, DetectGzSam) {
     EXPECT_NE(dynamic_cast<SamBlockReader*>(reader), nullptr);
     RoughIOBlock block(kBlockSize);
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
-    /* GZ 输入由 io 层透明解压，块类型仍按非 GZ 的 SAM 设置 */
+    /* GZ input is transparently decompressed by the io layer; the block type is still set as for non-GZ SAM. */
     EXPECT_EQ(block.getBlockType(), SAM);
     delete reader;
     delete io;
@@ -422,8 +423,8 @@ TEST(BlockFactoryFormatTest, DetectBam) {
     EXPECT_EQ(dynamic_cast<BamGzBlockReader*>(reader), nullptr);
     RoughIOBlock block(kBlockSize);
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
-    EXPECT_EQ(block.getBlockType(), BAM);         // BAM 转成 SAM 块，但类型标记为 BAM
-    EXPECT_FALSE(reader->blockHasData(&block));   // 首块为头部块
+    EXPECT_EQ(block.getBlockType(), BAM);         // BAM is converted to a SAM block, but the type remains BAM
+    EXPECT_FALSE(reader->blockHasData(&block));   // the first block is the header block
     delete reader;
     delete io;
     std::remove("ut_b.bam");
@@ -461,15 +462,15 @@ TEST(BlockFactoryFormatTest, DetectBinary) {
     std::remove("ut_bin.dat");
 }
 
-/* ---- 文件级 BAM 判定（引擎据此决定 ioReader 是否走透明 gz 解压） ---- */
+/* ---- File-level BAM detection (the engine uses this to decide whether ioReader takes the transparent gz-decompress path) ---- */
 
 TEST(BlockFactoryFormatTest, IsBamFile) {
-    writeFile("ut_i.bam", makeBam());                        // 原始 BAM（非 gz）
-    writeBgzfFile("ut_i.bam.bgz", makeBam());                // BGZF 压缩的 BAM
-    writeBgzfFile("ut_i.sam.gz", makeSam(3));                // gz 压缩的 SAM
-    writeFile("ut_i.sam", makeSam(3));                       // 原始 SAM
+    writeFile("ut_i.bam", makeBam());                        // raw BAM (not gz)
+    writeBgzfFile("ut_i.bam.bgz", makeBam());                // BGZF-compressed BAM
+    writeBgzfFile("ut_i.sam.gz", makeSam(3));                // gz-compressed SAM
+    writeFile("ut_i.sam", makeSam(3));                       // raw SAM
 
-    /* BGZF 的 BAM 逐字节是 gzip 流，必须能识别为 BAM，避免走透明 gz 解压丢文件总长 */
+    /* A BGZF BAM is byte-for-byte a gzip stream and must be recognized as BAM, so the transparent gz path is not taken and the total file length is not lost. */
     EXPECT_TRUE(BlockUtil::isBamFile("ut_i.bam"));
     EXPECT_TRUE(BlockUtil::isBamFile("ut_i.bam.bgz"));
     EXPECT_FALSE(BlockUtil::isBamFile("ut_i.sam"));
@@ -481,7 +482,7 @@ TEST(BlockFactoryFormatTest, IsBamFile) {
     std::remove("ut_i.sam");
 }
 
-/* ---- 按内容探测输入格式（SAM/BAM 决定参考是否只需 squash） ---- */
+/* ---- Detect input format by content (for SAM/BAM this decides whether the reference only needs squashing) ---- */
 
 TEST(BlockFactoryFormatTest, DetectInputFileType) {
     writeFile("ut_t.sam", makeSam(3));
@@ -497,13 +498,13 @@ TEST(BlockFactoryFormatTest, DetectInputFileType) {
     writeFile("ut_t.bin", bin);
 
     EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.sam"), SAM);
-    EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.sam.gz"), SAM);     // gz 自动解压探测
-    EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.sam.gz2"), SAM);    // 普通 gzip（无 FEXTRA）
+    EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.sam.gz"), SAM);     // probe after transparent gz decompression
+    EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.sam.gz2"), SAM);    // plain gzip (no FEXTRA)
     EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.fq"), FASTQ_GEN2);
     EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.fq.gz"), FASTQ_GEN2);
     EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.fq.gz2"), FASTQ_GEN2);
     EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.bam"), BAM);
-    EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.bam.bgz"), BAM);     // BGZF 解压后是 BAM
+    EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.bam.bgz"), BAM);     // it is BAM after BGZF decompression
     EXPECT_EQ(BlockUtil::detectInputFileType("ut_t.bin"), BINARY);
     EXPECT_EQ(BlockUtil::detectInputFileType("no_such_file.dat"), TYPE_UNKNOW);
 
@@ -518,24 +519,24 @@ TEST(BlockFactoryFormatTest, DetectInputFileType) {
     std::remove("ut_t.bin");
 }
 
-/* ---- SAM 块读取：头部独立成块 + 按 read 数分块 ---- */
+/* ---- SAM block reading: header as its own block + split by read count ---- */
 
 TEST(SamBlockReaderTest, HeaderIndependentBlockAndReadCountSplit) {
     writeFile("ut_sam.sam", makeSam(7));
     IOReader* io = new FileReader("ut_sam.sam");
     ASSERT_EQ(io->openIO(), 0);
-    /* 堆上构造：BlockReader 带 256MB cache 成员，栈上会溢出 */
+    /* Construct on the heap: BlockReader carries a 256 MB cache member and would overflow the stack. */
     SamBlockReader* reader = new SamBlockReader(io, nullptr, 0, 3);   // readsPerBlock=3, splitHeader=true
 
     RoughIOBlock block(kBlockSize);
-    // block 0：纯头部块
+    // block 0: header-only block
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getBlockType(), SAM);
     EXPECT_FALSE(reader->blockHasData(&block));
     EXPECT_EQ(block.getNpos().size(), 2);
     EXPECT_EQ(blockText(block), "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000000\n");
 
-    // 3 / 3 / 1 条 read 数据块
+    // data blocks of 3 / 3 / 1 reads
     block.reset();
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getNpos().size(), 3);
@@ -561,16 +562,16 @@ TEST(SamBlockReaderTest, HeaderMergedMode) {
     writeFile("ut_sam.sam", makeSam(5));
     IOReader* io = new FileReader("ut_sam.sam");
     ASSERT_EQ(io->openIO(), 0);
-    /* 堆上构造：BlockReader 带 256MB cache 成员，栈上会溢出 */
+    /* Construct on the heap: BlockReader carries a 256 MB cache member and would overflow the stack. */
     SamBlockReader* reader = new SamBlockReader(io, nullptr, 0, 3, false);   // splitHeader=false
 
     RoughIOBlock block(kBlockSize);
-    // block 0：头部（2 行）+ 3 条 read
+    // block 0: header (2 lines) + 3 reads
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getNpos().size(), 5);
     EXPECT_TRUE(reader->blockHasData(&block));
 
-    // block 1：剩余 2 条 read
+    // block 1: remaining 2 reads
     block.reset();
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getNpos().size(), 2);
@@ -580,7 +581,7 @@ TEST(SamBlockReaderTest, HeaderMergedMode) {
     std::remove("ut_sam.sam");
 }
 
-/* 压缩级别决定 readsPerBlock：1-5->10000，6-7->25000，8-9->100000 */
+/* The compress level determines readsPerBlock: 1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000. */
 TEST(SamBlockReaderTest, ReadsPerBlockByCompressLevel) {
     writeFile("ut_sam.sam", makeSam(4));
     IOReader* io = new FileReader("ut_sam.sam");
@@ -595,9 +596,9 @@ TEST(SamBlockReaderTest, ReadsPerBlockByCompressLevel) {
     std::remove("ut_sam.sam");
 }
 
-/* ---- BamWriter（SAM -> BAM 转换） ---- */
+/* ---- BamWriter (SAM -> BAM conversion) ---- */
 
-/* SAM 头 + 数据块写入 BamWriter 后，产出可被 BamBlockReader 读回的原 SAM 内容 */
+/* After the SAM header and data blocks are written to BamWriter, it produces the original SAM content readable back by BamBlockReader. */
 TEST(BamWriterTest, SamToBamRoundtrip) {
     const std::string data = kSamHeader + makeSamRead(0, 1) + makeSamRead(1, 21) + makeSamRead(2, 41);
 
@@ -618,7 +619,7 @@ TEST(BamWriterTest, SamToBamRoundtrip) {
     io->closeIO();
     delete io;
 
-    /* 用 BAM 读取侧（BGZF 分支）读回 */
+    /* Read back using the BAM reading side (BGZF branch). */
     IOReader* rd = new FileReader("ut_bw.bam");
     ASSERT_EQ(rd->openIO(), 0);
     BlockReader* reader = BlockFactory::createBlockReader(rd, 5);
@@ -628,7 +629,7 @@ TEST(BamWriterTest, SamToBamRoundtrip) {
     RoughIOBlock out(kBlockSize);
     ASSERT_GT(reader->readBlock(&out, TYPE_UNKNOW), 0);
     EXPECT_EQ(out.getBlockType(), BAM);
-    EXPECT_EQ(blockText(out), kSamHeader);   // 头块
+    EXPECT_EQ(blockText(out), kSamHeader);   // header block
 
     std::string lines;
     while (true) {
@@ -646,7 +647,7 @@ TEST(BamWriterTest, SamToBamRoundtrip) {
     std::remove("ut_bw.bam");
 }
 
-/* 头部未独立成块（头部行 + 数据行同块）：BamWriter 先写头再转数据行 */
+/* When the header is not a separate block (header lines and data lines share a block): BamWriter writes the header first, then converts the data lines. */
 TEST(BamWriterTest, MergedHeaderAndDataBlock) {
     const std::string text = kSamHeader + makeSamRead(0, 1) + makeSamRead(1, 21);
 
@@ -679,7 +680,7 @@ TEST(BamWriterTest, MergedHeaderAndDataBlock) {
     std::remove("ut_bw.bam");
 }
 
-/* 非 SAM 块透传：-b 误用于 FASTQ/二进制时原样写出，不丢数据 */
+/* Non-SAM blocks pass through: when -b is mistakenly used on FASTQ/binary input, the data is written as-is without loss. */
 TEST(BamWriterTest, NonSamPassThrough) {
     const std::string bin(100, '\xAA');
 
@@ -702,7 +703,7 @@ TEST(BamWriterTest, NonSamPassThrough) {
     std::remove("ut_bw.bin");
 }
 
-/* BGZF 输出是标准 BAM 容器：首字节为 gzip 魔数且带 BC/BS 扩展头 */
+/* BGZF output is a standard BAM container: the first bytes are the gzip magic and it carries the BC/BS extra header. */
 TEST(BamWriterTest, BgzfContainer) {
     IOWriter* io = new FileWriter("ut_bw.bam");
     ASSERT_EQ(io->openIO(), 0);

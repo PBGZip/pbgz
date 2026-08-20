@@ -140,9 +140,11 @@ TEST_F(ReferenceTest, Constructor) {
 }
 
 /*
- * makeIndex() 只从 fasta 现建内存索引, 不涉及 .ni: 后者只在用户显式要求时才产生和加载。
- * 原先这里断言 getNiFilePath() 的文件名, 是拿另一条路的后置条件来考它, 从用例引入起
- * 就一直红着, 反倒把真正该查的返回值漏了。
+ * makeIndex() only builds an in-memory index from the FASTA on the fly and does not touch .ni:
+ * the latter is produced and loaded only when an explicit path is given. Previously this case
+ * asserted the getNiFilePath() filename, which tested it against a post-condition of a different
+ * path; it had been failing ever since the case was introduced, and meanwhile the return value
+ * that actually matters was never checked.
  */
 TEST_F(ReferenceTest, ReferenceMakeIndex) {
     Reference refe(testFastaFile, 1);
@@ -154,9 +156,9 @@ TEST_F(ReferenceTest, ReferenceMakeIndex) {
     EXPECT_NE(refe.getSquash(), nullptr);
 
     /*
-     * 每碱基 2 bit, 1038 个碱基需要 ceil(1038/4) = 260 字节。
-     * 原值 259 是把 1038/4 的整除结果当成了答案, 丢掉了余数 2——
-     * 259 字节只装得下 1036 个碱基, 最后两个会丢。
+     * At 2 bits per base, 1038 bases need ceil(1038/4) = 260 bytes. The former value 259 treated
+     * the integer division 1038/4 as the answer and dropped the remainder 2: 259 bytes hold only
+     * 1036 bases, and the last two would be lost.
      */
     EXPECT_EQ(refe.getSquashLength(), 260);
 
@@ -165,8 +167,8 @@ TEST_F(ReferenceTest, ReferenceMakeIndex) {
 }
 
 /*
- * makeSquashIndex() 只加载 squash 与 matched 缓冲，不建读映射哈希表：
- * 供 SAM/BAM 压缩使用。squash 内容必须与 makeIndex 完全一致。
+ * makeSquashIndex() only loads the squash and matched buffers without building the read-mapping
+ * hash table: it is used for SAM/BAM compression. The squash content must exactly match makeIndex.
  */
 TEST_F(ReferenceTest, MakeSquashIndexMatchesMakeIndex) {
     Reference withIndex(testFastaFile, 1);
@@ -180,7 +182,7 @@ TEST_F(ReferenceTest, MakeSquashIndexMatchesMakeIndex) {
     EXPECT_EQ(0, memcmp(squashOnly.getSquash(), withIndex.getSquash(), withIndex.getSquashLength()));
     EXPECT_EQ(squashOnly.getFastaChecksum(), withIndex.getFastaChecksum());
 
-    /* NI 优先：makeSquashIndex 也应能吃 --ni 提供的预建索引 */
+    /* NI takes priority: makeSquashIndex should also accept a prebuilt index supplied via --ni. */
     const std::string niFile = testDir + "/squash.ni";
     Reference maker(testFastaFile, 1);
     ASSERT_TRUE(maker.makeNiFile(niFile));
@@ -194,9 +196,10 @@ TEST_F(ReferenceTest, MakeSquashIndexMatchesMakeIndex) {
 }
 
 /*
- * updateMatchedGene 不能因为 actgPos == 0 就提前返回：参考位置 0（如 chr1 的第一条
- * 比对的 1-based 位置 1）是合法位置，跳过它会让 sanitizeRefSquash 把该区清零，解压时
- * 还原成全 A 或全 N。回归用：此前 chr1 位置 1 的读压缩后解压 MD5 必失败。
+ * updateMatchedGene must not return early just because actgPos == 0: reference position 0 (e.g.,
+ * the 1-based position 1 of the first alignment on chr1) is a valid position, and skipping it lets
+ * sanitizeRefSquash zero out that region so decompression restores it as all A or all N. Regression
+ * case: previously a read at chr1 position 1 always failed the MD5 check after compress-decompress.
  */
 TEST_F(ReferenceTest, UpdateMatchedGeneAtPositionZero) {
     Reference ref(testFastaFile, 1);
@@ -205,20 +208,21 @@ TEST_F(ReferenceTest, UpdateMatchedGeneAtPositionZero) {
     const int64_t len = ref.getSquashLength();
     ASSERT_GT(len, 16);
 
-    /* 位置 0 覆盖 16 个碱基（4 个 squash 字节） */
+    /* Position 0 covers 16 bases (4 squash bytes). */
     ref.updateMatchedGene(0, 16);
 
     uint8_t before[8];
     memcpy(before, ref.getSquash(), 8);
     ref.sanitizeRefSquash(0, 8);
 
-    /* 标记过的区域不能被清零 */
+    /* Marked regions must not be zeroed out. */
     EXPECT_EQ(0, memcmp(before, ref.getSquash(), 4));
 }
 
 /*
- * 索引只是省一遍 fasta 解析: 对得上就该给出与直接读 fasta 完全相同的 squash, 对不上就
- * 该退回去读 fasta——不能拿一份来历不明的参考把数据压错。
+ * The index only saves a FASTA parse: when it matches, it must yield exactly the same squash as
+ * reading the FASTA directly; when it does not, it must fall back to reading the FASTA. A
+ * reference of unknown provenance must never be used to compress data incorrectly.
  */
 TEST_F(ReferenceTest, NiIndexRoundTripAndFallback) {
     const std::string niFile = testDir + "/explicit.ni";
@@ -238,7 +242,7 @@ TEST_F(ReferenceTest, NiIndexRoundTripAndFallback) {
     EXPECT_EQ(0, memcmp(fromNi.getSquash(), fromFasta.getSquash(), fromFasta.getSquashLength()));
     EXPECT_EQ(fromNi.getFastaChecksum(), fromFasta.getFastaChecksum());
 
-    /* 载荷翻掉一个 bit: 自校验必须发现, 并退回 fasta 给出正确结果 */
+    /* Flip one bit in the payload: self-validation must detect it and fall back to the FASTA to give the correct result. */
     std::fstream tamper(niFile, std::ios::in | std::ios::out | std::ios::binary);
     ASSERT_TRUE(tamper.is_open());
     tamper.seekg(64);
@@ -255,7 +259,7 @@ TEST_F(ReferenceTest, NiIndexRoundTripAndFallback) {
     ASSERT_EQ(tampered.getSquashLength(), fromFasta.getSquashLength());
     EXPECT_EQ(0, memcmp(tampered.getSquash(), fromFasta.getSquash(), fromFasta.getSquashLength()));
 
-    /* 索引记录的参考文件名对不上, 同样不能用 */
+    /* If the reference filename recorded in the index does not match, it must also be rejected. */
     const std::string otherFasta = testDir + "/other.fasta";
     std::ofstream other(otherFasta);
     other << ">chr1\n" << "ATCGATCGATCGATCGATCGATCGATCGATCG\n";

@@ -40,7 +40,7 @@ rm -frf $buildpath/tools || true
 export PATH=$buildpath/tools/bin:$PATH
 export LD_LIBRARY_PATH=$buildpath/tools/lib:$LD_LIBRARY_PATH
 
-# 检查当前系统是否为aarch64
+# Check whether the current system is aarch64
 
 if [ "$(uname -m)" == "aarch64" ]; then
     other_configure_flags="--build=aarch64-unknown-linux"

@@ -209,7 +209,7 @@ TEST_F(IndexActuatorTest, Initial_BAMBlockType_Allowed) {
 
     IndexActuator actuator(pInBlock, pOutBlock);
     int32_t result = actuator.initial();
-    // BAM 块内容为 SAM 文本，同样支持建索引（与 SAM 行为一致）
+    // BAM block content is SAM text, so indexing is supported the same way (consistent with SAM behavior)
     EXPECT_EQ(0, result);
 }
 

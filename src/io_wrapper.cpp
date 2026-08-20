@@ -320,8 +320,9 @@ size_t FileReader::readLine(std::string& line) {
 }
 
 /*
- * msync 的长度为 0 时返回 EINVAL（exfat / APFS 上实测一致），这只是“没东西要刷”
- * 的退化情况，不是写出失败，不能记进错误链。
+ * msync returns EINVAL when the length is 0 (consistently observed on exfat /
+ * APFS); this is only the degenerate case of "nothing to flush", not a write
+ * failure, so it must not be recorded into the error chain.
  */
 static int32_t msyncMapped(uint8_t* addr, size_t len, int flags)
 {
@@ -352,9 +353,12 @@ int32_t FileWriter::openIO() {
 
 void FileWriter::closeIO() {
     /*
-     * 写出走的是 mmap。早前 msync/ftruncate/munmap/close 的返回值全被丢掉，写回失败时
-     * 文件长度是对的、内容却是零，进程还以 0 退出——实测在外置卷上产出过 5MiB 之后
-     * 全为零的 12MB “正常”压缩文件。现在逐个检查并把错误粘到 writeErr 上。
+     * Writes go through mmap. Previously the return values of
+     * msync/ftruncate/munmap/close were all discarded, so when the write-back
+     * failed the file length was right but the content was all zeros, and the
+     * process still exited with 0—empirically this produced a 12MB "normal"
+     * compressed file that was entirely zeros after the first 5MiB on an external
+     * volume. Now each call is checked and errors are latched onto writeErr.
      */
     if (fo.mappedAddress != nullptr) {
         if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
@@ -376,7 +380,7 @@ void FileWriter::closeIO() {
 
     // Close file descriptor
     if (fo.fd != -1) {
-        // munmap 之后 fsync 才是数据真正落盘的唯一保证，msync 在部分文件系统上不可用
+        // After munmap, fsync is the only guarantee that the data is actually flushed to disk; msync is unavailable on some file systems
         if (0 != fsync(fo.fd)) {
             LOG_ERROR("fsync output file failed: %s", strerror(errno));
             latchWriteError(errno);
@@ -517,12 +521,15 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     fo.fileSize = newSize;
     fo.position = fo.fileSize;
     /*
-     * 返回本次实际写入的字节数，而不是累计文件位置 newSize。
+     * Returns the number of bytes actually written this call, not the cumulative
+     * file position newSize.
      *
-     * writeIO 的契约是"返回写入字节数（PipeWriter/GzFileWriter 均如此），调用方求和
-     * 得到总长"。原先返回 newSize 会让 writeBlockData 里 7 次调用之和 ≈ 7×文件位置，
-     * 一旦输出文件超过 ~2^31/7 ≈ 307MB，uint32 累加再转 int32 就溢出成负数，
-     * 被误判为"Write block failed"。
+     * The writeIO contract is "return the number of bytes written (PipeWriter
+     * and GzFileWriter do the same); the caller sums them to get the total
+     * length". Returning newSize would make the sum of the 7 calls in
+     * writeBlockData ≈ 7 * file position; once the output file exceeds
+     * ~2^31/7 ≈ 307MB, the uint32 accumulation then cast to int32 overflows to
+     * a negative value, which gets misreported as "Write block failed".
      */
     return writeLen;
 }

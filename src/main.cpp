@@ -241,7 +241,7 @@ public:
             }
         }
 
-        /* 索引只是加速手段, -r 才决定用哪个参考; 索引不可信时还得靠 -r 退回去重建。 */
+        /* The index is only an acceleration mechanism; -r decides which reference is used. When the index is untrustworthy, fall back to -r and rebuild. */
         if (!parameter.niIndexFile.empty()) {
             if (parameter.referenceGenic.empty()) {
                 fprintf(stderr, "--ni requires -r: the FASTA it was built from decides which reference is used.\n");
@@ -353,11 +353,14 @@ public:
             name.resize(name.length() - 5);
 
             /*
-             * 扩展名按输出格式定，在 name 上直接调整（不能再拼接到完整路径后再追加，
-             * 那会产出 con_sorted.bam.bam 这类双后缀）：
-             *   - -b：输出 BAM，统一 .bam（源名是 .sam/.bam 时替换扩展名）；
-             *   - 默认：输出 SAM 文本，源文件是 .bam（.bam.pbgz）时扩展名改回 .sam。
-             * FASTQ 源（如 .fq.gz.pbgz）保持原名不变。
+             * The extension is determined by the output format and adjusted directly on
+             * name (it must not be appended after joining with the full path, which
+             * would produce double suffixes such as con_sorted.bam.bam):
+             *   - -b: output BAM, always .bam (replace the extension when the source
+             *     name is .sam/.bam);
+             *   - default: output SAM text; when the source file is .bam (.bam.pbgz),
+             *     the extension is changed back to .sam.
+             * FASTQ sources (e.g. .fq.gz.pbgz) keep their original name unchanged.
              */
             if (parameter.isDecToBam) {
                 if (PathUtil::suffixCheck(name, ".sam") || PathUtil::suffixCheck(name, ".bam")) {
@@ -543,9 +546,10 @@ public:
 } ;
 
 /*
- * 参考索引只在用户显式要求时生成, 且落在用户指定的路径; 之后压缩要复用, 也得由用户
- * 显式把它交给 -r。不做隐式缓存: 悄悄留下的索引一旦被人改动, 后续压缩会静默压错,
- * 而用户手上没有任何线索。显式指定意味着用户认得这个文件, 也认这份风险。
+ * The reference index is only generated and loaded at the path explicitly given by -r;
+ * no implicit caching is done. If an implicitly cached index were modified externally,
+ * subsequent compressions would silently produce wrong output with no way to notice;
+ * explicit specification keeps the index file controllable and verifiable.
  */
 class MakeRefCmdProc : public CommandProc {
 public:
@@ -951,7 +955,7 @@ int main(int argc, char** argv) {
     int32_t ret = processor->startEngine();
     if (ret != 0) {
         LOG_ERROR("Command start failed");
-        /* 异常退出：清理并删除已创建的输出文件（如缺参考基因导致的失败）。 */
+        /* Abnormal exit: clean up and delete any output file that was created (e.g. a failure caused by a missing reference genome). */
         PbgzManager::getInstance().exitProc(ret, nullptr);
     }
 

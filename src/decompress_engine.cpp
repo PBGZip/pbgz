@@ -37,7 +37,7 @@ BlockReader* DecompressEngine::createBlockReader() {
     PbgzBlockReader* pbgzReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
     pbgzReader->init();
     baseFileMeta = pbgzReader->getBaseFileMeta();
-    // 读回压缩时写入的块大小上界，供 actuator 预分配输出缓冲（见 PbgzEngine::fileBlockSize）
+    // Read back the block-size upper bound written during compression, for the actuator to pre-allocate its output buffer (see PbgzEngine::fileBlockSize)
     if (baseFileMeta.getMetaData().isMember("block_size")) {
         fileBlockSize = baseFileMeta.getMetaData("block_size").asUInt();
     }
@@ -83,7 +83,7 @@ BlockReader* DecompressEngine::createBlockReader() {
 
 BlockWriter* DecompressEngine::createBlockWriter() {
     if (parameter.isDecToBam) {
-        /* -b：把解压出的 SAM 文本转成标准 BAM 写出 */
+        /* -b: convert the decompressed SAM text to standard BAM when writing */
         BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(ioWriter);
         if (blockWriter == nullptr) {
             LOG_ERROR("Failed to create bam writer.");
@@ -104,7 +104,7 @@ void DecompressEngine::releaseBlockReader(BlockReader* &blockReader) {
 }
 
 void DecompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
-    /* -b 的 BamWriter 需要收尾：flush BGZF 残留块并追加 EOF 标记 */
+    /* The BamWriter under -b needs finalization: flush the residual BGZF block and append the EOF marker */
     BamWriter* bamWriter = dynamic_cast<BamWriter*>(blockWriter);
     if (bamWriter != nullptr && 0 != bamWriter->finish()) {
         LOG_ERROR("Bam writer finish failed.");
@@ -113,15 +113,20 @@ void DecompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 /*
- * 随机读取用先验：按文件级偏移 seek 过去，再交给块读者解析。
+ * Prior for random access: seek to the file-level offset, then hand it to the block
+ * reader for parsing.
  *
- * 顺序解压靠注册表在路过时认领即可，但随机读会直接跳到任意数据块，它所属包的
- * 先验块可能根本没被读到过，必须能按需取回。偏移记的是块容器头（魔数所在处），
- * 所以这里 seek 完只需要 readBlock，容器的魔数、长度、校验和仍由块读者负责，
- * 不在这里手工解析字节。
+ * Sequential decompression only needs the consumer to claim the prior when it is
+ * passed by; random access, however, jumps straight to an arbitrary data block whose
+ * package's prior block may never have been read, so the prior must be retrievable on
+ * demand. The offset points at the block container header (where the magic number
+ * lives), so after seeking, readBlock suffices; the container's magic number, length,
+ * and checksum are still handled by the block reader, not parsed manually here.
  *
- * 与 unpackReference 一样，偏移是相对本包起点的距离而不是绝对位置，cat 之后
- * 必须加上包起点；读完要把读位置还原，否则主循环会从先验块之后接着读。
+ * As with unpackReference, the offset is a distance relative to the start of the
+ * package, not an absolute position; after concatenating with cat, the package start
+ * must be added. The read position must also be restored when done, otherwise the main
+ * loop would continue reading from after the prior block.
  */
 bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value& priorMeta) {
     if (blockReader == nullptr || !priorMeta.isMember("offset")) {
@@ -138,7 +143,7 @@ bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value
     const int64_t packageStart = (int64_t)blockReader->getCurrentFileStart();
     const int64_t blockAddress = packageStart + offset;
     const int64_t packageIndex = blockReader->getCurrentFileIndex();
-    /* 偏移只用来 seek 取块，登记与查表一律用包序号。 */
+    /* The offset is only used to seek and fetch the block; registration and lookups always use the package index. */
     if (qualPriorConsumer.forPackage(packageIndex) != nullptr) {
         return true;
     }
@@ -223,14 +228,18 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     }
     pRefGene->setNiFile(parameter.niIndexFile);
     /*
-     * SAM/BAM 解压只取参考碱基序列（getSquash/getStretch 等），不需要 makeIndex 的
-     * 读映射哈希表（那只对 FASTQ 的 read 定位有用）。压缩侧把源文件类型写进
-     * srcFileType（文件输入在 baseFileMeta，管道输入在 dynamicFileMeta）。
+     * SAM/BAM decompression only needs the reference base sequence (getSquash/
+     * getStretch and so on); it does not need the read-mapping hash table from
+     * makeIndex (useful only for locating FASTQ reads). The compression side records
+     * the source file type in srcFileType (in baseFileMeta for file input, in
+     * dynamicFileMeta for piped input).
      *
-     * 老版本文件、或管道输入压缩的文件可能没有这个字段：getMetaData 会对缺失键造出
-     * null，asUInt() 返回 0。这里显式兼容——只有识别为已知类型才采用，否则按未知
-     * 保守处理（走 makeIndex）。参考是用户明确下的指令, 用不了就得停下, 悄悄改成
-     * 无参考等于解出另一份东西。
+     * Old-version files, or files compressed from piped input, may lack this field:
+     * getMetaData fabricates null for a missing key and asUInt() returns 0. This is
+     * explicitly handled here — the type is adopted only when it is recognized as a
+     * known type, otherwise it is treated conservatively as unknown (going through
+     * makeIndex). If an explicitly specified reference cannot be loaded, decompression
+     * must abort, otherwise it would produce data that does not match expectations.
      */
     BlockType srcType = TYPE_UNKNOW;
     {
@@ -307,10 +316,13 @@ int64_t DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
         }
         if (BlockUtil::isAuxiliaryBlock(inBlockPtr->getBlockType())) {
             /*
-             * 头部预读同样要守"辅助块不是数据块"这条规则。先验块现在位于文件首块之前，
-             * 拿它去当 SAM 头解析会得到 headLineNumber == 0 而提前跳出循环，
-             * 染色体信息就永远注册不上，区域查询直接返回空。
-             * 顺手把它交给认领者：这条路径读到的先验与顺序流读到的是同一个块。
+             * Header pre-reading must also obey the rule that "an auxiliary block is
+             * not a data block". The prior block now sits before the file's first data
+             * block; parsing it as a SAM header would yield headLineNumber == 0 and
+             * exit the loop early, so chromosome information would never be registered
+             * and region queries would return empty.
+             * Hand it to the consumer as well: the prior read on this path is the same
+             * block the sequential stream would read.
              */
             PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
             (void)offerAuxBlock(inBlockPtr.get(),
@@ -398,8 +410,9 @@ bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int64_t packageIndex) {
     }
 
     {
-        /* 缓存已有就直接认领，不重复解压：同一个先验既可能被随机读提前 seek 取回，
-           也会在顺序流里被再次路过，两条路径指向的是同一个绝对地址。 */
+        /* If already cached, claim it directly without decompressing again: the same
+           prior may be fetched early by a random-access seek and then encountered again
+           in the sequential stream, and both paths point at the same absolute address. */
         std::lock_guard<std::mutex> lock(mutex);
         if (byPackage.find(packageIndex) != byPackage.end()) {
             return true;
@@ -463,14 +476,21 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
         }
         readPos = fileReader->getCurrentPos();
         /*
-         * refe 里存的 offset 是相对本压缩包头部的距离，不是拼接文件里的绝对位置。
+         * The offset stored in refe is a distance relative to the head of this
+         * compression package, not an absolute position in a concatenated file.
          *
-         * 压缩时输出总是从 0 开始写，所以两者在单包情况下恰好相等，长期以来直接当绝对
-         * 位置用也没出过问题。但多个包 cat 拼接之后，第二个包整体后移了前面所有包的
-         * 长度，再按绝对位置 seek 就会落进前一个包的数据区，参考解不出来，解压在第一个
-         * 包结束处就停住——这正是带参考基因组时 cat 拼接失效的原因。
+         * During compression the output always starts writing at 0, so the two happen
+         * to be equal in the single-package case, and treating the value as an absolute
+         * position has worked for a long time. But once multiple packages are
+         * concatenated with cat, the second package is shifted down by the total length
+         * of all preceding packages; seeking to the absolute position then lands in the
+         * previous package's data region, the reference cannot be unpacked, and
+         * decompression stops at the end of the first package — which is exactly why
+         * cat concatenation failed when a reference genome was involved.
          *
-         * 加上本包起点即可还原。单包时起点为 0，行为与改动前逐字节一致。
+         * Adding the current package's start restores the address. For a single package
+         * the start is 0, so the behavior is byte-for-byte identical to before the
+         * change.
          */
         fileReader->seekIO((int64_t)blockReader->getCurrentFileStart() + offset);
     }
@@ -572,7 +592,7 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
     }
 
     if (pActuator == nullptr) {
-        /* 失败时一律不释放任何块，收尾统一由 startWorkTask 负责，避免两处各归还一次。 */
+        /* On failure, never release any block here; cleanup is uniformly handled by startWorkTask to avoid each block being returned twice. */
         LOG_ERROR("Not support block type: %d, blockId=%ld", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
         return nullptr;
     }

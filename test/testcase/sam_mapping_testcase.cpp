@@ -812,8 +812,9 @@ public:
         IOReader* pIoReader = new FileReader(filename);
         pIoReader->openIO(); 
         /*
-         * 直接按原始内容载入整块（含 @SQ 头部），并记录换行符位置。
-         * 头部在 reader 里独立成块后，actuator 测试需要一个自含头部的完整块。
+         * Load the whole block directly from the raw content (including the @SQ header) and
+         * record newline positions. Since the reader separates the header into its own block,
+         * the actuator tests need a complete, self-contained block with the header included.
          */
         const size_t blockSize = pInBlock->getBlockSize();
         const size_t readLen = pIoReader->readIO(pInBlock->getBuffer(), blockSize);

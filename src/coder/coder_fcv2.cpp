@@ -1,14 +1,18 @@
 /*
- * coder_fcv2.cpp - 质量值上下文混合编码器的实现
+ * coder_fcv2.cpp - Implementation of the quality-value context-mixing coder
  *
- * 实现全部集中在本文件，头文件只暴露按记录调用的接口。原因见 coder_fcv2.h 的说明：
- * 本文件要用 fc/rangecoder.h 的二值区间编码器，它与 clr.h 的同名类冲突，而使用方
- * 同时需要 clr.h。
+ * The entire implementation lives in this file; the header only exposes the
+ * per-record call interface. See the note in coder_fcv2.h for the reason:
+ * this file needs the binary range coder from fc/rangecoder.h, which conflicts
+ * with the same-named class in clr.h, and the callers also need clr.h.
  *
- * 算法梗概：
- *   质量值符号先经哈夫曼树拆成一串二值判断，每个判断点由若干个不同粒度的概率模型
- *   分别预测，预测结果在对数几率域加权求和后交给区间编码器。权重按梯度下降更新，
- *   损失函数就是压缩后的比特数本身，所以权重是在直接优化压缩率。
+ * Algorithm overview:
+ *   A quality-value symbol is first split by a Huffman tree into a chain of
+ *   binary decisions. At each decision point several probability models of
+ *   differing granularity each predict, and the predictions are summed in the
+ *   log-odds domain with weights before being handed to the range coder. The
+ *   weights are updated by gradient descent; the loss is exactly the number of
+ *   bits emitted, so the weights directly optimize the compression ratio.
  */
 
 #include "coder_fcv2.h"
@@ -23,20 +27,23 @@
 
 namespace {
 
-/* 哈夫曼树的节点数上限，同时也限制了字母表大小。 */
+/* Upper bound on the number of Huffman tree nodes; also limits the alphabet size. */
 const int TREE_CAP = 64;
 
-/* 权重更新的步长移位量，等效学习率 1/4096。 */
+/* Weight-update step size as a shift, equivalent to a learning rate of 1/4096. */
 const int WEIGHT_LR_SHIFT = 12;
 
-/* 参与混合的模型个数。m0..m5 为既有六档，m6 为策略 4 新增的 read 平均质量分档上下文。 */
+/* Number of models participating in the mix. m0..m5 are the six existing tiers;
+   m6 is the read average-quality tier added by strategy 4. */
 const int MODEL_COUNT = 7;
 
-/* m6 的 read 平均质量分档数（策略 4）。 */
+/* Number of read average-quality bins for m6 (strategy 4). */
 const int QA_BINS = 4;
 
-/* 上下文参数档位的合法范围，解码端读回码流头部时按同一规则归一，防止损坏的码流
-   分配出过大的模型数组。各数组大小随 cfg 增长，必须给上界。 */
+/* Legal range of the context parameter tiers. When the decoder reads back the
+   stream header it normalizes by the same rule, so that a corrupted stream
+   cannot cause an oversized model array to be allocated. Array sizes grow with
+   cfg, so an upper bound is required. */
 const int CFG_CYCLE_MAX_MIN = 32;
 const int CFG_CYCLE_MAX_MAX = 128;
 const int CFG_CYCLE_BUCKET_MAX = 32;
@@ -45,8 +52,9 @@ const int CFG_DELTA_BUCKET_MAX = 16;
 const int CFG_PREV_SHIFT_MAX = 3;
 
 /*
- * 把外部传入的 cfg 归一成编码器实际使用的档位。两边（编码端、解码端）都必须调用，
- * 任何一条与这里不一致，编解码就会在上下文索引上错位。
+ * Normalizes an externally supplied cfg to the tiers actually used by the
+ * coder. Both sides (encoder and decoder) must call this; if either side
+ * diverges from it, encode/decode will misalign on the context indices.
  */
 Fcv2Cfg normalizeCfg(Fcv2Cfg cfg)
 {
@@ -61,16 +69,20 @@ Fcv2Cfg normalizeCfg(Fcv2Cfg cfg)
     if (cfg.prevShift < 0) cfg.prevShift = 0;
     if (cfg.prevShift > CFG_PREV_SHIFT_MAX) cfg.prevShift = CFG_PREV_SHIFT_MAX;
     if (!cfg.useDelta) {
-        /* 关闭跳变上下文时把分档归一为 1，模型退化为"位置 + 树节点"，数组布局不变。 */
+        /* When the delta context is disabled the bin count is normalized to 1,
+           the model degenerates to "position + tree node", and the array layout
+           is unchanged. */
         cfg.deltaBucket = 1;
     }
     return cfg;
 }
 
 /*
- * 计算一条 read 的平均质量档（策略 4，fqzcomp 的 do_qa）。均值与存储顺序无关
- * （求和对整条质量串），按 phred 均值分 4 档。只有编码端用它把档位写进码流，
- * 解码端直接读回，所以这里的阈值只影响压缩率、不影响两端一致性。
+ * Computes the average-quality bin of a read (strategy 4, fqzcomp's do_qa).
+ * The mean is independent of storage order (the sum runs over the whole quality
+ * string); the phred mean is divided into 4 bins. Only the encoder uses it to
+ * write the bin into the stream; the decoder reads it back directly, so these
+ * thresholds only affect the compression ratio, not both-side consistency.
  */
 inline int qaBinOf(const uint8_t* qual, uint32_t len)
 {
@@ -78,26 +90,31 @@ inline int qaBinOf(const uint8_t* qual, uint32_t len)
     for (uint32_t i = 0; i < len; i++) {
         sum += qual[i];
     }
-    int avg = (int)(sum / len);   /* 原始字节值，约 33..74（phred 0..41） */
+    int avg = (int)(sum / len);   /* raw byte value, about 33..74 (phred 0..41) */
     if (avg < 63) return 0;       /* phred < 30 */
     if (avg < 68) return 1;       /* 30..34 */
     if (avg < 71) return 2;       /* 35..37 */
     return 3;                     /* >= 38 */
 }
 
-/* 碱基上下文的取值个数：ACGTN + 未知（seq 为空或非碱基字符）。 */
+/* Number of distinct base-context states: ACGTN + unknown (seq empty or a
+   non-base character). */
 const int BASE_STATES = 6;
 
-/* 原始字节 -> 碱基符号（ACGTN -> 0..4），其余全部归入 5（未知）。initTables 里填充。 */
+/* Raw byte -> base symbol (ACGTN -> 0..4), everything else maps to 5
+   (unknown). Filled in initTables. */
 uint8_t g_baseSym[256];
 
 /*
- * 模型快照与码流刻意分离：码流格式不能因先验模型功能而改变。下面的固定头让快照能在
- * 读入前判定是否仍对应当前的数组布局；只要任一尺寸常量变化，旧快照中的节点下标就不再
- * 有定义，必须拒绝，而不是以看似可用但实际错误的概率继续编码。
+ * The model snapshot is deliberately kept separate from the stream: the stream
+ * format must not change because of the prior-model feature. The fixed header
+ * below lets the snapshot be validated against the current array layout before
+ * it is read; if any size constant changes, the node indices in an old snapshot
+ * are no longer well-defined and must be rejected, rather than continuing to
+ * encode with probabilities that look usable but are actually wrong.
  */
 const uint8_t MODEL_MAGIC[] = { 'f', 'c', 'v', '2', 'p', 'r', 'i', 'o', 'r' };
-const uint16_t MODEL_FORMAT_VERSION = 7;  /* v7: read 平均质量档上下文 m6（useQa + QA_BINS） */
+const uint16_t MODEL_FORMAT_VERSION = 7;  /* v7: read average-quality tier context m6 (useQa + QA_BINS) */
 
 inline void appendU16(std::vector<uint8_t>& out, uint16_t value)
 {
@@ -118,9 +135,11 @@ inline void appendI32(std::vector<uint8_t>& out, int32_t value)
 }
 
 /*
- * 字节读取器只在输入还剩足够空间时推进位置，因而截断快照不会越界读取，也不会让调用者
- * 看到只恢复了一半的模型。所有数字都逐字节按小端解析，避免宿主端序和结构体填充参与
- * 快照格式。
+ * The byte reader advances its position only when enough input remains, so a
+ * truncated snapshot cannot cause an out-of-bounds read, nor can it expose a
+ * half-restored model to the caller. All numbers are parsed byte-by-byte in
+ * little-endian order, keeping host endianness and struct padding out of the
+ * snapshot format.
  */
 class ModelBlobReader {
 public:
@@ -160,28 +179,35 @@ private:
 };
 
 /*
- * 概率与计数打包进一个 uint16_t：低 12 位是概率（0..4095），高 4 位是更新次数（0..15）。
+ * A probability and a count are packed into one uint16_t: the low 12 bits are
+ * the probability (0..4095) and the high 4 bits are the update count (0..15).
  *
- * 计数上限取 15 而不是更大，是因为自适应步长表在计数达到 15 之后就恒定不变了，
- * 再往上记录没有意义。这样正好省出 4 位与概率共用一个 16 位整数，模型内存减半。
+ * The count is capped at 15 rather than something larger because the adaptive
+ * step-size table becomes constant once the count reaches 15, so recording
+ * anything beyond that is pointless. This conveniently frees 4 bits to share a
+ * single 16-bit integer with the probability, halving the model's memory.
  */
 typedef uint16_t Counter;
 
 inline int counterProb(Counter c)  { return c & 0x0FFF; }
 inline int counterCount(Counter c) { return c >> 12; }
 
-const Counter COUNTER_INIT = 2048;   /* 概率 0.5，计数 0 */
+const Counter COUNTER_INIT = 2048;   /* probability 0.5, count 0 */
 
-/* 对数几率与概率的互转表，12 位定点，缩放因子 256。 */
+/* Lookup tables converting between log-odds and probability, 12-bit fixed
+   point with a scale factor of 256. */
 short  g_stretch[4096];
 uint16_t g_squash[4096];
 
 /*
- * 自适应步长表。
+ * Adaptive step-size table.
  *
- * 新建的计数器更新次数少，步长大，几次更新就能从初值 0.5 靠近真实值；随着更新次数
- * 增加步长变小，估计逐渐稳定。这直接针对稀疏上下文——上下文越细，每个计数器被访问
- * 的次数越少，正好处在大步长快速收敛的阶段。
+ * A freshly created counter has few updates and a large step, so a few updates
+ * suffice to move it from the initial 0.5 toward the true value; as the update
+ * count grows the step shrinks and the estimate gradually stabilizes. This
+ * targets sparse contexts directly - the finer the context, the fewer times
+ * each counter is accessed, and it sits exactly in the phase of fast convergence
+ * with a large step.
  */
 uint8_t g_adaptShift[16];
 
@@ -238,11 +264,14 @@ inline void counterUpdate(Counter& c, int isZero)
 }
 
 /*
- * 哈夫曼树。
+ * Huffman tree.
  *
- * 叶子是质量值符号，从根到叶的路径就是一串二值判断。按频率构造使高频符号路径更短，
- * 减少每符号的二值编码次数。这只影响速度，不影响压缩率：算术编码的代价是各步
- * -log2(p) 之和，把一个符号拆成几步条件判断，总代价不变。
+ * The leaves are quality-value symbols; the path from root to leaf is a chain
+ * of binary decisions. Building it by frequency gives high-frequency symbols
+ * shorter paths, reducing the number of binary codings per symbol. This only
+ * affects speed, not the compression ratio: the cost of arithmetic coding is
+ * the sum of -log2(p) over the steps, and splitting a symbol into several
+ * conditional decisions leaves the total cost unchanged.
  */
 struct HuffTree {
     int alphaSize;
@@ -259,7 +288,8 @@ struct HuffTree {
         int node[TREE_CAP * 2];
         int live = 0;
         for (int i = 0; i < alpha; i++) {
-            /* 频率加一，保证没出现过的符号也有一条路径，避免编码时越界。 */
+            /* Add one to the frequency so that even symbols never observed get
+               a path, avoiding out-of-bounds access during coding. */
             weight[live] = (long long)freq[i] + 1;
             node[live] = i;
             live++;
@@ -315,42 +345,54 @@ private:
 };
 
 /*
- * 七个粒度递增的上下文模型。
+ * Seven context models of increasing granularity.
  *
- *   m0  只看树节点，最粗，任何时候样本都充足，起保底作用
- *   m1  位置 + 树节点
- *   m2  前一个符号 + 位置 + 树节点
- *   m3  前两个符号 + 位置档 + 链方向 + 树节点
- *   m4  当前碱基 + 位置 + 树节点
- *   m5  read 内质量跳变次数档 + 位置 + 树节点（策略 1）
- *   m6  read 平均质量分档 + 位置 + 树节点（策略 4）
+ *   m0  only the tree node; the coarsest, always has enough samples, acts as a
+ *       floor/baseline
+ *   m1  position + tree node
+ *   m2  previous symbol + position + tree node
+ *   m3  previous two symbols + position bin + strand + tree node
+ *   m4  current base + position + tree node
+ *   m5  in-read quality-transition count bin + position + tree node
+ *       (strategy 1)
+ *   m6  read average-quality bin + position + tree node (strategy 4)
  *
- * m4 用的碱基是"产生本质量值的那次测序循环"的碱基：正向链是位置 i，反向链按存储序
- * 取 len-1-i。质量值与碱基强相关（错配位、低复杂度区的质量系统性偏低），这维上下文
- * 与其他维度（前驱符号、链方向）基本正交，与 m3 不重叠。
+ * The base used by m4 is the base of "the sequencing cycle that produced this
+ * quality value": position i on the forward strand, len-1-i in storage order on
+ * the reverse strand. Quality values correlate strongly with the base
+ * (mismatch positions and low-complexity regions are systematically lower in
+ * quality), and this context dimension is largely orthogonal to the others
+ * (previous symbols, strand), so it does not overlap m3.
  *
- * m5 的跳变次数是质量值随 read 单调变化（测序循环越靠后质量越低）的另一种刻画：
- * "到当前位置为止质量值一共变了多少次"反映这条 read 的质量是否干净，与局部前驱符号
- * （m2/m3）和位置（m1）都不重叠，且只在 read 内部累积、逐条重置。fqzcomp 用同一维
- * 度（state->delta）参与上下文，这里做成独立模型交给混合器，由权重决定它值多少。
+ * m5's transition count is another description of quality monotonically
+ * changing along a read (later sequencing cycles tend to have lower quality):
+ * "how many times the quality has changed up to the current position" reflects
+ * whether this read's quality is clean, does not overlap the local previous
+ * symbols (m2/m3) or the position (m1), and accumulates only within a read,
+ * resetting per record. fqzcomp uses the same dimension (state->delta) in its
+ * context; here it is made an independent model handed to the mixer, and the
+ * weights decide how much it is worth.
  *
- * m6 是整条 read 的平均质量档（策略 4，fqzcomp 的 do_qa）：不同 read 的平均质量差异
- * 很大（实测 Q10~Q40 长尾），整条 read 处于"高质量档"还是"低质量档"是符号分布的
- * 强先验。档位由编码端算好写进码流（每记录 2 bit），解码端直接读回，上下文两侧一致。
+ * m6 is the whole-read average-quality bin (strategy 4, fqzcomp's do_qa):
+ * average quality varies widely across reads (empirically a long tail from
+ * Q10 to Q40), so whether an entire read sits in the "high-quality bin" or the
+ * "low-quality bin" is a strong prior on the symbol distribution. The bin is
+ * computed by the encoder and written into the stream (2 bits per record); the
+ * decoder reads it back directly, keeping both sides consistent.
  *
- * 各数组的尺寸由 Fcv2Cfg 决定，见 init()。
+ * The sizes of the arrays are determined by Fcv2Cfg, see init().
  */
 struct ContextModel {
     int alphaSize;
-    int prevStates;          /* 符号取值数加一，多出来的那个表示"没有前驱" */
-    int prevQStates;         /* m3 用的量化前驱取值数（>> prevShift） */
+    int prevStates;          /* number of symbol values plus one; the extra slot represents "no predecessor" */
+    int prevQStates;         /* number of quantized predecessor values for m3 (>> prevShift) */
     int cycleMax;
     int cycleBucket;
     int deltaMax;
     int deltaBucket;
     int prevShift;
     std::vector<Counter> m0, m1, m2, m3, m4, m5, m6;
-    std::vector<int> weight; /* 混合权重，按 位置档 × 树节点 × 模型 组织 */
+    std::vector<int> weight; /* mixing weights, organized by position bin x tree node x model */
 
     void init(int alpha, const Fcv2Cfg& cfg)
     {
@@ -362,10 +404,14 @@ struct ContextModel {
         deltaBucket = cfg.deltaBucket;
         prevShift = cfg.prevShift;
         /*
-         * m3 用全符号取值太稀疏（本数据 39×39×16×2×64 ≈ 3.1M 槽，每块仅 ~9 次访问），
-         * 学不出 order-2 结构。实测把前驱质量值 >>1 量化到 22 档（质量值≈符号 id），
-         * 保留 55% 的 order-2 条件熵收益（3.66 vs 3.53 bits），槽数却降到 1/3。
-         * 档位随 prevShift 可调：字母表大时继续右移更粗，字母表小时可以不量化。
+         * Using all symbol values for m3 is too sparse (39x39x16x2x64 = about
+         * 3.1M slots on this data, only ~9 accesses per block), so the order-2
+         * structure cannot be learned. Empirically, quantizing the previous
+         * quality value by >>1 to 22 tiers (quality value ~ symbol id) retains
+         * 55% of the order-2 conditional-entropy gain (3.66 vs 3.53 bits) while
+         * cutting the slot count to 1/3. The tier count is adjustable via
+         * prevShift: shift further right for coarser tiers with large
+         * alphabets, or skip quantization for small alphabets.
          */
         prevQStates = (alpha >> prevShift) + 2;
         m0.assign((size_t)TREE_CAP, COUNTER_INIT);
@@ -375,7 +421,8 @@ struct ContextModel {
         m4.assign((size_t)BASE_STATES * cycleMax * TREE_CAP, COUNTER_INIT);
         m5.assign((size_t)deltaBucket * cycleMax * TREE_CAP, COUNTER_INIT);
         m6.assign((size_t)QA_BINS * cycleMax * TREE_CAP, COUNTER_INIT);
-        /* 权重初值取 1<<14，即定点 0.25，七个模型合起来接近简单平均。 */
+        /* Initial weights are 1<<14, i.e. fixed-point 0.25, so the seven models
+           together start close to a simple average. */
         weight.assign((size_t)cycleBucket * TREE_CAP * MODEL_COUNT, 1 << 14);
     }
 
@@ -384,7 +431,7 @@ struct ContextModel {
     {
         int bucket = cyc * cycleBucket / cycleMax;
         if (bucket >= cycleBucket) bucket = cycleBucket - 1;
-        int qp = (prev >> prevShift);      /* 量化前驱质量值 */
+        int qp = (prev >> prevShift);      /* quantized previous quality value */
         int qp2 = (prev2 >> prevShift);
         if (qp >= prevQStates) qp = prevQStates - 1;
         if (qp2 >= prevQStates) qp2 = prevQStates - 1;
@@ -422,7 +469,8 @@ struct ContextModel {
 } /* namespace */
 
 /*
- * 实现体。放在匿名命名空间之外是因为头文件里前置声明了它。
+ * The implementation body. It lives outside the anonymous namespace because
+ * the header forward-declares it.
  */
 class fcv2_impl {
 public:
@@ -432,33 +480,41 @@ public:
     RangeCoder rc;
 
     /*
-     * 链方向自己的概率模型。
+     * Probability model for the strand itself.
      *
-     * 链方向随每条记录写进码流，而不是由调用方在解压时再提供一次。这样编码器完全
-     * 自包含：解压侧不需要为了解 QUAL 去关心 FLAG 字段解到哪一步了，也不必维护一份
-     * 逐记录的链方向数组。
+     * The strand is written into the stream with each record, rather than being
+     * supplied again by the caller at decompression. This makes the coder fully
+     * self-contained: the decompression side need not care how far the FLAG
+     * field has been decoded in order to decode QUAL, nor maintain a
+     * per-record array of strands.
      *
-     * 代价是每条记录约一个比特。实测反向链占 49.9%，接近最大熵，压不动，一百万条
-     * 记录约 125 KB，对 90 MB 的质量值是 0.139%。而链方向带来的收益是 0.372 个
-     * 百分点，扣掉这部分仍然净赚 0.233 个百分点，值得。
+     * The cost is about one bit per record. Empirically the reverse strand is
+     * 49.9%, close to maximum entropy, so it compresses poorly: a million
+     * records cost about 125 KB, which is 0.139% of 90 MB of quality values.
+     * Meanwhile the strand brings a gain of 0.372 percentage points, so after
+     * subtracting this cost the net gain is still 0.233 percentage points;
+     * worth it.
      *
-     * 仍然用一个自适应计数器而不是固定的 0.5，是因为按坐标排序的 SAM 里正反链未必
-     * 严格各半，模型能自己适应实际比例。
+     * An adaptive counter is still used instead of a fixed 0.5 because forward
+     * and reverse strands are not necessarily split evenly in a coordinate-
+     * sorted SAM; the model adapts to the actual ratio.
      */
     Counter revCounter;
 
-    /* 相邻重复 read 去重（策略 3）：dup 标记自己的自适应概率，随记录逐条维护。 */
+    /* Adjacent duplicate read dedup (strategy 3): the dup flag has its own
+       adaptive probability, maintained record by record. */
     Counter dupCounter;
-    /* 上一条记录的质量串（存储序），用于比对与解码端还原；跨记录保留。 */
+    /* The previous record's quality string (storage order), used for
+       comparison and for the decoder to restore it; kept across records. */
     std::vector<uint8_t> prevQual;
     uint32_t prevQualLen = 0;
 
-    Fcv2Cfg cfg;             /* 归一后的上下文参数档位 */
+    Fcv2Cfg cfg;             /* normalized context-parameter tiers */
 
     int alphaSize;
-    int symbolOf[256];      /* 原始字节 -> 内部符号编号 */
-    int byteOf[TREE_CAP];   /* 内部符号编号 -> 原始字节 */
-    uint16_t quantFreq[TREE_CAP]; /* 量化后的频率，随码流写出供解码端重建同一棵树 */
+    int symbolOf[256];      /* raw byte -> internal symbol number */
+    int byteOf[TREE_CAP];   /* internal symbol number -> raw byte */
+    uint16_t quantFreq[TREE_CAP]; /* quantized frequencies, written to the stream so the decoder rebuilds the same tree */
     bool encodeStarted;
     bool flushed;
     bool modelLoaded;
@@ -475,11 +531,14 @@ public:
     }
 
     /*
-     * 一次二值预测：把各模型的概率取对数几率，按权重加权求和，再转回概率。
+     * A single binary prediction: take each model's probability to log-odds,
+     * sum them weighted by the weights, then convert back to a probability.
      *
-     * 之所以在对数几率域做线性组合而不是直接对概率加权平均，是因为概率的尺度不均匀：
-     * 0.50 和 0.51 之间的差别，与 0.98 和 0.99 之间的差别，在编码代价上完全不是一
-     * 回事。对数几率是可加的证据强度，合并语义正确。
+     * The linear combination is done in the log-odds domain rather than as a
+     * direct weighted average of probabilities because probability scales are
+     * not uniform: the difference between 0.50 and 0.51 and the difference
+     * between 0.98 and 0.99 are entirely different in coding cost. Log-odds is
+     * an additive evidence strength, so the combination semantics are correct.
      */
     inline int predict(const size_t* base, int node, int cyc,
                        Counter** slot, int* stretched, int*& wp)
@@ -498,11 +557,14 @@ public:
     }
 
     /*
-     * 更新权重和各模型的计数器。
+     * Updates the weights and each model's counter.
      *
-     * 权重更新是对交叉熵损失的梯度下降。把混合器看作一个逻辑回归，输入是各模型给出的
-     * 对数几率，输出是最终概率，那么损失对权重的梯度恰好是 -(目标 - 预测) × 输入。
-     * 这里的损失函数就是编码这一位实际花掉的比特数，所以权重直接在优化压缩率。
+     * The weight update is gradient descent on the cross-entropy loss. Viewing
+     * the mixer as a logistic regression whose inputs are the log-odds given by
+     * each model and whose output is the final probability, the gradient of the
+     * loss w.r.t. a weight is exactly -(target - prediction) x input. Here the
+     * loss is the number of bits actually spent coding this bit, so the weights
+     * directly optimize the compression ratio.
      */
     inline void update(Counter** slot, const int* stretched, int* wp, int p, int isZero)
     {
@@ -513,7 +575,8 @@ public:
         }
     }
 
-    /* 记录内位置转成测序循环序号，反向链需要按记录长度翻转，见头文件说明。 */
+    /* Converts an in-record position to a sequencing-cycle index; the reverse
+       strand must flip it by the record length, see the header note. */
     inline int cycleOf(uint32_t i, uint32_t len, bool rev) const
     {
         uint32_t c = rev ? (len - 1 - i) : i;
@@ -607,11 +670,16 @@ public:
                               useDedup == 1, useQa == 1 };
         storedCfg = normalizeCfg(storedCfg);
         /*
-         * 先验是跨块训练产物，其计数器数组按训练时的档位布局。加载方（可能是压缩端或
-         * 解码端）采用先验自身携带的档位作为有效档位，而不是要求先验与构造时的档位
-         * 一致：先验总是与它一起使用的那条码流同档位（训练与压缩用同一组参数），
-         * 这样任何一端都能安全地"先验决定了档位"。若与码流头部不一致，begin_decode
-         * 会以档位不符拒绝，见其 modelLoaded 分支。
+         * The prior is a cross-block training product, so its counter arrays
+         * follow the tier layout used during training. The loader (whether the
+         * compression or the decompression side) adopts the tiers carried by
+         * the prior itself as the effective tiers, rather than requiring the
+         * prior to match the tiers of construction: the prior always shares the
+         * tiers of the stream it is used with (training and compression use the
+         * same parameter set), so either side can safely treat "the prior
+         * decides the tiers". If they disagree with the stream header,
+         * begin_decode rejects on the tier mismatch, see its modelLoaded
+         * branch.
          */
         cfg = storedCfg;
 
@@ -664,7 +732,7 @@ public:
         tree = restoredTree;
         revCounter = restoredRevCounter;
         dupCounter = restoredDupCounter;
-        prevQualLen = 0;   /* 先验只带模型状态，不带上一条质量串 */
+        prevQualLen = 0;   /* the prior carries only model state, not the previous quality string */
         prevQual.clear();
         alphaSize = (int)storedAlpha;
         memcpy(byteOf, restoredByteOf, sizeof(byteOf));
@@ -731,15 +799,17 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable)
 coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, const Fcv2Cfg& cfg)
     : impl(new fcv2_impl(io, cfg))
 {
-    /* 只收录实际出现过的质量值，字母表越小树越浅。 */
+    /* Only quality values that actually occurred are admitted; a smaller
+       alphabet gives a shallower tree. */
     int alpha = 0;
     for (size_t b = 0; b < freqTable.size() && b < 256; b++) {
         if (freqTable[b] == 0) {
             continue;
         }
         if (alpha >= TREE_CAP) {
-            /* 字母表超出树容量，调用方应改用其他编码器，这里保持 alphaSize 为 0
-               让 supports 之外的调用能被上层察觉。 */
+            /* The alphabet exceeds the tree capacity; the caller should switch
+               to another coder. alphaSize is left at 0 so that calls beyond
+               supports() are noticed by the upper layer. */
             alpha = 0;
             break;
         }
@@ -750,11 +820,14 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, con
     impl->alphaSize = alpha;
     if (alpha > 0) {
         /*
-         * 频率量化到 1..65535 再建树，而不是直接用原始计数。
+         * Frequencies are quantized to 1..65535 before building the tree,
+         * rather than using the raw counts directly.
          *
-         * 这样做是为了让编码端和解码端建树时看到的输入完全一致：解码端只能拿到写进
-         * 码流的量化值，如果编码端用原始计数建树，两棵树可能在某个合并顺序上分岔。
-         * 统一用量化值就不存在这个问题。
+         * This is so that the encoder and decoder see exactly the same input
+         * when building the tree: the decoder only gets the quantized values
+         * written into the stream, and if the encoder built the tree from raw
+         * counts the two trees could diverge at some merge order. Using the
+         * quantized values uniformly avoids this problem.
          */
         uint32_t maxFreq = 1;
         for (int s = 0; s < alpha; s++) {
@@ -811,9 +884,11 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         d->rc.InitEncoder(d->io->data, d->io->data_capacity);
         d->rc.EncodeByte((unsigned)d->alphaSize);
         /*
-         * 上下文参数档位写进码流头部。模型数组的布局由它决定，解码端必须读回同一组
-         * 参数才能对上上下文索引；这也让每个数据块可以独立携带自己的档位选择。
-         * 见 normalizeCfg()：两端按同一规则归一，保证任何合法取值两侧一致。
+         * The context parameter tiers are written into the stream header. The
+         * model array layout is determined by them, and the decoder must read
+         * back the same set to align the context indices; this also lets each
+         * data block carry its own tier choice. See normalizeCfg(): both sides
+         * normalize by the same rule, so any legal value agrees on both sides.
          */
         d->rc.EncodeByte((unsigned)d->cfg.cycleMax);
         d->rc.EncodeByte((unsigned)d->cfg.cycleBucket);
@@ -824,11 +899,16 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         d->rc.EncodeByte((unsigned)(d->cfg.useDedup ? 1 : 0));
         d->rc.EncodeByte((unsigned)(d->cfg.useQa ? 1 : 0));
         /*
-         * 字母表连同各符号的量化频率一起写进码流。
+         * The alphabet is written into the stream together with each symbol's
+         * quantized frequency.
          *
-         * 频率必须写出去，不能让解码端猜。哈夫曼树的形状完全由频率决定，两端建出的
-         * 树只要有一点不同，路径就对不上，解出来的就是另一个符号。量化到 16 位后
-         * 每个符号两字节，几十个符号总共不到一百字节，相对整块数据可以忽略。
+         * The frequencies must be written out; the decoder must not be left to
+         * guess them. The shape of the Huffman tree is entirely determined by
+         * the frequencies, and if the trees built on the two sides differ in
+         * the slightest way the paths no longer match and the decoded symbol is
+         * a different one. After quantization to 16 bits each symbol takes two
+         * bytes; a few dozen symbols total under a hundred bytes, negligible
+         * relative to a whole block of data.
          */
         for (int s = 0; s < d->alphaSize; s++) {
             d->rc.EncodeByte((unsigned)d->byteOf[s]);
@@ -854,9 +934,11 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
     }
 
     /*
-     * 相邻重复 read 去重（策略 3，fqzcomp 的 do_dedup）：与上一条记录逐字节比对，
-     * 完全相同就写 1 bit 并把整条质量串跳过。命中重复时本记录的上下文状态不更新
-     * （prev/prev2/delta 都在记录开头重置），下一条记录照常从零开始，两端一致。
+     * Adjacent duplicate read dedup (strategy 3, fqzcomp's do_dedup): compare
+     * byte-by-byte with the previous record; if identical, write 1 bit and skip
+     * the whole quality string. When a duplicate is hit, this record's context
+     * state is not updated (prev/prev2/delta are all reset at the start of each
+     * record), so the next record starts from zero as usual on both sides.
      */
     if (d->cfg.useDedup) {
         bool isDup = (len == d->prevQualLen) &&
@@ -881,8 +963,9 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
     }
 
     /*
-     * read 平均质量档（策略 4）：档位写进码流，作为 m6 上下文。固定 2 bit/记录，
-     * 解码端读回同一档位。
+     * read average-quality bin (strategy 4): the bin is written into the stream
+     * as the m6 context. Fixed 2 bits/record; the decoder reads back the same
+     * bin.
      */
     int qa = 0;
     if (d->cfg.useQa) {
@@ -901,20 +984,26 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
 
     int prev = d->alphaSize;
     int prev2 = d->alphaSize;
-    int delta = 0;   /* read 内质量跳变次数，随记录重置 */
+    int delta = 0;   /* in-read quality-transition count, reset per record */
 
     for (uint32_t i = 0; i < len; i++) {
         int sym = d->symbolOf[qual[i]];
         if (sym < 0) {
-            /* 出现了统计阶段没见过的质量值，无法编码。上层保证不会发生；
-               真发生时跳过该字节会破坏往返，所以直接用最后一个符号顶替并不可取，
-               这里选择保持前驱不变、跳过本字节，由上层的往返校验暴露问题。 */
+            /* A quality value not seen during the statistics phase cannot be
+               coded. The upper layer guarantees this never happens; if it does,
+               skipping the byte would break the round trip, and substituting
+               the last symbol is likewise unacceptable, so here we keep the
+               predecessors unchanged and skip the byte, letting the upper
+               layer's round-trip verification expose the problem. */
             continue;
         }
         /*
-         * 碱基上下文取"产生本质量值的循环"对应的碱基：正向链 i、反向链 len-1-i，
-         * 与 cycleOf 用同一套映射，保证两端一致。seq 长度不足（异常数据）时该位置
-         * 归入"未知"档，绝不对 seq 越界读取。
+         * The base context takes the base of "the cycle that produced this
+         * quality value": i on the forward strand, len-1-i on the reverse
+         * strand, using the same mapping as cycleOf so both sides stay
+         * consistent. If the seq length is insufficient (abnormal data) the
+         * position falls into the "unknown" bin, and seq is never read
+         * out-of-bounds.
          */
         uint32_t mapped = rev ? (len - 1 - i) : i;
         int cyc = d->cycleOf(i, len, rev);
@@ -938,8 +1027,10 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
             d->update(slot, stretched, wp, p0, !bit);
         }
         /*
-         * 跳变次数在本符号编码后才更新，因此 m5 的上下文统计的是"当前符号之前"的变化
-         * 次数，与 fqzcomp 的 delta 用法一致。第一个符号没有前驱，不算跳变。
+         * The transition count is updated only after the symbol is coded, so
+         * the m5 context counts the changes "before the current symbol",
+         * matching fqzcomp's use of delta. The first symbol has no predecessor
+         * and does not count as a transition.
          */
         if (prev != d->alphaSize && sym != prev) {
             delta++;
@@ -948,7 +1039,8 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         prev = sym;
     }
 
-    /* 非重复记录：记录本条质量串，供下一条做去重比对。 */
+    /* Non-duplicate record: store this record's quality string for the next
+       record's dedup comparison. */
     d->prevQualLen = len;
     if (d->prevQual.size() < (size_t)len) {
         d->prevQual.resize(len);
@@ -975,7 +1067,8 @@ int32_t coder_fcv2::begin_decode()
     if (alpha <= 0 || alpha > TREE_CAP) {
         return -1;
     }
-    /* 读回编码端写入的上下文参数档位，与 encode_record 的写出顺序严格一致。 */
+    /* Read back the context parameter tiers written by the encoder, in the
+       exact order encode_record writes them. */
     Fcv2Cfg streamCfg;
     streamCfg.cycleMax = (int)d->rc.DecodeByte();
     streamCfg.cycleBucket = (int)d->rc.DecodeByte();
@@ -988,12 +1081,15 @@ int32_t coder_fcv2::begin_decode()
     if (streamCfg.prevShift > CFG_PREV_SHIFT_MAX ||
         streamCfg.cycleBucket > CFG_CYCLE_BUCKET_MAX ||
         streamCfg.deltaBucket > CFG_DELTA_BUCKET_MAX) {
-        return -1;   /* 损坏码流：档位超出合法范围，禁止据此分配模型 */
+        return -1;   /* corrupted stream: tier exceeds the legal range; refuse to allocate a model from it */
     }
     streamCfg = normalizeCfg(streamCfg);
     /*
-     * 先验来自跨块训练，其模型布局由训练时的档位决定；如果与码流头部不一致，计数器
-     * 数组对不上，只能拒绝（压缩侧的同款不一致会让 loadModel 返回 false）。
+     * The prior comes from cross-block training, so its model layout is
+     * determined by the tiers used at training time; if it disagrees with the
+     * stream header, the counter arrays no longer line up and it can only be
+     * rejected (the same mismatch on the compression side makes loadModel
+     * return false).
      */
     if (d->modelLoaded && d->cfg != streamCfg) {
         return -1;
@@ -1015,9 +1111,13 @@ int32_t coder_fcv2::begin_decode()
     }
 
     /*
-     * 先验中的计数器按树节点编号索引，不能拿它去解另一棵树的码流。即使两个字母表含有
-     * 同一批字节，只要频率改变导致合并顺序变化，节点编号也可能已经代表另一个判断；因此
-     * 载入先验后必须逐项核对码流头，并保留已载入的学习状态，而非再次 init 覆盖它。
+     * The counters in the prior are indexed by tree-node number, so they cannot
+     * be used to decode a stream built from a different tree. Even if two
+     * alphabets contain the same set of bytes, if the frequencies change and
+     * the merge order changes, a node number may now denote a different
+     * decision; therefore, after loading a prior, every item in the stream
+     * header must be verified, and the loaded learning state must be kept
+     * rather than overwritten by calling init again.
      */
     if (d->modelLoaded) {
         if (d->alphaSize != alpha) return -1;
@@ -1036,7 +1136,8 @@ int32_t coder_fcv2::begin_decode()
         d->quantFreq[s] = streamQuantFreq[s];
     }
     d->alphaSize = alpha;
-    /* 用码流里带来的量化频率重建，保证与编码端是同一棵树。 */
+    /* Rebuild from the quantized frequencies carried in the stream, so the
+       tree is identical to the encoder's. */
     d->tree.build(freq, alpha);
     d->cm.init(alpha, d->cfg);
     return 0;
@@ -1050,7 +1151,7 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
         return 0;
     }
 
-    /* 链方向由码流自带，见 fcv2_impl::revCounter 的说明。 */
+    /* The strand is carried in the stream, see the note on fcv2_impl::revCounter. */
     int p0 = counterProb(d->revCounter);
     if (p0 < 1)    p0 = 1;
     if (p0 > 4095) p0 = 4095;
@@ -1058,7 +1159,8 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
     counterUpdate(d->revCounter, !rv);
     bool rev = (rv != 0);
 
-    /* 相邻重复 read 去重：dup=1 时直接拷贝上一条解码出的质量串，跳过本记录。 */
+    /* Adjacent duplicate read dedup: when dup=1, copy the quality string
+       decoded for the previous record directly and skip this record. */
     if (d->cfg.useDedup) {
         int pDup = counterProb(d->dupCounter);
         if (pDup < 1)    pDup = 1;
@@ -1067,7 +1169,9 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
         counterUpdate(d->dupCounter, !isDup);
         if (isDup) {
             if (d->prevQualLen < len) {
-                /* 上一条质量串缺失或过短，属于损坏流；用 '!' 兜底避免越界读。 */
+                /* The previous quality string is missing or too short, a
+                   corrupted stream; fall back to '!' to avoid an out-of-bounds
+                   read. */
                 memset(dst, '!', len);
             } else {
                 memcpy(dst, d->prevQual.data(), len);
@@ -1083,9 +1187,10 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
 
     int prev = d->alphaSize;
     int prev2 = d->alphaSize;
-    int delta = 0;   /* 与编码侧同序维护的 read 内质量跳变次数 */
+    int delta = 0;   /* in-read quality-transition count, maintained in the same order as the encoder */
 
-    /* read 平均质量档：读回编码端写下的 2 bit，作为 m6 上下文。 */
+    /* read average-quality bin: read back the 2 bits written by the encoder,
+       as the m6 context. */
     int qa = 0;
     if (d->cfg.useQa) {
         qa = (d->rc.DecodeBit<12>(2048) << 1) | d->rc.DecodeBit<12>(2048);

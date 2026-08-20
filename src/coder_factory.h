@@ -1,17 +1,23 @@
 /*
- * coder_factory.h - 按类型或 magic 创建编码器/解码器
+ * coder_factory.h - create encoders/decoders by type or magic
  *
- * 在此之前，各个执行器都是直接 new 出具体的编码器类，编码器类型在代码里写死。
- * 预处理阶段（CodecSelector）虽然会试压出每个字段的最优编码器并存进 PreprocessInfo，
- * 但执行器从不去读它，选择结果实际上没有生效。
+ * Previously each actuator directly new'd a concrete encoder class, with the
+ * encoder type hard-coded in the code. The preprocessing phase (CodecSelector)
+ * trial-compressed to find the best encoder per field and stored it in
+ * PreprocessInfo, but actuators never read it, so the selection result never
+ * took effect.
  *
- * 这个工厂把"类型 -> 实例"的映射集中到一处，让执行器可以按预处理的选择结果动态
- * 创建编码器，同时保证任何异常情况下都有可用的兜底。
+ * This factory centralizes the "type -> instance" mapping so actuators can
+ * create encoders dynamically according to the preprocessing result, while
+ * guaranteeing a usable fallback under any abnormal condition.
  *
- * 注意本头文件刻意不包含任何具体编码器的头文件，实现全部放在 coder_factory.cpp。
- * 原因是 coder_fc.h 会间接引入 clr.h，而 coder_qual.h 引入的 qual_model.h 里另有
- * 一个同名但接口不同的 RangeCoder，两者出现在同一个编译单元就会冲突。把实现挪进
- * .cpp 之后，包含本头文件的调用方只会看到声明，不会被这层依赖波及。
+ * Note that this header deliberately includes no concrete encoder headers; all
+ * implementations live in coder_factory.cpp. The reason is that coder_fc.h
+ * brings in clr.h indirectly, while qual_model.h (brought in by coder_qual.h)
+ * has another RangeCoder of the same name but a different interface; the two
+ * conflict when they appear in the same translation unit. After moving the
+ * implementation into the .cpp, callers that include this header only see
+ * declarations and are not affected by that dependency.
  */
 
 #pragma once
@@ -25,64 +31,85 @@
 class CoderFactory {
 public:
     /*
-     * 压缩侧：按预处理选出的类型创建编码器。
+     * Compression side: create an encoder by the type picked during
+     * preprocessing.
      *
-     * 这里必须永远返回一个可用的编码器，不能返回空指针。压缩是单向过程，一旦某个
-     * 字段因为拿不到编码器而被跳过，产出的文件就是残缺的，问题会推迟到解压时才暴露。
-     * 所以无法识别的类型（包括将来新增、但本版本还不认识的类型）一律退回 BWT_CM，
-     * 它是所有字段都能处理的通用编码器，压缩率未必最优但一定正确。
+     * This must always return a usable encoder, never a null pointer.
+     * Compression is a one-way process: if a field is skipped because no encoder
+     * could be obtained, the produced file is incomplete and the problem only
+     * surfaces at decompression time. So unrecognized types (including ones
+     * added in the future but unknown to this version) all fall back to BWT_CM,
+     * a general-purpose encoder that handles every field; its compression ratio
+     * may not be optimal but it is always correct.
      *
-     * CoderType::QUAL 也走这条兜底路径：coder_qual 不继承 coder 基类，构造时还需要
-     * 额外的频率表，没法由本工厂统一创建，质量字段有自己单独的压缩函数。通用字段
-     * 不应该被选成 QUAL（试压候选里根本没有它），万一出现就说明选择结果异常，
-     * 退回 BWT_CM 是安全的。
+     * CoderType::QUAL also goes down this fallback path: coder_qual does not
+     * inherit from the coder base class and also needs an extra frequency table
+     * at construction, so this factory cannot create it uniformly; the quality
+     * field has its own dedicated compression function. Generic fields should
+     * never be picked as QUAL (it is not even in the trial candidates), and if
+     * it ever happens the selection result is anomalous, so falling back to
+     * BWT_CM is safe.
      */
     static std::shared_ptr<coder> makeEncoder(CoderType type, coder_io* io);
 
     /*
-     * 解压侧：按码流里记录的 magic 创建解码器。
+     * Decompression side: create a decoder by the magic recorded in the
+     * bitstream.
      *
-     * 这里和压缩侧相反，必须返回空指针而不是兜底。解压时 magic 是写在文件里的事实，
-     * 表明这段数据当初是用哪个编码器压的。如果不认识这个 magic，说明文件是更新版本
-     * 的 pbgz 写的，或者数据已经损坏。此时随便挑一个编码器去解，只会解出一堆垃圾，
-     * 而且很可能不报错——这比直接失败危险得多。
+     * Unlike the compression side, this must return a null pointer rather than a
+     * fallback. At decompression time the magic is a fact written in the file,
+     * stating which encoder originally compressed this data. If the magic is
+     * unrecognized, the file was written by a newer version of pbgz, or the
+     * data is corrupt. Picking some encoder at random and decompressing with it
+     * would only produce garbage, and most likely without any error — far more
+     * dangerous than failing outright.
      *
-     * 调用方拿到空指针后必须报错中止，不能静默跳过。
+     * On receiving a null pointer the caller must error out and abort; it must
+     * not silently skip.
      */
     static std::shared_ptr<coder> makeDecoder(const std::string& magic, coder_io* io);
 
     /*
-     * 创建编码器之前，把引擎的压缩级别按编码器类型换算成该编码器能接受的 level，
-     * 写入 coder_io 的 meta。编码器构造/首次编码时会读取这个值，并随之写进块 meta
-     * （解码侧按 meta["coder"]["level"] 回放）。
+     * Before creating an encoder, convert the engine's compression level into
+     * the level accepted by that encoder type and write it into coder_io's
+     * meta. The encoder reads this value at construction / first encoding and
+     * writes it into the block meta (the decoding side replays it from
+     * meta["coder"]["level"]).
      *
-     * 目前只有 coder_bwt_cm 真正消费 level（内部 BWT 块大小，0-9），compressLevel
-     * 1-9 与之直接对应；该参数只在编码侧生效，解码侧块大小从码流读出，改它不影响
-     * 兼容。coder_affix_match 虽然也有 level（1-2），但它的解码侧在构造之后才
-     * set_level（不生效，恒为默认 2），编码侧一旦设成 1 就会与解码侧不一致、损坏
-     * 数据，所以保持默认 2、不随 compressLevel 变化。其余编码器（fc/fcv2/qual）
-     * 不消费 level，设置是空操作。
+     * Currently only coder_bwt_cm truly consumes the level (internal BWT block
+     * size, 0-9), to which compressLevel 1-9 maps directly; the parameter only
+     * takes effect on the encoding side, since on the decoding side the block
+     * size is read from the bitstream, so changing it does not affect
+     * compatibility. coder_affix_match also has a level (1-2), but its decoding
+     * side calls set_level only after construction (ineffective, always the
+     * default 2), and once the encoding side sets it to 1 it would disagree
+     * with the decoding side and corrupt data, so it stays at the default 2 and
+     * does not follow compressLevel. The remaining encoders (fc/fcv2/qual) do
+     * not consume the level, so setting it is a no-op.
      */
     static void applyLevel(coder_io* io, CoderType type, uint8_t compressLevel);
 
     /*
-     * 该类型能否由本工厂创建。
+     * Whether this factory can create the given type.
      *
-     * 预处理阶段用它来过滤试压候选：如果某个类型工厂造不出来，就算试压赢了也没法
-     * 在压缩时被真正使用，不如一开始就别参与比较。
+     * Preprocessing uses it to filter trial candidates: if the factory cannot
+     * build a type, even a trial win cannot be actually used at compression
+     * time, so it is better not to include it in the comparison at all.
      */
     static bool canMake(CoderType type);
 
     /*
-     * 某个编码器能否用于指定文件类型的指定字段。
+     * Whether an encoder can be used for a given field of a given file type.
      *
-     * 绝大多数编码器是通用字节流压缩器，放哪个字段上都能跑。少数有额外前置依赖：
-     * fcv2 需要每条记录的长度和链方向，只有比对后的 SAM 的 QUAL 列能提供，用在别处
-     * 拿不到这些信息。预处理试压前先问一句，不适用就不参与比较，免得选出一个实际
-     * 用不了的编码器。
+     * Most encoders are generic byte-stream compressors that work on any field.
+     * A few have extra prerequisites: fcv2 needs each record's length and
+     * strand direction, which only the QUAL column of an aligned SAM provides;
+     * elsewhere that information is unavailable. Ask this question before
+     * trial-compressing so an unusable encoder is not picked.
      *
-     * 这个判断放在这里而不是各编码器自己身上，是因为它要比较 BlockType 和 SamField，
-     * 而 coder 层的编译目标不包含 src 目录，不能反向依赖。
+     * This check lives here rather than on each encoder itself because it
+     * compares BlockType and SamField, and the coder layer's compilation target
+     * does not include the src directory, so it cannot depend upward.
      */
     static bool coderSupports(CoderType type, uint32_t fileType, uint32_t fieldIdx);
 };

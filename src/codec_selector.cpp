@@ -96,8 +96,10 @@ bool trialEncode(const uint8_t* data, uint32_t len, int bwtLevel, uint32_t& outL
 }
 
 /*
- * 按行试压 coder_affix_match。affix 的前后缀匹配发生在相邻两行之间，必须逐行喂，
- * 一次 encode_line 灌进整列会退化成普通上下文模型，测不出它的真实水平。
+ * Trial-compress coder_affix_match line by line. affix's prefix/suffix matching
+ * happens between adjacent lines, so it must be fed line by line; feeding the
+ * whole column in one encode_line call degrades it to an ordinary context model
+ * and fails to measure its real performance.
  */
 bool trialAffixLines(const std::vector<LineSample>& lines, uint32_t& outLen, uint32_t& usec)
 {
@@ -139,14 +141,17 @@ int CodecSelector::pickBwtLevel(uint32_t sampleLen)
 }
 
 /*
- * 领先者需要领先多少才算胜负已分。
+ * How far the leader must be ahead for the winner to be settled.
  *
- * 取压缩后大小的相对差：领先者比次优者小 3% 以上就定案。差距小于这个数时，
- * 换更多样本重测有可能反转，值得再跑一轮；大于这个数基本不会反转。
+ * Uses the relative difference in compressed size: if the leader is more than
+ * 3% smaller than the runner-up, finalize. If the gap is below this, re-testing
+ * with more samples could flip the ranking, so another round is worthwhile;
+ * above this the ranking is unlikely to flip.
  */
 const double SETTLE_MARGIN = 0.03;
 
-/* 评估的起步样本量。太小容易被局部数据带偏，取和最小可信样本一致。 */
+/* Starting sample size for the evaluation. Too small a sample is easily biased
+ * by local data, so it matches the minimum trustworthy sample size. */
 const uint32_t PROBE_START = MIN_SELECT_SAMPLE;
 
 FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len, bool trialAffix,
@@ -160,14 +165,20 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     }
 
     /*
-     * 从小样本起步，每轮加倍，一旦领先者拉开足够差距就收手。
+     * Start from a small sample and double it each round, stopping once the
+     * leader opens up enough of a gap.
      *
-     * 每一轮都是拿新实例重压 [0, probe)，而不是在上一轮的基础上增量喂。这样做有两个
-     * 原因：coder_fc 只支持整块压缩，第二次调用 encode_line 会直接报错；而且重压
-     * 恰好模拟了实际压缩时"一个数据块从头压到尾"的情形，量出来的数字更贴近真实表现。
+     * Each round trial-compresses the fresh range [0, probe) with a new
+     * instance, rather than incrementally feeding on top of the previous round.
+     * There are two reasons: coder_fc only supports whole-block compression, so
+     * a second encode_line call fails outright; and re-compressing mimics how a
+     * block is actually compressed in production ("one data block from start to
+     * finish"), so the measured numbers are closer to real behavior.
      *
-     * 重压带来的额外开销是有界的：样本量按 2 倍递增，所有轮次加起来不超过最后一轮的
-     * 两倍。而多数字段在头一两轮就定案了，实际反而比一次性压满整个采样更省。
+     * The extra cost of re-compression is bounded: the sample doubles each
+     * round, so all rounds together cost no more than twice the last round.
+     * And most fields settle in the first round or two, so in practice this
+     * costs less than compressing the entire sample in one shot.
      */
     uint32_t bwtCmLen = 0, fcLen = 0, affixLen = 0;
     uint32_t bwtCmUs = 0, fcUs = 0, affixUs = 0, outUs = 0, outLen = 0;
@@ -199,15 +210,17 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
         if (!anyOk) {
             break;
         }
-        /* 样本已经用尽，没有更多数据可加，只能就此定案。 */
+        /* The sample is exhausted; there is no more data to add, so settle. */
         if (probe >= len) {
             break;
         }
-        /* 只有一个候选能跑通，再加数据也没有比较对象。 */
+        /* Only one candidate compresses successfully; adding more data gives
+         * nothing to compare against. */
         if (runnerUp == UINT32_MAX) {
             break;
         }
-        /* 领先者已经拉开足够差距，再加数据不会反转。 */
+        /* The leader is far enough ahead that more data will not flip the
+         * ranking. */
         if ((double)(runnerUp - bestLen) / (double)runnerUp >= SETTLE_MARGIN) {
             break;
         }
@@ -215,9 +228,12 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     }
 
     /*
-     * affix 的逐行试压单独做：它是逐行编码器，需要行边界，无法并入上面的整段试压。
-     * 用全部逐行样本压一次（不再做逐轮加倍），和 bwt/fc 的定案结果比较大小定胜负。
-     * lines 为空说明调用方没有提供按行样本，affix 直接弃权。
+     * affix's trial compression is done separately: it is a line-based encoder
+     * that needs line boundaries, so it cannot be merged into the whole-stream
+     * trial above. It compresses all line samples once (without per-round
+     * doubling) and is compared against the settled bwt/fc result by size. If
+     * lines is empty, the caller supplied no line samples, so affix simply
+     * abstains.
      */
     if (trialAffix && lines != nullptr && !lines->empty() &&
         trialAffixLines(*lines, outLen, outUs)) {
@@ -248,11 +264,14 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
 }
 
 /*
- * 从一块中追加采集 QUAL 记录。不清空 records/freqByByte，collectedQualBytes 为进出
- * 累计值，因此既支持"清空后采一次"（extractQualSamples），也支持跨块累积
- * （accumulateQualPrior）。qualBudget 是**总量上限**（不是本次剩余额度）：内部越界
- * 检查为 collectedQualBytes + qualLen > qualBudget，collectedQualBytes 在跨块时是
- * 已累计的总量，传剩余额度会误跳过后续块。
+ * Append QUAL records collected from a block. records/freqByByte are not
+ * cleared, and collectedQualBytes is a running total, so this supports both
+ * "clear then collect once" (extractQualSamples) and cross-block accumulation
+ * (accumulateQualPrior). qualBudget is the **total cap** (not the remaining
+ * budget for this call): the internal bounds check is
+ * collectedQualBytes + qualLen > qualBudget, and since collectedQualBytes is
+ * the accumulated total when spanning blocks, passing a remaining budget would
+ * wrongly skip later blocks.
  */
 namespace {
 void collectQualSamplesInto(RoughIOBlock* block,
@@ -274,7 +293,8 @@ void collectQualSamplesInto(RoughIOBlock* block,
             continue;
         }
 
-        /* 逐个 tab 切出前 11 个必需字段的起止位置。 */
+        /* Split on each tab to locate the start and end of the first 11
+         * required fields. */
         uint32_t beg[SAM_FIELD_COUNT] = {0};
         uint32_t end[SAM_FIELD_COUNT] = {0};
         uint32_t fieldIdx = 0;
@@ -290,22 +310,25 @@ void collectQualSamplesInto(RoughIOBlock* block,
             pos = tabPos + 1;
         }
         if (fieldIdx < SAM_FIELD_COUNT) {
-            continue;   /* 字段不全的行跳过，不参与评估 */
+            continue;   /* skip lines with incomplete fields; they do not take part in evaluation */
         }
 
         uint32_t qBeg = beg[SAM_QUAL], qEnd = end[SAM_QUAL];
         if (qEnd <= qBeg) {
             continue;
         }
-        /* QUAL 为单个 '*' 表示缺失，这类记录没有质量值可压。 */
+        /* A QUAL of a single '*' means the value is missing; such records have
+         * no quality values to compress. */
         if (qEnd - qBeg == 1 && line[qBeg] == '*') {
             continue;
         }
 
         uint32_t qualLen = qEnd - qBeg;
         /*
-         * 只接收完整记录，不能为了凑满上限截断 QUAL：fcv2 依赖真实读长来还原循环位置，
-         * 截断会悄悄训练出错误的上下文。超过上限后不再保留记录，但仍扫描到块尾。
+         * Only accept complete records; do not truncate QUAL to fill the cap:
+         * fcv2 relies on the real read length to recover the cycle position,
+         * and truncation would silently train the wrong context. Records beyond
+         * the cap are not kept, but scanning continues to the end of the block.
          */
         if (collectedQualBytes + qualLen > qualBudget) {
             continue;
@@ -315,7 +338,8 @@ void collectQualSamplesInto(RoughIOBlock* block,
         rec.qual.assign((const char*)(line + qBeg), qualLen);
         rec.seq.assign((const char*)(line + beg[SAM_SEQ]), end[SAM_SEQ] - beg[SAM_SEQ]);
 
-        /* 手工解析 FLAG，取 0x10 位。字段没有以 \0 结尾，不能直接用 strtol。 */
+        /* Manually parse FLAG and extract the 0x10 bit. The field is not
+         * NUL-terminated, so strtol cannot be used directly. */
         long flagVal = 0;
         for (uint32_t p = beg[SAM_FLAG]; p < end[SAM_FLAG]; ++p) {
             uint8_t ch = line[p];
@@ -348,8 +372,10 @@ void CodecSelector::extractQualSamples(RoughIOBlock* block,
 }
 
 /*
- * 把一块的 QUAL 追加进跨块训练累积器。达到 QUAL_PRIOR_TRAIN_MAX 后不再采集；
- * 单块内部同样只收完整记录，超限部分丢弃但不提前停止扫描。
+ * Append a block's QUAL records to the cross-block training accumulator. Once
+ * QUAL_PRIOR_TRAIN_MAX is reached no more are collected; within a single block
+ * only complete records are kept, and over-cap records are dropped without
+ * stopping the scan early.
  */
 void CodecSelector::accumulateQualPrior(RoughIOBlock* block, QualPriorAccum& acc)
 {
@@ -360,17 +386,24 @@ void CodecSelector::accumulateQualPrior(RoughIOBlock* block, QualPriorAccum& acc
         acc.freqByByte.assign(256, 0);
     }
     /*
-     * 预算传总上限 QUAL_PRIOR_TRAIN_MAX：collectQualSamplesInto 内部的越界检查是
-     * collectedQualBytes + qualLen > qualBudget，而 collectedQualBytes 是跨块累计值，
-     * 传"剩余额度"会让已累计量超过剩余量，后续块整块被跳过。
+     * The budget is passed as the total cap QUAL_PRIOR_TRAIN_MAX: the bounds
+     * check inside collectQualSamplesInto is
+     * collectedQualBytes + qualLen > qualBudget, and collectedQualBytes is the
+     * cross-block accumulated value, so passing a "remaining quota" would let
+     * the accumulated amount exceed the remaining one and skip subsequent
+     * blocks entirely.
      */
     collectQualSamplesInto(block, acc.records, acc.freqByByte, UINT32_MAX, QUAL_PRIOR_TRAIN_MAX, acc.collectedBytes);
 }
 
 /*
- * 在累积的 QUAL 上训练 fcv2 先验并导出模型快照。编码器选择仍只用小样本；小样本足以
- * 稳定比较候选，而模型学习需要更多质量值。这里故意只产出快照、不触碰块或文件偏移，
- * 让 coder/ 层继续不知道块和文件偏移，维持既有分层。失败或样本为空返回空向量。
+ * Train the fcv2 prior on the accumulated QUAL and export a model snapshot.
+ * Codec selection still uses only a small sample: a small sample suffices to
+ * compare candidates stably, while model learning needs many more quality
+ * values. This deliberately only produces a snapshot and touches neither blocks
+ * nor file offsets, keeping the coder/ layer unaware of block and file offsets
+ * and preserving the existing layering. Returns an empty vector on failure or
+ * when the samples are empty.
  */
 std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& acc,
                                                         const QualFcv2Params& params,
@@ -390,7 +423,8 @@ std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& ac
     try {
         std::vector<uint8_t> scratch((size_t)trained * 2 + (1u << 16), 0);
         coder_io io(scratch.data(), (int32_t)scratch.size());
-        /* 把 QualSelector 选定的档位翻译成 coder 层参数，保证先验与压缩端一致。 */
+        /* Translate the tier selected by QualSelector into coder-layer
+         * parameters so the prior stays consistent with the compression side. */
         Fcv2Cfg cfg;
         cfg.cycleMax = params.cycleMax;
         cfg.cycleBucket = params.cycleBucket;
@@ -416,7 +450,9 @@ std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& ac
         }
         return snapshot;
     } catch (...) {
-        /* 训练只是可选优化；任意分配或未知数据失败都必须回到无先验的既有压缩路径。 */
+        /* Training is only an optional optimization; any allocation or
+         * unknown-data failure must fall back to the existing prior-less
+         * compression path. */
         return {};
     }
 }
@@ -449,9 +485,12 @@ uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
             }
             fieldBufs[fieldIdx].append((const char*)(line + pos), (size_t)(tabPos - pos));
             /*
-             * affix 逐行试压需要行边界，整列拼起来会丢。这里只记指针不拷贝——
-             * SafeLineReader 返回的是块缓冲内的视图，analyze 期间块内容不变。
-             * 含行尾 tab 与压缩时的喂法一致（见 compressRegularField）。
+             * affix's line-by-line trial compression needs line boundaries,
+             * which are lost when the whole column is concatenated. Only the
+             * pointers are recorded, no copy: SafeLineReader returns views into
+             * the block buffer, and the block contents stay unchanged during
+             * analyze. Including the trailing tab matches how compression feeds
+             * the data (see compressRegularField).
              */
             if (samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH)) {
                 LineSample ls;
@@ -503,25 +542,33 @@ uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
 }
 
 /*
- * 先验值不值得写。
+ * Whether the prior is worth writing.
  *
- * 先验的成本是固定的：一个辅助块，本文件实测打包后约 0.6 MB，与输入多大无关。
- * 收益则是每个块的 QUAL 都省下大致固定的比例，随 QUAL 总量线性增长。一条常数
- * 成本线和一条过原点的收益线必然相交，交点就是盈亏平衡点，低于它写先验一定亏。
+ * The cost of the prior is fixed: one auxiliary block, measured in this file at
+ * about 0.6 MB packed, independent of input size. The benefit is that every
+ * block's QUAL saves a roughly fixed fraction, growing linearly with the total
+ * QUAL volume. A constant cost line and a benefit line through the origin must
+ * intersect; the intersection is the break-even point, and below it writing the
+ * prior is always a loss.
  *
- * 阈值取自 benchmark/HANDSOFF.md 20.14 的实测：QUAL 约 150 MB（对应 SAM 约
- * 540 MB）。此前没有这个判断，等于假定所有文件都在平衡点右侧。
+ * The threshold comes from the measurement in benchmark/HANDSOFF.md section
+ * 20.14: QUAL of about 150 MB (corresponding to SAM of about 540 MB). Before
+ * this check, the code effectively assumed every file sits to the right of the
+ * break-even point.
  *
- * 总量按首块样本里 QUAL 占已扫描原始字节的比例外推。这个比例是记录格式决定的
- * （读长、字段构成），同一文件内部相当稳定，实测外推误差约 1%，而判据是与一个
- * 数量级的阈值比大小，这个精度足够。
+ * The total is extrapolated from the share of QUAL in the scanned raw bytes of
+ * the first block's sample. That share is determined by the record format (read
+ * length, field composition) and is fairly stable within a file; the measured
+ * extrapolation error is about 1%, while the decision compares against a
+ * threshold an order of magnitude away, so this precision is sufficient.
  *
- * 输入长度不可知（管道输入）时按"写"处理：成本有上界且很小，漏写造成的损失却
- * 随文件增大没有上界，两类误判并不对称。
+ * When the input length is unknown (piped input), treat it as "write": the cost
+ * is bounded and small, while the loss from omitting it grows unboundedly with
+ * file size, so the two kinds of misjudgment are not symmetric.
  */
 static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, uint64_t inputTotalBytes)
 {
-    /* QUAL 总量的盈亏平衡点。 */
+    /* Break-even point for the total QUAL volume. */
     const uint64_t QUAL_PRIOR_MIN_TOTAL = 150ull * 1024ull * 1024ull;
 
     if (inputTotalBytes == 0 || scannedBytes == 0) {
@@ -557,23 +604,31 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
         }
         if (f == (uint32_t)SAM_QUAL) {
             /*
-             * 质量值列走专用评估：候选是 coder_qual 和 fcv2，而不是通用的字节流
-             * 压缩器。此前这里比较的是 coder_bwt_cm 和 coder_fc，而压缩时用的是
-             * 另外两个，选出来的结果实际上没有被使用。
+             * The quality-value column goes through dedicated evaluation: the
+             * candidates are coder_qual and fcv2, not generic byte-stream
+             * compressors. Previously this compared coder_bwt_cm and coder_fc,
+             * while compression used the other two, so the selection result was
+             * never actually used.
              */
             std::vector<QualSampleRecord> qualRecs;
             std::vector<uint32_t> qualFreq;
             /*
-             * 质量值选型扫整块而不是 4MB：fcv2 是自适应上下文混合器，小样本下还没收敛
-             * 会被低估（实测 970KB 样本 48.27%，整块 7.7MB 时 48.33% 已反超 bwt_cm），
-             * 只有让它在真实数据量下参与比较，选出来的 coder 才对得上实际压缩。
+             * Quality-value selection scans the whole block instead of 4 MB:
+             * fcv2 is an adaptive context mixer and is underestimated on small
+             * samples before it converges (measured 48.27% on a 970 KB sample;
+             * at 7.7 MB, 48.33%, already beating bwt_cm). Only by letting it
+             * compete at real data volumes does the chosen coder match actual
+             * compression.
              */
             extractQualSamples(block, qualRecs, qualFreq,
                                (uint32_t)block->getDataLen(), QUAL_PRIOR_TRAIN_MAX);
             info.fields[f] = QualSelector::select(qualRecs, qualFreq);
             /*
-             * 先验值得训练就记下请求，实际训练推迟到读线程读完预训练块之后跨块累积
-             * 完成再执行（见 CompressEngine）。这里只产出决策，不在这里训练。
+             * If the prior is worth training, record the request; the actual
+             * training is deferred until the read thread finishes the
+             * pre-training blocks and the cross-block accumulation is complete
+             * (see CompressEngine). This only produces the decision; training is
+             * not done here.
              */
             if (info.fields[f].status == FieldStatus::SELECTED &&
                 info.fields[f].selectedCoder == CoderType::FCV2 &&
@@ -583,8 +638,10 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             continue;
         }
         /*
-         * 该字段试压哪些候选编码器由配置表决定（field_coder_config.h）。
-         * 候选为空表示字段走固定策略（PNEXT/TLEN 的差值/推算），不参与通用选择。
+         * Which candidate coders are tried for a field is decided by the config
+         * table (field_coder_config.h). An empty candidate list means the field
+         * uses a fixed strategy (PNEXT/TLEN differencing/inference) and does not
+         * take part in the generic selection.
          */
         const FieldCoderConfig* cfg = samFieldCoderConfig(f);
         if (cfg == nullptr || cfg->candidates.empty()) {

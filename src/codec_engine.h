@@ -99,7 +99,7 @@ protected:
     Reference* pRefGene;
     PbgzFileMeta baseFileMeta;
     PbgzFileMeta dynamicFileMeta;
-    // 写线程补 refe.offset 与尾部线程补参考统计会并发改同一 JSON，必须共用此锁。
+    // The writer thread filling in refe.offset and the tail thread accumulating reference statistics concurrently modify the same JSON, so they must share this lock.
     std::mutex dynamicFileMetaMutex;
     bool refeOffsetFLag;
 

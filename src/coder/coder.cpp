@@ -25,10 +25,13 @@
 #include "coder_fc.h"
 
 /*
- * 四个回调原先默认是空指针, 只在构造引擎时才绑定。于是任何不经引擎的入口(例如显式
- * 建参考索引)一走到编解码层就拿到空实现: safe_alloc 返回 nullptr 当场抛异常,
- * safe_free 更是直接静默泄漏。依赖不该由调用顺序来保证, 这里给出自足的默认实现,
- * 注册随之退化为可选的覆盖。
+ * The four callbacks used to default to null pointers and were only bound when
+ * the engine was constructed. As a result, any entry point that bypasses the
+ * engine (e.g., explicitly building a reference index) would reach the codec
+ * layer with empty implementations: safe_alloc returned nullptr and threw on the
+ * spot, and safe_free simply leaked silently. Dependencies should not be
+ * guaranteed by call order; self-sufficient defaults are provided here, and
+ * registration degrades to an optional override.
  */
 static uint8_t* defaultAllocProc(size_t size) {
     return size > 0 ? static_cast<uint8_t*>(calloc(size, 1)) : nullptr;
@@ -154,8 +157,10 @@ void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...) 
 }
 
 /*
- * 不再调用 exit_proc / exit()：错误改为异常上抛，由调用方（PbgzEngine 的单块
- * 处理边界）捕获后走正常的失败返回路径，保证每一个错误最终都有人处理。
+ * No longer calls exit_proc / exit(): errors are thrown as exceptions instead
+ * and caught by the caller (PbgzEngine's single-block processing boundary),
+ * which then follows the normal failed-return path, ensuring every error is
+ * eventually handled.
  */
 void coder_exit(int16_t exit_code, const char* exit_msg_format, ...) {
     char exit_message[2048];

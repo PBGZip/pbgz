@@ -69,9 +69,10 @@ void CodecEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outBlock
 void CodecEngine::writeBlockPreProc(BlockWriter*, RoughIOBlock* outBlockPtr) {
     if (outBlockPtr->getBlockType() == REFERENCE) {
         /*
-         * 该钩子必须由写线程在 blockId 排序之后、writeBlock 之前调用。
-         * 若在 outputDataPool 入队时取偏移，前序正文块可能尚未落盘，
-         * refe.offset 就会随工作线程调度改变，进而改变动态元数据。
+         * This hook must be called by the writer thread after blockId sorting and
+         * before writeBlock. If the offset were captured at outputDataPool enqueue time,
+         * the preceding data blocks might not be on disk yet, so refe.offset would vary
+         * with worker-thread scheduling and in turn alter the dynamic metadata.
          */
         FileWriter* fileWriter =  dynamic_cast<FileWriter*>(ioWriter);
         if (fileWriter != nullptr) {

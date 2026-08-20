@@ -383,7 +383,7 @@ int32_t SamCodecActuator::preAnalysis() {
                     } else if (linePos.size() == 10) {  // Quality value is the 11th field
                         uint32_t qualityLen = i - linePos.at(9) - 1;
                         if (baseLen != qualityLen) {
-                            /* QUAL 为单个 '*' 表示缺失质量，长度不必等于 SEQ 长度 */
+                            /* A QUAL of a single '*' denotes missing quality; its length need not equal the SEQ length */
                             const bool missingQual = (qualityLen == 1 &&
                                                       line.at(linePos.at(9) + 1) == '*');
                             if (!missingQual) {
@@ -596,11 +596,14 @@ int32_t SamCodecActuator::compressSamByFields() {
                     fieldDstLen = compressIdFieldInAll(fieldSrcLen, fieldMeta);
                 } else {
                     /*
-                     * QNAME 试压选型：affix 分段 vs coder_qname（跨行去重）。
-                     * 多 FASTQ 拼接（前缀交替、数字全局随机）时 qname 更优；
-                     * 单 FASTQ（前缀恒定、片段号局部有序）时 affix 的相邻共享前缀
-                     * 更优。两个编码器各对前 QNAME_TRIAL_LINES 行试压、回滚，取
-                     * 实测较小者，再正式全量编码。
+                     * QNAME trial-based selection: affix segmentation vs
+                     * coder_qname (cross-line deduplication). For concatenated
+                     * FASTQs (alternating prefixes, globally random numbers)
+                     * qname wins; for a single FASTQ (constant prefix, locally
+                     * ordered fragment numbers) affix's shared adjacent prefixes
+                     * win. Both coders run a trial on the first QNAME_TRIAL_LINES
+                     * lines and are rolled back; the one with the smaller
+                     * measured output is used for the full encoding.
                      */
                     const uint32_t QNAME_TRIAL_LINES = 20000;
                     const int64_t startLen = outBlockPtr->getDataLen();
@@ -632,8 +635,10 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 3: // POS
                 /*
-                 * POS 按与上一行 POS 的差值压缩。实测差分约 0.34 B/行，优于定宽二进制
-                 * （1.00 B/行）和文本 affix（0.53 B/行）。固定走差分路径，不参与编码器选择。
+                 * POS is compressed as the delta against the previous line's POS.
+                 * Empirically ~0.34 B/line, better than fixed-width binary
+                 * (1.00 B/line) and textual affix (0.53 B/line). Always uses the
+                 * delta path; not subject to coder selection.
                  */
                 fieldDstLen = compressPosFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
@@ -652,18 +657,24 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 7: // PNEXT
                 /*
-                 * PNEXT 按与 POS 的差值压缩。连续行的差值远小于原始坐标，实测
-                 * bwt_cm 压差值文本约 0.86 bytes/line，远好于压原始 PNEXT 或 affix。
-                 * 试压选择基于的是原始 PNEXT 文本，和这里实际采用的差值编码不一致，
-                 * 所以该字段固定走差值路径，不参与编码器选择。
+                 * PNEXT is compressed as the delta against POS. The deltas of
+                 * consecutive lines are far smaller than the raw coordinates;
+                 * empirically bwt_cm compresses the delta text to ~0.86
+                 * bytes/line, far better than compressing raw PNEXT or affix.
+                 * The trial-based selection is based on raw PNEXT text, which
+                 * does not match the delta encoding actually used here, so this
+                 * field always takes the delta path and is excluded from coder
+                 * selection.
                  */
                 fieldDstLen = compressPNextFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 8: // TLEN
                 /*
-                 * TLEN 不存原值：解压时按 POS/PNEXT/CIGAR 推算，只对推算不上的行
-                 * 存异常。CIGAR/FLAG/RNAME/RNEXT/POS/PNEXT 都在本字段之前压缩，
-                 * 推算所需的跟踪 map 已就绪。
+                 * TLEN is not stored verbatim: it is reconstructed from
+                 * POS/PNEXT/CIGAR on decompression, storing exceptions only for
+                 * lines that cannot be reconstructed. CIGAR/FLAG/RNAME/RNEXT/
+                 * POS/PNEXT are all compressed before this field, so the
+                 * tracking maps needed for reconstruction are already populated.
                  */
                 fieldDstLen = compressTLen<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
@@ -772,7 +783,7 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
             length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", pNextDelta);
             fieldSrcLen += fieldLength;
         } else {
-            /* 空/异常值按差值为 0 处理。 */
+            /* Empty/invalid values are treated as a delta of 0. */
             length = snprintf((char*)buff, sizeof(buff), "0\t");
             fieldSrcLen += 2;
         }
@@ -837,7 +848,7 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
             fieldSrcLen += fieldLength;
             prevPos = posValue;
         } else {
-            /* 空/异常值按差值为 0 处理。 */
+            /* Empty/invalid values are treated as a delta of 0. */
             mappedPos[lineIdx] = 0;
             length = snprintf((char*)buff, sizeof(buff), "0\t");
             fieldSrcLen += 2;
@@ -973,7 +984,7 @@ int32_t SamCodecActuator::compressIdFieldQname(uint32_t& fieldSrcLen, Json::Valu
         }
         uint32_t contentId = lineIdx - headEndLine;
         uint8_t* idStart = buffer + lineStart;
-        /* QNAME 字段到第一个 tab 为止（含 tab，与 compressIdFieldInAll 一致）。 */
+        /* The QNAME field runs up to the first tab (inclusive, consistent with compressIdFieldInAll). */
         uint32_t idLength = contentPos[contentId][0] + 1;
         qnameCoder->encode_line(idStart, idLength);
         fieldSrcLen += idLength;
@@ -1181,10 +1192,12 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
             fieldSrcLen += fieldLength;
 
             /*
-             * FLAG/POS/PNEXT 被以文本形态（affix）压缩时，这里的跟踪 map 必须照常
-             * 填好：compressBaseWithRef 在 SEQ 阶段要靠 mappedPos/mappedChr/mappedFlag
-             * 还原参考位置，解压侧也要靠它们还原。二进制形态在 compressNumber 里填，
-             * 文本形态在这里填，两边保持一致。
+             * When FLAG/POS/PNEXT are compressed in textual form (affix), the
+             * tracking maps must still be filled here: compressBaseWithRef
+             * relies on mappedPos/mappedChr/mappedFlag to restore reference
+             * positions in the SEQ phase, and the decompression side does too.
+             * The binary form fills them in compressNumber; the textual form
+             * fills them here, keeping both sides consistent.
              */
             if (fieldLength > 1 && (fieldIdx == 1 || fieldIdx == 3 || fieldIdx == 7)) {
                 std::string str = std::string((char*)fieldStart, fieldLength - 1);
@@ -1223,22 +1236,25 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
 }
 
 /*
- * OPTION 字段（第 12 列起的全部 tag）按 CRAM 式 tag 列化压缩。
+ * The OPTION field (all tags starting at column 12) is compressed by CRAM-style
+ * tag columnization.
  *
- * 思路：OPTION 文本 = 恒定的 tag 结构（名字/冒号/类型）+ 变化的值。通用字节流压缩
- * （affix/bwt）靠前缀匹配吃掉 tag 结构，但值仍按文本数字存，浪费一半。这里把结构
- * 和值分开：
- *   1. 块内建 tag 字典（name+type 各一次）。
- *   2. 每条记录只存 tag 的 id 序列（顺序）。
- *   3. 每个 tag 的值单独成列：整数按 delta + 定宽二进制，其余按长度前缀字节流。
- *   4. 各列各自走 bwt_cm。
+ * Idea: OPTION text = constant tag structure (name/colon/type) + varying
+ * values. Generic byte-stream compression (affix/bwt) absorbs the tag structure
+ * via prefix matching, but values are still stored as decimal text, wasting
+ * roughly half. Here the structure and the values are separated:
+ *   1. Build a per-block tag dictionary (each name+type stored once).
+ *   2. Each record stores only its sequence of tag ids (in order).
+ *   3. Each tag's values form a separate column: integers as delta +
+ *      fixed-width binary, the rest as length-prefixed byte streams.
+ *   4. Each column is compressed independently with bwt_cm.
  */
 int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
 
-    /* 逐行解析 OPTION，建 tag 字典 + 每行 id 序列 + 每 tag 值列。 */
+    /* Parse OPTION line by line: build the tag dictionary, each line's id sequence, and each tag's value column. */
     std::vector<std::pair<std::string, std::string>> tagDict;
     std::map<std::string, int> tagId;
     std::vector<std::vector<uint8_t>> recIds;
@@ -1320,12 +1336,14 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
     }
 
     /*
-     * 所有列都按"逐行 + 分隔符"编码，用 bwt_cm 逐行方式压缩。
-     * 不能用一次性大块：bwt_cm 对近恒定大块（id 序列几乎恒定、整数列 delta 几乎全 0）
-     * 解码会挂，而逐行 + '\n' 分隔是验证过不挂的用法。
+     * Every column is encoded as "line by line + delimiter" and compressed with
+     * bwt_cm's line-wise mode. A single large blob must not be used: bwt_cm
+     * fails to decode near-constant large blobs (id sequences almost constant,
+     * integer columns with deltas almost all 0), whereas line-wise encoding with
+     * '\n' delimiters is a verified working usage.
      */
 
-    /* id 列：每条记录一行，id 逗号分隔，行尾 '\n'。 */
+    /* id column: one line per record, ids comma-separated, line terminated by '\n'. */
     {
         std::vector<uint8_t> idStream;
         for (size_t r = 0; r < recIds.size(); ++r) {
@@ -1342,7 +1360,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
         size_t pos = 0;
         for (size_t r = 0; r < recIds.size(); ++r) {
-            /* 逐行喂，保持 bwt_cm 行模式语义。 */
+            /* Feed line by line to preserve bwt_cm's line-mode semantics. */
             size_t start = pos;
             while (pos < idStream.size() && idStream[pos] != '\n') pos++;
             pos++;
@@ -1360,7 +1378,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         totalDst += io->data_len;
     }
 
-    /* 各 tag 值列：每值一行，行尾 '\n'（SAM 值不含 '\n'）。整数列按文本存，绕开 bwt 大块缺陷。 */
+    /* Each tag value column: one value per line, terminated by '\n' (SAM values never contain '\n'). Integer columns are stored as text to avoid the bwt large-blob defect. */
     for (uint32_t t = 0; t < nTag; ++t) {
         const std::vector<std::string>& vals = tagVals[t];
         std::vector<uint8_t> col;
@@ -1441,7 +1459,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
         } else {
             uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
             baseLengthBuffer[lineIdx - headEndLine] = sequeceLength;
-            /* 参考跨度供 TLEN 推算（field 8 在本字段之后压缩）。 */
+            /* Reference span for TLEN reconstruction (field 8 is compressed after this field). */
             cigarReadLen[lineIdx] = parseCigarRefConsumed(fieldStart, fieldLength);
         }
 
@@ -1475,7 +1493,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
 }
 
 uint32_t SamCodecActuator::parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength) {
-    /* 只统计消耗参考序列的 CIGAR 操作：M/D/N/=/X（含小写）。 */
+    /* Counts only CIGAR operations that consume reference sequence: M/D/N/=/X (including lowercase). */
     if (cigarString == nullptr || cigarLength == 0) {
         return 0;
     }
@@ -1504,20 +1522,22 @@ uint32_t SamCodecActuator::parseCigarRefConsumed(uint8_t* cigarString, uint32_t 
 }
 
 /*
- * 按 SAM 规范推算 TLEN：
- *   |TLEN| = 最右 mapped base - 最左 mapped base + 1
- * 左侧片段为正、右侧片段为负。pos < pnext 时本读在左，右端 = pnext + 伙伴参考跨度 - 1；
- * pos > pnext 时本读在右，左端 = pos，模板长为负。
+ * Reconstruct TLEN per the SAM spec:
+ *   |TLEN| = rightmost mapped base - leftmost mapped base + 1
+ * The left fragment is positive and the right one negative. When pos < pnext,
+ * this read is on the left and the right end = pnext + mate reference span - 1;
+ * when pos > pnext, this read is on the right, the left end = pos, and the
+ * template length is negative.
  */
 int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
-    /* 非配对（FLAG bit0）或任一端未比对（bit2/bit3），TLEN 定为 0。 */
+    /* Not paired (FLAG bit 0) or either end unmapped (bits 2/3): TLEN is set to 0. */
     auto flagIt = mappedFlag.find(lineIdx);
     if (flagIt == mappedFlag.end() || !(flagIt->second & 0x1) ||
         (flagIt->second & 0x4) || (flagIt->second & 0x8)) {
         return 0;
     }
 
-    /* 参照序列不可用或伙伴在不同参照上，TLEN 定为 0。 */
+    /* Reference sequence unavailable or mate on a different reference: TLEN is set to 0. */
     auto chrIt = mappedChr.find(lineIdx);
     if (chrIt == mappedChr.end() || chrIt->second == 0xFFFF) {
         return 0;
@@ -1542,11 +1562,11 @@ int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
     }
     int64_t pnext = pnextIt->second;
 
-    /* 本读的参考跨度来自 CIGAR。 */
+    /* This read's reference span comes from CIGAR. */
     auto readLenIt = cigarReadLen.find(lineIdx);
     uint32_t refSpan = (readLenIt != cigarReadLen.end()) ? readLenIt->second : 0;
 
-    /* 伙伴跨度通过 (pnext, pos) 反查完整索引；找不到按 0 处理（跨度缺失只损失压缩率）。 */
+    /* The mate's span is looked up in the full index via (pnext, pos); if not found, 0 is used (a missing span only hurts the compression ratio). */
     uint32_t mateRefSpan = 0;
     auto mateIt = tlenMateIndex.find(std::make_pair(pnext, pos));
     if (mateIt != tlenMateIndex.end()) {
@@ -1558,11 +1578,16 @@ int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
 
     int64_t templateLen;
     /*
-     * TLEN 的模板长度约定因比对工具而异，恰好相差 1：
-     *   bwa 写的是 右端pos + 右端读长 - 左端pos - 1（minusOne=true）
-     *   minimap2 写的是 右端pos + 右端读长 - 左端pos     （minusOne=false）
-     * 没有哪个是"标准"，必须按块自适应选（compressTLen 里统计哪种匹配更多）。
-     * 选错约定会让 99%+ 的记录被判为异常，异常流退化为存全量 TLEN。
+     * The template-length convention for TLEN varies by aligner, differing by
+     * exactly 1:
+     *   bwa writes right-end pos + right-read length - left-end pos - 1
+     *       (minusOne=true)
+     *   minimap2 writes right-end pos + right-read length - left-end pos
+     *       (minusOne=false)
+     * Neither is "standard", so it must be chosen adaptively per block
+     * (compressTLen counts which convention matches more records). Choosing the
+     * wrong convention marks 99%+ of records as exceptions, degenerating the
+     * exception stream into storing full TLEN values.
      */
     const int64_t conv = minusOne ? 1 : 0;
     if (pos < pnext) {
@@ -1586,10 +1611,10 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
     uint32_t totalSrcLen = 0;
     uint32_t totalDstLen = 0;
 
-    /* 推算不上的行存 (相对行号, 实际值)。 */
+    /* Lines that cannot be reconstructed store (relative line number, actual value). */
     std::vector<std::pair<uint32_t, int32_t>> tlenExceptions;
 
-    /* POS/PNEXT 已在前面字段压好，这里建完整伙伴索引。 */
+    /* POS/PNEXT are already compressed in earlier fields; build the full mate index here. */
     tlenMateIndex.clear();
     for (const auto& entry : nextMappedPos) {
         auto posIt2 = mappedPos.find(entry.first);
@@ -1600,8 +1625,10 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
     }
 
     /*
-     * 第一遍：统计两种模板长度约定（bwa 减 1 / minimap2 不减）分别匹配多少记录，
-     * 取匹配多的那个作为本块约定。约定存进 meta，解压侧照读。
+     * First pass: count how many records each template-length convention
+     * matches (bwa minus 1 / minimap2 plain); the one with more matches is
+     * chosen as this block's convention. The convention is stored in meta for
+     * the decompression side.
      */
     uint64_t convMinus1 = 0, convPlain = 0;
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
@@ -1628,7 +1655,7 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
     LOG_INFO("TLEN convention: minusOne=%d (matches %llu vs %llu)",
              (int)minusOne, (unsigned long long)convMinus1, (unsigned long long)convPlain);
 
-    /* 第二遍：按选定的约定收集推不上的行。 */
+    /* Second pass: collect the lines that cannot be reconstructed under the chosen convention. */
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
@@ -1704,7 +1731,7 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
     fieldSrcLen = 0;
-    /* 按实际块数据长度预分配（SAM 数据块可能按 read 行数分块而超过 byte block_size）。 */
+    /* Pre-allocate by the actual block data length (SAM blocks may be split by read count and exceed the byte block_size). */
     std::unique_ptr<uint8_t[]> tmpBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen());
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
@@ -1986,9 +2013,11 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     fieldMeta["streams"] = metaStreams;
     fieldMeta["field"] = fieldIdx;
     /*
-     * 只修正 fieldSrcLen：SEQ 列原始大小 = 匹配流源长（srcLen，即各记录 SEQ 文本
-     * 总长，与 QUAL 列口径一致）；npos/baselen 辅助流不计入。meta 的 totalsrclen
-     * 保持原样（含辅助流）。
+     * Only fieldSrcLen is corrected: the SEQ column's raw size = the match
+     * stream's source length (srcLen, i.e. the total SEQ text length across
+     * records, matching the QUAL column's accounting); the npos/baselen
+     * auxiliary streams are excluded. meta's totalsrclen is kept as is (it
+     * includes the auxiliary streams).
      */
     fieldSrcLen = (uint32_t)srcLen;
 
@@ -2007,14 +2036,20 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
 
     /*
-     * 质量值可以用两种编码器。coder_qual 是原有的，以 SEQ 为上下文；fcv2 是上下文
-     * 混合编码器，以前一个和前两个质量值、记录内的测序循环序号、链方向为上下文。
+     * Quality values can use two coders. coder_qual is the original one and uses
+     * SEQ as context; fcv2 is a context-mixing coder that uses the previous and
+     * second-previous quality values, the in-record sequencing-cycle number, and
+     * the strand direction as context.
      *
-     * 用哪一个由预处理阶段的试压结果决定。质量值列走的是专用评估路径
-     * （QualSelector），候选就是这两个，样本按记录采集因而保留了记录边界和链方向。
+     * Which one is used is decided by the preprocessing trial results. The
+     * quality column goes through a dedicated evaluation path (QualSelector),
+     * whose two candidates are these coders; samples are collected per record
+     * and therefore preserve record boundaries and strand direction.
      *
-     * 预处理没跑成、样本太小被跳过、或者当前引擎不提供预处理信息时，coderFor 返回
-     * 传入的兜底类型 QUAL，也就是沿用原有的 coder_qual，行为与接通选择之前一致。
+     * When preprocessing did not run, was skipped because the sample was too
+     * small, or the current engine provides no preprocessing information,
+     * coderFor returns the passed-in fallback QUAL, i.e. the original
+     * coder_qual, behaving exactly as before selection was wired in.
      */
     int64_t qualPriorAddress = -1;
     CoderType pickedQualCoder = CoderType::QUAL;
@@ -2030,9 +2065,11 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     std::shared_ptr<coder_bwt_cm> qualCmCoder;
     if (useFcv2) {
         /*
-         * 预处理若选中 fcv2，会把上下文参数档位一并交出来；编码端用与先验训练相同的
-         * 档位创建编码器，档位本身还会写进码流头部，解码端自行读回。未接通预处理时
-         * 退回默认档位，与冷启动行为一致。
+         * If preprocessing picks fcv2, it also hands over the context parameter
+         * tier; the encoding side creates the coder with the same tier used for
+         * prior training, and the tier is written into the stream header for the
+         * decoding side to read back. Without preprocessing, it falls back to
+         * the default tier, consistent with cold-start behavior.
          */
         Fcv2Cfg fcv2Cfg;
         const FieldCodecSelection* qualSel =
@@ -2051,18 +2088,25 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
         for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
             uint32_t b = (uint32_t)qualFreqTable[i].first + (uint32_t)'!';
             if (b < 256) {
-                /* qualFreqTable 只保留了按频率降序的字母表，实际计数没有留下来，
-                   这里用排名折算出一个单调递减的权重，仅用于确定哈夫曼树形状。 */
+                /* qualFreqTable keeps only the alphabet in frequency-descending
+                   order; the actual counts were not retained. A monotonically
+                   decreasing weight is derived from the rank here, used only to
+                   shape the Huffman tree. */
                 freqByByte[b] = (uint32_t)(qualFreqTable.size() - i);
             }
         }
         /*
-         * 有先验就从先验起步：模型不必从固定初值重新学，块越小收益越明显。
-         * 先验的绝对地址要一并写进块 meta——解码方只有拿到同一份快照才能对上，
-         * 而它在随机读场景下无法沿着顺序流推断出这个地址。
+         * When a prior exists, start from it: the model need not relearn from
+         * fixed initial values, and the gain is larger for smaller blocks. The
+         * prior's absolute address must be written into the block meta—the
+         * decoding side can only match up if it obtains the same snapshot, and
+         * in random-access scenarios it cannot infer this address by walking the
+         * sequential stream.
          *
-         * 加载失败在压缩侧是良性回退（保留固定初值模型，仅损失压缩率），
-         * 所以只有 loaded 为真时才登记地址，避免给解码方一个它无法兑现的承诺。
+         * A load failure on the compression side is a benign fallback (the
+         * fixed-initial model is kept, only the ratio suffers), so the address
+         * is registered only when loaded is true, avoiding a promise the
+         * decoding side cannot honor.
          */
         qualPriorAddress = (pbgzEngine != nullptr) ? pbgzEngine->getQualPriorAddress() : -1;
         AuxPayloadPtr priorBlob =
@@ -2079,8 +2123,9 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
         }
     } else if (useBwtCm) {
         /*
-         * bwt_cm 不需要字母表，也不需要 SEQ 或链方向，逐条喂质量值即可。
-         * 它是 fcv2 不适用时的第二顺位：实测比 coder_qual 好 7.4 个百分点。
+         * bwt_cm needs no alphabet and no SEQ or strand direction; feed quality
+         * values record by record. It is the second choice when fcv2 does not
+         * apply: empirically 7.4 percentage points better than coder_qual.
          */
         qualCmCoder = std::make_shared<coder_bwt_cm>(qualityIo.get());
         CoderFactory::applyLevel(qualityIo.get(), CoderType::BWT_CM, engineCompressLevel());
@@ -2129,9 +2174,12 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
         }
 
         /*
-         * 缺失质量（单个 '*'）的读：按 SEQ 长度展开成等长 '*' 再进码流，否则每条记录
-         * 进码流的长度（1）与解压侧按 SEQ/CIGAR 长度（seqLen）取回对不上，整条质量列
-         * 会错位。解码侧再折叠回单个 '*'（见 decompressQuality）。
+         * Reads with missing quality (a single '*'): expand into seqLen '*'
+         * before entering the stream; otherwise the per-record stream length (1)
+         * would not match what the decompression side fetches by SEQ/CIGAR
+         * length (seqLen), and the whole quality column would shift out of
+         * alignment. The decode side folds it back into a single '*' (see
+         * decompressQuality).
          */
         if (qualLength == 1 && qualStart[0] == '*' && seqLen > 0) {
             qualMissingBuf.assign(seqLen, '*');
@@ -2141,10 +2189,13 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
 
         if (useFcv2) {
             /*
-             * 从 FLAG 字段取链方向。按 SAM 规范，0x10 置位表示 SEQ 和 QUAL 在文件里
-             * 是相对参考正链存放的，也就是相对测序仪读出顺序已经反转，编码器需要据此
-             * 还原真实的循环序号。这里手工解析而不是用 strtol，是因为字段没有以 \0
-             * 结尾，且这是每条记录都会走到的热路径。
+             * Take the strand direction from the FLAG field. Per the SAM spec,
+             * bit 0x10 being set means SEQ and QUAL are stored relative to the
+             * reference's forward strand, i.e. reversed relative to the order
+             * read out by the sequencer, and the coder must use this to restore
+             * the real cycle number. The field is parsed by hand rather than
+             * with strtol because it is not NUL-terminated and this is a hot
+             * path taken for every record.
              */
             bool rev = false;
             if (contentPos[contentIdx].size() > 1) {
@@ -2186,7 +2237,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     subMeta["dstlen"] = qualityIo->data_len;
     subMeta["coder"] = qualityIo->meta;
     if (qualPriorAddress >= 0) {
-        /* 先验块容器头的绝对文件偏移，解码方凭它取回同一份快照。 */
+        /* Absolute file offset of the prior block container header; the decoding side uses it to retrieve the same snapshot. */
         subMeta["prior"] = (Json::Value::Int64)qualPriorAddress;
     }
     streamMeta.append(subMeta);
@@ -2221,7 +2272,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     subMeta["streamname"] = "qualityfreq";
     streamMeta.append(subMeta);
 
-    /* 频率表辅助流仍计入 meta 的 totalsrclen（保持原有口径）。 */
+    /* The frequency-table auxiliary stream still counts toward meta's totalsrclen (original accounting preserved). */
     totalSrcLength += freqSrcLen;
     totalDstLength += qualityFreqIo->data_len;
 
@@ -2232,23 +2283,32 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     fieldMeta["field"] = fieldIdx;
 
     /*
-     * 只修正 fieldSrcLen：QUAL 列原始大小 = 质量值文本总长（streamSrcLen），
-     * 频率表辅助流不计入；meta 的 totalsrclen 保持原样（含 freqSrcLen）。
+     * Only fieldSrcLen is corrected: the QUAL column's raw size = total length
+     * of the quality text (streamSrcLen); the frequency-table auxiliary stream
+     * is excluded. meta's totalsrclen is kept as is (it includes freqSrcLen).
      */
     fieldSrcLen = streamSrcLen;
 
     /*
-     * verbose 模式下逐块打印本块 QUAL 到底走了哪一路编码器、以及本块自己的压缩率。
+     * In verbose mode, print per block which coder this block's QUAL actually
+     * took, along with this block's own compression ratio.
      *
-     * 为什么必须在这里做：QUAL 的选择是"预处理阶段一次决定、后续所有块沿用"的模式，
-     * 但一次压缩里有 ~10 个线程并发压不同的块，最终日志只有一行汇总，光看那一行没
-     * 办法确认每个块真的都走了预期的编码器，也没法看到块与块之间压缩率的抖动。
+     * Why it must be done here: QUAL selection follows a "decided once in
+     * preprocessing, reused by all subsequent blocks" pattern, but a single
+     * compression run has ~10 threads compressing different blocks
+     * concurrently, and the final log is a single summary line—looking at just
+     * that line you cannot confirm each block really used the expected coder,
+     * nor see the ratio jitter between blocks.
      *
-     * 三点约束：
-     *   1. 只在 verbose=true 时输出，非 verbose 时保持默认输出字节级一致；
-     *   2. 必须整行一次 fprintf 打完，因为多线程并发写 stderr，拆成多次调用会互相
-     *      穿插，肉眼没法读；单次 fprintf 写入内核缓冲区通常是原子的；
-     *   3. totalSrcLength 为 0 时直接把比例置 0，避免除零。
+     * Three constraints:
+     *   1. Only output when verbose=true; otherwise keep the default output
+     *      byte-identical;
+     *   2. Each line must be emitted with a single fprintf call, because
+     *      multiple threads write to stderr concurrently and splitting into
+     *      several calls would interleave and become unreadable; a single
+     *      fprintf write into the kernel buffer is usually atomic;
+     *   3. When totalSrcLength is 0, set the ratio directly to 0 to avoid
+     *      division by zero.
      */
     if (pbgzEngine != nullptr && pbgzEngine->getParameter().verbose) {
         const double qualRatio = (totalSrcLength == 0)
@@ -2294,20 +2354,27 @@ int32_t SamCodecActuator::decompress() {
     initMetaInfo();
 
     /*
-     * 块入口预分配：按文件头的 block_size（压缩时确定的上界）×2 保证输出缓冲够——
-     * 确定值，不是估算，不受 fieldcount/读长影响。堵所有字段越界的主防线。
-     * block_size 从 baseFileMeta 读回（DecompressEngine::createBlockReader），此刻
-     * 已就绪；为 0（老文件没写）时落回默认 getBlockSize()。
-     * coder_io 的 putc 检查与 decode 错误返回链作兜底（见 decompressQuality 等）。
+     * Pre-allocate at the block entry: the file header's block_size (the upper
+     * bound fixed at compression time) x2 guarantees a large enough output
+     * buffer—a deterministic value, not an estimate, unaffected by
+     * fieldcount/read length. This is the primary defense against
+     * out-of-bounds writes across all fields. block_size is read back from
+     * baseFileMeta (DecompressEngine::createBlockReader) and is already
+     * available here; when it is 0 (old files that did not write it), fall back
+     * to the default getBlockSize(). coder_io's putc checks and the decode
+     * error-return chain act as a backstop (see decompressQuality et al.).
      */
     size_t bs = pbgzEngine->getFileBlockSize();
     if (bs == 0) {
         bs = ConfigManager::getInstance().getBlockSizeByCompressLevel(pbgzEngine->getParameter().compressLevel);
     }
     /*
-     * 输出缓冲按"块大小上界 ×2"与"本块实际数据长度"取大预分配：SAM 数据块可能按 read
-     * 行数分块而超过 byte block_size（如 -l 1 时 10000 read ≈ 1.8MB > 512KB 的块上界）。
-     * inBlockPtr->getDataLen() 来自块 meta 的 datalen，即压缩前的原始长度，是输出上界。
+     * Pre-allocate the output buffer as the larger of "block-size upper bound
+     * x2" and "this block's actual data length": SAM blocks may be split by
+     * read count and exceed the byte block_size (e.g. with -l 1, 10000 reads
+     * ~= 1.8MB > the 512KB block upper bound). inBlockPtr->getDataLen() comes
+     * from the block meta's datalen, i.e. the original pre-compression length,
+     * which is the output bound.
      */
     size_t outCapacity = bs * 2;
     if ((size_t)inBlockPtr->getDataLen() > outCapacity) {
@@ -2392,7 +2459,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         return 0;
     }
 
-    // ensureCapacity 已在 decompress() 开头调用，此处不重复
+    // ensureCapacity was already called at the start of decompress(); not repeated here
 
     // Initialize decoders based on compression metadata
     if (0 != initDecoder(outputBlock)) {
@@ -2414,25 +2481,32 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
     uint8_t* pBaseOut = nullptr;
     if (streams[9]["coder"]["magic"].asString() == "coder_fc") {
         /*
-         * coder_fc 是"整块"编码器：SEQ 必须一次性全解出来，但最终 SAM 输出是按行
-         * 交错的（ID\tFLAG\t...\tSEQ\tQUAL\n），所以 SEQ 只能先落到别处、再逐行搬。
-         * 这里把它暂存在 outputBlock 缓冲的**尾部**（见 initDecoder 同样的落点），
-         * 头部正常向前追加行内容，两者对向生长、互不覆盖：
-         *   头部输出 <= block_size，尾部 SEQ <= block_size，块入口已按 block_size*2
-         *   一次性 ensureCapacity，容量有确定上界。
-         * 不用独立 malloc 缓冲的原因：memcpy 次数完全一样（都得逐行搬），独立缓冲只
-         * 会多出每块一次 malloc/free、首次写的缺页开销，以及"线程数 × 整条 SEQ"的
-         * 额外内存峰值。
+         * coder_fc is a "whole-block" coder: SEQ must be fully decoded in one
+         * go, but the final SAM output is interleaved line by line
+         * (ID\tFLAG\t...\tSEQ\tQUAL\n), so SEQ can only land somewhere else
+         * first and be moved line by line afterwards. It is staged at the
+         * **tail** of the outputBlock buffer (same landing spot as in
+         * initDecoder), while the head appends line content normally; the two
+         * grow toward each other without overlapping:
+         *   head output <= block_size, tail SEQ <= block_size, and the block
+         *   entry has already done a one-shot ensureCapacity at block_size*2,
+         *   giving a deterministic capacity bound.
+         * Why not a separate malloc'd buffer: the number of memcpy calls is
+         * identical (lines must be moved either way); a separate buffer only
+         * adds one malloc/free per block, page faults on first write, and an
+         * extra memory peak of "threads x one full SEQ".
          *
-         * 不变量：块内绝对不能对 outputBlock 做 realloc，否则这里的尾部指针以及
-         * 下面 basePtr 都会悬空。
+         * Invariant: never realloc outputBlock within a block, or both the tail
+         * pointer here and basePtr below would dangle.
          */
         pBaseOut = pBaseEnd - streams[9]["totalsrclen"].asUInt();
     }
 
     /*
-     * 先把 POS/CIGAR/PNEXT 预解码出来：TLEN 推算需要完整伙伴索引，逐行解码时伙伴
-     * 可能在块的后半段还没解到。预解码结果按行缓存，主循环直接拷贝，避免二次解码。
+     * First pre-decode POS/CIGAR/PNEXT: TLEN reconstruction needs the full mate
+     * index, and during line-by-line decoding a mate may lie in the second half
+     * of the block, not yet decoded. The pre-decoded results are cached per
+     * line and the main loop copies them directly, avoiding a second decode.
      */
     posDeltaPrev = 0;
     if (0 != preDecodeForTLEN()) {
@@ -2440,7 +2514,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         return -1;
     }
 
-    /* 拷贝预解码字段的字节，避免再次解码；未缓存时返回 -1。 */
+    /* Copy the pre-decoded field bytes to avoid decoding again; returns -1 when not cached. */
     auto copyPreDecodedField = [&](uint32_t fieldIdx, uint32_t lineNo) -> int32_t {
         auto preIt = tlenPreDecodedFields.find(fieldIdx);
         if (preIt != tlenPreDecodedFields.end() && lineNo < preIt->second.size() && !preIt->second[lineNo].empty()) {
@@ -2516,7 +2590,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                     uint8_t* pEnd = outputBlock->getCurrent();
                     *(pEnd - 1) = '\n';
                 }
-            } else if (fieldIdx == 11) {   /// OPTION（全部 tag）
+            } else if (fieldIdx == 11) {   /// OPTION (all tags)
                 decoderLen = decompressOptionField(lineNo, '\n', outputBlock, streams[11]);
             } else {   /// Optional fields
                 // Decode field until tab or end
@@ -2669,13 +2743,19 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 LOG_DEBUG("srclen = %d, dstlen = %d", srcLength, dstLength);
                 if (coderName == "coder_fc") {
                     /*
-                     * 整块 SEQ 解到 outputBlock 缓冲的尾部作暂存，decompressBase 再逐行
-                     * 搬到头部。不另开独立缓冲：那样每块要多一次整条 SEQ 的 malloc/free
-                     * 和首次触碰缺页，峰值内存还要多出 线程数×SEQ大小，而拷贝次数一样。
+                     * The whole-block SEQ is decoded into the tail of the
+                     * outputBlock buffer as staging, then decompressBase moves
+                     * it to the head line by line. No separate buffer is
+                     * allocated: that would add one malloc/free of the whole SEQ
+                     * per block plus page faults on first touch, and raise peak
+                     * memory by threads x SEQ size, while the number of copies
+                     * stays the same.
                      *
-                     * 不变量：块内绝不能对 outputBlock 做 realloc，否则这个尾部指针悬空。
-                     * 容量由块入口一次性按 block_size*2 预分配保证（见 decompress()）——
-                     * 头部输出 ≤ block_size、尾部暂存 ≤ block_size，正好 2 倍。
+                     * Invariant: never realloc outputBlock within a block, or
+                     * this tail pointer would dangle. Capacity is guaranteed by
+                     * the one-shot block_size*2 pre-allocation at the block
+                     * entry (see decompress())—head output <= block_size and
+                     * tail staging <= block_size, exactly 2x.
                      */
                     coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstLength, &ioErrSink, "SEQ");
                     baseIo.meta = baseMeta;
@@ -2788,7 +2868,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength, &ioErrSink, "QUAL freq table");
                 auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
                 uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
-                /* 同 fastq_actuator: 计数用 uint8_t 会在字母表超过 127 个符号时回绕, 导致堆越界。 */
+                /* Same as fastq_actuator: counting with uint8_t wraps when the alphabet exceeds 127 symbols, causing a heap out-of-bounds write. */
                 uint32_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
                 uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
                 int32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
@@ -2808,23 +2888,32 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     qualCoder = std::make_shared<coder_qual>(qualIo.get(), true, qualFreqTable);
                 } else if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_fcv2") {
                     /*
-                     * fcv2 的字母表和各符号频率都写在它自己的码流头部，begin_decode
-                     * 会读回来重建哈夫曼树，所以这里构造时传空频率表即可。
+                     * fcv2's alphabet and per-symbol frequencies are written in
+                     * its own stream header; begin_decode reads them back to
+                     * rebuild the Huffman tree, so passing an empty frequency
+                     * table here at construction is enough.
                      */
                     std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
                     ioVector.push_back(qualIo);
                     std::vector<uint32_t> emptyFreq(256, 0);
                     /*
-                     * 编码方若从先验起步，解码方必须用同一份快照起步，否则模型立刻发散。
-                     * 与压缩侧的良性回退不同，这里加载失败必须致命：静默回退到固定初值
-                     * 会解出一片看似合法的错误数据，比直接失败危险得多。
+                     * If the encoding side started from a prior, the decoding
+                     * side must start from the same snapshot, or the model
+                     * diverges immediately. Unlike the benign fallback on the
+                     * compression side, a load failure here must be fatal:
+                     * silently falling back to fixed initial values would decode
+                     * a stream of seemingly valid wrong data, far more dangerous
+                     * than failing outright.
                      *
-                     * 先验的地址来自块 meta 而非顺序推断，随机读因此同样成立。
+                     * The prior's address comes from the block meta rather than
+                     * sequential inference, so random access works as well.
                      */
                     if (qualStreamMeta[0].isMember("prior")) {
                         /*
-                         * meta 里的偏移只是 seek 手段与校验值，索引键用包序号：
-                         * 绝对偏移在管道输入下退化为 0，按它查表会全部落空。
+                         * The offset in meta is only a seek handle and
+                         * validation value; the index key is the package index:
+                         * under piped input the absolute offset degenerates to
+                         * 0, and looking it up by offset would always miss.
                          */
                         const int64_t priorAddress = qualStreamMeta[0]["prior"].asInt64();
                         AuxPayloadPtr priorBlob =
@@ -2865,7 +2954,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 return -1;
             }
         } else if (idx == 8) {
-            /* TLEN 字段：优先走推算优化，异常流单独解码。 */
+            /* TLEN field: prefer the reconstruction optimization; the exception stream is decoded separately. */
             Json::Value& tlenMeta = streamMeta[idx];
             bool isOptimized = tlenMeta.isMember("optimized") && tlenMeta["optimized"].asBool();
 
@@ -2920,11 +3009,14 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         } else if (idx == 11 && streamMeta[idx].isMember("mode") &&
                    streamMeta[idx]["mode"].asString() == "tag_split") {
             /*
-             * OPTION tag-split：不在 initDecoder 建解码器，也不推进 readOffset——
-             * 记下本字段流的起点，decompressOptionField 在首个 OPTION 行时按
-             * streams 数组惰性解全部列。
-             * 不能直接用 readOffset：decompressIdField 等逐行解码会推进 readOffset，
-             * 到 OPTION 行时已偏移（实测多出 ID 字段 dstlen）。
+             * OPTION tag-split: no decoder is built in initDecoder and
+             * readOffset is not advanced—the start of this field's stream is
+             * recorded, and decompressOptionField lazily decodes all columns
+             * from the streams array when the first OPTION line is reached.
+             * readOffset cannot be used directly: line-by-line decoders such as
+             * decompressIdField advance readOffset, so it has already shifted by
+             * the time the OPTION line is reached (measured as off by the ID
+             * field's dstlen).
              */
             fieldIoStart[idx] = readOffset;
             continue;
@@ -2932,8 +3024,10 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
             uint32_t dstLen = streamMeta[idx]["dstlen"].asUInt();
             /*
-             * 记下 POS(3)/CIGAR(5)/PNEXT(7) 的压缩流位置，preDecodeForTLEN 据此重建
-             * 解码器把全块预解码，TLEN 推算才能拿到完整伙伴索引。
+             * Record the compressed stream positions of POS(3)/CIGAR(5)/PNEXT(7)
+             * so that preDecodeForTLEN can rebuild decoders and pre-decode the
+             * whole block; only then can TLEN reconstruction obtain the full
+             * mate index.
              */
             fieldIoStart[idx] = readOffset;
             fieldIoDstLen[idx] = dstLen;
@@ -2960,7 +3054,7 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
 }
 
 int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
-    /* decode_line 负值是错误码（码流损坏/缓冲不足），原样上抛，不能当长度用。 */
+    /* A negative decode_line return is an error code (corrupted stream / insufficient buffer); pass it through, never treat it as a length. */
     int32_t fieldLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(), splitFlag, false);
     if (fieldLen < 0) {
         LOG_ERROR("Decode regular field(%u) failed: %d", fieldIdx, fieldLen);
@@ -2969,9 +3063,10 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lin
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
 
     /*
-     * FLAG/POS/PNEXT 以文本形态（affix）压缩时，这里要把跟踪 map 填回来：
-     * 后续 QUAL 阶段与参考序列阶段都要读 mappedPos/mappedChr/mappedFlag。
-     * 与二进制形态 decompressNumber 里填的保持一致。
+     * When FLAG/POS/PNEXT are compressed in textual form (affix), the tracking
+     * maps must be repopulated here: the later QUAL and reference-sequence
+     * stages all read mappedPos/mappedChr/mappedFlag. This must stay consistent
+     * with what decompressNumber fills for the binary form.
      */
     if (fieldLen > 1 && (fieldIdx == 1 || fieldIdx == 3 || fieldIdx == 7)) {
         uint8_t* vs = outputBlock->getBuffer() + outputBlock->getDataLen() - fieldLen;
@@ -2988,20 +3083,27 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lin
 }
 
 /*
- * OPTION 字段的解压侧：先在整个块解码前把 id 序列列和各 tag 值列全部解出来缓存，
- * 逐行输出时按该行的 id 序列拼回 `NAME:TYPE:VALUE`，与压缩侧完全对称。
+ * Decompression side of the OPTION field: before decoding the whole block, all
+ * id-sequence columns and tag-value columns are decoded and cached; when
+ * emitting lines, `NAME:TYPE:VALUE` is reassembled from that line's id
+ * sequence, fully symmetric with the compression side.
  *
- * 压缩时 OPTION 整块作为一个字段（field 11），解压也一次性解完所有行，输出从
- * 块起始按行推进。首次调用（lineNo==0 且缓存空）时惰性解全部。
+ * On compression the entire OPTION field is one field (field 11), and on
+ * decompression all lines are decoded at once with output advancing line by
+ * line from the block start. Everything is lazily decoded on the first call
+ * (lineNo == 0 with an empty cache).
  */
 int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFlag,
                                                 RoughIOBlock* outputBlock,
                                                 const Json::Value& fieldMeta) {
     if (!fieldMeta.isMember("tags") || fieldMeta["mode"].asString() != "tag_split") {
         /*
-         * affix 形态：整块所有行的 OPTION 作为一列。某行没有 OPTION 时解码结果为空，
-         * 只追加了分隔符（fieldLen==1），需去掉 QUAL 之后刚追加的 '\t'（与 tag_split
-         * 空行的处理一致）。块内字段数取全块最大值，无 OPTION 的行也会走到这里。
+         * affix form: the OPTION of all lines in the block is one column. When a
+         * line has no OPTION, the decoded result is empty and only a delimiter
+         * was appended (fieldLen == 1); the '\t' just appended after QUAL must
+         * be removed (same handling as empty lines in tag_split). The per-block
+         * field count is the block-wide maximum, so lines without OPTION also
+         * reach this path.
          */
         const int32_t fieldLen = decompressRegularField(11, lineNo, splitFlag, outputBlock);
         if (fieldLen == 1) {
@@ -3014,7 +3116,7 @@ int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFl
         return fieldLen;
     }
 
-    /* 惰性：整个 OPTION 列一次解出。 */
+    /* Lazy: the entire OPTION column is decoded at once. */
     if (optionCacheEmpty) {
         if (0 != decodeOptionColumn(fieldMeta)) {
             return -1;
@@ -3030,7 +3132,7 @@ int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFl
             return (int32_t)content.size() + 1;
         }
     }
-    /* 本行没有 OPTION：把 QUAL 之后刚追加的 '\t' 转回 '\n'（与旧逻辑一致）。 */
+    /* This line has no OPTION: turn the '\t' just appended after QUAL back into '\n' (consistent with the old logic). */
     uint8_t* pEnd = outputBlock->getCurrent();
     if (pEnd > outputBlock->getBuffer()) {
         *(pEnd - 1) = '\n';
@@ -3042,7 +3144,7 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
     optionRecLines.clear();
     optionCacheEmpty = false;
 
-    /* 本字段流起点：initDecoder 已记录；不能用 readOffset（被逐行解码推进过）。 */
+    /* Start of this field's stream: recorded by initDecoder; readOffset cannot be used (it has been advanced by line-by-line decoding). */
     uint32_t optBase = readOffset;
     auto optIt = fieldIoStart.find(11);
     if (optIt != fieldIoStart.end()) {
@@ -3057,7 +3159,7 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
     const Json::Value& tags = fieldMeta["tags"];
     const uint32_t nTag = (uint32_t)tags.size();
 
-    /* 解 id 序列列（逐行文本，逗号分隔）。 */
+    /* Decode the id-sequence column (line-wise text, comma-separated). */
     std::vector<std::vector<uint8_t>> recIds;
     uint32_t idStreamDst = 0;
     for (uint32_t i = 0; i < streams.size(); ++i) {
@@ -3092,7 +3194,7 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
         optBase += idStreamDst;
     }
 
-    /* 解各 tag 值列（逐行文本）。 */
+    /* Decode each tag-value column (line-wise text). */
     std::vector<std::vector<std::string>> tagVals(nTag);
     uint32_t colIdx = 0;
     for (uint32_t i = 0; i < streams.size(); ++i) {
@@ -3117,7 +3219,7 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
         colIdx++;
     }
 
-    /* 逐行拼回 OPTION 文本。 */
+    /* Reassemble the OPTION text line by line. */
     const uint32_t lines = (uint32_t)recIds.size();
     optionRecLines.resize(lines);
     std::vector<size_t> colPos(nTag, 0);
@@ -3223,9 +3325,11 @@ int32_t SamCodecActuator::decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uin
 }
 
 /*
- * 预解码 POS/CIGAR/PNEXT 并把结果按行缓存。TLEN 推算需要完整伙伴索引与参考跨度，
- * 主循环逐行解码时伙伴可能落在块的后半段，拿不到；这里先解一遍全部行，主循环随后
- * 直接拷贝缓存，不再二次解码。
+ * Pre-decode POS/CIGAR/PNEXT and cache the results per line. TLEN
+ * reconstruction needs the full mate index and reference spans; while the main
+ * loop decodes line by line, a mate may lie in the second half of the block and
+ * be unavailable. Here all lines are decoded once up front; the main loop then
+ * copies the cache directly without decoding again.
  */
 int32_t SamCodecActuator::preDecodeForTLEN() {
     if (samLine == 0 || !meta.isMember("sam")) {
@@ -3236,7 +3340,7 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
     uint8_t tmpBuf[1024];
     Json::Value& streams = meta["sam"]["streams"];
 
-    /* 推算 TLEN 需要的字段：POS(3)、CIGAR(5)、PNEXT(7)。 */
+    /* Fields needed to reconstruct TLEN: POS(3), CIGAR(5), PNEXT(7). */
     static const uint32_t tlenFields[] = {3, 5, 7};
 
     for (uint32_t f : tlenFields) {
@@ -3268,18 +3372,22 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
         fieldCache.clear();
         fieldCache.reserve(samLine);
 
-        /* pos_delta 模式的差值链：上一行还原出的绝对 POS。 */
+        /* Delta chain of pos_delta mode: the absolute POS reconstructed from the previous line. */
         int64_t posPrev = 0;
         for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
             /*
-             * coder_affix_match 把 last 指向调用方输出缓冲，除非 need2hold 置位；
-             * 这里必须置位，否则跨行上下文会被下一次解码覆盖。bwt_cm 内部自行缓冲。
+             * coder_affix_match points last at the caller's output buffer
+             * unless need2hold is set; it must be set here, otherwise the
+             * cross-line context would be overwritten by the next decode.
+             * bwt_cm buffers internally on its own.
              */
             bool need2hold = (coderName == "coder_affix_match");
             /*
-             * 字段形态：CIGAR 恒为文本（compressCigar 逐行编码）；POS/PNEXT 缺省按
-             * 二进制定宽处理，mode 为文本形态时才按文本解。文本数据绝不能按定长解，
-             * 否则 bwt_cm 的定长分支会越过块边界空转。
+             * Field form: CIGAR is always textual (encoded line-wise by
+             * compressCigar); POS/PNEXT default to fixed-width binary and are
+             * decoded as text only when mode is textual. Textual data must never
+             * be decoded as fixed-length, otherwise bwt_cm's fixed-length branch
+             * would spin past the block boundary.
              */
             bool binary = (f != 5) && (mode == "number" || mode == "");
             int32_t len;
@@ -3337,7 +3445,7 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
         }
     }
 
-    /* 完整伙伴索引：所有 (pos, pnext) 已知后一次性建立。 */
+    /* Full mate index: built at once once all (pos, pnext) pairs are known. */
     tlenMateIndex.clear();
     for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
         auto posIt = mappedPos.find(lineNo);
@@ -3359,7 +3467,7 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
     uint32_t idLength = 0;
 
     if (idUsesQnameCoder && !idDecoders.empty()) {
-        /* 单流 coder_qname：逐行解一整条 QNAME（含末尾 '\t'）。 */
+        /* Single-stream coder_qname: decode one whole QNAME per line (including the trailing '\t'). */
         int32_t segLen = idDecoders[0]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
             UINT8_MAX, false);
         if (segLen < 0) {
@@ -3431,10 +3539,13 @@ int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo, 
 int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock) {
     /*
-     * 这里**不能**再 ensureCapacity：调用方 decompressSamByFields 在 SEQ 阶段抓了
-     * basePtr = outputBlock->getCurrent() 留给 QUAL 用，块内任何 realloc 都会让它
-     * 悬空，产出随机错误内容。缓冲够用由块入口一次性预分配保证（按文件头 block_size
-     * 的确定上界 ×2，见 decompress()），逐行不再扩容。
+     * ensureCapacity **must not** be called here: the caller
+     * decompressSamByFields captured basePtr = outputBlock->getCurrent() in the
+     * SEQ phase for QUAL to use, and any realloc within the block would leave it
+     * dangling and produce random garbage. Sufficient buffer space is guaranteed
+     * by the one-shot pre-allocation at the block entry (the deterministic
+     * block_size upper bound x 2, see decompress()); no further growth happens
+     * line by line.
      */
     bool isUserReference = pRefeGene != nullptr && fieldMeta.isMember("streams");
     uint32_t actualBaseLen = 0;
@@ -3580,16 +3691,19 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
     uint8_t* dst = outputBlock->getCurrent();
     if (qualFcv2Decoder != nullptr) {
-        /* 链方向由码流自带；碱基上下文用本记录已经解出的 SEQ（basePtr），
-           与压缩侧传 seqStart 对应。 */
+        /* The strand direction comes with the stream; the base context uses this
+           record's already-decoded SEQ (basePtr), corresponding to seqStart on
+           the compression side. */
         if (qualFcv2Decoder->decode_record(dst, actualBaseLen, basePtr, actualBaseLen) < 0) {
             LOG_ERROR("Decode quality by fcv2 failed, len = %u", actualBaseLen);
             return -1;
         }
     } else if (qualCmDecoder != nullptr) {
         /*
-         * bwt_cm 同样不需要 SEQ 上下文。压缩侧是按记录逐条 encode_line 喂进去的，
-         * 这里也按同样的长度逐条取回；不传分隔符，长度由调用方给定。
+         * bwt_cm likewise needs no SEQ context. The compression side fed
+         * records one by one via encode_line; here they are fetched one by one
+         * with the same length, without a delimiter; the length is given by the
+         * caller.
          */
         if (qualCmDecoder->decode_line(dst, actualBaseLen) < 0) {
             LOG_ERROR("Decode quality by bwt_cm failed, len = %u", actualBaseLen);
@@ -3600,8 +3714,10 @@ int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBas
     }
 
     /*
-     * 缺失质量（原文件里是单个 '*'）的读在压缩侧被展开成 seqLen 个 '*' 进码流，
-     * 这里解出来再折叠回单个 '*'，保证还原结果与原文一致。
+     * Reads with missing quality (a single '*' in the original file) were
+     * expanded into seqLen '*' on the compression side; here they are folded
+     * back into a single '*', ensuring the reconstructed output matches the
+     * original.
      */
     bool missing = true;
     for (uint32_t i = 0; i < actualBaseLen; ++i) {

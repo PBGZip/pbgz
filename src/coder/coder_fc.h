@@ -71,8 +71,9 @@ public:
     }
 
     /*
-     * coder_fc 只支持整块压缩：encode_line 内部一次性做完 LZP、BWT 和熵编码，
-     * 首行的 check_exit 会拦住第二次调用，输入长度也必须大于 FC_MIN_LEN。
+     * coder_fc only supports whole-block compression: encode_line performs LZP,
+     * BWT and entropy coding in one shot internally; the check_exit on the first
+     * line blocks a second call, and the input length must also exceed FC_MIN_LEN.
      */
     bool supportsLineMode() const override { return false; }
 

@@ -61,21 +61,26 @@ protected:
     virtual int32_t startEnginePreProc() { return 0; }
 
     /*
-     * 准备基础文件元信息，必须在 startWriteTask 之前调用。
+     * Prepare the base file metadata; must be called before startWriteTask.
      *
-     * 为什么要单独开这个钩子：写线程一启动就会执行 createBlockWriter，里面立刻
-     * 调用 writeBaseFileMeta 把 baseFileMeta 落盘。如果此时主线程还在往
-     * baseFileMeta 里塞内容，两边就在同一份 JSON 上赛跑——谁先跑完决定了写进
-     * 文件头的元信息里有没有那部分内容。
+     * Why this hook exists separately: as soon as the writer thread starts, it runs
+     * createBlockWriter, which immediately calls writeBaseFileMeta to persist
+     * baseFileMeta. If the main thread is still filling baseFileMeta at that point, the
+     * two sides race on the same JSON - whoever finishes first decides whether that
+     * portion ends up in the metadata written to the file header.
      *
-     * 这个竞争的实际后果是压缩结果不可复现：同一份输入压两次，文件头元信息可能
-     * 相差一整个 JSON 成员，后续所有内容随之整体偏移，两次输出的字节完全不同。
-     * 两个结果都能正确解压（解压侧对成员缺失做了兼容），所以问题长期没有暴露，
-     * 但它让"同一输入必得同一输出"这条基本性质不成立，也让任何字节级回归对比
-     * 都无法进行。
+     * The practical consequence of this race is that compression becomes
+     * non-reproducible: compressing the same input twice may leave the file-header
+     * metadata differing by a whole JSON member, shifting everything that follows and
+     * producing entirely different output bytes. Both results still decompress
+     * correctly (the decompression side tolerates missing members), which is why the
+     * problem went unnoticed for a long time, but it breaks the basic property that
+     * "the same input always yields the same output" and makes any byte-level
+     * regression comparison impossible.
      *
-     * 因此约定：凡是要写进基础文件元信息的内容，都必须在本钩子里填好；
-     * 需要写线程就绪之后才能做的事（例如往下游写参考块）留在 startWorkPreProc。
+     * Convention therefore: anything that must be written into the base file metadata
+     * has to be filled in within this hook; work that requires the writer thread to be
+     * ready (e.g. writing the reference block downstream) stays in startWorkPreProc.
      */
     virtual int32_t prepareFileMeta() { return 0; }
 
@@ -107,55 +112,71 @@ protected:
 
     virtual int64_t readBlocks(BlockReader* blockReader);
 
-    /*     * 读到一个数据块之后、入队之前回调，供引擎做按块累积等预处理相关工作。
+    /*
+     * Callback after a data block is read and before it is enqueued, for engine-side
+     * per-block accumulation and similar preprocessing.
      *
-     * 基类默认空操作。压缩引擎用它跨块累积 QUAL 先验训练样本（首块决策 + 后续块
-     * 追加），累积到目标块数或上限后训练并发布先验。
+     * The base class is a no-op by default. The compression engine uses it to
+     * accumulate QUAL prior training samples across blocks (first-block decision plus
+     * appending on subsequent blocks); once the target block count or cap is reached it
+     * trains and releases the prior.
      */
     virtual void pretrainBlockProc(RoughIOBlock* /*blockPtr*/) {}
 
-    /*     * 读循环结束（EOF 或读错误）后调用一次，供引擎收尾未完成的预处理。
-     * 基类默认空操作。
+    /*
+     * Called once after the read loop ends (EOF or read error), for the engine to wrap
+     * up any incomplete preprocessing. The base class is a no-op by default.
      */
     virtual void readLoopPostProc() {}
 
-    /*     * 工作线程开始拉块压缩前的同步点。基类默认空操作。
+    /*     * Synchronization point before worker threads start pulling blocks to compress.
+     * The base class is a no-op by default.
      *
-     * 压缩引擎用它实现"先验发布前 coder 线程不得开始"：读线程把跨块训练出的先验
-     * 发布（落盘辅助块 + 置位标志）后通知，工作线程才被放行。其他引擎无此需求。
+     * The compression engine uses it to enforce "coder threads must not start before the
+     * prior is released": the reader thread releases the cross-block trained prior
+     * (persisting the auxiliary block and setting the flag) and then notifies, which is
+     * when the worker threads are released. Other engines have no such requirement.
      */
     virtual void workStartBarrier() {}
 
-    /*     * 读到一个块之后、送进 inputDataPool 之前的处置，由 readOneBlock 统一询问。
+    /*     * Disposition of a block after it is read and before it goes into inputDataPool,
+     * asked uniformly by readOneBlock.
      *
-     * 之所以做成一个返回值而不是让各引擎重写整个 readOneBlock：读循环的骨架
-     * （取空闲块 / 读 / 首块决策 / 入队 / 计数）对所有引擎完全相同，各引擎真正
-     * 不同的只有"这个块归不归我"这一步。此前三个引擎各抄了一份骨架，任何加在
-     * 骨架上的改动都会漏掉两份。
+     * This is a return value rather than letting each engine override the whole
+     * readOneBlock because the skeleton of the read loop (acquire free block / read /
+     * first-block decision / enqueue / count) is identical for all engines; the only
+     * step that genuinely differs is "is this block mine". Previously each of the three
+     * engines duplicated the skeleton, so any change to the skeleton missed two copies.
      */
     enum class BlockIntake {
-        DISPATCH,   /* 正常数据块，入队交给工作线程 */
-        SKIP,       /* 不属于本引擎的数据流，已就地消费，读循环继续 */
-        ABORT       /* 输入不可用，读循环终止 */
+        DISPATCH,   /* Normal data block; enqueue it for the worker threads */
+        SKIP,       /* Data stream that does not belong to this engine; already consumed in place, the read loop continues */
+        ABORT       /* Input unusable; terminate the read loop */
     };
 
     virtual BlockIntake intakeBlock(BlockReader* /*blockReader*/, RoughIOBlock* /*blockPtr*/) {
         return BlockIntake::DISPATCH;
     }
 
-    /* 读一个块之前的时机，用于捕捉"这个块在源文件里的起始位置"这类只在读前有效的量。 */
+    /* A moment before a block is read, for capturing quantities that are only valid before the read, such as "the block's starting position in the source file". */
     virtual void readBlockPreProc(BlockReader* /*blockReader*/) { }
 
-    /*     * 文件级决策：读线程在把第一个数据块送进 inputDataPool 之前调一次。
+    /*     * File-level decision: the reader thread calls it once before handing the first
+     * data block to inputDataPool.
      *
-     * 位置是这个钩子的全部意义。编码器选型、先验训练这类决策对整个文件只做一次，
-     * 且必须先于任何块的处理。放在"入队之前"，这条先后关系就由数据流位置本身保证：
-     * 工作线程只能从队列里取块，取不到就无块可压。队列的入队/出队自带 release/acquire，
-     * 决策结果的可见性一并解决。因此不需要工作线程互相等待，也不需要额外的同步标志。
+     * Placement is the whole point of this hook. Decisions such as codec selection and
+     * prior training are made exactly once per file and must precede the processing of
+     * any block. Placing it "before enqueue" guarantees this ordering by the data-flow
+     * position itself: worker threads can only take blocks from the queue, and without
+     * a block there is nothing to compress. The queue's enqueue/dequeue provide
+     * release/acquire semantics, so visibility of the decision result is covered too;
+     * no waiting between worker threads or extra synchronization flags are needed.
      *
-     * 一并得到的性质：决策永远发生在读线程、永远基于第 0 块，样本不再随调度漂移；
-     * 同步辅助块（如 QUAL 先验）发射时写线程尚未收到任何数据块，"辅助块物理上先于
-     * 全部数据块"从时序上的巧合变成位置上的事实。
+     * A property gained along the way: the decision always happens on the reader thread
+     * and is always based on block 0, so the sample no longer drifts with scheduling;
+     * and when a synchronous auxiliary block (such as the QUAL prior) is emitted the
+     * writer thread has not yet received any data block, turning "the auxiliary block
+     * physically precedes all data blocks" from a timing coincidence into a positional fact.
      */
     virtual void fileDecisionProc(RoughIOBlock* /*firstBlock*/) { }
 
@@ -173,26 +194,34 @@ protected:
 
     virtual void writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockPtr);
 
-    /* 写线程侧：落盘一个同步辅助块并把它的容器头偏移回交给发射者。 */
+    /* Writer-thread side: persist a synchronous auxiliary block and hand its container-header offset back to the emitter. */
     void completeSyncAuxBlock(BlockWriter* blockWriter, RoughIOBlock* block);
 
     /*
-     * 路过一个辅助块时逐个询问认领者。返回值仅用于日志：没人认领的辅助块被安静跳过，
-     * 这是老版本读到新格式时需要的前向兼容行为，不构成错误。
+     * When an auxiliary block passes by, ask each consumer in turn whether it claims it.
+     * The return value is only used for logging: an auxiliary block claimed by no one is
+     * silently skipped, which is the forward-compatible behavior an old version needs
+     * when reading a newer format and is not an error.
      */
     bool offerAuxBlock(RoughIOBlock* blockPtr, int64_t packageIndex);
 
     /*
-     * 同步发射一个辅助块：推给写线程，阻塞等它落盘，返回该块**容器头**的绝对文件偏移
-     * （即块读管理器能从该处解析出块 json 的位置，不是块内负载的起点）。
+     * Synchronously emit an auxiliary block: push it to the writer thread, block until
+     * it is persisted, and return the absolute file offset of the block's **container
+     * header** (i.e. the position from which the block-read manager can parse the block
+     * JSON, not the start of the block's payload).
      *
-     * 辅助块是位置寻址的：它不占用数据块的 blockId，也不参与写线程的顺序重排，
-     * 写线程见到即写。之所以必须由写线程亲自执行写动作，是因为只有它持有 BlockWriter
-     * 并独占文件写指针——调用方在别的线程上取 getCurrentPos() 拿到的都是竞态值。
+     * Auxiliary blocks are position-addressed: they do not occupy a data-block blockId
+     * and do not participate in the writer thread's reordering; the writer writes them
+     * on sight. The write must be performed by the writer thread itself because only it
+     * holds the BlockWriter and exclusively owns the file write pointer - a caller on
+     * any other thread reading getCurrentPos() would get a racy value.
      *
-     * 仅允许在 fileDecisionProc 内调用：那时读线程还没派发过任何数据块，写线程手上
-     * 必然空闲，全局至多一个发射在途，故下面用单个槽位承接结果，无需按块建映射。
-     * 返回后块已被写线程归还到 freeOutputPool，调用方不得再触碰它。
+     * May only be called from within fileDecisionProc: at that point the reader thread
+     * has not dispatched any data block, the writer thread is necessarily idle, and at
+     * most one emission is in flight globally, so a single slot below is enough to carry
+     * the result with no per-block mapping. After return the block has already been
+     * returned to freeOutputPool by the writer thread; the caller must not touch it.
      */
     int64_t emitSyncAuxBlock(RoughIOBlock* block);
 
@@ -215,10 +244,13 @@ public:
     virtual Reference* getReference() { return nullptr; }
 
     /*
-     * 压缩时写入文件头的块大小上界。解压侧 createBlockReader 从 baseFileMeta 读回，
-     * actuator 据此 ensureCapacity(block_size*2) 预分配输出缓冲——堵所有字段越界的
-     * 主防线。0 表示尚未读到（老文件没写或 createBlockReader 未跑），actuator 落回
-     * 默认 getBlockSize()。coder_io 的 putc 检查与 decode 错误返回链作兜底。
+     * Upper bound of the block size written to the file header when compressing. On the
+     * decompression side createBlockReader reads it back from baseFileMeta, and the
+     * actuator uses it to pre-allocate the output buffer with ensureCapacity(block_size*2)
+     * - the primary defense against out-of-bounds access in every field. 0 means it has
+     * not been read yet (older files do not write it, or createBlockReader has not run);
+     * the actuator then falls back to the default getBlockSize(). The coder_io putc
+     * check and the decode error-return chain serve as a backstop.
      */
     uint32_t fileBlockSize = 0;
     uint32_t getFileBlockSize() const { return fileBlockSize; }
@@ -228,17 +260,22 @@ public:
     virtual const PreprocessInfo* getPreprocessInfo() { return nullptr; }
 
     /*
-     * 取 QUAL 先验模型快照。两侧来源不同但接口一致：
-     * 压缩侧返回首块预处理训练出的那份；解压侧按辅助块绝对地址取回已认领的那份。
-     * 返回空表示本次没有可用先验，调用方必须回退到固定初值模型。
+     * Fetch the QUAL prior model snapshot. The two sides obtain it from different
+     * sources but through the same interface: the compression side returns the one
+     * trained during first-block preprocessing; the decompression side retrieves the
+     * claimed one by the auxiliary block's absolute address. Returning empty means no
+     * prior is available this run, and callers must fall back to the fixed
+     * initial-value model.
      *
-     * 解压侧不做 seek 回读：先验块现在物理上位于全部数据块之前，
-     * 顺序流一定先路过它再遇到数据块；区域查询路径则在引擎初始化时按文件元信息预取。
-     * 两条路径都保证工作线程取用时缓存已就位。
+     * The decompression side does not seek back to re-read: the prior block now
+     * physically precedes all data blocks, so a sequential stream is guaranteed to pass
+     * it before reaching any data block; the region-query path prefetches it at engine
+     * initialization according to the file metadata. Both paths guarantee the cache is
+     * in place by the time a worker thread uses it.
      */
     virtual AuxPayloadPtr getQualPrior(int64_t /*packageIndex*/) { return AuxPayloadPtr(); }
 
-    /* 先验块容器头的绝对偏移；压缩侧据此写进块 meta，解压侧据此回查。-1 表示无先验。 */
+    /* Absolute offset of the prior block's container header; the compression side writes it into the block meta and the decompression side uses it to look up the block. -1 means no prior. */
     virtual int64_t getQualPriorAddress() const { return -1; }
 
 
@@ -251,30 +288,34 @@ public:
     uint32_t blockCount;
 
     /*
-     * 块级失败的最终归口：工作线程里 actuatorProc 返回非零时置位，引擎收尾
-     * （startEnginePostProc 之后）统一检查并返回错误，进程以非零退出——
-     * 块失败不再是"打个警告、推个零长块就过去"。atomic 因为工作线程并发置位。
+     * Final funnel for block-level failures: set when actuatorProc returns non-zero on
+     * a worker thread; engine cleanup (after startEnginePostProc) checks it uniformly
+     * and returns an error, so the process exits non-zero - a block failure is no
+     * longer dismissed with a warning and a zero-length block. atomic because worker
+     * threads set it concurrently.
      */
     std::atomic<bool> taskFailed{false};
 
-    /* 文件级决策（编码器选型等）是否已执行；SAM 头部块不携带数据，决策推迟到首个数据块。 */
+    /* Whether the file-level decision (codec selection, etc.) has been executed; a SAM header block carries no data, so the decision is deferred to the first data block. */
     bool fileDecisionInvoked = false;
 
-    /* 同步辅助块发射的交接槽位，由发射者与写线程共用，受 auxEmitMutex 保护。 */
+    /* Handoff slot for emitting synchronous auxiliary blocks, shared by the emitter and the writer thread and guarded by auxEmitMutex. */
     mutable std::mutex auxEmitMutex;
     mutable std::condition_variable auxEmitCond;
     int64_t auxEmitOffset = -1;
     bool auxEmitDone = false;
 
     /*
-     * 首块串行化：id==0 的 coder 线程先处理完第 0 块再放行其余线程，避免并发
-     * preAnalysis 在 SamInfo 尚未填充时把块误判为二进制。perf 分支原有机制，
-     * 接入先验门闩（workStartBarrier）时被误删，此处恢复。放行只发生一次。
+     * First-block serialization: the coder thread with id==0 finishes processing block 0
+     * before releasing the other threads, so concurrent preAnalysis cannot misclassify a
+     * block as binary while SamInfo is not yet populated. This mechanism originally
+     * existed in the perf branch and was accidentally removed when the prior latch
+     * (workStartBarrier) was integrated; restored here. The release happens only once.
      */
     mutable std::mutex coderStartMutex;
     std::condition_variable coderStartCond;
     bool coderStartSync = false;
 
-    /* 首次返回 true 并记下，之后恒返回 false；配合 notify_all 只放行一次。 */
+    /* Returns true the first time it is called and records it; always returns false afterwards, working with notify_all to release exactly once. */
     bool firstCoderNotify(bool flag);
 };

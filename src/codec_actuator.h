@@ -44,7 +44,8 @@ public:
         outBlockPtr = nullptr;
     }
 
-    /* 见 Actuator::ioError()，本次块处理的越界错误汇聚点 */
+    /* See Actuator::ioError(); the aggregation point for out-of-bounds errors
+     * of this block's processing */
     const coder_err_sink& ioError() const { return ioErrSink; }
 
 #if defined(TEST_MODE) || defined(GTEST_ENABLED)
@@ -54,25 +55,32 @@ public:
 
 protected:
     /*
-     * 引擎参数里的压缩级别；无引擎（解压/测试引擎）时返回 0，调用方据此跳过
-     * level 设置，编码器保持各自的默认 level。
+     * The compression level from the engine parameters; returns 0 when there is
+     * no engine (decompression/test engine), in which case the caller skips the
+     * level setting and each encoder keeps its own default level.
      */
     uint8_t engineCompressLevel() const {
         return (pbgzEngine != nullptr) ? pbgzEngine->getParameter().compressLevel : 0;
     }
 
     /*
-     * 为某个字段创建编码器，类型取自预处理阶段的试压结果。
+     * Create an encoder for a field, with the type taken from the
+     * trial-compression result of the preprocessing phase.
      *
-     * fallback 传本字段原先写死的那个编码器。以下三种情况都会原样退回 fallback，
-     * 使行为和接通预处理选择之前完全一致：
-     *   1. 引擎不提供预处理信息（解压引擎、测试引擎都返回空指针）
-     *   2. 预处理还没跑完，或者跑失败了
-     *   3. 该字段样本太小被跳过，没有可信的试压结果
+     * fallback is the encoder that this field previously hard-coded. All three
+     * of the following cases fall back to it unchanged, so behavior stays
+     * exactly as before preprocessing selection was wired in:
+     *   1. The engine provides no preprocessing info (both decompression and
+     *      test engines return a null pointer)
+     *   2. Preprocessing has not finished yet, or it failed
+     *   3. The field's sample is too small and was skipped, so there is no
+     *      trustworthy trial-compression result
      *
-     * 也就是说这条路径只会让编码器变得更好，不会因为预处理出问题而压不出东西。
-     * level 取自引擎参数（engineCompressLevel），按最终使用的编码器类型换算后写入
-     * coder_io，编码器构造/首次编码时读取。
+     * In other words, this path can only make the encoder better; a
+     * preprocessing problem can never leave nothing to compress with. The level
+     * comes from the engine parameters (engineCompressLevel), is converted
+     * according to the finally used encoder type, and is written into coder_io
+     * for the encoder to read at construction / first encoding.
      */
     std::shared_ptr<coder> makeFieldEncoder(uint32_t fieldIdx, CoderType fallback,
                                             coder_io* io, bool lineMode)
@@ -88,10 +96,13 @@ protected:
         std::shared_ptr<coder> enc = CoderFactory::makeEncoder(picked, io);
 
         /*
-         * 预处理试压一律按整块方式测量，选出来的编码器未必能按逐行方式使用。
-         * 本字段要逐行喂数据、而选中的编码器不支持时，退回该字段原本写死的那个，
-         * 它的用法是经过验证的。宁可压缩率差一点，也不能压出解不开的数据。
-         * 退回的类型也要重设 level（两种编码器能接受的级别范围不同）。
+         * Preprocessing trial compression always measures whole-block, so the
+         * picked encoder may not be usable line by line. When this field must
+         * be fed line by line but the picked encoder does not support it, fall
+         * back to the encoder this field originally hard-coded, whose usage is
+         * verified. Better a slightly worse compression ratio than data that
+         * cannot be decompressed. The level must also be reapplied for the
+         * fallback type (the two encoder types accept different level ranges).
          */
         if (lineMode && !enc->supportsLineMode()) {
             CoderFactory::applyLevel(io, fallback, level);
@@ -101,9 +112,12 @@ protected:
     }
 
     /*
-     * 构造 coder_io 的唯一入口。走这里出来的视图自带汇聚点，越界必然被引擎看到；
-     * 直接 make_shared<coder_io> 则不带，那是留给试压和单测的——试压时装不下只是
-     * "这个编码器不合适"的选择依据，不是故障，不该让整块失败。
+     * The only entry point for constructing coder_io. Views created here carry
+     * the aggregation sink, so any out-of-bounds access is guaranteed to be
+     * seen by the engine; a direct make_shared<coder_io> does not, and that is
+     * reserved for trial compression and unit tests — in a trial, running out of
+     * capacity is only evidence that "this encoder is unsuitable", not a
+     * failure, and should not fail the whole block.
      */
     std::shared_ptr<coder_io> makeCoderIo(const uint8_t* buff, int32_t len, const char* name) {
         return std::make_shared<coder_io>(buff, len, &ioErrSink, name);

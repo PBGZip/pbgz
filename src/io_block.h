@@ -34,10 +34,10 @@
 
 const size_t BLOCK_SIZE = 268435456;
 
-/* Creator 预读用于判定文件格式的字节数。该数据随后并入首个块/首个包头部，不浪费。 */
+/* Number of bytes the Creator reads ahead to determine the file format. This data is later merged into the first block / first package header, so nothing is wasted. */
 const size_t BLOCK_TYPE_DETECT_SIZE = 1 << 20;
 
-/* 输入块初始分配大小：不再按 -l 一次性分配大缓冲，固定 1MB 起步，读取时按需 realloc 扩容。 */
+/* Initial allocation size for an input block: no longer allocates one large buffer for -l up front; starts at a fixed 1MB and grows on demand with realloc while reading. */
 const size_t FIXED_INPUT_BLOCK_SIZE = 1 << 20;
 
 typedef enum
@@ -87,19 +87,28 @@ public:
     }
 
     /*
-     * 按需扩容。返回 0 成功，-1 失败（realloc 失败）。
+     * Grows the buffer on demand. Returns 0 on success, -1 on failure (realloc
+     * failed).
      *
-     * 主防线：actuator 块入口按 block_size（压缩时确定的上界）×2 预分配，堵所有
-     * 字段越界。coder_io 的 putc 检查与 decode 错误返回链作兜底。
+     * Primary defense: the actuator's block entry pre-allocates block_size (the
+     * upper bound determined at compression time) * 2, plugging all field
+     * overflows. coder_io's putc check and the decode error return chain serve
+     * as a fallback.
      *
-     * 异常告警：目标 size 超过常规上界（2GB）或相对当前已扩到 16 倍还不够——
-     * 前者多半是 block_size 异常，后者多半是 coder 反复越界（兜底链也调它），
-     * 都说明有更深层问题。打警告但不中断：数据可能就是大，留给上层据错误码决策。
+     * Abnormal warning: when the target size exceeds the usual upper bound (2GB)
+     * or growing to 16x the current size is still not enough—the former usually
+     * means block_size is anomalous, the latter usually means a coder keeps
+     * overflowing (the fallback chain also calls this)—both indicate a deeper
+     * problem. It logs a warning but does not abort: the data may simply be
+     * large, and the decision is left to the caller based on the error code.
      *
-     * 在 reset() 之后、任何数据写入之前调用：此刻 dataLen == 0，缓冲里没有有效
-     * 数据，不存在指向缓冲内部的悬空指针，realloc 安全。扩容后 bufferSize 更新，
-     * 后续 getRemain/getCurrent/getBufferSize 都看到新值。块归还 freeOutputPool
-     * 后复用带着更大的缓冲，后续块沿用，不会每块 realloc。
+     * Called after reset() and before any data is written: at this point
+     * dataLen == 0, the buffer holds no valid data, and there are no dangling
+     * pointers into the buffer, so realloc is safe. After growing, bufferSize is
+     * updated, and later getRemain/getCurrent/getBufferSize all see the new
+     * value. When a block is returned to the freeOutputPool and reused, it
+     * carries the larger buffer, and subsequent blocks keep using it without a
+     * per-block realloc.
      */
     int32_t ensureCapacity(size_t neededSize) {
         if (bufferSize >= neededSize) {
@@ -124,8 +133,9 @@ public:
     }
 
     /*
-     * 本块属于第几个 pbgz 包。辅助块的身份用的就是它——
-     * 绝对文件偏移在管道输入下退化为 0，根本不成立，不能当身份。
+     * Which pbgz package this block belongs to. It is also used as the identity
+     * of an auxiliary block—under pipe input an absolute file offset degenerates
+     * to 0 and is meaningless, so it cannot serve as identity.
      */
     int64_t getPackageIndex() const {
         return packageIndex;
@@ -136,11 +146,15 @@ public:
     }
 
     /*
-     * 本块所属 pbgz 包在文件中的起点。
+     * Start position of this block's pbgz package in the file.
      *
-     * 块 meta 里记录的辅助块地址是**包内相对**的——压缩时无从预知自己将来被 cat 到
-     * 哪个位置。解压侧必须加上本块所属包的起点才还原成绝对地址，与参考基因组走的
-     * getCurrentFileStart() + offset 是同一套语义。单包场景该值为 0，退化成相对即绝对。
+     * The auxiliary-block addresses recorded in the block meta are **relative to
+     * the package**—at compression time it is impossible to know where the file
+     * will later be cat'ed to. The decompression side must add the start position
+     * of the package this block belongs to in order to reconstruct absolute
+     * addresses; this is the same semantics as getCurrentFileStart() + offset
+     * used for the reference genome. In the single-package case this value is 0,
+     * so relative degenerates to absolute.
      */
     int64_t getPackageStart() const {
         return packageStart;
@@ -151,10 +165,13 @@ public:
     }
 
     /*
-     * 位置寻址标记：本块是"同步发射的辅助块"，写线程见到即写，
-     * 不参与 blockId 顺序重排，也不消耗数据块的 id 序列。
-     * 块取自公共池并被反复复用，故必须在 reset() 里清掉，
-     * 否则上一轮的标记会让一个普通数据块被当成辅助块提前写出。
+     * Position-addressing flag: this block is a "synchronously emitted auxiliary
+     * block"; the writer thread writes it immediately on sight, it does not take
+     * part in blockId reordering, and it does not consume the data block id
+     * sequence. Blocks come from a shared pool and are reused repeatedly, so this
+     * flag must be cleared in reset(); otherwise a stale flag from the previous
+     * round would cause an ordinary data block to be written out early as an
+     * auxiliary block.
      */
     bool isSyncAux() const {
         return syncAux;

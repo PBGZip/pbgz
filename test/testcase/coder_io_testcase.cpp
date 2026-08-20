@@ -29,15 +29,16 @@
 #include "coder/coder_io.h"
 
 /*
- * 越界错误汇聚点的行为。
+ * Behavior of the out-of-bounds error sink.
  *
- * 这些用例守的是一条性质："一次块处理里任何一路流越界，都必须能在出口被问到"。
- * 原来它靠每个调用点自觉去查各自的 err，结果 SAM 查了 12 路、FASTQ 和索引一路
- * 都没查，越界写坏的数据被当成成功写了出去。
+ * These cases guard one property: "any stream that overflows during a single block process must
+ * be queryable at the exit point." Previously this relied on every call site checking its own err;
+ * the result was that SAM checked all 12 streams while FASTQ and the index checked none, so data
+ * corrupted by an overflow was written out as if it had succeeded.
  */
 class CoderIoErrSinkTest : public ::testing::Test {};
 
-/* 不接汇聚点时行为与原来一致：只置本地 err，不影响别人 */
+/* Without a sink attached, behavior is unchanged: only the local err is set and nothing else is affected. */
 TEST_F(CoderIoErrSinkTest, StandaloneIoKeepsErrorLocal)
 {
     std::vector<uint8_t> buf(2);
@@ -51,7 +52,7 @@ TEST_F(CoderIoErrSinkTest, StandaloneIoKeepsErrorLocal)
     EXPECT_EQ(io.err, coder_io::IO_BUF_FULL);
 }
 
-/* 写越界立刻上报汇聚点，并带上是哪一路流 */
+/* A write overflow is reported to the sink immediately, together with which stream overflowed. */
 TEST_F(CoderIoErrSinkTest, WriteOverflowReachesSink)
 {
     coder_err_sink sink;
@@ -67,7 +68,7 @@ TEST_F(CoderIoErrSinkTest, WriteOverflowReachesSink)
     EXPECT_STREQ(sink.what, "QUAL");
 }
 
-/* 读端耗尽同样上报。'\0' 本身是合法数据，只能靠标志区分"真读到 0"和"没得读" */
+/* Read exhaustion is reported as well. '\0' itself is valid data, so a flag alone distinguishes a real 0 from nothing left to read. */
 TEST_F(CoderIoErrSinkTest, ReadExhaustionReachesSink)
 {
     coder_err_sink sink;
@@ -75,7 +76,7 @@ TEST_F(CoderIoErrSinkTest, ReadExhaustionReachesSink)
     coder_io io(buf.data(), (int32_t)buf.size(), &sink, "SEQ");
 
     EXPECT_EQ(io.getc(), 0x00);
-    EXPECT_TRUE(sink.ok()) << "读到真实的 0 不该被当成耗尽";
+    EXPECT_TRUE(sink.ok()) << "A real read 0 must not be treated as exhaustion";
 
     EXPECT_EQ(io.getc(), 0x00);
     EXPECT_FALSE(sink.ok());
@@ -84,8 +85,8 @@ TEST_F(CoderIoErrSinkTest, ReadExhaustionReachesSink)
 }
 
 /*
- * 一个块要开十几路流，汇聚点只留第一个错误：后续错误多半是它的连锁反应，
- * 第一个最有定位价值。
+ * A block opens over a dozen streams; the sink keeps only the first error: subsequent errors are
+ * usually chain reactions of it, and the first one has the most diagnostic value.
  */
 TEST_F(CoderIoErrSinkTest, SinkKeepsFirstErrorAcrossStreams)
 {
@@ -104,11 +105,11 @@ TEST_F(CoderIoErrSinkTest, SinkKeepsFirstErrorAcrossStreams)
     second.putc('a');
     second.getc();
     second.getc();
-    EXPECT_EQ(sink.err, coder_io::IO_BUF_FULL) << "首个错误应保持不变";
+    EXPECT_EQ(sink.err, coder_io::IO_BUF_FULL) << "The first error must be preserved";
     EXPECT_STREQ(sink.what, "QNAME");
 }
 
-/* err 是粘性的：同一路流反复越界不会把错误刷成别的 */
+/* err is sticky: repeated overflows on the same stream never overwrite the recorded error. */
 TEST_F(CoderIoErrSinkTest, ErrorIsSticky)
 {
     coder_err_sink sink;

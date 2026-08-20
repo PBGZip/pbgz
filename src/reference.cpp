@@ -87,19 +87,21 @@ Reference::~Reference() {
 }
 
 /*
- * 索引只在用户显式指定时加载, 且必须整个读进内存、校验通过之后才算数。
- *
- * 两条理由。其一, 磁盘上这份随时可能正被另一个进程改写, 边读边用等于信任一个会变的
- * 东西, 所以读完即脱离磁盘, 之后只认内存快照。其二, 载荷与文件内记录的校验和对不上
- * 就说明它已不是当初那份索引, 拿去压会压错且不留任何迹象。校验通过前不碰任何成员,
- * 失败时对象保持原样, 调用方可以干净地退回去读 fasta。
+ * An index takes effect only after it is read entirely into memory and passes
+ * verification. The on-disk index may be being rewritten by another process, so using
+ * it while reading would mean trusting something that changes; therefore once read it
+ * detaches from the disk and only the in-memory snapshot counts. If the payload does
+ * not match the checksum recorded in the file, the index is corrupt or has been
+ * tampered with and is rejected outright. No member is touched before verification
+ * passes, and on failure the object is left unchanged, so the caller can fall back to
+ * reading the fasta.
  */
 bool Reference::loadFromNiFile(const std::string& niFile) {
     const int64_t magicLen = (int64_t)PBGZ_FILE_MAGIC.length();
     const int64_t headerLen = magicLen + 3 + 2 + (int64_t)sizeof(int64_t);
     uint8_t* image = nullptr;
 
-    /* 不可信的索引不是致命错误, 但必须让用户看见, 否则他不知道自己压的是哪一份参考。 */
+    /* An unusable index is not fatal: warn and fall back to the fasta, avoiding silently compressing against an unexpected reference. */
     auto reject = [&](const std::string& why) {
         MemoryUtil::safeFree(image);
         fprintf(stderr, "warning: index %s is unusable (%s), building the index from %s instead.\n",
@@ -151,7 +153,7 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
         return reject(std::string("carries unreadable metadata: ") + e.what());
     }
 
-    /* -r 决定用哪个参考, 索引得先证明自己是从那一份建出来的。 */
+    /* -r decides which reference is used; the index must prove it was built from that very one. */
     const std::string wantName = PathUtil::getFileName(refGeneFile);
     const std::string haveName = niMeta["refe_name"].asString();
     if (haveName != wantName) {
@@ -395,9 +397,12 @@ std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName)
 }
 
 /*
- * 只负责把已经建好的 squash 序列化出去。解析 fasta 的实现只保留 initSquashFromFasta 一处:
- * 这里原先另有一套自己的解析循环, 且漏掉了文件末尾不足 4 个碱基的残留, 于是同一个参考
- * 经两条路会得到长度不同的 squash。同一件事只留一份实现, 才不会再次分叉。
+ * Only serializes an already-built squash. The fasta parsing implementation exists in
+ * exactly one place, initSquashFromFasta: this code used to have its own parse loop,
+ * and it dropped the trailing residue of fewer than 4 bases at the end of the file, so
+ * the same reference produced squashes of different lengths through the two paths.
+ * Keeping a single implementation for the same thing is what prevents the fork from
+ * happening again.
  */
 bool Reference::writeNiFile(const std::string& niFile) {
     if (refGeneSquash == nullptr || refGeneSquashlen <= 0) {
@@ -458,8 +463,10 @@ bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& ref
 }
 
 /*
- * 只在用户显式要求时落盘, 路径也由用户给定: 隐式缓存一旦被改写, 之后压出来的数据
- * 就是错的且无人察觉, 所以这里不写用户数据目录, 也不登记任何全局配置。
+ * The index is written to disk only at the path given by the caller; no implicit
+ * caching is done: once a cache file is altered, later compressions would silently go
+ * wrong with no way to notice, so no default directory is ever written and nothing is
+ * registered in the global configuration.
  */
 bool Reference::makeNiFile(const std::string& niFile) {
     if (!initSquashFromFasta()) {
@@ -469,10 +476,10 @@ bool Reference::makeNiFile(const std::string& niFile) {
     return writeNiFile(niFile);
 }
 
-/* 按文件头识别, 不看后缀: 用户给什么路径就认什么内容。 */
+/* Identify by the file header, not by the suffix; only the content counts. */
 bool Reference::isNiFile(const std::string& file) {
     const size_t magicLen = PBGZ_FILE_MAGIC.length();
-    const size_t headLen = magicLen + 3 + 2; /* magic + 版本 + "ni" */
+    const size_t headLen = magicLen + 3 + 2; /* magic + version + "ni" */
     uint8_t head[64];
     if (headLen > sizeof(head)) {
         return false;
@@ -500,7 +507,7 @@ bool Reference::makeIndex() {
     uint32_t *hashBucketCurpos;
 
     hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
-    /* 索引信不过就退回读 fasta: 参考基因组由 -r 决定, 索引只是省一遍解析。 */
+    /* If the index cannot be trusted, fall back to reading the fasta: the reference genome is decided by -r, the index only saves one round of parsing. */
     if (!loadSquashAndMatched()) {
         MemoryUtil::safeFree(hashBucketCurpos);
         return false;
@@ -524,12 +531,13 @@ bool Reference::makeIndex() {
 }
 
 /*
- * 加载参考 squash（NI 优先，其次 FASTA），分配 matched 跟踪缓冲，打印支持上限。
- * makeIndex 与 makeSquashIndex 共用；不碰哈希表。
+ * Load the reference squash (NI first, then FASTA), allocate the matched tracking
+ * buffer, and print the supported upper bound. Shared by makeIndex and makeSquashIndex;
+ * does not touch the hash table.
  */
 bool Reference::loadSquashAndMatched() {
     const int64_t supportMax = ((int64_t)2 << 30) * baseGroupStep;
-    /* 索引信不过就退回读 fasta: 参考基因组由 -r 决定, 索引只是省一遍解析。 */
+    /* If the index cannot be trusted, fall back to reading the fasta: the reference genome is decided by -r, the index only saves one round of parsing. */
     bool squashReady = !niIndexFile.empty() && loadFromNiFile(niIndexFile);
     if (!squashReady) {
         squashReady = initSquashFromFasta();
@@ -551,7 +559,7 @@ bool Reference::loadSquashAndMatched() {
     return true;
 }
 
-/* 只加载参考 squash，不建读映射哈希表：SAM/BAM 压缩用。 */
+/* Only load the reference squash; do not build the read-mapping hash table: used for SAM/BAM compression. */
 bool Reference::makeSquashIndex() {
     Timer cost_ms(true);
     if (!loadSquashAndMatched()) {

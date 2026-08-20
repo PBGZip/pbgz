@@ -52,8 +52,9 @@ public:
 
     /// @brief Load reference squash (NI or FASTA) without building the read-mapping
     /// hash table.
-    /// SAM/BAM 自带比对位置（RNAME/POS），压缩 SEQ 时只用参考碱基序列，不需要
-    /// makeIndex 的哈希表（那个只对 FASTQ 的 read 定位有用）。FASTQ 仍走 makeIndex。
+    /// SAM/BAM already carry their own alignment positions (RNAME/POS); compressing SEQ
+    /// only needs the reference base sequence, not makeIndex's hash table (which is
+    /// useful only for locating reads in FASTQ). FASTQ still goes through makeIndex.
     /// @return  bool true for success / false for failure
     bool makeSquashIndex();
 

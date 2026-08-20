@@ -33,8 +33,9 @@ set(TEST_MAIN ${CMAKE_CURRENT_SOURCE_DIR}/pbgz_test_main.cpp)
 # Generate test executable
 add_executable(pbgz_test ${TEST_MAIN} ${TEST_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPEN_SOURCES})
 
-# 模型快照测试不依赖外部数据集，单独保留为小型命令行程序，便于在接入主压缩路径之前
-# 直接验证先验的二进制兼容性、错误回退和编解码状态同步。
+# The model snapshot test does not depend on an external dataset; it is kept as a small
+# standalone command-line program so that prior binary compatibility, error fallback, and codec
+# state synchronization can be verified before integration into the main compression path.
 add_executable(fcv2_model_roundtrip fcv2_model_roundtrip.cpp)
 
 # Include main project header files
@@ -74,7 +75,8 @@ target_link_libraries(fcv2_model_roundtrip PRIVATE
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
-# coder_bwt_cm 逐记录定长往返验证：用于定位 QUAL 走 bwt_cm 时的解压失败根因。
+# Per-record fixed-length round-trip verification for coder_bwt_cm: used to pinpoint the root
+# cause of decompression failures when QUAL is encoded via bwt_cm.
 add_executable(bwtcm_record_roundtrip bwtcm_record_roundtrip.cpp)
 target_link_libraries(bwtcm_record_roundtrip PRIVATE
     pbgz_coder

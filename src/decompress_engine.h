@@ -32,19 +32,22 @@
 
 
 /*
- * QUAL 先验的认领者。读线程路过 QUAL_PRIOR 块时把它解出来存下，工作线程随后取用。
+ * Claimant of the QUAL prior. When the reader thread passes a QUAL_PRIOR block, it
+ * decompresses and stores it; worker threads use it afterwards.
  *
- * blob 由读线程写、工作线程读，两者之间没有其它同步点，所以这里自带一把锁；
- * 读只发生在解码器构造时，不在热路径上。
+ * The blob is written by the reader thread and read by worker threads with no other
+ * synchronization point between them, so this carries its own lock; reads happen only
+ * when decoders are constructed, not on the hot path.
  */
 class QualPriorConsumer : public AuxBlockConsumer {
 public:
     bool claim(RoughIOBlock* blockPtr, int64_t packageIndex) override;
 
     /*
-     * 按包序号取该包的先验，没有则返回空。
-     * 返回 shared_ptr 是为了让取用者把这份数据一直握到自己解完，
-     * 不受认领者后续动作影响。
+     * Return the prior for the given package index, or an empty payload if there is
+     * none.
+     * A shared_ptr is returned so the consumer can hold the data until it finishes
+     * decompressing, unaffected by the claimant's subsequent actions.
      */
     AuxPayloadPtr forPackage(int64_t packageIndex) const {
         std::lock_guard<std::mutex> lock(mutex);

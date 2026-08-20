@@ -1,15 +1,21 @@
 /*
- * qual_selector.cpp - 质量值列的编码器评估
+ * qual_selector.cpp - encoder evaluation for the quality-value column
  *
- * 本文件刻意不包含 coder_fc.h 或任何会引入 fc/rangecoder.h 的头文件：那里的
- * RangeCoder 与 coder_qual.h 间接引入的 clr.h 中的同名类冲突。质量值的评估之所以
- * 从 codec_selector.cpp 里分出来，这是原因之一，详见 qual_selector.h 的说明。
+ * This file deliberately does not include coder_fc.h or any header that pulls in
+ * fc/rangecoder.h: its RangeCoder conflicts with the same-named class in clr.h,
+ * which coder_qual.h brings in indirectly. That is one reason the quality-value
+ * evaluation is split out of codec_selector.cpp; see qual_selector.h for
+ * details.
  *
- * 与通用字段的 selectCoder 对应，质量值列也走"多轮收敛"（策略 7）：从 64KB 起步，
- * 每轮翻倍样本量，一旦领先者拉开 3% 以上的差距就定案，避免在小样本上被自适应编码器
- * 尚未收敛的假象带偏。此外还按数据特征给 fcv2 选上下文参数档位（策略 2，见
- * fqzcomp 的 fqz_pick_parameters 思路），把档位也作为候选参与试压，胜出的档位随
- * FieldCodecSelection.fcv2Params 交给压缩端与先验训练。
+ * Mirroring selectCoder for generic fields, the quality-value column also uses
+ * multi-round convergence (strategy 7): start at 64 KB, double the sample each
+ * round, and finalize once the leader opens a gap of more than 3%, avoiding
+ * being misled on small samples by adaptive encoders that have not yet
+ * converged. In addition, context parameter tiers are picked for fcv2 based on
+ * data characteristics (strategy 2, following the fqz_pick_parameters idea from
+ * fqzcomp), and the tiers participate as candidates in the trial compression;
+ * the winning tier is handed to the compression side and prior training via
+ * FieldCodecSelection.fcv2Params.
  */
 
 #include "qual_selector.h"
@@ -26,19 +32,23 @@
 
 namespace {
 
-/* 样本少于这个字节数就不做评估，直接沿用默认编码器。太少的样本判断不可靠。 */
+/* If the sample is smaller than this many bytes, skip evaluation and keep the
+ * default encoder. Too little sample data makes the decision unreliable. */
 const uint32_t MIN_QUAL_SAMPLE = 64u << 10;
 
-/* 试压输出缓冲的富余量。质量值几乎不可能压不动，留一倍余量足够安全。 */
+/* Slack for the trial-compression output buffer. Quality values are almost
+ * never incompressible, so a 2x margin is more than safe. */
 inline size_t trialCapacity(size_t srcLen)
 {
     return (srcLen << 1) + (1u << 16);
 }
 
-/* 领先者需要领先多少才算胜负已分，与通用字段 selectCoder 同一阈值。 */
+/* How far the leader must be ahead for the winner to be settled; the same
+ * threshold as the generic-field selectCoder. */
 const double SETTLE_MARGIN = 0.03;
 
-/* 返回样本里前 n 条记录的累计 QUAL 字节数不超过 budget 的最大 n（只收完整记录）。 */
+/* Return the largest n such that the cumulative QUAL bytes of the first n
+ * records do not exceed budget (only complete records are kept). */
 size_t recordsForBudget(const std::vector<QualSampleRecord>& records, size_t budget)
 {
     size_t used = 0;
@@ -52,13 +62,14 @@ size_t recordsForBudget(const std::vector<QualSampleRecord>& records, size_t bud
     return n;
 }
 
-/* coder_bwt_cm 内部块大小，与 codec_selector.cpp 的 BWT_LEVEL_SIZE 保持一致。 */
+/* Internal block sizes of coder_bwt_cm, kept consistent with BWT_LEVEL_SIZE in
+ * codec_selector.cpp. */
 const uint32_t kBwtLevelSize[10] = {
     0, 1u << 20, 1u << 22, 1u << 23, 0x00FFFFFFu,
     1u << 25, 1u << 26, 1u << 27, 1u << 28, 0x7FFFFFFFu
 };
 
-/* 取最小的、内部块能装下本轮样本的档位。 */
+/* Pick the smallest tier whose internal block can hold this round's sample. */
 int bwtLevelFor(uint32_t sampleLen)
 {
     for (int lv = 1; lv <= 9; ++lv) {
@@ -70,11 +81,13 @@ int bwtLevelFor(uint32_t sampleLen)
 }
 
 /*
- * 用 coder_qual 试压。
+ * Trial-compress with coder_qual.
  *
- * 它以对应的碱基序列作为上下文，所以必须逐条记录喂入，同时给出 seq 和 qual。
- * 频率表的格式沿用 sam_actuator 的既有约定：按出现次数降序排列的字母表，
- * 第二个元素固定为 1（实际计数没有被保留下来）。
+ * It uses the corresponding base sequence as context, so records must be fed
+ * one at a time with both seq and qual. The frequency-table format follows the
+ * existing convention in sam_actuator: an alphabet sorted by descending
+ * frequency of occurrence, with the second element fixed at 1 (the actual count
+ * is not preserved).
  */
 bool trialQual(const std::vector<QualSampleRecord>& records, size_t recordCount,
                const std::vector<uint32_t>& freqByByte,
@@ -121,10 +134,12 @@ bool trialQual(const std::vector<QualSampleRecord>& records, size_t recordCount,
 }
 
 /*
- * 用 fcv2 试压。
+ * Trial-compress with fcv2.
  *
- * 它不需要碱基序列，但需要每条记录的长度和链方向。链方向由它自己写进码流，
- * 所以这里传进去之后解码端不必再提供一次。cfg 决定上下文参数档位，见策略 2。
+ * It does not need the base sequence, but it needs each record's length and
+ * strand direction. The strand direction is written into the bitstream by the
+ * encoder itself, so once passed in here the decoder does not need to supply it
+ * again. cfg selects the context parameter tier; see strategy 2.
  */
 bool trialFcv2(const std::vector<QualSampleRecord>& records, size_t recordCount,
                const std::vector<uint32_t>& freqByByte, const Fcv2Cfg& cfg,
@@ -160,19 +175,25 @@ bool trialFcv2(const std::vector<QualSampleRecord>& records, size_t recordCount,
 }
 
 /*
- * 用 coder_bwt_cm 试压。
+ * Trial-compress with coder_bwt_cm.
  *
- * 这个候选原先不在质量值列的候选集里——通用字段走 CodecSelector 才会试 bwt_cm，
- * 质量值列只在 coder_qual 和 fcv2 之间二选一。实测发现这是个真实缺口：4 MB 真实
- * 质量值上 fcv2 25.81%、bwt_cm 26.31%、coder_qual 33.74%，fcv2 依然胜出，
- * 但 bwt_cm 比 coder_qual 好 7.4 个百分点，而 coder_qual 恰恰是当前的兜底选择。
+ * This candidate was originally not in the quality-value candidate set — generic
+ * fields only try bwt_cm through CodecSelector, while the quality-value column
+ * chose only between coder_qual and fcv2. Measurement showed this was a real
+ * gap: on 4 MB of real quality values, fcv2 25.81%, bwt_cm 26.31%, coder_qual
+ * 33.74%; fcv2 still wins, but bwt_cm beats coder_qual by 7.4 percentage
+ * points, and coder_qual happens to be the current fallback choice.
  *
- * fcv2 有明确的不适用场景：它需要每条记录的长度和链方向，只有比对后 SAM 的 QUAL
- * 列能提供（见 CoderFactory::coderSupports）。那些场景下回退到 bwt_cm 而不是
- * coder_qual，代价从 7.4 个百分点降到 0.49 个百分点。
+ * fcv2 has clearly inapplicable scenarios: it needs each record's length and
+ * strand direction, which only the QUAL column of an aligned SAM can provide
+ * (see CoderFactory::coderSupports). In those scenarios falling back to bwt_cm
+ * instead of coder_qual reduces the cost from 7.4 percentage points to 0.49
+ * percentage points.
  *
- * 按记录逐条 encode_line，与 sam_actuator 里的实际调用方式保持一致。内部块大小按
- * 本轮样本量选档（与通用字段 selectCoder 的 pickBwtLevel 同理），小样本用不到大块。
+ * Records are fed one encode_line at a time, matching how sam_actuator actually
+ * calls it. The internal block size is chosen per this round's sample size
+ * (same rationale as pickBwtLevel in the generic-field selectCoder); small
+ * samples do not need large blocks.
  */
 bool trialBwtCm(const std::vector<QualSampleRecord>& records, size_t recordCount,
                 int bwtLevel, uint32_t& outLen, uint32_t& usec)
@@ -206,7 +227,8 @@ bool trialBwtCm(const std::vector<QualSampleRecord>& records, size_t recordCount
     return outLen > 0 && outLen < buf.size();
 }
 
-/* 把 coder 层的档位翻译成 PreprocessInfo 携带的参数（字段一一对应）。 */
+/* Translate the coder-layer tier into the parameters carried by PreprocessInfo
+ * (fields correspond one-to-one). */
 QualFcv2Params toQualParams(const Fcv2Cfg& cfg)
 {
     QualFcv2Params p;
@@ -222,41 +244,50 @@ QualFcv2Params toQualParams(const Fcv2Cfg& cfg)
 }
 
 /*
- * 按数据特征给 fcv2 选候选档位（策略 2）。
+ * Pick candidate tiers for fcv2 based on data characteristics (strategy 2).
  *
- * 思路取自 fqzcomp 的 fqz_pick_parameters：质量值字母表小（NovaSeq/HiSeqX 类，符号数
- * 少）时上下文不稀疏，可以用更细的位置分档、不对前驱质量值做量化；字母表大或样本
- * 小时上下文稀疏，分档变粗、前驱右移更多。但统计规则只是先验，实测（合成 30MB 质量值
- * 上，细档比粗档好约 0.3 个百分点）显示哪个档位真正胜出与数据有关，所以把多档都放进
- * 候选，交由 select() 一并试压取压缩后更小的——参数选择以实测为准。
+ * The idea comes from fqz_pick_parameters in fqzcomp: when the quality-value
+ * alphabet is small (NovaSeq/HiSeqX-like, few symbols), the context is not
+ * sparse, so finer positional bucketing can be used and the predecessor quality
+ * values do not need quantization; when the alphabet is large or the sample is
+ * small, the context is sparse, so bucketing is coarser and the predecessor is
+ * shifted more. But the statistical rule is only a prior; measurements (on a
+ * synthetic 30 MB of quality values, the fine tier beats the coarse tier by
+ * about 0.3 percentage points) show that which tier actually wins depends on
+ * the data, so several tiers are put into the candidate set and select()
+ * trial-compresses them all, picking the smallest compressed size — parameter
+ * choice is driven by measurement.
  *
- * 唯一的数据特征判断是样本量：细档需要足够样本收敛，小样本下放进候选只会平白增加
- * 试压时间，甚至被未收敛的假象误选，所以小样本时只保留默认档与粗档。
+ * The only data-characteristic decision is the sample size: the fine tier needs
+ * enough sample to converge, and with a small sample including it as a candidate
+ * only adds trial-compression time and risks being wrongly chosen by a
+ * not-yet-converged illusion, so with small samples only the default tier and
+ * the coarse tier are kept.
  */
 std::vector<Fcv2Cfg> candidateFcv2Cfgs(size_t sampleLen)
 {
     std::vector<Fcv2Cfg> cfgs;
-    cfgs.push_back(Fcv2Cfg());   /* 默认档 */
+    cfgs.push_back(Fcv2Cfg());   /* default tier */
 
-    Fcv2Cfg dedup = Fcv2Cfg();   /* 默认档 + 相邻重复 read 去重（策略 3） */
+    Fcv2Cfg dedup = Fcv2Cfg();   /* default tier + dedup of adjacent duplicate reads (strategy 3) */
     dedup.useDedup = true;
     cfgs.push_back(dedup);
 
-    Fcv2Cfg qa = Fcv2Cfg();      /* 默认档 + read 平均质量档（策略 4） */
+    Fcv2Cfg qa = Fcv2Cfg();      /* default tier + per-read average-quality tier (strategy 4) */
     qa.useQa = true;
     cfgs.push_back(qa);
 
-    Fcv2Cfg fine;                /* 小字母表风格：细档、前驱不量化 */
+    Fcv2Cfg fine;                /* small-alphabet style: fine tiers, predecessor not quantized */
     fine.cycleBucket = 24;
     fine.deltaBucket = 12;
     fine.prevShift = 0;
 
-    Fcv2Cfg coarse;              /* 大字母表/小样本风格：粗档、前驱右移两位 */
+    Fcv2Cfg coarse;              /* large-alphabet/small-sample style: coarse tiers, predecessor shifted right two bits */
     coarse.cycleBucket = 8;
     coarse.deltaBucket = 4;
     coarse.prevShift = 2;
 
-    Fcv2Cfg coarseQa = coarse;   /* 粗档 + read 平均质量档（策略 4，实测最优组合） */
+    Fcv2Cfg coarseQa = coarse;   /* coarse tier + per-read average-quality tier (strategy 4, best measured combination) */
     coarseQa.useQa = true;
     cfgs.push_back(coarseQa);
 
@@ -267,13 +298,14 @@ std::vector<Fcv2Cfg> candidateFcv2Cfgs(size_t sampleLen)
     return cfgs;
 }
 
-/* 一次"按字节预算压缩全部候选"的回合。返回各候选的压缩大小与是否可用。 */
+/* One round that compresses every candidate under a byte budget. Returns each
+ * candidate's compressed size and whether it succeeded. */
 struct QualRoundResult {
     bool     qualOk = false;
     uint32_t qualLen = 0;
     bool     fcv2Ok = false;
     uint32_t fcv2Len = 0;
-    Fcv2Cfg  fcv2Cfg;          /* 多个 fcv2 档位里胜出的那个 */
+    Fcv2Cfg  fcv2Cfg;          /* the winning one among the several fcv2 tiers */
     bool     cmOk = false;
     uint32_t cmLen = 0;
     uint32_t bestLen = 0;
@@ -299,7 +331,8 @@ QualRoundResult runRound(const std::vector<QualSampleRecord>& records,
         r.bestCoder = CoderType::QUAL;
     }
 
-    /* 多个 fcv2 档位里取最小的那个，与 coder_qual / bwt_cm 比较时用这个代表 fcv2。 */
+    /* Pick the smallest among the several fcv2 tiers; this represents fcv2 when
+     * compared against coder_qual / bwt_cm. */
     bool fcv2Picked = false;
     for (size_t i = 0; i < cfgs.size(); i++) {
         uint32_t len = 0, us = 0;
@@ -355,15 +388,22 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     const std::vector<Fcv2Cfg> cfgs = candidateFcv2Cfgs(sampleLen);
 
     /*
-     * 多轮收敛（策略 7）：从小样本起步，每轮翻倍，一旦领先者拉开足够差距就收手。
-     * 每轮都是拿新样本量重压全部候选，而不是增量喂——重压恰好模拟了实际压缩时
-     * "一个数据块从头压到尾"的情形，量出来的数字更贴近真实表现。
-     * 与通用字段 selectCoder 的理由一致，见 codec_selector.cpp 的 selectCoder。
+     * Multi-round convergence (strategy 7): start from a small sample and double
+     * it each round, stopping once the leader opens enough of a gap. Each round
+     * re-compresses all candidates at the new sample size rather than feeding
+     * incrementally — re-compression mimics the "one data block from start to
+     * finish" case of real compression, so the measured numbers are closer to
+     * real behavior. The rationale is the same as the generic-field selectCoder;
+     * see selectCoder in codec_selector.cpp.
      *
-     * 提前定案有一个前提：样本必须大到自适应编码器已经收敛。实测本文件的质量值上，
-     * bwt_cm 在小样本（64KB~512KB）时领先 fcv2 达 2%~5%（它在这个区间压得异常好），
-     * 但随样本增大优势逐步收窄，约 2~4MB 处被 fcv2 反超。若一上来就按 3% 领先阈值
-     * 定案，会在第一轮就误选 bwt_cm。因此设一个最低定案样本量，低于它只翻倍不定案。
+     * Early finalization has a precondition: the sample must be large enough
+     * that the adaptive encoders have converged. Measured on this file's quality
+     * values, bwt_cm leads fcv2 by 2%-5% on small samples (64 KB-512 KB; it
+     * compresses unusually well in this range), but the lead narrows as the
+     * sample grows and fcv2 overtakes it around 2-4 MB. Finalizing immediately
+     * at the 3% lead threshold would wrongly pick bwt_cm in the first round.
+     * Hence a minimum finalization sample size is set: below it, only double,
+     * never finalize.
      */
     const uint32_t MIN_SETTLE_PROBE = 1u << 20;   /* 1 MB */
 
@@ -387,7 +427,8 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
             probe = (probe > sampleLen / 2) ? sampleLen : (probe * 2);
             continue;
         }
-        /* 只有一个候选能跑通，再加数据也没有比较对象。 */
+        /* Only one candidate compresses successfully; adding more data gives
+         * nothing to compare against. */
         {
             uint32_t runnerUp = UINT32_MAX;
             if (r.bestCoder == CoderType::QUAL) {
@@ -403,7 +444,8 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
             if (runnerUp == UINT32_MAX) {
                 break;
             }
-            /* 领先者已经拉开足够差距，再加数据不会反转。 */
+            /* The leader is far enough ahead that more data will not flip the
+             * ranking. */
             if ((double)(runnerUp - r.bestLen) / (double)runnerUp >= SETTLE_MARGIN) {
                 break;
             }
@@ -425,7 +467,8 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     sel.selectedCoder = final.bestCoder;
     sel.bestCompLen = final.bestLen;
     if (final.bestCoder == CoderType::FCV2) {
-        /* 胜出的是 fcv2，把最后一轮里胜出的档位交给上层，编码与先验训练据此保持一致。 */
+        /* fcv2 won; hand the winning tier from the last round to the caller so
+         * encoding and prior training stay consistent with it. */
         sel.fcv2Params = toQualParams(final.fcv2Cfg);
     }
     sel.status = FieldStatus::SELECTED;

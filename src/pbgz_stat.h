@@ -32,9 +32,9 @@
 #include <functional>
 
 enum class MetricType {
-    VALUE,           // 设置值
-    ACCUMULATED,     // 累加值
-    CALCULATED       // 计算值 (基于其他指标)
+    VALUE,           // Set value
+    ACCUMULATED,     // Accumulated value
+    CALCULATED       // Calculated value (based on other metrics)
 };
 
 namespace StatMetricIds {
@@ -55,7 +55,7 @@ struct StatMetric {
         : metricId(id), metricName(name), metricType(type), calcFunc(func) {}
 };
 
-// 全局统计指标定义：指标ID对应的名称、类型、计算公式
+// Global statistic metric definitions: name, type, and calculation function for each metric ID
 const std::map<uint16_t, StatMetric> gStatMetrics = {
     {StatMetricIds::ORIGINAL_SIZE, StatMetric(StatMetricIds::ORIGINAL_SIZE, "Original Size", MetricType::ACCUMULATED)},
     {StatMetricIds::COMPRESSED_SIZE, StatMetric(StatMetricIds::COMPRESSED_SIZE, "Compressed Size", MetricType::ACCUMULATED)},
@@ -75,7 +75,7 @@ class StatObject {
 public:
     uint16_t objectId;
     std::string objectName;
-    std::map<uint16_t, uint64_t> metricValues;  // metricId -> 统计值
+    std::map<uint16_t, uint64_t> metricValues;  // metricId -> statistic value
     
     StatObject(uint16_t id = 0, const std::string& name = "") : objectId(id), objectName(name) {}
     
@@ -97,7 +97,7 @@ class StatUnit {
 public:
     uint16_t unitId;
     std::string unitName;
-    std::vector<uint16_t> metrics;  // 该统计单元包含的统计指标ID列表
+    std::vector<uint16_t> metrics;  // List of statistic metric IDs contained in this statistic unit
     std::map<uint16_t, StatObject> objects;  // objectId -> StatObject
     
     StatUnit(uint16_t id = 0, const std::string& name = "") : unitId(id), unitName(name) {}
@@ -136,27 +136,27 @@ public:
     
     virtual int init();
     
-    // 统计单元管理
+    // Statistic unit management
     void registerStatUnit(uint16_t unitId, const std::string& unitName);
     void addStatUnitMetric(uint16_t unitId, uint16_t metricId);
     
-    // 统计对象管理
+    // Statistic object management
     void addStatObject(uint16_t unitId, uint16_t objectId, const std::string& objectName);
     
-    // 统计值操作
+    // Statistic value operations
     void setMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metricId, uint64_t value);
     void addMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metricId, uint64_t value);
     uint64_t getMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metricId) const;
     
-    // 获取指定统计单元中所有对象的某个指标值
+    // Get the value of a given metric across all objects of the specified statistic unit
     std::map<uint16_t, uint64_t> getUnitMetricValues(uint16_t unitId, uint16_t metricId) const;
     
-    // 打印统计结果
+    // Print the statistic results
     void printStats();
     
 protected:
-    // 三层结构：
-    // 第一层：统计单元（StatUnit），包含指标和对象
+    // Three-layer structure:
+    // Layer 1: statistic unit (StatUnit), containing metrics and objects
     std::map<uint16_t, StatUnit> statUnits;
 };
 

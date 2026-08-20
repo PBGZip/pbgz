@@ -132,8 +132,9 @@ public:
         }
 
         /*
-         * 直接按原始内容载入整块（含 @SQ 头部），并记录换行符位置。
-         * 头部在 reader 里独立成块后，actuator 测试需要一个自含头部的完整块。
+         * Load the whole block directly from the raw content (including the @SQ header) and
+         * record newline positions. Since the reader separates the header into its own block,
+         * the actuator tests need a complete, self-contained block with the header included.
          */
         const size_t blockSize = pInBlock->getBlockSize();
         const size_t readLen = pIoReader->readIO(pInBlock->getBuffer(), blockSize);
@@ -151,9 +152,10 @@ public:
     }
 
     /*
-     * 直接按原始内容载入块并记录换行符位置，不做格式探测。
-     * 用于故意构造"结构上像 SAM 但内容非法"的输入，绕过 BlockFactory 的严格格式
-     * 判定，直接验证 actuator 预分析对非法内容的拒绝逻辑。
+     * Load the block directly from the raw content and record newline positions without format
+     * detection. Used to intentionally construct input that "looks like SAM but is invalid",
+     * bypassing BlockFactory's strict format checks to directly verify the actuator's pre-analysis
+     * rejection of invalid content.
      */
     void loadSamDataRaw(const std::string& filename) {
         pInBlock->reset();
@@ -555,7 +557,7 @@ protected:
 // Test 1: ID field covering all separator characters
 TEST_F(SamDecompressTest, TestIDFieldSeparators) {
     generateSamFileWithSeparators("test_id_separators.sam");
-    // 优化后只验证压缩和解压的返回码，不再比较文件内容
+    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
     EXPECT_NO_THROW(compressAndDecompress("test_id_separators.sam"));
 }
 
@@ -563,7 +565,7 @@ TEST_F(SamDecompressTest, TestIDFieldSeparators) {
 TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
     generateSamFileWithMissingFields("test_missing_fields.sam");
         // After optimization, only verify compression and decompression return codes, no longer compare file content
-        // Load input file（非法内容直接按原始字节载入，验证 actuator 预分析拒绝逻辑）
+        // Load input file (invalid content is loaded as raw bytes to verify the actuator's pre-analysis rejection logic)
         loadSamDataRaw("test_missing_fields.sam");
 
         // Create compressor
@@ -577,47 +579,48 @@ TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
 // Test 3: FLAG field matching, unmatched, forward matching, reverse matching
 TEST_F(SamDecompressTest, TestFlagVariants) {
     generateSamFileWithFlagVariants("test_flag_matching.sam");
-    // 优化后只验证压缩和解压的返回码，不再比较文件内容
+    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
     EXPECT_NO_THROW(compressAndDecompress("test_flag_matching.sam"));
 }
 
 // Test 4.1: Fixed-length Base field scenario
 TEST_F(SamDecompressTest, TestBaseFieldFixed) {
     generateSamFileWithFixedBase("test_base_fixed.sam");
-    // 优化后只验证压缩和解压的返回码，不再比较文件内容
+    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
     EXPECT_NO_THROW(compressAndDecompress("test_base_fixed.sam"));
 }
 
 // Test 4.2: Variable-length Base field scenario
 TEST_F(SamDecompressTest, TestBaseFieldVariable) {
     generateSamFileWithVariableBase("test_base_variable.sam");
-    // 优化后只验证压缩和解压的返回码，不再比较文件内容
+    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
     EXPECT_NO_THROW(compressAndDecompress("test_base_variable.sam"));
 }
 
 // Test 4.3: 3rd generation fastq scenario
 TEST_F(SamDecompressTest, TestBaseFieldFastq3) {
     generateSamFileWithFastq3Base("test_base_fastq3.sam");
-    // 优化后只验证压缩和解压的返回码，不再比较文件内容
+    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
     EXPECT_NO_THROW(compressAndDecompress("test_base_fastq3.sam"));
 }
 
 // Test 5.1: With optional fields
 TEST_F(SamDecompressTest, TestOptionalFieldsPresent) {
     generateSamFileWithOptionalFields("test_optional_fields.sam");
-    // 优化后只验证压缩和解压的返回码，不再比较文件内容
+    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
     EXPECT_NO_THROW(compressAndDecompress("test_optional_fields.sam"));
 }
 
 // Test 5.2: Without optional fields
 TEST_F(SamDecompressTest, TestNoOptionalFields) {
     generateSamFileWithoutOptionalFields("test_no_optional_fields.sam");
-    // 优化后只验证压缩和解压的返回码，不再比较文件内容
+    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
     EXPECT_NO_THROW(compressAndDecompress("test_no_optional_fields.sam"));
 }
 
-/* 缺失质量（单个 '*'）的读：压缩侧按 SEQ 长度展开、解压侧折叠回 '*',
- * 保证质量值码流不因记录长度错位。回归用：此前 `*` 读会让整条 QUAL 列错乱。 */
+/* Reads with missing quality (a single '*'): the compression side expands them to SEQ length and
+ * the decompression side folds them back to '*', keeping the quality-value stream aligned with
+ * record lengths. Regression case: previously a '*' read corrupted the whole QUAL column. */
 TEST_F(SamDecompressTest, TestMissingQuality) {
     std::ofstream file("test_missing_quality.sam");
     ASSERT_TRUE(file.is_open());
@@ -656,7 +659,7 @@ TEST_F(SamDecompressTest, TestMixedScenarios) {
     file.close();
 
     // After optimization, only verify compression and decompression return codes, no longer compare file content
-    // Load input file（含非法缺字段记录，直接按原始字节载入，验证 actuator 预分析拒绝逻辑）
+    // Load input file (contains invalid records with missing fields; load as raw bytes to verify the actuator's pre-analysis rejection logic)
     loadSamDataRaw("test_mixed.sam");
 
     // Create compressor
@@ -734,7 +737,7 @@ TEST_F(SamDecompressTest, TestFieldCountTooFew) {
     file << "read3\t0\tchr2\t3\t60\t76M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:1\n";
     file.close();
 
-    // Load input file（含缺字段记录，直接按原始字节载入，验证 actuator 预分析拒绝逻辑）
+    // Load input file (contains records with missing fields; load as raw bytes to verify the actuator's pre-analysis rejection logic)
     loadSamDataRaw("test_field_count_too_few.sam");
 
     // Create compressor

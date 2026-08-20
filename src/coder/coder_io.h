@@ -39,22 +39,27 @@ struct coder_io
     };
 
     /*
-     * 流错误标志。写越界（buf 不够）和读端耗尽都置位，让上层 coder 在 decode 过程中
-     * 能查到、通过返回值把错误传给 actuator——不再静默越界写坏堆、或静默返回 '\0'
-     * 产出错误却"成功"的文件。
+     * Stream error flag. Both write overflow (buffer too small) and read-side
+     * exhaustion set it, so the higher-level coder can inspect it during decode
+     * and propagate the error to the actuator through the return value—instead of
+     * silently writing past the end and corrupting the heap, or silently returning
+     * '\0' and producing a "successful" file with wrong content.
      *
-     * 读端耗尽原本返回 '\0'，但 '\0' 本身也可能是真实数据（质量值 '!'-'!'=0），
-     * 所以不能靠返回值区分"真读到 0"和"没得读"；用标志区分。
+     * Read-side exhaustion used to return '\0', but '\0' can also be real data
+     * (quality value '!'-'!'=0), so the return value alone cannot distinguish a
+     * real zero from "nothing left to read"; a flag is used instead.
      */
     enum io_err {
         IO_OK = 0,
-        IO_BUF_FULL = -1,    // 写端：data_len 已到 data_capacity，再写越界
-        IO_READ_EMPTY = -2,  // 读端：data_len 已到 data_capacity，无数据可读
+        IO_BUF_FULL = -1,    // Write side: data_len has reached data_capacity; writing further overflows
+        IO_READ_EMPTY = -2,  // Read side: data_len has reached data_capacity; no data left to read
     };
 
     /*
-     * 独立使用的构造：试压、单元测试这类场合，越界只说明"这个编码器装不下"，
-     * 是选择依据而不是故障，所以不接汇聚点。
+     * Constructor for standalone use: in contexts such as trial compression and
+     * unit tests, overflow only means "this codec cannot fit the data"; it is a
+     * selection criterion rather than a failure, so no aggregation point is
+     * attached.
      */
     coder_io(const uint8_t *buff, int32_t buff_len)
     {
@@ -62,8 +67,9 @@ struct coder_io
     }
 
     /*
-     * 归属某次块处理的构造：越界就是这次块处理失败，必须报到汇聚点。
-     * name 是流名，出错时用来说清是哪一路流越的界。
+     * Constructor for ownership by a block-processing pass: overflow here means
+     * the block pass itself failed and must be reported to the aggregation point.
+     * name is the stream name, used to identify which stream overflowed on error.
      */
     coder_io(const uint8_t *buff, int32_t buff_len, coder_err_sink *sink, const char *name)
     {
@@ -71,9 +77,11 @@ struct coder_io
     }
 
     /*
-     * 唯一置错入口。err 本身仍是粘性的（只记第一个），同时立刻上报汇聚点——
-     * 上报放在置错的瞬间而不是析构时，这样 coder_io 是局部量还是成员、
-     * 谁先析构，都不影响错误能否被看到。
+     * The single error-setting entry point. err itself remains sticky (only the
+     * first error is recorded), and the aggregation point is notified at once—
+     * reporting happens at the moment the error is set rather than in the
+     * destructor, so whether coder_io is a local or a member, and regardless of
+     * destruction order, the error is always visible.
      */
     void set_err(int32_t e)
     {
@@ -107,9 +115,12 @@ struct coder_io
     }
 
     /*
-     * 写一个字节。buf 满时不再写、置 IO_BUF_FULL——这是堆溢出的根源防线：
-     * 原实现 *(data+data_len++)=c 不检查，越界直接写坏堆。上层 coder 在 decode
-     * 结束时查 err，有错返回负数，actuator 据此扩容重试。
+     * Write one byte. When buf is full, nothing is written and IO_BUF_FULL is
+     * set—this is the root defense against heap overflow: the original
+     * implementation *(data+data_len++)=c performed no check and overflowed
+     * directly into the heap. The higher-level coder checks err at the end of
+     * decode and returns a negative value on error, prompting the actuator to
+     * grow the buffer and retry.
      */
     void putc(uint8_t c)
     {
@@ -121,9 +132,11 @@ struct coder_io
     }
 
     /*
-     * 读一个字节。读端耗尽返回 '\0'（保持原行为，不破坏正常路径），但置
-     * IO_READ_EMPTY 让上层可区分"真读到 0"与"没得读"。原来静默返回 '\0' 会让
-     * 解压器以为还有数据，产出错误内容却"成功"。
+     * Read one byte. On read-side exhaustion, returns '\0' (preserving the
+     * original behavior so the normal path is unaffected), but sets
+     * IO_READ_EMPTY so the higher level can tell a real zero from "nothing left
+     * to read". The old silent '\0' made the decompressor think data remained,
+     * producing wrong content that was still reported as "success".
      */
     uint8_t getc()
     {
@@ -142,7 +155,7 @@ struct coder_io
     int32_t data_capacity;
     /* Currently processed length */
     int32_t data_len;
-    /* 流错误标志，见 io_err；coder 在 decode 结束时检查并返回错误码 */
+    /* Stream error flag; see io_err. The coder checks it at the end of decode and returns the error code. */
     int32_t err;
     /* Encoder parameter input and output metadata interaction through meta */
     Json::Value meta;
@@ -160,7 +173,7 @@ private:
         m = MUNSET;
     }
 
-    /* 定义在 coder_err_sink 之后 */
+    /* Defined after coder_err_sink */
     void report(int32_t e);
 
     coder_err_sink *err_sink;
@@ -168,23 +181,27 @@ private:
 };
 
 /*
- * 越界错误的汇聚点。
+ * Aggregation point for overflow errors.
  *
- * coder_io 是块缓冲上的一个有界视图，处理一个块要开出十几个视图。"这次块处理
- * 有没有越界"是块处理这一整件事的性质，不是每个视图各自的性质；原来它被拆成
- * 十几个互不相干的局部 err，能不能被问到全凭调用方自觉——结果 SAM 问了 12 个、
- * FASTQ 一个都没问、索引一个都没问。补上缺的那 30 处只是把自觉重复一遍，下一个
- * 新增的流照样会漏。
+ * coder_io is a bounded view over the block buffer; processing one block opens
+ * over a dozen views. "Did this block pass overflow?" is a property of the block
+ * pass as a whole, not of any individual view; it used to be split across a
+ * dozen unrelated local err values, only reachable if the caller remembered to
+ * check—as a result, SAM checked 12 of them, FASTQ checked none, and the index
+ * checked none. Patching in the missing 30 checks would just repeat that
+ * forgetfulness; the next newly added stream would still leak.
  *
- * 所以把答案收到一处：视图置错的瞬间就报到这里，调用方在块处理的出口问一次。
- * 汇聚点挂在 Actuator 上，而执行器是每块新建、用完即删的，因此它天然是
- * "每块一个、线程独享"，不需要清理，也不存在跨线程共享。
+ * So the answer is collected in one place: the moment a view sets its error it
+ * is reported here, and the caller asks once at the exit of the block pass. The
+ * aggregation point hangs off the Actuator, and since the executor is created
+ * per block and destroyed after use, it is naturally "one per block,
+ * thread-exclusive": no cleanup needed and never shared across threads.
  */
 struct coder_err_sink
 {
-    /* 首个错误，粘性；后续错误多半是它的连锁反应，留第一个最有定位价值 */
+    /* First error, sticky; later errors are usually its knock-on effects, so keeping the first one is most useful for diagnosis */
     int32_t err = coder_io::IO_OK;
-    /* 出错的流名 */
+    /* Name of the stream that errored */
     const char *what = "";
 
     bool ok() const { return err == coder_io::IO_OK; }

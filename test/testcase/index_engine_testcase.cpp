@@ -25,11 +25,11 @@ public:
 
     int32_t init(const std::string& outputFile) {
         /*
-         * IndexEngine::startEnginePostProc 一进门就要求 ioReader 是个 FileReader
-         * ——索引只对可 seek 的输入才有意义。这个门是后加的，而本 mock 从来只设
-         * ioWriter，于是 postProc 在空指针检查处直接 return 0：
-         * 断言 result == 0 照样成立，却什么都没写，检查输出的用例才会失败。
-         * 这里补一个真实存在的输入文件，让用例走到它真正要验证的那段逻辑。
+         * IndexEngine::startEnginePostProc requires ioReader to be a FileReader: indexing is only
+         * meaningful for seekable input. This mock only sets ioWriter; if no input file is provided,
+         * postProc returns 0 right at the null-pointer check. Asserting result == 0 would pass,
+         * yet nothing is written, so only the cases that check the output would fail. Provide a real
+         * input file here so the cases reach the logic they actually verify.
          */
         inputFileName = outputFile + ".in";
         { std::ofstream seed(inputFileName); seed << "seed"; }

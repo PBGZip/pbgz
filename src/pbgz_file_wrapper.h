@@ -45,46 +45,59 @@ public:
     PbgzFileMeta& getDynamicFileMeta();
 
     /*
-     * 预读的格式探测数据（BlockFactory 在创建 reader 前从 ioReader 读出的字节）。
+     * Prefetched format-probing data (bytes BlockFactory read from ioReader before
+     * creating the reader).
      *
-     * 管道输入不可 seek，探测读走的字节必须以本接口交还给读取方，否则文件头就会丢。
-     * 这些字节按序在常规读取之前先被消费；seek 场景（动态元信息回读）直接读 ioReader，
-     * 不经过预读缓冲，seek 复位后预读缓冲继续生效。
+     * Pipe input is not seekable, so the bytes consumed by probing must be handed back
+     * to the reader through this interface or the file header would be lost. These
+     * bytes are consumed in order ahead of regular reads; seek scenarios (dynamic meta
+     * reread) read ioReader directly, bypassing the prefetch buffer, and the prefetch
+     * buffer remains in effect once the seek position is restored.
      */
     void setPreReadData(const uint8_t* data, size_t len);
 
     /*
-     * 当前正在读的那个 pbgz 包在整个输入流里的起始字节位置。
+     * Start byte position, in the whole input stream, of the pbgz package currently
+     * being read.
      *
-     * 存在的理由是 cat 拼接：多个独立压缩包首尾相接成一个文件之后，从第二个包开始，
-     * 包内记录的所有偏移都不再等于它在拼接文件里的实际位置。压缩时输出总是从 0 开始
-     * 写，所以包里存的偏移本质上是"相对本包头部的距离"；单包读取时包起点恰好是 0，
-     * 相对值与绝对值相等，问题被掩盖，只有拼接才会暴露。
+     * It exists because of cat concatenation: once several independently compressed
+     * packages are joined end-to-end into one file, from the second package onward no
+     * offset recorded inside a package equals its real position in the concatenated
+     * file. During compression output always starts writing at 0, so an offset stored
+     * in a package is essentially "the distance from its own header"; when reading a
+     * single package the start happens to be 0, relative and absolute values coincide,
+     * and the problem is masked - only concatenation exposes it.
      *
-     * 读侧拿到这个起点，用「包起点 + 包内偏移」还原真实位置即可，写出的格式一个字节
-     * 都不用改，也不影响已有文件的兼容性。
+     * The read side simply takes this start and reconstructs the real position as
+     * "package start + in-package offset"; the written format needs no byte changed,
+     * and compatibility with existing files is unaffected.
      */
     uint64_t getCurrentFileStart() const;
 
     /*
-     * 最近一次 readDataBlock 所读那个块的绝对起点（魔数所在字节）。
+     * Absolute start of the block most recently read by readDataBlock (the byte where
+     * the magic number sits).
      *
-     * 辅助块的身份就是它的绝对地址：包起点只在"每个包恰好一份"时够用，先验一旦分片
-     * 就不成立。缓存按这个地址做键，重复遇到同一个块时可以直接命中而不必重读。
+     * An auxiliary block's identity is its absolute address: the package start only
+     * suffices while "exactly one of each kind per package" holds, and breaks once
+     * priors are sharded. The cache keys on this address, so re-encountering the same
+     * block hits directly without re-reading.
      */
     uint64_t getCurrentBlockStart() const { return currentBlockStart; }
 
     /*
-     * 当前正在读的是第几个 pbgz 包（cat 拼接后依次递增）。
-     * 与 getCurrentFileStart 不同，这个序号在管道输入下同样有效——
-     * 它只依赖已解析过的包头个数，不依赖任何文件位置。
+     * Which pbgz package is currently being read (increments in order after cat
+     * concatenation). Unlike getCurrentFileStart, this sequence number works under
+     * pipe input too - it depends only on the number of package headers parsed, not on
+     * any file position.
      */
     int32_t getCurrentFileIndex() const { return currentFileIndex; }
 
     /*
-     * 读一个数据块。dst 非空时，块数据先按 dataLength 扩容到 dst（输入块缓冲按
-     * 参数级 block_size 预分配，而文件的块可能更大，如 -l 9 的 512MB 块压缩后仍达
-     * ~72MB），再把数据读进 dst 的缓冲。
+     * Read one data block. When dst is non-null, the block data is first resized into
+     * dst to dataLength (the input block buffer is preallocated at the parameter-level
+     * block_size, but a file's block may be larger, e.g. a -l 9 512MB block still
+     * reaches ~72MB compressed), then the data is read into dst's buffer.
      */
     int32_t readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* dst = nullptr);
 
@@ -108,21 +121,21 @@ private:
 
     int32_t readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic = true, bool usePreRead = true);
 
-    /* 先消费预读缓冲，再读 ioReader；动态元信息回读（已 seek）时走直接 ioReader 读取 */
+    /* Consume the prefetch buffer first, then read ioReader; dynamic meta rereads (already seeked) go through direct ioReader reads */
     size_t readFromSource(void* pBuffer, size_t n);
 
 private:
     std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers, a file may consist of multiple compressed packages concatenated together
     std::map<int32_t, PbgzFileMeta> baseFileMetaMap;      // Base file metadata
     std::map<int32_t, PbgzFileMeta> dynamicFileMetaMap;   // Dynamic file meta data, only exits in file reader
-    std::map<int32_t, uint64_t> fileStartMap;             // 每个拼接包在输入流里的起始位置，用于把包内相对偏移还原成真实位置
+    std::map<int32_t, uint64_t> fileStartMap;             // start position of each concatenated package in the input stream, used to translate in-package relative offsets back into real positions
     int32_t currentFileIndex; // Current file sequence number, indicating which file is currently being read
     IOReader* ioReader;
 
-    /* 预读的格式探测数据：ioReader 已被 Creator 消费掉的字节，读回时按序先消费 */
+    /* Prefetched format-probing data: bytes already consumed from ioReader by the Creator; consumed in order first when reading back */
     uint8_t preReadBuf[BLOCK_TYPE_DETECT_SIZE];
-    size_t preReadSize;   // 尚未消费的预读字节数
-    size_t preReadPos;    // 预读缓冲内的消费位置
+    size_t preReadSize;   // prefetch bytes not yet consumed
+    size_t preReadPos;    // consumption position within the prefetch buffer
 };
 
 /// @brief Writer for pbgz format files

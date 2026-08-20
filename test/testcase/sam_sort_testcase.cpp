@@ -113,8 +113,9 @@ public:
         }
 
         /*
-         * 直接按原始内容载入整块（含 @SQ 头部），并记录换行符位置。
-         * 头部在 reader 里独立成块后，actuator 测试需要一个自含头部的完整块。
+         * Load the whole block directly from the raw content (including the @SQ header) and
+         * record newline positions. Since the reader separates the header into its own block,
+         * the actuator tests need a complete, self-contained block with the header included.
          */
         const size_t blockSize = pInBlock->getBlockSize();
         const size_t readLen = pIoReader->readIO(pInBlock->getBuffer(), blockSize);
@@ -133,9 +134,10 @@ public:
     }
 
     /*
-     * 直接按原始内容载入块并记录换行符位置，不做格式探测。
-     * 用于故意构造非法/缺字段的 SAM 输入，绕过 BlockFactory 的严格格式判定，
-     * 直接验证 actuator 对非法内容的拒绝逻辑。
+     * Load the block directly from the raw content and record newline positions without format
+     * detection. Used to intentionally construct invalid/missing-field SAM input, bypassing
+     * BlockFactory's strict format checks to directly verify the actuator's rejection of invalid
+     * content.
      */
     void loadSamDataRaw(const std::string& filename) {
         pInBlock->reset();

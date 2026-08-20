@@ -57,8 +57,10 @@ void PbgzFileReader::setPreReadData(const uint8_t* data, size_t len) {
 }
 
 /*
- * 常规读取入口：先消费预读缓冲（Creator 探测读走的字节），再读 ioReader。
- * 管道输入不可 seek，探测数据必须由此交还；seek 场景（动态元信息回读）不走这里。
+ * Regular read entry: first consume the prefetch buffer (bytes the Creator read away
+ * during format probing), then read from ioReader. Pipe input is not seekable, so the
+ * probed bytes must be handed back through here; seek scenarios (dynamic meta
+ * reread) do not go through this path.
  */
 size_t PbgzFileReader::readFromSource(void* pBuffer, size_t n) {
     size_t got = 0;
@@ -94,13 +96,18 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     }
 
     /*
-     * 先把本包在输入流里的起始位置记下来，后面用它把包内的相对偏移还原成真实位置。
+     * Record the start position of this package in the input stream first; later it is
+     * used to translate in-package relative offsets back into real positions.
      *
-     * isCheckMagic 为真时表示调用方已经把 4 字节文件魔数读走了（见 readDataBlock 里
-     * 发现新包头的那条分支），此时当前位置已经越过包头，要退回魔数长度才是真正的起点。
+     * When isCheckMagic is true, the caller has already consumed the 4-byte file magic
+     * (see the branch in readDataBlock that detects a new package header), so the
+     * current position has already moved past the header and must be rewound by the
+     * magic length to reach the true start.
      *
-     * 位置一律以"真实源位置"计算：ioReader 可能已被 Creator 预读消费过 preReadSize
-     * 个字节，ioReader->getCurrentPos() 会虚高，减去未消费的预读长度才是真实位置。
+     * Positions are always computed as "true source positions": ioReader may have had
+     * preReadSize bytes consumed from it by the Creator's prefetch, making
+     * ioReader->getCurrentPos() appear too large; subtracting the unconsumed prefetch
+     * length yields the true position.
      */
     uint64_t fileStartPos = 0;
     FileReader* posReader = dynamic_cast<FileReader*>(ioReader);
@@ -181,14 +188,16 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
 
     size_t readOffset = fileReader->getCurrentPos(); // Backup current read position
     /*
-     * 包里存的是相对本包头部的距离，加上本包起点才是拼接文件里的真实位置。
-     * 单包时起点为 0，行为与改动前完全一致；拼接时第二个包之后才会用到这个修正。
+     * The package stores distances relative to its own header; adding the package
+     * start yields the real position in the concatenated file. For a single package
+     * the start is 0 and behavior is identical to before the change; the correction
+     * only matters for the second and later packages when concatenating.
      */
     fileReader->seekIO((int64_t)(fileStartPos + dynamicOffset));
 
     PbgzFileMeta dyncFileMeta;
     dyncFileMeta.setMetaType(DYNAMIC_FILE_META);
-    /* 已 seek 到动态元信息处，直接读 ioReader，不经过预读缓冲 */
+    /* Already seeked to the dynamic meta, read ioReader directly, bypassing the prefetch buffer */
     if (0 != readFileMeta(dyncFileMeta, true, false)) {
         LOG_ERROR("Read dynamic file meta failed. offset = %llu", dynamicOffset);
         return -1;
@@ -409,16 +418,18 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     dataBlock.setDataLength(dataLength);
 
     /*
-     * 块数据读进 dst 的缓冲：输入块是按参数级 block_size 预分配的，而文件里的块可能
-     * 更大（-l 9 的 512MB 块压缩后仍 ~72MB > 64MB 输入缓冲），必须先扩容再读，
-     * 否则 readIO 直接写越界。与解压侧输出块的 ensureCapacity(block_size*2) 同一机制。
+     * Block data is read into dst's buffer: the input block is preallocated at the
+     * parameter-level block_size, but a block in the file may be larger (a -l 9 512MB
+     * block still compresses to ~72MB, exceeding the 64MB input buffer), so it must be
+     * resized before reading or readIO writes out of bounds. Same mechanism as the
+     * ensureCapacity(block_size*2) on the decompression side's output blocks.
      */
     if (dst != nullptr) {
         if (0 != dst->ensureCapacity(dataLength)) {
             LOG_ERROR("Failed to ensure input block capacity %u", dataLength);
             return -1;
         }
-        dataBlock.setDataPtr(dst->getBuffer());   // realloc 后指针可能变了
+        dataBlock.setDataPtr(dst->getBuffer());   // the pointer may have changed after realloc
     }
 
     // Read the block data

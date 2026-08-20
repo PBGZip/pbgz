@@ -30,29 +30,29 @@
 class PbgzStatTest : public ::testing::Test {
 public:
     void SetUp() override {
-        // 测试前的准备工作
+        // Setup before the test
     }
     
     void TearDown() override {
-        // 测试后的清理工作
+        // Cleanup after the test
     }
 };
 
-// 测试 FastqStat 初始化
+// Test FastqStat initialization
 TEST_F(PbgzStatTest, FastqStatInitialization) {
     FastqStat fastqStat;
     int result = fastqStat.init();
     EXPECT_EQ(result, 0);
 }
 
-// 测试 SamStat 初始化
+// Test SamStat initialization
 TEST_F(PbgzStatTest, SamStatInitialization) {
     SamStat samStat;
     int result = samStat.init();
     EXPECT_EQ(result, 0);
 }
 
-// 测试 FastqStat 设置指标值
+// Test FastqStat setting metric values
 TEST_F(PbgzStatTest, FastqStatSetValue) {
     FastqStat fastqStat;
     fastqStat.init();
@@ -66,7 +66,7 @@ TEST_F(PbgzStatTest, FastqStatSetValue) {
     EXPECT_EQ(value, 50ULL);
 }
 
-// 测试累加指标值
+// Test accumulating metric values
 TEST_F(PbgzStatTest, FastqStatAccumulateValue) {
     FastqStat fastqStat;
     fastqStat.init();
@@ -79,7 +79,7 @@ TEST_F(PbgzStatTest, FastqStatAccumulateValue) {
     EXPECT_EQ(value, 45ULL);
 }
 
-// 测试压缩率计算
+// Test compression ratio calculation
 TEST_F(PbgzStatTest, CompressionRatioCalculation) {
     FastqStat fastqStat;
     fastqStat.init();
@@ -89,11 +89,11 @@ TEST_F(PbgzStatTest, CompressionRatioCalculation) {
     
     
     uint64_t ratio = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO);
-    // 压缩率 = (200 / 1000) * 10000 = 2000 (即 20%)
+    // ratio = (200 / 1000) * 10000 = 2000 (i.e., 20%)
     EXPECT_EQ(ratio, 2000ULL);
 }
 
-// 测试原始大小为0时的压缩率计算
+// Test compression ratio calculation when the original size is 0
 TEST_F(PbgzStatTest, CompressionRatioZeroOriginal) {
     FastqStat fastqStat;
     fastqStat.init();
@@ -103,11 +103,11 @@ TEST_F(PbgzStatTest, CompressionRatioZeroOriginal) {
     
     
     uint64_t ratio = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::COMPRESSION_RATIO);
-    // 原始大小为0时，压缩率应为0
+    // With an original size of 0, the compression ratio should be 0
     EXPECT_EQ(ratio, 0ULL);
 }
 
-// 测试 SamStat 设置指标值
+// Test SamStat setting metric values
 TEST_F(PbgzStatTest, SamStatSetValue) {
     SamStat samStat;
     samStat.init();
@@ -121,7 +121,7 @@ TEST_F(PbgzStatTest, SamStatSetValue) {
     EXPECT_EQ(value, 80ULL);
 }
 
-// 测试 SamStat 累加指标值
+// Test SamStat accumulating metric values
 TEST_F(PbgzStatTest, SamStatAccumulateValue) {
     SamStat samStat;
     samStat.init();
@@ -133,55 +133,55 @@ TEST_F(PbgzStatTest, SamStatAccumulateValue) {
     EXPECT_EQ(value, 15ULL);
 }
 
-// 测试获取不存在的指标
+// Test fetching a non-existent metric
 TEST_F(PbgzStatTest, GetNonExistentMetric) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 获取一个未设置的指标
+    // Fetch a metric that was never set
     uint64_t value = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE);
     EXPECT_EQ(value, 0ULL);
 }
 
-// 测试全局指标设置
+// Test global metric setting
 TEST_F(PbgzStatTest, GlobalMetrics) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 注意：先调用 calculateAllMetrics 来确保压缩率计算
+    // Note: call calculateAllMetrics first to ensure the compression ratio is computed
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 1000);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 200);
     
     
-    // 现在测试压缩率是否正确计算
+    // Now test that the compression ratio is computed correctly
     uint64_t ratio = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO);
     EXPECT_EQ(ratio, 2000ULL);  // (200/1000)*10000 = 2000
 }
 
-// 测试字段名称存储
+// Test field name storage
 TEST_F(PbgzStatTest, FieldNamesStorage) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 由于printStats()现在使用fprintf输出到stderr，我们直接调用即可验证功能
-    // 这个测试主要验证printStats()不会崩溃，并且能正常输出
+    // Since printStats() now outputs to stderr via fprintf, we can call it directly to verify functionality
+    // This test mainly verifies that printStats() does not crash and produces output normally
     
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 20);
     
-    // printStats()会计算并输出统计数据
+    // printStats() computes and outputs the statistics
     fastqStat.printStats();
     
-    // 验证统计数据计算正确
+    // Verify the statistics are computed correctly
     uint64_t originalSize = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE);
     uint64_t compressedSize = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE);
     EXPECT_EQ(originalSize, 100ULL);
     EXPECT_EQ(compressedSize, 20ULL);
 }
 
-// 测试命名空间访问
+// Test namespace access
 TEST_F(PbgzStatTest, NamespaceAccess) {
-    // 测试 StatUnitId 命名空间
+    // Test the StatUnitId namespace
     EXPECT_EQ(StatObjectId::FASTQ_ID, 1);
     EXPECT_EQ(StatObjectId::FASTQ_BASE, 2);
     EXPECT_EQ(StatObjectId::FASTQ_COMMENT, 3);
@@ -194,12 +194,12 @@ TEST_F(PbgzStatTest, NamespaceAccess) {
     EXPECT_EQ(StatObjectId::SAM_SEQ, 14);
     EXPECT_EQ(StatObjectId::SAM_QUAL, 15);
     
-    // 测试 StatMetricIds 命名空间
+    // Test the StatMetricIds namespace
     EXPECT_EQ(StatMetricIds::ORIGINAL_SIZE, 1);
     EXPECT_EQ(StatMetricIds::COMPRESSED_SIZE, 2);
     EXPECT_EQ(StatMetricIds::COMPRESSION_RATIO, 3);
     
-    // 测试 StatUnitNames 字符串
+    // Test the StatUnitNames strings
     EXPECT_EQ(StatObjectNames::Fastq::ID, "ID");
     EXPECT_EQ(StatObjectNames::Fastq::BASE, "Base");
     EXPECT_EQ(StatObjectNames::Fastq::COMMENT, "Comment");
@@ -211,12 +211,12 @@ TEST_F(PbgzStatTest, NamespaceAccess) {
     EXPECT_EQ(StatObjectNames::Sam::QUAL, "QUAL");
 }
 
-// 测试多个字段的统计
+// Test statistics across multiple fields
 TEST_F(PbgzStatTest, MultipleFields) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 为多个字段设置数据
+    // Set data for multiple fields
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 20);
     
@@ -229,21 +229,21 @@ TEST_F(PbgzStatTest, MultipleFields) {
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::ORIGINAL_SIZE, 200);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::COMPRESSED_SIZE, 40);
     
-    // 计算压缩率
+    // Compute the compression ratio
     
-    // 验证每个字段的压缩率都正确计算
+    // Verify each field's compression ratio is computed correctly
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO), 2000ULL);
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::COMPRESSION_RATIO), 2000ULL);
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_COMMENT, StatMetricIds::COMPRESSION_RATIO), 2000ULL);
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::COMPRESSION_RATIO), 2000ULL);
 }
 
-// 测试不同压缩率的计算
+// Test computation of different compression ratios
 TEST_F(PbgzStatTest, DifferentCompressionRatios) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 设置不同的压缩率
+    // Set different compression ratios
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 1000);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 200);  // 20% -> 2000
     
@@ -259,37 +259,37 @@ TEST_F(PbgzStatTest, DifferentCompressionRatios) {
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::COMPRESSION_RATIO), 3000ULL);
 }
 
-// 测试重新计算压缩率
+// Test recomputing the compression ratio
 TEST_F(PbgzStatTest, RecalculateCompressionRatio) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 初始设置
+    // Initial setup
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 1000);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 200);
     
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO), 2000ULL);
     
-    // 更新压缩后大小，重新计算
+    // Update the compressed size and recompute
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 100);
     
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO), 3000ULL);  // (300/1000)*10000
 }
 
-// 测试多种指标类型的累加
+// Test accumulation across multiple metric types
 TEST_F(PbgzStatTest, AccumulationAndSetting) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 先 set，再add
+    // First set, then add
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::ORIGINAL_SIZE, 50);
     
-    // 原始大小类型为ACCUMULATED，所以 add 会累加
+    // ORIGINAL_SIZE is of type ACCUMULATED, so add accumulates
     uint64_t value = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::ORIGINAL_SIZE);
     EXPECT_EQ(value, 150ULL);  // 100 + 50 = 150
     
-    // COMPRESSED_SIZE 类型是 ACCUMULATED，add 会有作用
+    // COMPRESSED_SIZE is of type ACCUMULATED, so add takes effect
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::COMPRESSED_SIZE, 100);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::COMPRESSED_SIZE, 50);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::COMPRESSED_SIZE, 30);
@@ -298,27 +298,27 @@ TEST_F(PbgzStatTest, AccumulationAndSetting) {
     EXPECT_EQ(value, 180ULL);
 }
 
-// 测试计算指标的更新顺序
+// Test the update order of computed metrics
 TEST_F(PbgzStatTest, CalculatedMetricUpdateOrder) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 只设置原始大小
+    // Set only the original size
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 1000);
     
-    // 压缩率因为原大非0但压缩为0，应该为0
+    // The ratio should be 0 because the original size is non-zero but the compressed size is 0
     uint64_t ratio = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO);
     EXPECT_EQ(ratio, 0ULL);
     
-    // 设置压缩后大小后重新计算
+    // Set the compressed size, then recompute
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 200);
     
-    // 现在应该有正确的压缩率
+    // Now the compression ratio should be correct
     ratio = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO);
     EXPECT_EQ(ratio, 2000ULL);
 }
 
-// 测试独立的统计对象
+// Test independent statistic objects
 TEST_F(PbgzStatTest, IndependentStatObjects) {
     FastqStat fastqStat1;
     FastqStat fastqStat2;
@@ -326,7 +326,7 @@ TEST_F(PbgzStatTest, IndependentStatObjects) {
     fastqStat1.init();
     fastqStat2.init();
     
-    // 不同的对象，数据互不影响
+    // Different objects do not affect each other's data
     fastqStat1.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat1.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 20);
     
@@ -334,31 +334,31 @@ TEST_F(PbgzStatTest, IndependentStatObjects) {
     fastqStat2.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 40);
     
     
-    // 验证两个对象的数据独立
+    // Verify the two objects' data are independent
     EXPECT_EQ(fastqStat1.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE), 100ULL);
     EXPECT_EQ(fastqStat2.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE), 200ULL);
 }
 
-// 测试重复初始化
+// Test repeated initialization
 TEST_F(PbgzStatTest, ReInitialization) {
     FastqStat fastqStat;
     
     fastqStat.init();
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     
-    // 重新初始化应该清除之前的设置
+    // Re-initialization should clear the previous settings
     fastqStat.init();
     
     uint64_t value = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE);
     EXPECT_EQ(value, 0ULL);
 }
 
-// 测试所有字段统计
+// Test statistics for all fields
 TEST_F(PbgzStatTest, AllFastqFields) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 测试所有4个FASTQ字段都正确注册
+    // Verify all 4 FASTQ fields are registered correctly
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_COMMENT, StatMetricIds::ORIGINAL_SIZE, 100);
@@ -370,7 +370,7 @@ TEST_F(PbgzStatTest, AllFastqFields) {
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::ORIGINAL_SIZE), 100ULL);
 }
 
-// 测试所有SAM字段统计
+// Test statistics for all SAM fields
 TEST_F(PbgzStatTest, AllSamFields) {
     SamStat samStat;
     samStat.init();
@@ -398,20 +398,20 @@ TEST_F(PbgzStatTest, AllSamFields) {
     EXPECT_EQ(samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_TLEN, StatMetricIds::ORIGINAL_SIZE), 100ULL);
 }
 
-// 测试FastqStat多次累加数据
+// Test FastqStat accumulating data multiple times
 TEST_F(PbgzStatTest, FastqStatMultipleAccumulations) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 第一次累加ID字段
+    // First accumulation on the ID field
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 50);
     
-    // 第二次累加ID字段
+    // Second accumulation on the ID field
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 150);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 30);
     
-    // 验证累加结果：100+150=250, 50+30=80
+    // Verify the accumulated results: 100+150=250, 50+30=80
     uint64_t totalOriginal = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE);
     uint64_t totalCompressed = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE);
     
@@ -419,24 +419,24 @@ TEST_F(PbgzStatTest, FastqStatMultipleAccumulations) {
     EXPECT_EQ(totalCompressed, 80ULL);
 }
 
-// 测试SamStat多次累加数据
+// Test SamStat accumulating data multiple times
 TEST_F(PbgzStatTest, SamStatMultipleAccumulations) {
     SamStat samStat;
     samStat.init();
     
-    // 第一次累加QNAME字段
+    // First accumulation on the QNAME field
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::ORIGINAL_SIZE, 100);
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::COMPRESSED_SIZE, 25);
     
-    // 第二次累加QNAME字段
+    // Second accumulation on the QNAME field
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::ORIGINAL_SIZE, 200);
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::COMPRESSED_SIZE, 45);
     
-    // 第三次累加QNAME字段
+    // Third accumulation on the QNAME field
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::ORIGINAL_SIZE, 150);
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::COMPRESSED_SIZE, 60);
     
-    // 验证累加结果：100+200+150=450, 25+45+60=130
+    // Verify the accumulated results: 100+200+150=450, 25+45+60=130
     uint64_t totalOriginal = samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::ORIGINAL_SIZE);
     uint64_t totalCompressed = samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::COMPRESSED_SIZE);
     
@@ -444,21 +444,21 @@ TEST_F(PbgzStatTest, SamStatMultipleAccumulations) {
     EXPECT_EQ(totalCompressed, 130ULL);
 }
 
-// 测试累加和设置混合使用
+// Test mixing set and add
 TEST_F(PbgzStatTest, MixedSetAndAccumulate) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 先设置初始值
+    // First set the initial values
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 80);
     
-    // 然后累加
+    // Then accumulate
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 50);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 20);
     
-    // 最后再设置，但通常累加用于动态累加，set用于初始化
-    // 这里我们验证结果是set + add = 150, 100
+    // Finally set again, but typically add is used for dynamic accumulation and set for initialization
+    // Here we verify the result is set + add = 150, 100
     uint64_t totalOriginal = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE);
     uint64_t totalCompressed = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE);
     
@@ -466,7 +466,7 @@ TEST_F(PbgzStatTest, MixedSetAndAccumulate) {
     EXPECT_EQ(totalCompressed, 100ULL);
 }
 
-// 测试空字段的压缩率
+// Test the compression ratio for empty fields
 TEST_F(PbgzStatTest, EmptyFieldCompressionRatio) {
     FastqStat fastqStat;
     fastqStat.init();
@@ -475,17 +475,17 @@ TEST_F(PbgzStatTest, EmptyFieldCompressionRatio) {
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 0);
     
     
-    // 当原始大小为0时，压缩率应该为0
+    // When the original size is 0, the compression ratio should be 0
     uint64_t ratio = fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO);
     EXPECT_EQ(ratio, 0ULL);
 }
 
-// 测试所有FASTQ字段的累加
+// Test accumulation across all FASTQ fields
 TEST_F(PbgzStatTest, FastqStatAllFieldsAccumulate) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 对所有4个字段进行多次累加
+    // Accumulate multiple times across all 4 fields
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 20);
     
@@ -498,12 +498,12 @@ TEST_F(PbgzStatTest, FastqStatAllFieldsAccumulate) {
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::ORIGINAL_SIZE, 300);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::COMPRESSED_SIZE, 150);
     
-    // 第二次累加ID字段
+    // Second accumulation on the ID field
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 200);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 40);
     
     
-    // 验证累加结果
+    // Verify the accumulated results
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE), 300ULL);
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE), 60ULL);
     
@@ -516,16 +516,16 @@ TEST_F(PbgzStatTest, FastqStatAllFieldsAccumulate) {
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::ORIGINAL_SIZE), 300ULL);
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_QUALITY, StatMetricIds::COMPRESSED_SIZE), 150ULL);
     
-    // 验证压缩率
+    // Verify the compression ratios
     EXPECT_EQ(fastqStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSION_RATIO), 2000ULL); // 60/300*10000=2000
 }
 
-// 测试所有SAM字段的累加
+// Test accumulation across all SAM fields
 TEST_F(PbgzStatTest, SamStatAllFieldsAccumulate) {
     SamStat samStat;
     samStat.init();
     
-    // 对所有11个字段进行累加
+    // Accumulate across all 11 fields
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::ORIGINAL_SIZE, 100);
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::COMPRESSED_SIZE, 25);
     
@@ -560,7 +560,7 @@ TEST_F(PbgzStatTest, SamStatAllFieldsAccumulate) {
     samStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QUAL, StatMetricIds::COMPRESSED_SIZE, 150);
     
     
-    // 验证累加结果
+    // Verify the accumulated results
     EXPECT_EQ(samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::ORIGINAL_SIZE), 100ULL);
     EXPECT_EQ(samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::COMPRESSED_SIZE), 25ULL);
     
@@ -594,17 +594,17 @@ TEST_F(PbgzStatTest, SamStatAllFieldsAccumulate) {
     EXPECT_EQ(samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QUAL, StatMetricIds::ORIGINAL_SIZE), 300ULL);
     EXPECT_EQ(samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QUAL, StatMetricIds::COMPRESSED_SIZE), 150ULL);
     
-    // 验证压缩率计算：QNAME像 25/100=25%, SEQ像 250/500=50%
+    // Verify the ratio computations: QNAME like 25/100=25%, SEQ like 250/500=50%
     EXPECT_EQ(samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_QNAME, StatMetricIds::COMPRESSION_RATIO), 2500ULL); // 25/100*10000
     EXPECT_EQ(samStat.getMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::SAM_SEQ, StatMetricIds::COMPRESSION_RATIO), 5000ULL);  // 250/500*10000
 }
 
-// 测试高压缩率的场景
+// Test a high compression ratio scenario
 TEST_F(PbgzStatTest, HighCompressionRatio) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 设置高压缩率场景：1000字节压缩到50字节（5%压缩率）
+    // Set up a high compression ratio scenario: 1000 bytes compressed to 50 bytes (5% ratio)
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 1000);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 50);
     
@@ -613,12 +613,12 @@ TEST_F(PbgzStatTest, HighCompressionRatio) {
     EXPECT_EQ(ratio, 500ULL); // 50/1000*10000=500
 }
 
-// 测试低压缩率的场景  
+// Test a low compression ratio scenario  
 TEST_F(PbgzStatTest, LowCompressionRatio) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 设置低压缩率场景：100字节压缩到90字节（90%压缩率）
+    // Set up a low compression ratio scenario: 100 bytes compressed to 90 bytes (90% ratio)
     fastqStat.setMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::ORIGINAL_SIZE, 100);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_BASE, StatMetricIds::COMPRESSED_SIZE, 90);
     
@@ -627,12 +627,12 @@ TEST_F(PbgzStatTest, LowCompressionRatio) {
     EXPECT_EQ(ratio, 9000ULL); // 90/100*10000=9000
 }
 
-// 测试大数据量的累加
+// Test accumulation with large data volumes
 TEST_F(PbgzStatTest, LargeValueAccumulation) {
     FastqStat fastqStat;
     fastqStat.init();
     
-    // 测试大数值的累加
+    // Test accumulation of large values
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::ORIGINAL_SIZE, 1000000ULL);
     fastqStat.addMetricValue(StatUnitIds::COMPRESSION_RATIO, StatObjectId::FASTQ_ID, StatMetricIds::COMPRESSED_SIZE, 100000ULL);
     

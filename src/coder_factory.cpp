@@ -1,20 +1,29 @@
 /*
- * coder_factory.cpp - 编码器工厂的实现
+ * coder_factory.cpp - implementation of the encoder factory
  *
- * 实现放在 .cpp 而不是头文件里，是为了不让具体编码器的头文件泄漏给调用方：
- * coder_fc.h 会间接引入 clr.h，其中定义了一个 RangeCoder；而 coder_qual.h 引入的
- * qual_model.h 里另有一个同名但接口不同的 RangeCoder。两者同时出现在一个编译单元
- * 就会冲突。执行器普遍需要 coder_qual.h，所以工厂头文件必须保持干净。
+ * The implementation lives in the .cpp rather than the header so that concrete
+ * encoder headers do not leak to callers: coder_fc.h brings in clr.h
+ * indirectly, which defines a RangeCoder; and qual_model.h (brought in by
+ * coder_qual.h) has another RangeCoder of the same name but a different
+ * interface. The two conflict if they appear in the same translation unit.
+ * Actuators commonly need coder_qual.h, so the factory header must stay clean.
  *
- * 关于 coder_simple_rc：它已从编解码两侧全部移除。
+ * About coder_simple_rc: it has been removed entirely from both the encoding
+ * and decoding sides.
  *
- * 实测这个编码器是有损的——单独测它的往返时，10 个数据块全部校验失败，游程长度信息
- * 丢了将近四成，它那个看起来很漂亮的压缩率正是丢数据换来的。
+ * Measurements showed this encoder is lossy — in a standalone round-trip test,
+ * all 10 data blocks failed verification and nearly 40% of run-length
+ * information was lost; its attractive compression ratio was bought with lost
+ * data.
  *
- * 在接通预处理选择之前，执行器把编码器类型写死，它从来没有被真正调用过，所以问题
- * 一直没暴露，也不存在用它压出来的历史文件。接通之后风险就变实了：试压只比较压缩后
- * 的大小、并不验证能否原样解回来，只要它在某个字段上压得最小就会被选中，产出一个
- * 解不出原始数据的文件。既然没有历史包袱，编码解码两侧一并去掉最干净。
+ * Before preprocessing selection was wired in, actuators hard-coded the encoder
+ * type and it was never actually invoked, so the problem never surfaced and no
+ * historical files compressed with it exist. After wiring it in, the risk
+ * became real: trial compression only compares compressed size and does not
+ * verify lossless round-trip, so as long as it compressed some field the
+ * smallest it would be picked, producing a file that cannot be decompressed
+ * back to the original data. Since there is no historical baggage, removing it
+ * from both sides is the cleanest.
  */
 
 #include "coder_factory.h"
@@ -34,9 +43,12 @@ std::shared_ptr<coder> CoderFactory::makeEncoder(CoderType type, coder_io* io)
         return std::make_shared<coder_affix_match>(io);
 
     /*
-     * QUAL 走兜底：coder_qual 不继承 coder 基类，构造时还需要额外的频率表，没法由
-     * 本工厂统一创建，质量字段有自己单独的压缩函数。通用字段不应该被选成 QUAL
-     * （试压候选里根本没有它），万一出现就说明选择结果异常，退回 BWT_CM 是安全的。
+     * QUAL goes through the fallback: coder_qual does not inherit from the
+     * coder base class and also needs an extra frequency table at construction,
+     * so this factory cannot create it uniformly; the quality field has its own
+     * dedicated compression function. Generic fields should never be picked as
+     * QUAL (it is not even in the trial candidates), and if it ever happens the
+     * selection result is anomalous, so falling back to BWT_CM is safe.
      */
     case CoderType::QUAL:
     case CoderType::SIMPLE_RC:
@@ -85,7 +97,8 @@ bool CoderFactory::coderSupports(CoderType type, uint32_t fileType, uint32_t fie
         return (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) && fieldIdx == (uint32_t)SAM_QUAL;
     }
     if (type == CoderType::AFFIX_MATCH) {
-        /* 是否候选由配置表统一判定，避免与预处理试压范围两处维护。 */
+        /* Whether it is a candidate is decided uniformly by the config table,
+         * avoiding maintaining the trial-compression scope in two places. */
         return (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) && samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH);
     }
     return true;

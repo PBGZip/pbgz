@@ -1,17 +1,20 @@
 /*
- * coder_bwt_cm 逐记录往返验证（用于定位 QUAL 走 bwt_cm 时解压失败的根因）。
+ * Per-record round-trip verification for coder_bwt_cm (used to pinpoint the root cause of
+ * decompression failures when QUAL goes through bwt_cm).
  *
- * 要回答的问题：把 QUAL 按记录逐条 encode_line(ptr, len) 喂进 bwt_cm、
- * 再按同样的长度逐条 decode_line(out, len) 取回，能不能逐字节还原。
+ * Question to answer: if QUAL records are fed one at a time into bwt_cm via encode_line(ptr, len)
+ * and read back with decode_line(out, len) at the same lengths, can the bytes be restored exactly?
  *
- * 之所以必须先单测编码器本身，是因为端到端失败（解出 64 MB vs 原 19 MB）
- * 有两种可能：编码器的定长流接口本身不成立，或者 sam_actuator 的接线错了。
- * 这两者的修法完全不同，靠读代码分不出来，必须用一个不含任何 pbgz 上下文的
- * 最小用例把编码器单独钉死。
+ * The coder itself must be unit-tested first because an end-to-end failure (decoding 64 MB vs an
+ * original 19 MB) has two possible causes: the coder's fixed-length stream interface is broken on
+ * its own, or the wiring in sam_actuator is wrong. The two fixes are completely different, and
+ * reading the code cannot tell them apart, so a minimal case with no pbgz context is needed to
+ * pin the coder down in isolation.
  *
- * 关键点：decode_line 传 split_ch = UINT8_MAX 时走的是纯定长流分支，
- * 不看分隔符，只按调用方给的 out_len 取字节。encode 侧无分隔符喂入
- * 与它是配套的，所以理论上应当成立——本测试就是验证这个"理论上"。
+ * Key point: when decode_line is called with split_ch = UINT8_MAX, it takes the pure fixed-length
+ * stream branch: it ignores separators and only takes as many bytes as the caller's out_len. The
+ * encode side feeding data with no separator is its counterpart, so it should hold in theory; this
+ * test verifies that "in theory".
  */
 
 #include <stdint.h>
@@ -39,14 +42,15 @@ void registerCoderCallbacks()
         });
     coder_ns::register_free_func([](void*& ptr) { free(ptr); ptr = NULL; });
     coder_ns::resister_logger_proc([](int, const char* msg) {
-        fprintf(stderr, "coder 日志: %s\n", msg != NULL ? msg : "");
+        fprintf(stderr, "coder log: %s\n", msg != NULL ? msg : "");
     });
     coder_ns::initFcCoder();
 }
 
 /*
- * 造一批长度不等的伪质量值记录。长度故意不统一，因为真实 SAM 里 QUAL 长度
- * 随 SEQ 变化，定长记录会掩盖掉"跨块边界时记录被劈开"这一类问题。
+ * Build a batch of pseudo quality-value records of varying lengths. The lengths are deliberately
+ * unequal because QUAL length varies with SEQ in real SAM data; fixed-length records would hide
+ * problems such as a record being split across a block boundary.
  */
 struct Records {
     std::vector<uint8_t> flat;
@@ -62,7 +66,7 @@ Records makeRecords(uint32_t count, uint32_t baseLen)
         r.lens.push_back(len);
         for (uint32_t j = 0; j < len; ++j) {
             seed = seed * 1103515245u + 12345u;
-            /* 质量值集中在少数几个符号上，贴近真实分布，否则压不动看不出问题 */
+            /* quality values are concentrated on a few symbols, close to the real distribution; otherwise there is nothing to compress and problems would not show */
             static const char alphabet[] = "!,:FI";
             r.flat.push_back((uint8_t)alphabet[(seed >> 16) % 5]);
         }
@@ -70,13 +74,13 @@ Records makeRecords(uint32_t count, uint32_t baseLen)
     return r;
 }
 
-/* 返回 0 表示通过 */
+/* Return 0 to indicate success. */
 int runCase(const char* name, uint32_t count, uint32_t baseLen, int level)
 {
     Records rec = makeRecords(count, baseLen);
     const uint32_t srcLen = (uint32_t)rec.flat.size();
 
-    /* 压缩缓冲给足，避免因为溢出把问题误判成编码器缺陷 */
+    /* Give the compression buffer plenty of room so overflow does not get misjudged as a coder defect. */
     std::vector<uint8_t> comp(srcLen * 2 + (1u << 20), 0);
 
     uint32_t dstLen = 0;
@@ -103,7 +107,7 @@ int runCase(const char* name, uint32_t count, uint32_t baseLen, int level)
             int32_t got = dec.decode_line(out.data() + outOff, rec.lens[i]);
             if (got != (int32_t)rec.lens[i]) {
                 fprintf(stderr,
-                        "  [%s] 第 %u 条记录长度不符: 期望 %u, 实际 %d\n",
+                        "  [%s] record %u length mismatch: expected %u, got %d\n",
                         name, i, rec.lens[i], got);
                 bad = 1;
                 break;
@@ -113,13 +117,13 @@ int runCase(const char* name, uint32_t count, uint32_t baseLen, int level)
     }
 
     if (!bad && outOff != srcLen) {
-        fprintf(stderr, "  [%s] 总长不符: 期望 %u, 实际 %u\n", name, srcLen, outOff);
+        fprintf(stderr, "  [%s] total length mismatch: expected %u, got %u\n", name, srcLen, outOff);
         bad = 1;
     }
     if (!bad && memcmp(out.data(), rec.flat.data(), srcLen) != 0) {
         for (uint32_t i = 0; i < srcLen; ++i) {
             if (out[i] != rec.flat[i]) {
-                fprintf(stderr, "  [%s] 内容首个不一致位置 %u: 期望 0x%02X, 实际 0x%02X\n",
+                fprintf(stderr, "  [%s] first mismatch at offset %u: expected 0x%02X, got 0x%02X\n",
                         name, i, rec.flat[i], out[i]);
                 break;
             }
@@ -127,7 +131,7 @@ int runCase(const char* name, uint32_t count, uint32_t baseLen, int level)
         bad = 1;
     }
 
-    printf("%-28s level=%d  %u 条 / %u 字节 -> %u 字节 (%.2f%%)  %s\n",
+    printf("%-28s level=%d  %u records / %u bytes -> %u bytes (%.2f%%)  %s\n",
            name, level, count, srcLen, dstLen,
            srcLen == 0 ? 0.0 : (double)dstLen * 100.0 / (double)srcLen,
            bad ? "FAIL" : "PASS");
@@ -141,15 +145,15 @@ int main()
     registerCoderCallbacks();
 
     int fail = 0;
-    /* 小数据：全部落在 encode_flush 的单块路径上 */
-    fail |= runCase("单块-小数据", 2000, 100, 4);
-    /* 大数据：必须跨越 bsize，触发 encode_line 里的整块提交 + 记录被劈开 */
-    fail |= runCase("跨块-level1(1MB块)", 40000, 150, 1);
-    /* 多次跨块 */
-    fail |= runCase("多次跨块-level1", 200000, 150, 1);
-    /* 产品默认档位 */
-    fail |= runCase("默认档-level4", 50000, 150, 4);
+    /* Small data: everything falls on encode_flush's single-block path. */
+    fail |= runCase("single-block-small-data", 2000, 100, 4);
+    /* Large data: must span bsize, triggering whole-block commits in encode_line and records being split. */
+    fail |= runCase("cross-block-level1(1MB-block)", 40000, 150, 1);
+    /* Multiple cross-block spans. */
+    fail |= runCase("multi-cross-block-level1", 200000, 150, 1);
+    /* Production default level. */
+    fail |= runCase("default-tier-level4", 50000, 150, 4);
 
-    printf("\n%s\n", fail ? "结论: 有用例失败" : "结论: 全部通过");
+    printf("\n%s\n", fail ? "result: some cases failed" : "result: all passed");
     return fail;
 }

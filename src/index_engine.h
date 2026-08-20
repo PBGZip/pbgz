@@ -53,6 +53,6 @@ protected:
 private:
     std::map<uint32_t, int64_t> blockFileOffset;
 
-    /* 当前这一块在源文件里的起始位置，只能在读之前取得；只由读线程访问。 */
+    /* Start offset of the current block in the source file; obtainable only before reading, accessed only by the reader thread. */
     int64_t pendingBlockOffset = 0;
 };

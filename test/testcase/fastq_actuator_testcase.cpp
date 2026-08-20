@@ -244,8 +244,9 @@ TEST_F(FastQActuatorTest, testPreAnalysis) {
     EXPECT_EQ(actuator.idSplitMinLen[3], 1);
 
     
-    // 编号段（段 1/2）最大长度 = 块内最大记录编号的位数：块内编号从 1 递增，
-    // 最大编号即块内记录数，随压缩等级块大小配置变化，由实际数据推导。
+    // The max length of the number segment (segment 1/2) equals the digit count of the largest
+    // record number in the block: numbers increase from 1, so the largest number is the record
+    // count, which varies with the compress-level block size config and is derived from the data.
     const uint32_t maxRecordDigits = static_cast<uint32_t>(
         std::to_string(pInBlock->getNpos().size() / 4).size());
     EXPECT_EQ(actuator.idSplitMaxLen[0], 12);

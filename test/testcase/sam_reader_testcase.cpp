@@ -195,7 +195,7 @@ TEST_F(SamReaderTest, TestSamFileReading) {
 }
 
 TEST_F(SamReaderTest, TestLargeSamFileReading) {
-    // Test reading large SAM file: 头部独立成块（block 0 只含 @ 行），数据块随后
+    // Test reading large SAM file: the header is its own block (block 0 contains only @ lines), data blocks follow
     RoughIOBlock* pBlock = new RoughIOBlock(SamReaderTestData::MAX_BLOCK_SIZE);
     
     IOReader* pIoReader = new FileReader(SamReaderTestData::largeSamFile);
@@ -207,12 +207,12 @@ TEST_F(SamReaderTest, TestLargeSamFileReading) {
     // Verify successful reading
     EXPECT_GT(result, 0) << "Reading large SAM file should succeed";
     
-    // 首块为头部块：类型是 SAM 且只含 @ 行
+    // First block is the header block: type is SAM and it contains only @ lines
     EXPECT_EQ(pBlock->getBlockType(), SAM) << "Header block type should be SAM";
     EXPECT_GT(pBlock->getDataLen(), 0) << "Header block should have data";
     EXPECT_FALSE(pBlockReader->blockHasData(pBlock)) << "First block should be header-only";
     
-    // 第二个块为数据块，包含大量数据
+    // Second block is a data block containing a large amount of data
     pBlock->reset();
     result = pBlockReader->readBlock(pBlock, TYPE_UNKNOW);
     EXPECT_GT(result, 0) << "Reading SAM data block should succeed";

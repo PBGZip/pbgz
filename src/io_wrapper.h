@@ -81,11 +81,14 @@ public:
     virtual ~IOWriter() {}
 
     /*
-     * 粘性写出错误。closeIO() 返回 void、写出又发生在独立线程里，失败没有返回值可
-     * 沿调用栈上抛；所以照 fqz range coder 的 rc->err 那样把错误粘在对象上，由写线程
-     * 退出前取走、交给引擎的 taskFailed 做最终处理。
+     * Sticky write error. closeIO() returns void and the writes happen in a
+     * separate thread, so a failure has no return value to propagate up the call
+     * stack; therefore, like rc->err in the fqz range coder, the error is
+     * latched onto the object and picked up by the writer thread before it
+     * exits, then handed to the engine's taskFailed for final handling.
      *
-     * 只记第一次错误：后续失败多半是它的连锁反应，首个才是现场。
+     * Only the first error is recorded: later failures are usually its knock-on
+     * effects; the first one is the scene of the incident.
      */
     void latchWriteError(int32_t e) { if (writeErr == 0) writeErr = e; }
 
@@ -191,7 +194,7 @@ public:
 
     void flushIO() {
         if (fo.mappedAddress != nullptr && fo.fileSize > 0) {
-            (void)msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);  // 提前回写的优化，失败由 closeIO 的 fsync 兜底
+            (void)msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);  // Optimization to write back early; failures are caught by the fsync in closeIO
         }
     }
 

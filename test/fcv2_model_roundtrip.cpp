@@ -1,8 +1,10 @@
 /*
- * fcv2 模型快照独立测试。
+ * Standalone tests for the fcv2 model snapshot.
  *
- * 训练数据、码流和损坏快照均在内存中生成，避免测试依赖大数据文件；每个断言对应模型
- * 快照接口的一项公开保证，失败立即以非零状态退出，适合直接作为构建后的冒烟测试。
+ * The training data, compressed stream, and corrupted snapshots are all generated in memory so the
+ * tests do not depend on large data files; each assertion corresponds to a public guarantee of the
+ * model-snapshot interface, and any failure exits immediately with a non-zero status, making this
+ * suitable as a post-build smoke test.
  */
 
 #include <stdint.h>
@@ -16,25 +18,28 @@
 namespace {
 
 /*
- * 与 coder_fcv2.cpp 的 exportModel 布局逐字段对应：
- *   魔数 9 + 12×u16（版本/循环上限/位置档/跳变上限/跳变档/前驱右移/跳变开关/去重开关/
- *   质量档开关/树容量/模型数/字母表）+ 8×u32（m0..m6、权重数组长度）
- *   之后是字母表字节、各符号量化频率、revCounter、dupCounter、七个计数数组、权重数组。
- * 任一尺寸常量或模型数改动都要同步这里，否则 6a 的长度断言会失真。
+ * Matches the exportModel layout in coder_fcv2.cpp field by field:
+ *   magic 9 + 12 x u16 (version/cycle cap/position bucket/delta cap/delta bucket/prev shift/
+ *   delta switch/dedup switch/QA switch/tree capacity/model count/alphabet) + 8 x u32
+ *   (m0..m6, weight-array length)
+ *   followed by the alphabet bytes, per-symbol quantized frequencies, revCounter, dupCounter,
+ *   seven counter arrays, and the weight array.
+ * Any change to a size constant or the model count must be mirrored here, or the length assertion
+ * in 6a will drift.
  */
 const size_t kHeaderBytes = 9 + 12 * 2 + 8 * 4;
 
 size_t expectedBlobSize(int alpha)
 {
     size_t prevStates = (size_t)alpha + 1;
-    size_t prevQStates = (size_t)(alpha >> 1) + 2;   /* m3 量化前驱（默认档 prevShift=1） */
+    size_t prevQStates = (size_t)(alpha >> 1) + 2;   /* m3 quantized predecessor (default preset prevShift=1) */
     size_t counters = 64 + 96 * 64 + prevStates * 96 * 64 +
         prevQStates * prevQStates * 16 * 2 * 64 +     /* m0..m3 */
-        6 * 96 * 64 +                                  /* m4 碱基上下文 */
-        8 * 96 * 64 +                                  /* m5 跳变上下文（默认 deltaBucket=8） */
-        4 * 96 * 64;                                   /* m6 平均质量档（QA_BINS=4） */
+        6 * 96 * 64 +                                  /* m4 base context */
+        8 * 96 * 64 +                                  /* m5 delta context (default deltaBucket=8) */
+        4 * 96 * 64;                                   /* m6 average-quality bucket (QA_BINS=4) */
     return kHeaderBytes + (size_t)alpha + (size_t)alpha * 2 + 2 + 2 + counters * 2 +
-           16 * 64 * 7 * 4;                            /* 权重：位置档 × 树节点 × 7 模型 × 4 字节 */
+           16 * 64 * 7 * 4;                            /* weights: position buckets x tree nodes x 7 models x 4 bytes */
 }
 
 std::vector<uint8_t> makeQualityData()
@@ -96,14 +101,14 @@ int main()
 
     const bool exported = trainAndExport(input, freq, blob);
     const bool sizeCorrect = exported && blob.size() == expectedBlobSize(38);
-    bool allPassed = check("6a 导出非空且长度精确", sizeCorrect);
+    bool allPassed = check("6a export is non-empty and exact length", sizeCorrect);
 
     std::vector<uint8_t> reloadStorage(4096, 0);
     coder_io reloadIo(reloadStorage.data(), (int32_t)reloadStorage.size());
     bool loaded = false;
     coder_fcv2 reloaded(&reloadIo, freq, blob, &loaded);
     std::vector<uint8_t> reexported;
-    allPassed = check("6b 载入后逐字节重导出", loaded && reloaded.export_model(reexported) &&
+    allPassed = check("6b byte-identical re-export after loading", loaded && reloaded.export_model(reexported) &&
                       reexported == blob) && allPassed;
 
     std::vector<uint8_t> compressed(input.size() * 2 + 4096, 0);
@@ -124,7 +129,7 @@ int main()
     for (size_t offset = 0; roundTrip && offset < input.size(); offset += 151) {
         roundTrip = decoder.decode_record(decoded.data() + offset, 151) == 151;
     }
-    allPassed = check("6c 先验加载后的编解码往返", roundTrip && decoded == input) && allPassed;
+    allPassed = check("6c codec round-trip after prior loading", roundTrip && decoded == input) && allPassed;
 
     std::vector<uint8_t> truncated(blob.begin(), blob.empty() ? blob.end() : blob.end() - 1);
     std::vector<uint8_t> badMagic = blob;
@@ -136,9 +141,9 @@ int main()
     const bool corruptionsRejected = rejectsAndFallsBack(truncated, freq) &&
         rejectsAndFallsBack(badMagic, freq) && rejectsAndFallsBack(badVersion, freq) &&
         rejectsAndFallsBack(badLength, freq);
-    allPassed = check("6d 截断、魔数、版本和长度损坏均回退", corruptionsRejected) && allPassed;
+    allPassed = check("6d truncation, magic, version and length corruption all fall back", corruptionsRejected) && allPassed;
 
-    printf("模型快照长度: alpha=38 为 %zu 字节，alpha=64 为 %zu 字节\n",
+    printf("model snapshot length: %zu bytes for alpha=38, %zu bytes for alpha=64\n",
            expectedBlobSize(38), expectedBlobSize(64));
     return allPassed ? 0 : 1;
 }

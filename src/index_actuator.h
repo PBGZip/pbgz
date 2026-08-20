@@ -39,14 +39,16 @@ public:
     virtual ~IndexActuator();
 
     /*
-     * 能建索引的块类型，唯一声明处。
+     * Block types for which an index can be built; the single place this is declared.
      *
-     * 索引要的是"每条 read 落在参考基因组的哪个位置"：SAM 的 RNAME/POS 是原文自带的，
-     * FASTQ 则要从 compressBaseWithRef 产出的 mpos 子流里取，取法完全不同，所以支持
-     * 哪些类型取决于本执行器实现了哪些解码分支。引擎侧只查询，不重复判断。
+     * An index needs "which position in the reference genome each read lands on": SAM
+     * carries RNAME/POS natively, while FASTQ must read them from the mpos substream
+     * produced by compressBaseWithRef - the extraction differs completely, so which
+     * types are supported depends on which decode branches this actuator implements.
+     * The engine side only queries; it does not duplicate the decision.
      */
     static bool supports(BlockType type) {
-        /* BAM 块内容为 SAM 文本，同样可建索引 */
+        /* BAM block content is SAM text, so it can be indexed too */
         return type == SAM || type == SAM_GZIP || type == BAM;
     }
 

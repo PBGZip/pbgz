@@ -1,5 +1,5 @@
 /*
- * bam_block_reader_testcase.cpp - BAM 块读取（BAM -> SAM 转换）测试
+ * bam_block_reader_testcase.cpp - Tests for BAM block reading (BAM -> SAM conversion)
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -60,11 +60,11 @@ namespace {
         }
     }
 
-    /* 构建一条 BAM 记录：单 CIGAR op（M），aux NM:i:0 / AS:i:70，QUAL 存 phred（ascii-33） */
+    /* Build one BAM record: a single CIGAR op (M), aux NM:i:0 / AS:i:70, QUAL stored as phred (ascii-33). */
     std::string buildRecord(const std::string& qname, int32_t flag, int32_t refID, int32_t pos,
                             uint8_t mapq, const std::string& seq, const std::string& qual) {
         std::string rec;
-        putI32(rec, 0);                      // block_size 占位
+        putI32(rec, 0);                      // block_size placeholder
         putI32(rec, refID);
         putI32(rec, pos);                    // 0-based
         putU8(rec, static_cast<uint8_t>(qname.size() + 1));
@@ -99,7 +99,7 @@ namespace {
         return rec;
     }
 
-    /* 构建原始 BAM 字节流（未压缩） */
+    /* Build a raw BAM byte stream (uncompressed). */
     std::string buildBam(int numReads, const std::string& headerText) {
         std::string bam = "BAM\x1";
         putI32(bam, static_cast<int32_t>(headerText.size()));
@@ -134,7 +134,7 @@ namespace {
 
 }  // namespace
 
-/* BAM 头部独立成块，数据区解压成 SAM 行组成 SAM 块 */
+/* The BAM header forms its own block; the data region is decompressed into SAM lines forming SAM blocks. */
 TEST(BamBlockReaderTest, HeaderIndependentBlockAndSamConversion) {
     const std::string bam = buildBam(5, kBamHeader);
     writeFile("ut_bam.bam", bam);
@@ -148,21 +148,21 @@ TEST(BamBlockReaderTest, HeaderIndependentBlockAndSamConversion) {
 
     RoughIOBlock block(kBlockSize);
 
-    // block 0：SAM 头部块（只含 @ 行，不携带数据）
+    // block 0: SAM header block (contains only @ lines, carries no data)
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getBlockType(), BAM);
     EXPECT_FALSE(reader->blockHasData(&block));
     EXPECT_EQ(blockText(block), kBamHeader);
-    EXPECT_EQ(block.getNpos().size(), 2);   // @HD / @SQ 两行
+    EXPECT_EQ(block.getNpos().size(), 2);   // two lines: @HD / @SQ
 
-    // block 1：数据块（5 条 read 转成 SAM 行）
+    // block 1: data block (5 reads converted to SAM lines)
     block.reset();
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getBlockType(), BAM);
     EXPECT_TRUE(reader->blockHasData(&block));
     EXPECT_EQ(block.getNpos().size(), 5);
 
-    // 校验第一条转换出的 SAM 行
+    // Verify the first converted SAM line
     const std::string line = std::string(
         reinterpret_cast<char*>(block.getBuffer()), block.getNpos()[0]);
     const std::string expected =
@@ -178,7 +178,7 @@ TEST(BamBlockReaderTest, HeaderIndependentBlockAndSamConversion) {
     std::remove("ut_bam.bam");
 }
 
-/* BAM 头文本缺失 @SQ 时，由参考序列表生成 @SQ 行 */
+/* When the BAM header text lacks @SQ, generate the @SQ lines from the reference sequence table. */
 TEST(BamBlockReaderTest, GenerateSqFromRefs) {
     const std::string headerOnly = "@HD\tVN:1.6\n";
     const std::string bam = buildBam(2, headerOnly);
@@ -198,23 +198,23 @@ TEST(BamBlockReaderTest, GenerateSqFromRefs) {
     std::remove("ut_bam.bam");
 }
 
-/* 数据区按 readsPerBlock 条 read 分块 */
+/* The data region is split into blocks of readsPerBlock reads each. */
 TEST(BamBlockReaderTest, ReadCountSplit) {
     const std::string bam = buildBam(7, kBamHeader);
     writeFile("ut_bam.bam", bam);
 
     IOReader* io = new FileReader("ut_bam.bam");
     ASSERT_EQ(io->openIO(), 0);
-    /* 堆上构造：BlockReader 带 256MB cache 成员，栈上会溢出 */
+    /* Construct on the heap: BlockReader carries a 256 MB cache member and would overflow the stack. */
     BamBlockReader* reader = new BamBlockReader(io, nullptr, 0, 3);   // readsPerBlock=3, splitHeader=true
 
     RoughIOBlock block(kBlockSize);
-    // block 0：头部块
+    // block 0: header block
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getNpos().size(), 2);
     EXPECT_FALSE(reader->blockHasData(&block));
 
-    // 3 / 3 / 1 条 read 三个数据块
+    // three data blocks of 3 / 3 / 1 reads
     block.reset();
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getNpos().size(), 3);
@@ -236,23 +236,23 @@ TEST(BamBlockReaderTest, ReadCountSplit) {
     std::remove("ut_bam.bam");
 }
 
-/* splitHeader=false：头部与首个数据块合并，排序等下游可自含 @SQ */
+/* With splitHeader=false, the header is merged into the first data block so downstream steps such as sorting can be self-contained with @SQ. */
 TEST(BamBlockReaderTest, HeaderMergedMode) {
     const std::string bam = buildBam(5, kBamHeader);
     writeFile("ut_bam.bam", bam);
 
     IOReader* io = new FileReader("ut_bam.bam");
     ASSERT_EQ(io->openIO(), 0);
-    /* 堆上构造：BlockReader 带 256MB cache 成员，栈上会溢出 */
+    /* Construct on the heap: BlockReader carries a 256 MB cache member and would overflow the stack. */
     BamBlockReader* reader = new BamBlockReader(io, nullptr, 0, 3, false);   // splitHeader=false
 
     RoughIOBlock block(kBlockSize);
-    // block 0：头部（2 行）+ 3 条 read
+    // block 0: header (2 lines) + 3 reads
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getNpos().size(), 5);
     EXPECT_TRUE(reader->blockHasData(&block));
 
-    // block 1：剩余 2 条 read
+    // block 1: remaining 2 reads
     block.reset();
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getNpos().size(), 2);
@@ -262,7 +262,7 @@ TEST(BamBlockReaderTest, HeaderMergedMode) {
     std::remove("ut_bam.bam");
 }
 
-/* BGZF 压缩的 BAM（.bam.gz）：BamGzBlockReader 先 inflate 再转 SAM */
+/* BGZF-compressed BAM (.bam.gz): BamGzBlockReader first inflates, then converts to SAM. */
 TEST(BamBlockReaderTest, GzBamInflate) {
     const std::string bam = buildBam(4, kBamHeader);
     writeBgzfFile("ut_bam.bam.gz", bam);
@@ -276,12 +276,12 @@ TEST(BamBlockReaderTest, GzBamInflate) {
     RoughIOBlock block(kBlockSize);
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getBlockType(), BAM);
-    EXPECT_EQ(block.getNpos().size(), 2);     // 头部块
+    EXPECT_EQ(block.getNpos().size(), 2);     // header block
 
     block.reset();
     ASSERT_GT(reader->readBlock(&block, TYPE_UNKNOW), 0);
     EXPECT_EQ(block.getBlockType(), BAM);
-    EXPECT_EQ(block.getNpos().size(), 4);     // 数据块
+    EXPECT_EQ(block.getNpos().size(), 4);     // data block
 
     const std::string line = std::string(
         reinterpret_cast<char*>(block.getBuffer()), block.getNpos()[0]);
