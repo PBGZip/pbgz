@@ -106,6 +106,7 @@ collect_binary_artifacts() {
     ssh -i "$SSH_KEY_FILE" -o Strict Host Key Checking=no root@"$BUILD_SERVER_PUBLIC_IP" bash -s << ENDSSH
 SOURCE_PATH="$SOURCE_PATH"
 TIMESTAMP="$TIMESTAMP"
+WORKSPACE_PATH="/workspace"
 
 log() {
     echo "[\\$(date +'%Y-%m-%d %H:%M:%S')] \\$1"
@@ -115,9 +116,16 @@ log() {
 PACKAGING_DIR="/tmp/artifact_packaging"
 mkdir -p "\$PACKAGING_DIR"
 
-# Find Build Outputdirectory
-BUILD_OUTPUT="build"
-if [ -d "\$BUILD_OUTPUT" ]; then
+# Find Build Output directory (probe known locations under /workspace)
+BUILD_OUTPUT=""
+for cand in "\$WORKSPACE_PATH/workspace/pbgz/build" "/workspace/workspace/pbgz/build" "/workspace/pbgz/build" "build"; do
+    if [ -d "\$cand" ]; then
+        BUILD_OUTPUT="\$cand"
+        break
+    fi
+done
+
+if [ -n "\$BUILD_OUTPUT" ]; then
     log "Found Build Outputdirectory: \$BUILD_OUTPUT"
 
     # Collect All Build Artifacts

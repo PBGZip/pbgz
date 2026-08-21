@@ -773,7 +773,20 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
 
         uint8_t buff[32] = {0};
         int length = 0;
-        if (fieldLength > 1) {
+        
+        /* Check if PNEXT is valid based on FLAG bits */
+        auto flagIt = mappedFlag.find(lineIdx);
+        bool isPNextValid = false;
+        if (flagIt != mappedFlag.end()) {
+            uint16_t flag = flagIt->second;
+            /* PNEXT is valid only if:
+             * - FLAG bit 0x1 is set (paired-end sequencing)
+             * - FLAG bit 0x8 is not set (mate is mapped)
+             */
+            isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
+        }
+        
+        if (isPNextValid && fieldLength > 1) {
             std::string pNextStr = std::string((char*)fieldStart, fieldLength - 1);
             int64_t pNextValue = (int64_t)std::stoll(pNextStr);
             nextMappedPos[lineIdx] = pNextValue;
@@ -783,9 +796,14 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
             length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", pNextDelta);
             fieldSrcLen += fieldLength;
         } else {
-            /* Empty/invalid values are treated as a delta of 0. */
-            length = snprintf((char*)buff, sizeof(buff), "0\t");
-            fieldSrcLen += 2;
+            /* Invalid PNEXT (unpaired or mate unmapped), store original value directly */
+            if (fieldLength > 1) {
+                length = snprintf((char*)buff, sizeof(buff), "%.*s\t", fieldLength - 1, fieldStart);
+                fieldSrcLen += fieldLength;
+            } else {
+                length = snprintf((char*)buff, sizeof(buff), "0\t");
+                fieldSrcLen += 2;
+            }
         }
         fieldCoder->encode_line(buff, (uint32_t)length);
         deltaLength += (uint32_t)length;
@@ -2540,6 +2558,16 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                 } else {
                     decoderLen = decompressNumber<uint16_t>(fieldIdx, lineNo, outputBlock);
                 }
+                /* Store FLAG value for PNEXT validation - retrieve from output */
+                if (decoderLen > 1) {
+                    uint8_t* flagOutput = outputBlock->getCurrent() - decoderLen;
+                    std::string flagStr((char*)flagOutput, (size_t)decoderLen - 1);
+                    try {
+                        mappedFlag[lineNo] = (uint16_t)std::stoll(flagStr);
+                    } catch (...) {
+                        mappedFlag[lineNo] = 0;
+                    }
+                }
             } else if (fieldIdx == 2) {  /// RNAME
                 decoderLen = decompressChrName(fieldIdx, lineNo, outputBlock);
             } else if (fieldIdx == 3) {  /// POS
@@ -3250,9 +3278,22 @@ int32_t SamCodecActuator::decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t 
         return -1;
     }
 
-    int64_t pos = mappedPos.find(lineNo) == mappedPos.end() ? 0 : mappedPos[lineNo];
-    int64_t pNext = pos;
-    if ((uint32_t)deltaLen > 1) {
+    /* Check if PNEXT is valid based on FLAG bits (same logic as compression) */
+    auto flagIt = mappedFlag.find(lineNo);
+    bool isPNextValid = false;
+    if (flagIt != mappedFlag.end()) {
+        uint16_t flag = flagIt->second;
+        /* PNEXT is valid only if:
+         * - FLAG bit 0x1 is set (paired-end sequencing)
+         * - FLAG bit 0x8 is not set (mate is mapped)
+         */
+        isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
+    }
+
+    int64_t pNext = 0;
+    if (isPNextValid && (uint32_t)deltaLen > 1) {
+        /* Valid PNEXT: decode as delta and reconstruct original value */
+        int64_t pos = mappedPos.find(lineNo) == mappedPos.end() ? 0 : mappedPos[lineNo];
         std::string pNextDeltaStr = std::string((char*)deltaBuffer, (size_t)deltaLen - 1);
         try {
             pNext = (int64_t)std::stoll(pNextDeltaStr) + pos;
@@ -3260,7 +3301,19 @@ int32_t SamCodecActuator::decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t 
             LOG_ERROR("Failed to parse delta value '%s' for line %d: %s", pNextDeltaStr.c_str(), lineNo, e.what());
             return -1;
         }
+    } else {
+        /* Invalid PNEXT: decode as original value directly */
+        if ((uint32_t)deltaLen > 1) {
+            std::string pNextStr = std::string((char*)deltaBuffer, (size_t)deltaLen - 1);
+            try {
+                pNext = (int64_t)std::stoll(pNextStr);
+            } catch (const std::exception& e) {
+                LOG_ERROR("Failed to parse PNEXT value '%s' for line %d: %s", pNextStr.c_str(), lineNo, e.what());
+                return -1;
+            }
+        }
     }
+    
     nextMappedPos[lineNo] = pNext;
     char buff[32];
     int pNextLen = snprintf(buff, sizeof(buff), "%" PRId64 "\t", pNext);
@@ -3339,6 +3392,62 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
     uint8_t* buffer = inBlockPtr->getBuffer();
     uint8_t tmpBuf[1024];
     Json::Value& streams = meta["sam"]["streams"];
+
+    /*
+     * Decode FLAG (field 1) first so that PNEXT (field 7) can be decoded
+     * correctly: PNEXT is stored as delta against POS only when the mate
+     * position is meaningful (FLAG bit 0x1 set and bit 0x8 clear), otherwise
+     * it stores the original value. This mirrors compressPNextFieldDelta.
+     */
+    auto flagStartIt = fieldIoStart.find(1);
+    if (flagStartIt != fieldIoStart.end() && streams.isValidIndex(1) && streams[1].isMember("coder")) {
+        uint32_t off = flagStartIt->second;
+        uint32_t dstlen = fieldIoDstLen[1];
+        std::string coderName = streams[1]["coder"]["magic"].asString();
+        std::string mode = streams[1].isMember("mode") ? streams[1]["mode"].asString() : "";
+
+        std::shared_ptr<coder_io> tmpIo = makeCoderIo(buffer + off, dstlen, "FLAG predecode");
+        std::shared_ptr<coder> tmpDec;
+        if (coderName == "coder_bwt_cm") {
+            tmpDec = std::make_shared<coder_bwt_cm>(tmpIo.get());
+        } else if (coderName == "coder_affix_match") {
+            tmpDec = std::make_shared<coder_affix_match>(tmpIo.get());
+        } else {
+            tmpDec = nullptr;
+        }
+        if (tmpDec) {
+            auto lvIt = fieldIoLevel.find(1);
+            if (lvIt != fieldIoLevel.end()) {
+                tmpDec->set_level(lvIt->second);
+            }
+
+            bool binary = (mode == "number" || mode == "");
+            for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+                bool need2hold = (coderName == "coder_affix_match");
+                int32_t len;
+                if (binary) {
+                    len = tmpDec->decode_line(tmpBuf, sizeof(uint16_t), UINT8_MAX, need2hold);
+                    if (len >= (int32_t)sizeof(uint16_t)) {
+                        mappedFlag[lineNo] = *(uint16_t*)tmpBuf;
+                    } else {
+                        mappedFlag[lineNo] = 0;
+                    }
+                } else {
+                    len = tmpDec->decode_line(tmpBuf, (uint32_t)sizeof(tmpBuf), '\t', need2hold);
+                    if (len > 1) {
+                        std::string flagStr((char*)tmpBuf, (size_t)len - 1);
+                        try {
+                            mappedFlag[lineNo] = (uint16_t)std::stoll(flagStr);
+                        } catch (...) {
+                            mappedFlag[lineNo] = 0;
+                        }
+                    } else {
+                        mappedFlag[lineNo] = 0;
+                    }
+                }
+            }
+        }
+    }
 
     /* Fields needed to reconstruct TLEN: POS(3), CIGAR(5), PNEXT(7). */
     static const uint32_t tlenFields[] = {3, 5, 7};
@@ -3428,11 +3537,35 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
                         nextMappedPos[lineNo] = pnextBin;
                         fieldCache.emplace_back(std::to_string(pnextBin) + '\t');
                     } else if (mode == "pnext_delta") {
-                        int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
-                        int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
-                        int64_t pnext = delta + pos;
-                        nextMappedPos[lineNo] = pnext;
-                        fieldCache.emplace_back(std::to_string(pnext) + '\t');
+                        /* Check if PNEXT is valid based on FLAG bits (same logic as compression) */
+                        auto flagIt = mappedFlag.find(lineNo);
+                        bool isPNextValid = false;
+                        if (flagIt != mappedFlag.end()) {
+                            uint16_t flag = flagIt->second;
+                            /* PNEXT is valid only if:
+                             * - FLAG bit 0x1 is set (paired-end sequencing)
+                             * - FLAG bit 0x8 is not set (mate is mapped)
+                             */
+                            isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
+                        }
+
+                        if (isPNextValid) {
+                            /* Valid PNEXT: stored as delta against POS, reconstruct */
+                            int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                            int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                            int64_t pnext = delta + pos;
+                            nextMappedPos[lineNo] = pnext;
+                            fieldCache.emplace_back(std::to_string(pnext) + '\t');
+                        } else {
+                            /* Invalid PNEXT: stored as original value directly */
+                            if ((uint32_t)len > 1) {
+                                nextMappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                                fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                            } else {
+                                nextMappedPos[lineNo] = 0;
+                                fieldCache.emplace_back("0\t");
+                            }
+                        }
                     } else {
                         nextMappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
                         fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);

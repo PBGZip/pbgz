@@ -136,17 +136,20 @@ run_gradle_build() {
     BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
     # Fromenvironment variables Get Gradle Configure
-    GITHUB_REPO="${GITHUB_REPO:-https://github.com/PBGZ ip/pbgz.git}"
+    GITHUB_REPO="${GITHUB_REPO:-https://github.com/PBGZip/pbgz.git}"
     GITHUB_BRANCH="${GITHUB_BRANCH:-pbgz_v2.2.0}"
     BUILD_SCRIPT_GCC="${BUILD_SCRIPT_GCC:-3rd_party/build.all.gcc.sh}"
     BUILD_SCRIPT_RELEASE="${BUILD_SCRIPT_RELEASE:-build-release.sh}"
+    TEST_ENABLED="${TEST_ENABLED:-false}"
+    TEST_SCRIPT="${TEST_SCRIPT:-ci/scripts/run_all_tests.sh}"
 
     log "Gradle Build Configure:"
-    log " Git Hub Repository: $GITHUB_REPO"
+    log " GitHub Repository: $GITHUB_REPO"
     log " Branch: $GITHUB_BRANCH"
-    log " GCCB uild Script: $BUILD_SCRIPT_GCC"
+    log " GCC Build Script: $BUILD_SCRIPT_GCC"
     log " Release Build Script: $BUILD_SCRIPT_RELEASE"
-    log " CIS cript Path: $SOURCE_PATH"
+    log " Test Enabled: $TEST_ENABLED"
+    log " CI Script Path: $SOURCE_PATH"
     log " Workspace Path: $WORKSPACE_PATH"
     log " Log Path: $LOG_PATH"
 
@@ -161,6 +164,7 @@ GITHUB_REPO="$GITHUB_REPO"
 GITHUB_BRANCH="$GITHUB_BRANCH"
 BUILD_SCRIPT_GCC="$BUILD_SCRIPT_GCC"
 BUILD_SCRIPT_RELEASE="$BUILD_SCRIPT_RELEASE"
+TEST_ENABLED="$TEST_ENABLED"
 
 log() {
     echo "[\\$(date +'%Y-%m-%d %H:%M:%S')] \\$1"
@@ -178,6 +182,7 @@ GRADLE_ARGS=(
 "-Pgithub.branch=\$GITHUB_BRANCH"
 "-Pbuild.script.gcc=\$BUILD_SCRIPT_GCC"
 "-Pbuild.script.release=\$BUILD_SCRIPT_RELEASE"
+"-Ptest.enabled=\$TEST_ENABLED"
 )
 
 # execute Gradle Build Task
@@ -220,6 +225,45 @@ fi
 
 log "✅ Gradle Build Taskexecutecomplete"
 echo "✅ Gradle CI process Successcomplete" > /tmp/gradle_success.txt
+
+# Run tests after build if enabled
+if [ "\$TEST_ENABLED" = "true" ]; then
+    log "Test enabled, running unit tests and black-box test cases..."
+
+    # run_all_tests.sh lives in the CI repository under ci/scripts/
+    TEST_SCRIPT_PATH="\$SOURCE_PATH/ci/scripts/run_all_tests.sh"
+    if [ -f "\$TEST_SCRIPT_PATH" ]; then
+        # Determine actual build test binary path (Gradle downloads source to workspace/pbgz)
+        # If test binary not found under default path, probe common locations
+        PBGZ_TEST_BIN="\$WORKSPACE_PATH/workspace/pbgz/build-x86_64-gcc-release/test/pbgz_test"
+        if [ ! -f "\$PBGZ_TEST_BIN" ]; then
+            PBGZ_TEST_BIN="\$(find \$WORKSPACE_PATH/workspace -name 'pbgz_test' -type f 2>/dev/null | head -n 1)"
+        fi
+
+        if [ -n "\$PBGZ_TEST_BIN" ] && [ -f "\$PBGZ_TEST_BIN" ]; then
+            log "Running tests with C++ test binary: \$PBGZ_TEST_BIN"
+            bash "\$TEST_SCRIPT_PATH" --pbgz-test-path="\$PBGZ_TEST_BIN" \
+                --python-test-path="\$SOURCE_PATH/ci/run_all_testcase.py" \
+                > "\$LOG_PATH/test_all_\$BUILD_TIMESTAMP.log" 2>&1
+            TEST_RESULT=\$?
+            if [ \$TEST_RESULT -ne 0 ]; then
+                log "❌ Tests FAILED (exit code \$TEST_RESULT)"
+                tail -n 50 "\$LOG_PATH/test_all_\$BUILD_TIMESTAMP.log"
+                exit 1
+            else
+                log "✅ Tests PASSED"
+            fi
+        else
+            log "❌ Test binary not found under workspace, cannot run tests"
+            exit 1
+        fi
+    else
+        log "❌ Test script not found: \$TEST_SCRIPT_PATH"
+        exit 1
+    fi
+else
+    log "Tests disabled (TEST_ENABLED=false), skipping tests"
+fi
 ENDSSH
 
 GRADLE_RESULT=$?
@@ -235,7 +279,7 @@ log "✅ Gradle Build Taskexecutecomplete"
 collect_gradle_status() {
     log "Collect Gradle Build Status..."
 
-ssh -i "$SSH_KEY_FILE" -o Strict Host Check Checking=no root@"$BUILD_SERVER_PUBLIC_IP" "cat /tmp/gradle_build_status.env" > /tmp/gradle_build_status.txt 2>/dev/null || log "⚠️ no Get Gradle Build Status"
+ssh -i "$SSH_KEY_FILE" -o Strict Host Key Checking=no root@"$BUILD_SERVER_PUBLIC_IP" "cat /tmp/gradle_build_status.env" > /tmp/gradle_build_status.txt 2>/dev/null || log "⚠️ no Get Gradle Build Status"
 
 if [ -f /tmp/gradle_build_status.txt ]; then
     log "Gradle Build Status:"
@@ -247,7 +291,7 @@ fi
 verify_gradle_installation() {
     log "verify Gradle Install..."
 
-    ssh -i "$SSH_KEY_FILE" -o Strict Host Key Checking=no root@"$BUILD_SERVER_PUBLIC_IP" bash -s << \'ENDSSH\'
+    ssh -i "$SSH_KEY_FILE" -o Strict Host Key Checking=no root@"$BUILD_SERVER_PUBLIC_IP" bash -s << 'ENDSSH'
 # Preventive Check Gradleyesno
 cd /workspace/ci-scripts 2>/dev/null || (mkdir -p /workspace/ci-scripts && cd /workspace/ci-scripts)
 

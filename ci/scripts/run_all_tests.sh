@@ -29,12 +29,13 @@ log_error() {
       echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Get script directory
+# Get script directory (CI root = scripts' parent)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CI_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Default paths
-DEFAULT_PBGZ_TEST_PATH="./build-x86_64-gcc-release/test/pbgz_test"
-DEFAULT_PYTHON_TEST_PATH="./ci/run_all_testcase.py"
+# Default paths (relative to CI repository root)
+DEFAULT_PBGZ_TEST_PATH="${CI_ROOT}/workspace/pbgz/build-x86_64-gcc-release/test/pbgz_test"
+DEFAULT_PYTHON_TEST_PATH="${CI_ROOT}/ci/run_all_testcase.py"
 
 # Parse command line arguments
 PBGZ_TEST_PATH="$DEFAULT_PBGZ_TEST_PATH"
@@ -237,7 +238,7 @@ generate_report() {
 
 # Main execution
 main() {
-      cd "$SCRIPT_DIR"
+      cd "$CI_ROOT"
       
       # Run C++ tests
       run_cpp_tests
@@ -247,6 +248,10 @@ main() {
       
       # Generate report
       generate_report
+      local report_exit=$?
+      
+      log_info "Test suite exit code: $report_exit"
+      exit $report_exit
 }
 
 # Execute main function

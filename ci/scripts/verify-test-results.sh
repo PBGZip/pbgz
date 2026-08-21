@@ -38,7 +38,7 @@ configure_ssh() {
 check_gradle_status() {
     log "Check Gradle Build Status..."
 
-    ssh -i "$SSH_KEY_FILE" -o Strict Host Key Checking=no root@"$BUILD_SERVER_PUBLIC_IP" bash -s << \'ENDSSH\'
+    ssh -i "$SSH_KEY_FILE" -o Strict Host Key Checking=no root@"$BUILD_SERVER_PUBLIC_IP" bash -s << 'ENDSSH'
 set -e
 
 log() {

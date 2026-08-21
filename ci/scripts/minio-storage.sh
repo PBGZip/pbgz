@@ -49,13 +49,11 @@ upload_test_results() {
       echo "📤 Uploading test results to MinIO..."
       
       # Use Python MinIO tool for upload
-      python ci/testcase/pbgz_minio_tools.py compress-upload \
+      if python ci/testcase/pbgz_minio_tools.py compress-upload \
           "$test_file" \
           --bucket "${MINIO_RESULTS_BUCKET:-pbgz-results}" \
           --object "$object_name" \
-          --meta "{\"workflow\":\"${WORKFLOW_TYPE:-unknown}\",\"run_id\":\"${GITHUB_RUN_ID:-$(date +%s)}\"}\" || true
-      
-      if [ $? -eq 0 ]; then
+          --meta "{\"workflow\":\"${WORKFLOW_TYPE:-unknown}\",\"run_id\":\"${GITHUB_RUN_ID:-$(date +%s)}\"}"; then
           echo "✅ Test results uploaded successfully: $object_name"
           return 0
       else
@@ -76,12 +74,10 @@ upload_build_artifacts() {
               local timestamp=$(date +%Y%m%d-%H%M%S)
               local object_name="artifacts/${WORKFLOW_TYPE:-unknown}/${timestamp}/${artifact_name}"
               
-              python ci/testcase/pbgz_minio_tools.py compress-upload \
+              if python ci/testcase/pbgz_minio_tools.py compress-upload \
                   "$artifact" \
                   --bucket "${MINIO_COMPRESSED_BUCKET:-pbgz-compressed}" \
-                  --object "$object_name" || true
-              
-              if [ $? -eq 0 ]; then
+                  --object "$object_name"; then
                   echo "✅ Artifact uploaded: $artifact_name"
               else
                   echo "⚠️ Warning: Failed to upload $artifact_name"
@@ -171,25 +167,27 @@ list_minio_files() {
       echo "   Prefix: $prefix"
       
       # Use Python SDK to list files
-      python3 << EOF
-      import sys
-      import os
-      sys.path.insert(0, 'ci/testcase')
-      try:
-          from minio_storage_adapter import create_minio_adapter_from_env
-          
-          adapter = create_minio_adapter_from_env()
-          if adapter:
-              files = adapter.list_files("${bucket:-pbgz-results}", "${prefix:-}")
-              print(f"Found {len(files)} files:")
-              for file in files:
-                  print(f"  - {file}")
-          else:
-              print("MinIO adapter not configured")
-      except Exception as e:
-          print(f"Error: {e}")
-          sys.exit(1)
-      EOF
+      local bucket_name="${bucket:-pbgz-results}"
+      local prefix_name="${prefix:-}"
+      BUCKET="$bucket_name" PREFIX="$prefix_name" python3 << 'PYEOF'
+import sys
+import os
+sys.path.insert(0, 'ci/testcase')
+try:
+    from minio_storage_adapter import create_minio_adapter_from_env
+
+    adapter = create_minio_adapter_from_env()
+    if adapter:
+        files = adapter.list_files(os.environ.get('BUCKET', 'pbgz-results'), os.environ.get('PREFIX', ''))
+        print(f"Found {len(files)} files:")
+        for file in files:
+            print(f"  - {file}")
+    else:
+        print("MinIO adapter not configured")
+except Exception as e:
+    print(f"Error: {e}")
+    sys.exit(1)
+PYEOF
 }
 
 # Main function

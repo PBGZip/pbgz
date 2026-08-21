@@ -32,7 +32,7 @@ tasks.register("setupDirectories") {
     }
 }
 
-tasks.register("downloadSource", Exec::class) {
+tasks.register("downloadSource") {
     description = "Download source code from GitHub (with retry and integrity check)"
     group = "ci"
     
@@ -170,14 +170,18 @@ tasks.register<Exec>("buildGcc") {
             println("[$timestamp] Warning: script not executable, adding execute permission...")
             buildScriptPath.setExecutable(true)
         }
+        // Ensure log directory exists before opening log file stream
+        logsDir.mkdirs()
     }
     
     commandLine = mutableListOf("bash", buildScriptPath.absolutePath)
     workingDir = sourceCodeDir
     
     val logFile = file("${logsDir}/build_gcc_${timestamp}.log")
-    standardOutput = java.io.FileOutputStream(logFile)
-    errorOutput = System.err
+    doFirst {
+        standardOutput = java.io.FileOutputStream(logFile)
+        errorOutput = System.err
+    }
     
     doLast {
         println("[$timestamp] build.all.gcc.sh execution complete")
@@ -202,14 +206,18 @@ tasks.register<Exec>("buildRelease") {
             println("[$timestamp] Warning: script not executable, adding execute permission...")
             buildScriptPath.setExecutable(true)
         }
+        // Ensure log directory exists before opening log file stream
+        logsDir.mkdirs()
     }
     
     commandLine = mutableListOf("bash", buildScriptPath.absolutePath)
     workingDir = sourceCodeDir
     
     val logFile = file("${logsDir}/build_release_${timestamp}.log")
-    standardOutput = java.io.FileOutputStream(logFile)
-    errorOutput = System.err
+    doFirst {
+        standardOutput = java.io.FileOutputStream(logFile)
+        errorOutput = System.err
+    }
     
     doLast {
         println("[$timestamp] build-release.sh execution complete")
@@ -278,8 +286,11 @@ tasks.register<Exec>("runTests") {
     }
     
     val logFile = file("${logsDir}/test_${timestamp}.log")
-    standardOutput = java.io.FileOutputStream(logFile)
-    errorOutput = System.err
+    doFirst {
+        logsDir.mkdirs()
+        standardOutput = java.io.FileOutputStream(logFile)
+        errorOutput = System.err
+    }
     
     doLast {
         println("[$timestamp] test execution complete")
@@ -331,19 +342,6 @@ tasks.register("ci") {
                 workingDir = project.projectDir
             }
         }
-    }
-    
-    setExceptionAction { _ ->
-        val latestLog = if (ciLogFile.exists()) ciLogFile.absolutePath else "log file not generated"
-        if (notifyEnabled == "true" && File(notifyScript).exists()) {
-            println("[$timestamp] sending build failure notification...")
-            exec {
-                commandLine = mutableListOf("bash", notifyScript, "failure", latestLog)
-                workingDir = project.projectDir
-            }
-        }
-    } catch (e: Exception) {
-        println("[$timestamp] notification send failed: ${e.message}")
     }
 }
 

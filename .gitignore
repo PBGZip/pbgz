@@ -173,6 +173,8 @@ pbgz
 .gradle/
 ci/.gradle/**
 ci/.gradle/
+# Gradle wrapper jar is intentionally not committed
+ci/gradle/wrapper/gradle-wrapper.jar
 
 # Python cache
 __pycache__/

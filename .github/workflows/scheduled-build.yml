@@ -64,12 +64,14 @@ jobs:
       # Configure SSH key
       # NOTE: Actual server IP is dynamically set after server creation step
       # Here only configure SSH key, do not configure known_hosts
+      # Export BUILD_SERVER_SSH_KEY so downstream scripts can read it from env
       - name: Setup SSH Key
         run: |
           echo "🔧 Configuring SSH key..."
           mkdir -p ~/.ssh
           echo "${{ secrets.BUILD_SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          echo "BUILD_SERVER_SSH_KEY=${{ secrets.BUILD_SERVER_SSH_KEY }}" >> $GITHUB_ENV
           echo "✅ SSH key configuration completed"
 
       # Script 001: Create build server
@@ -83,30 +85,37 @@ jobs:
           SERVER_NAME: >-
             pbgz-ci-scheduled-$(date +%Y%m%d-%H%M%S)
 
+      # Export server IP to GITHUB_ENV for downstream steps
+      - name: Export Server IP
+        run: |
+          source /tmp/build_server_info.env
+          echo "BUILD_SERVER_IP=$BUILD_SERVER_PUBLIC_IP" >> $GITHUB_ENV
+          echo "✅ Exported server IP: $BUILD_SERVER_PUBLIC_IP"
+
       # Script 002: Prepare build environment
       - name: Prepare Build Environment
         run: bash ci/scripts/prepare-build-environment.sh
         env:
           BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
 
-       # Script 004: Run Gradle build (including source download, GCC build, Release build, testing)
-       - name: Run Gradle Build
-         run: bash ci/scripts/run-gradle-build.sh
-         env:
-           BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
-           GITHUB_REPO: ${{ env.GITHUB_REPO }}
-           GITHUB_BRANCH: ${{ env.GITHUB_BRANCH }}
-           BUILD_SCRIPT_GCC: ${{ env.BUILD_SCRIPT_GCC }}
-           BUILD_SCRIPT_RELEASE: ${{ env.BUILD_SCRIPT_RELEASE }}
-           GITHUB_CI_REPO: ${{ env.GITHUB_CI_REPO }}
-           GITHUB_CI_BRANCH: ${{ env.GITHUB_CI_BRANCH }}
-           TEST_ENABLED: "true"
-           TEST_SCRIPT: "ci/scripts/run_all_tests.sh"
+      # Script 004: Run Gradle build (including source download, GCC build, Release build, testing)
+      - name: Run Gradle Build
+        run: bash ci/scripts/run-gradle-build.sh
+        env:
+          BUILD_SERVER_IP: ${{ env.BUILD_SERVER_IP }}
+          GITHUB_REPO: ${{ env.GITHUB_REPO }}
+          GITHUB_BRANCH: ${{ env.GITHUB_BRANCH }}
+          BUILD_SCRIPT_GCC: ${{ env.BUILD_SCRIPT_GCC }}
+          BUILD_SCRIPT_RELEASE: ${{ env.BUILD_SCRIPT_RELEASE }}
+          GITHUB_CI_REPO: ${{ env.GITHUB_CI_REPO }}
+          GITHUB_CI_BRANCH: ${{ env.GITHUB_CI_BRANCH }}
+          TEST_ENABLED: "true"
+          TEST_SCRIPT: "ci/scripts/run_all_tests.sh"
 
-       # Setup MinIO Storage Environment
-       - name: Setup MinIO Storage
-         run: |
-           echo "🗄️ Setting up MinIO storage environment for scheduled build..."
+      # Setup MinIO Storage Environment
+      - name: Setup MinIO Storage
+        run: |
+          echo "🗄️ Setting up MinIO storage environment for scheduled build..."
            
            # Non-sensitive configuration already loaded from ci-config.properties
            # Sensitive configuration from GitHub Secrets
@@ -131,10 +140,21 @@ jobs:
         with:
           name: scheduled-build-artifacts
           path: |
-            ci_logs_*.tar.gz
-            build_artifacts_*.tar.gz
+            /tmp/artifacts/*.tar.gz
           if-no-files-found: warn
           retention-days: 30
+
+      # Upload build results and test logs to MinIO object storage
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          echo "🗄️ Uploading build results to MinIO..."
+          export WORKFLOW_TYPE=scheduled-build
+          export BUILD_SERVER_SSH_KEY="${{ secrets.BUILD_SERVER_SSH_KEY }}"
+          bash ci/scripts/minio-storage.sh upload-artifacts "/tmp/artifacts/*.tar.gz"
+        env:
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
 
       # Script 007: Terminate build server and cleanup resources
       - name: Terminate Build Server and Cleanup

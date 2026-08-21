@@ -54,9 +54,9 @@ create_server() {
     log "Create CI server..."
     
     SERVER_NAME="${SERVER_NAME:-ci-$(date +%Y%m%d-%H%M%S)}"
-    REGION="${REGION:-default}"
-    INSTANCE_TYPE="${INSTANCE_TYPE:-}"
-    IMAGE_ID="${IMAGE_ID:-ubuntu-20_04}"
+    REGION="${BUILD_SERVER_REGION:-${REGION:-cn-hangzhou}}"
+    INSTANCE_TYPE="${INSTANCE_TYPE:-ecs.c6.xlarge}"
+    IMAGE_ID="${IMAGE_ID:-ubuntu_20_04_x64}"
     SECURITY_GROUP_ID="${SECURITY_GROUP_ID:-}"
     KEY_PAIR_NAME="${KEY_PAIR_NAME:-ci-key}"
     
