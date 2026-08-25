@@ -164,7 +164,13 @@ private:
     /* The coder type chosen by preprocessing; returns fallback when the engine provides none or the decision is not yet made. */
     CoderType pickedCoderFor(uint32_t fieldIdx, CoderType fallback) const;
 
+    /* A single CIGAR operation (op char + length). */
+    struct CigarOp { char op; uint32_t len; };
+
     uint32_t parseCigar(uint8_t* cigarString, uint32_t cigarLength);
+
+    /* Parses a CIGAR string into an ordered list of (op, len) operations. */
+    void parseCigarOps(uint8_t* cigarString, uint32_t cigarLength, std::vector<CigarOp>& ops);
 
     /* Only counts CIGAR operations that consume reference sequence (M/D/N/=/X); used for TLEN reconstruction. */
     uint32_t parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength);
@@ -306,9 +312,19 @@ private:
     std::map<uint32_t, std::vector<std::string>> tlenPreDecodedFields;
     /* Cached lines whose TLEN reconstruction on the decompression side failed. */
     std::map<uint32_t, int32_t> tlenCache;
+    /* PNEXT exception lines (lineNo -> reconstructed PNEXT value), populated by preDecodeForTLEN for the pnext_qname_rebuild mode. */
+    std::map<uint32_t, int64_t> pnextCache;
+    /* QNAME per data line, populated by preDecodeForTLEN to rebuild PNEXT from mate pairing. */
+    std::vector<std::string> decodedQnames;
     /* Previous line's POS for delta decoding (used by the main-loop fallback path; preDecodeForTLEN uses a local variable). */
     int64_t posDeltaPrev = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
+
+    /* Per-line CIGAR operation list (op char, length), parsed once by
+       compressCigar / decompressCigar / preDecodeForTLEN and reused by the
+       SEQ reference rebuild (M segments from reference, I/S stored separately)
+       and by TLEN reconstruction. Indexed by lineNo - headEndLine. */
+    std::vector<std::vector<CigarOp>> cigarOpList;
 
     uint32_t baseNCount;
     uint32_t* baseNPosBuffer;
@@ -327,6 +343,13 @@ private:
 
     std::vector<std::shared_ptr<coder_io>> ioVector;
     std::vector<std::shared_ptr<coder>> idDecoders;
+    /* Per-sub-stream offset/length of the QNAME compressed stream, recorded by
+       initDecoder so preDecodeForTLEN can rebuild independent decoders and
+       pre-decode QNAME without consuming idDecoders used by the main loop. */
+    std::vector<uint32_t> idStreamOffsets;
+    std::vector<uint32_t> idStreamDstLens;
+    /* Coder type name per QNAME sub-stream, for preDecodeForTLEN to rebuild decoders. */
+    std::vector<std::string> idStreamCoders;
     /* True when QNAME is compressed/decompressed with coder_qname (see decompressIdField). */
     bool idUsesQnameCoder = false;
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;

@@ -751,11 +751,33 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
 
-    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "PNEXT delta");
-    std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
-
     fieldSrcLen = 0;
-    uint32_t deltaLength = 0;
+    uint32_t totalSrcLen = 0;
+
+    /*
+     * PNEXT is stored as "exception-only": for a paired record whose mate is
+     * present and mutually mapped (same QNAME), the PNEXT can be rebuilt on the
+     * decoder from the mate's POS, so it need not be stored. Only records that
+     * cannot be rebuilt (unpaired / mate unmapped / supplementary / mate
+     * missing from the block / asymmetric coords) are stored as exceptions.
+     *
+     * The decoder rebuilds non-exception PNEXT by grouping records with the
+     * same QNAME (a QNAME with exactly two mutually-mapped records is a mate
+     * pair). This preserves the block line order, so POS delta coding and the
+     * output order are unaffected.
+     */
+
+    // Pass 1: collect (lineIdx -> qname, pos, pnext, flag) for every data line.
+    struct RecInfo {
+        std::string qname;
+        int64_t pos = 0;
+        int64_t pnext = 0;
+        uint16_t flag = 0;
+        bool valid = false;   // paired (0x1) and mate mapped (not 0x8)
+        bool hasPnext = false; // pnext != 0/ *
+    };
+    std::map<uint32_t, RecInfo> records;
+    std::unordered_map<std::string, std::vector<uint32_t>> qnameToLines;
 
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -764,68 +786,135 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
         if (*line == '@') {
             continue;
         }
-
         uint32_t contentIdx = lineIdx - headEndLine;
+
+        // QNAME is field 0 (line start .. first tab).
+        uint32_t qnameLen = contentPos[contentIdx].empty()
+            ? 0 : contentPos[contentIdx][0];
+        RecInfo ri;
+        ri.qname.assign((char*)line, qnameLen);
+
+        // FLAG (field 1)
+        auto flagIt = mappedFlag.find(lineIdx);
+        if (flagIt != mappedFlag.end()) {
+            ri.flag = flagIt->second;
+        }
+        // POS (field 3) is already decoded by compressPosFieldDelta into mappedPos.
+        auto posIt = mappedPos.find(lineIdx);
+        if (posIt != mappedPos.end()) {
+            ri.pos = posIt->second;
+        }
+        // PNEXT (field 7): fieldLength includes trailing tab.
         uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
         uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
         uint8_t* fieldStart = line + prevTabPos + 1;
         uint32_t fieldLength = currTabPos - prevTabPos;
+        totalSrcLen += fieldLength;
 
-        uint8_t buff[32] = {0};
-        int length = 0;
-        
-        /* Check if PNEXT is valid based on FLAG bits */
-        auto flagIt = mappedFlag.find(lineIdx);
-        bool isPNextValid = false;
-        if (flagIt != mappedFlag.end()) {
-            uint16_t flag = flagIt->second;
-            /* PNEXT is valid only if:
-             * - FLAG bit 0x1 is set (paired-end sequencing)
-             * - FLAG bit 0x8 is not set (mate is mapped)
-             */
-            isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
-        }
-        
-        if (isPNextValid && fieldLength > 1) {
-            std::string pNextStr = std::string((char*)fieldStart, fieldLength - 1);
-            int64_t pNextValue = (int64_t)std::stoll(pNextStr);
-            nextMappedPos[lineIdx] = pNextValue;
-
-            int64_t pos = mappedPos.find(lineIdx) == mappedPos.end() ? 0 : mappedPos[lineIdx];
-            int64_t pNextDelta = pNextValue - pos;
-            length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", pNextDelta);
-            fieldSrcLen += fieldLength;
-        } else {
-            /* Invalid PNEXT (unpaired or mate unmapped), store original value directly */
-            if (fieldLength > 1) {
-                length = snprintf((char*)buff, sizeof(buff), "%.*s\t", fieldLength - 1, fieldStart);
-                fieldSrcLen += fieldLength;
-            } else {
-                length = snprintf((char*)buff, sizeof(buff), "0\t");
-                fieldSrcLen += 2;
+        ri.valid = (ri.flag & 0x1) && !(ri.flag & 0x8);
+        if (fieldLength > 1) {
+            std::string pnStr((char*)fieldStart, fieldLength - 1);
+            if (pnStr != "0" && pnStr != "*") {
+                ri.pnext = (int64_t)std::stoll(pnStr);
+                ri.hasPnext = true;
             }
         }
-        fieldCoder->encode_line(buff, (uint32_t)length);
-        deltaLength += (uint32_t)length;
+        nextMappedPos[lineIdx] = ri.hasPnext ? ri.pnext : 0;
+
+        records[lineIdx] = std::move(ri);
+        // Group by QNAME using the same criterion as the decoder (valid =
+        // paired && mate mapped), so exception decisions match exactly.
+        if (records[lineIdx].valid) {
+            qnameToLines[records[lineIdx].qname].push_back(lineIdx);
+        }
     }
 
-    fieldCoder->encode_flush();
-    if (fieldIo->err != coder_io::IO_OK) {
-        LOG_ERROR("Encode PNEXT delta overflow: output buffer too small");
-        return -1;
-    }
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
+    // Pass 2: decide rebuildable vs exception.
+    std::vector<std::pair<uint32_t, int64_t>> pnextExceptions; // (contentIdx, delta = pnext - pos)
+    for (auto& kv : records) {
+        uint32_t lineIdx = kv.first;
+        RecInfo& ri = kv.second;
 
-    fieldMeta["srclen"] = deltaLength;
-    fieldMeta["dstlen"] = fieldIo->data_len;
-    fieldMeta["coder"] = fieldIo->meta;
+        bool rebuildable = false;
+        if (ri.valid && ri.hasPnext) {
+            const auto& mates = qnameToLines[ri.qname];
+            // For the decoder to uniquely locate the mate from the QNAME group,
+            // this QNAME must contain exactly two mutually-mapped records.
+            if (mates.size() == 2) {
+                for (uint32_t ml : mates) {
+                    if (ml == lineIdx) continue;
+                    const RecInfo& mr = records[ml];
+                    if (mr.valid && mr.hasPnext &&
+                        mr.pnext == ri.pos && ri.pnext == mr.pos) {
+                        rebuildable = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!rebuildable) {
+            uint32_t contentIdx = lineIdx - headEndLine;
+            /* Reconstruction on the decoder is pnext = delta + pos. When the record
+               had no real PNEXT (field was "0" or "*"), hasPnext is false and the
+               original value is 0, so delta must be -pos (not 0) for the decoder to
+               reproduce 0. */
+            int64_t delta = ri.hasPnext ? (ri.pnext - ri.pos) : (0 - (int64_t)ri.pos);
+            pnextExceptions.emplace_back(contentIdx, delta);
+        }
+    }
+
+    // Encode the exception stream: (contentIdx, delta) pairs, like TLEN.
+    Json::Value metaSubs;
+    Json::Value metaStreams;
+    uint32_t totalDstLen = 0;
+
+    if (!pnextExceptions.empty()) {
+        std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "PNEXT exceptions");
+        std::shared_ptr<CoderType> excCoder = std::make_shared<CoderType>(excIo.get());
+
+        uint32_t excSrcLen = (uint32_t)(pnextExceptions.size() * (2 * sizeof(int32_t)));
+        int32_t* excBuffer = MemoryUtil::safeAlloc<int32_t>(excSrcLen);
+        if (excBuffer == nullptr) {
+            return -1;
+        }
+        for (uint32_t i = 0; i < pnextExceptions.size(); ++i) {
+            excBuffer[2 * i] = (int32_t)pnextExceptions[i].first;
+            excBuffer[2 * i + 1] = (int32_t)pnextExceptions[i].second;
+        }
+        excCoder->encode_line((uint8_t*)excBuffer, excSrcLen);
+        excCoder->encode_flush();
+        MemoryUtil::safeFree(excBuffer);
+        if (excIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode PNEXT exceptions overflow: output buffer too small");
+            return -1;
+        }
+        metaSubs["srclen"] = excSrcLen;
+        metaSubs["dstlen"] = excIo->data_len;
+        metaSubs["coder"] = excIo->meta;
+        metaSubs["sname"] = "pnextexc";
+        metaStreams.append(metaSubs);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + excIo->data_len);
+        totalDstLen += excIo->data_len;
+    }
+
+    // fieldSrcLen (output) must be the original PNEXT field byte length (with
+    // trailing tab) summed over all lines, so the -s statistics and
+    // recordFieldStats print the true source length. totalSrcLen accumulates
+    // exactly that (the exception-stream size is recorded only in the sub-stream
+    // meta, not folded into the field source length).
+    fieldSrcLen = totalSrcLen;
+    fieldMeta["srclen"] = totalSrcLen;
+    fieldMeta["dstlen"] = totalDstLen;
+    fieldMeta["streams"] = metaStreams;
     fieldMeta["field"] = fieldIdx;
-    fieldMeta["mode"] = "pnext_delta";
+    fieldMeta["mode"] = "pnext_qname_rebuild";
+    fieldMeta["exceptions"] = (Json::UInt64)pnextExceptions.size();
 
-    LOG_INFO("SAM field(%d) (PNEXT) delta compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
-        fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
+    LOG_INFO("SAM field(%d) (PNEXT) qname-rebuild compression completed: %u src -> %u dst, %u exceptions, ratio = %.2f%%",
+        fieldIdx, totalSrcLen, totalDstLen, (uint32_t)pnextExceptions.size(),
+        totalSrcLen ? (double)(totalDstLen * 100)/(double)totalSrcLen : 0.0);
 
-    return fieldIo->data_len;
+    return (int32_t)totalDstLen;
 }
 
 template<typename CoderType>
@@ -1452,6 +1541,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
 
     uint32_t lineCount = lineNum - headEndLine;
     baseLengthBuffer =  MemoryUtil::safeAlloc<uint32_t>(lineCount);
+    cigarOpList.resize(lineCount);
 
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
@@ -1474,11 +1564,14 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
         if (fieldLength == 2 && *fieldStart == '*' ) {
             baseLengthBuffer[lineIdx - headEndLine] = 0;
             cigarReadLen[lineIdx] = 0;
+            cigarOpList[contentIdx].clear();
         } else {
             uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
             baseLengthBuffer[lineIdx - headEndLine] = sequeceLength;
             /* Reference span for TLEN reconstruction (field 8 is compressed after this field). */
             cigarReadLen[lineIdx] = parseCigarRefConsumed(fieldStart, fieldLength);
+            /* Store the parsed operation list for the SEQ reference rebuild. */
+            parseCigarOps(fieldStart, fieldLength, cigarOpList[contentIdx]);
         }
 
         // Encode the field data
@@ -1832,6 +1925,13 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(lsquash);
     std::unique_ptr<uint8_t[]> baseMappedBuffer = std::make_unique<uint8_t[]>(baseMappedLength);
     baseNPosBuffer = MemoryUtil::safeAlloc<uint32_t>(baseNCount);
+    /* Scratch for the reference 2-bit-per-base sequence used by the CIGAR
+       M/=/X segment rebuild (a single op never exceeds baseMaxLength bases).
+       getStretch2Bits1Char can write up to outLen + 3 bytes because of its
+       unaligned 4-byte writes, so size the buffer with extra slack. */
+    std::unique_ptr<uint8_t[]> ref2bitBuf = std::make_unique<uint8_t[]>(baseMaxLength + 8);
+    /* Empty op list for reads with a `*` CIGAR (no operations). */
+    static const std::vector<CigarOp> emptyCigarOps;
 
     // Create metadata structure
     Json::Value metaSubs;
@@ -1893,52 +1993,89 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         }
 
         totalBaseLength += seqLength;
-        if (chrId != 0xFFFF && chrId != 0xFFFE && !(flag & 0x04)) {
-            // Get chromosome start position from SamInfo
-            int64_t chrStartPos =  SamInfo::getInstance().getPositionByIndex(chrId);
+
+        /*
+         * CIGAR-segment-based reference rebuild.
+         *
+         * For a mapped read the SEQ is encoded per-base as a 2-bit XOR against
+         * the reference, but only on the operations that consume reference
+         * (M/=/X). Operations that consume SEQ but not reference (I/S) are
+         * stored directly, and reference-only operations (D/N) only advance the
+         * reference position without producing any SEQ bytes. This is required
+         * so that indels do not cause the read to be compared against a
+         * contiguous reference window it does not actually align to.
+         *
+         * The decompression side mirrors this exact CIGAR walk (same refPos
+         * progression and same per-segment encoding), guaranteeing a lossless
+         * round-trip.
+         */
+        bool useReference = (chrId != 0xFFFF && chrId != 0xFFFE && !(flag & 0x04));
+        int64_t refPos = 0;
+        if (useReference) {
+            int64_t chrStartPos = SamInfo::getInstance().getPositionByIndex(chrId);
             if (chrStartPos == -1) {
-                // No valid mapping, encode directly
-                // LOG_DEBUG("chrStartPos not found, line = %d", contentIdx);
+                useReference = false;
+            } else {
+                refPos = chrStartPos + startPos - 1; // SAM is 1-based
+                /* Reference-consumed span (M/D/N/=/X); guard against reads whose
+                   alignment runs past the reference end. */
+                auto crlIt = cigarReadLen.find(lineIdx);
+                uint32_t refConsumed = (crlIt != cigarReadLen.end()) ? crlIt->second : 0;
+                uint64_t needSquash = (uint64_t)(refConsumed >> 2) + !!(refConsumed & 0x3) + 1;
+                if (refPos < 0 || ((uint64_t)(refPos >> 2)) + needSquash > (uint64_t)pRefeGene->getSquashLength()) {
+                    useReference = false;
+                }
+            }
+        }
+
+        const std::vector<CigarOp>& ops = (contentIdx < cigarOpList.size()) ? cigarOpList[contentIdx] : emptyCigarOps;
+        if (useReference && !ops.empty()) {
+            // Build the per-base 2-bit stream: XOR with reference for M/=/X,
+            // direct 2-bit for I/S.
+            uint32_t readPos = 0;
+            int64_t refPosLocal = refPos;
+            bool consistent = true;
+            for (size_t oi = 0; oi < ops.size(); ++oi) {
+                const CigarOp& op = ops[oi];
+                switch (op.op) {
+                    case 'M': case '=': case 'X':
+                        if (readPos + op.len > seqLength) { consistent = false; break; }
+                        pRefeGene->getStretch2Bits1Char(ref2bitBuf.get(), op.len, refPosLocal);
+                        for (uint32_t i = 0; i < op.len; ++i) {
+                            uint8_t read2 = (seqStart[readPos + i] >> 1) & 0x3;
+                            baseMappedBuffer[readPos + i] = read2 ^ ref2bitBuf[i];
+                        }
+                        readPos += op.len;
+                        refPosLocal += op.len;
+                        break;
+                    case 'I': case 'S':
+                        if (readPos + op.len > seqLength) { consistent = false; break; }
+                        for (uint32_t i = 0; i < op.len; ++i) {
+                            baseMappedBuffer[readPos + i] = (seqStart[readPos + i] >> 1) & 0x3;
+                        }
+                        readPos += op.len;
+                        break;
+                    case 'D': case 'N':
+                        refPosLocal += op.len;
+                        break;
+                    case 'H': case 'P':
+                    default:
+                        break; // consume neither SEQ nor reference
+                }
+                if (!consistent) break;
+            }
+            if (!consistent || readPos != seqLength) {
+                // CIGAR/SEQ length mismatch: fall back to direct encoding.
                 actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
                 outLen = seqLength;
             } else {
-                // Calculate actual reference position
-                int64_t refPos = chrStartPos + startPos - 1; // SAM is 1-based
-                // Determine strand direction from FLAG bit 4
-                uint32_t squashBufferLength = actgSquash(seqStart, seqLength, baseSquashBuffer);
-                uint8_t shiftBitLength = refPos % 4;
-                int64_t refSquashPos = refPos / 4;
-                uint32_t baseSquashLength = (seqLength >> 2) + !!(seqLength & 0x3) + 1;
-                if (refSquashPos + baseSquashLength > pRefeGene->getSquashLength()) {
-                    // LOG_DEBUG("Mapped pos is out of bound. line = %d", contentIdx);
-                    actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
-                    outLen = seqLength;
-                } else {
-                    const uint8_t* beginRefPos = pRefeGene->getSquash() + refSquashPos;
-                    uint8_t* refeMappedPos = MemoryUtil::safeAlloc<uint8_t>(squashBufferLength);;
-                    if (shiftBitLength == 0) {
-                        memcpy(refeMappedPos, beginRefPos, squashBufferLength);
-                    } else if (shiftBitLength == 1) {
-                        for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                            refeMappedPos[i] = ((beginRefPos[i] << 2) & 0xFC) + ((beginRefPos[i + 1] >> 6) & 0x03);
-                        }
-                    } else if (shiftBitLength == 2) {
-                        for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                            refeMappedPos[i] = ((beginRefPos[i] << 4) & 0xF0) + ((beginRefPos[i + 1] >> 4) & 0x0F);
-                        }
-                    } else if (shiftBitLength == 3) {
-                        for (uint32_t i = 0; i < squashBufferLength; ++i) {
-                            refeMappedPos[i] = ((beginRefPos[i] << 6) & 0xC0) + ((beginRefPos[i + 1] >> 2) & 0x3F);
-                        }
-                    }
-                    outLen = actgStretchMappingXor(baseSquashBuffer, refeMappedPos, squashBufferLength, baseMappedBuffer.get());
-                    MemoryUtil::safeFree(refeMappedPos);
-                    pRefeGene->updateMatchedGene(refPos, baseSquashLength << 2);
-                }
+                outLen = seqLength;
+                auto crlIt = cigarReadLen.find(lineIdx);
+                pRefeGene->updateMatchedGene((uint64_t)refPos,
+                    (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
             }
         } else {
-            // No valid mapping, encode directly
-            // LOG_DEBUG("Not mapping, line = %d", contentIdx);
+            // No valid mapping or no CIGAR ops, encode directly
             actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
             outLen = seqLength;
         }
@@ -2492,7 +2629,9 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
 
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     baseDiffSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
-    refeStrecchBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
+    /* +8 slack: getStretch2Bits1Char may write up to outLen+3 bytes due to its
+       unaligned 4-byte writes, and outLen (= actualBaseLen) can reach maxBaseLength. */
+    refeStrecchBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength + 8);
     uint32_t totalBaseLen = 0;
     uint32_t nposOffset = 0;
 
@@ -2737,9 +2876,15 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             }
 
             // ID decoders
+            idStreamOffsets.clear();
+            idStreamDstLens.clear();
+            idStreamCoders.clear();
             for (uint32_t i = 0; i < idStreamMeta.size(); ++i) {
                 std::string coderName = idStreamMeta[i]["coder"]["magic"].asString();
                 uint32_t dstLength = idStreamMeta[i]["dstlen"].asUInt();
+                idStreamOffsets.push_back(readOffset);
+                idStreamDstLens.push_back(dstLength);
+                idStreamCoders.push_back(coderName);
                 std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "QNAME sub-stream");
                 ioVector.push_back(io);
                 if (coderName == "coder_affix_match") {
@@ -3047,6 +3192,20 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
              * field's dstlen).
              */
             fieldIoStart[idx] = readOffset;
+            continue;
+        } else if (idx == 7 && streamMeta[idx].isMember("mode") &&
+                   streamMeta[idx]["mode"].asString() == "pnext_qname_rebuild") {
+            /*
+             * PNEXT qname-rebuild mode stores only an exception stream in
+             * streams[7]["streams"][0]. No line-by-line decoder is built; the
+             * exception stream offset is recorded so preDecodeForTLEN can decode
+             * it, and readOffset is advanced past it so later fields align.
+             */
+            fieldIoStart[idx] = readOffset;
+            if (streamMeta[idx].isMember("streams") && streamMeta[idx]["streams"].size() > 0) {
+                uint32_t excDstLen = streamMeta[idx]["streams"][0]["dstlen"].asUInt();
+                readOffset += excDstLen;
+            }
             continue;
         } else {
             std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
@@ -3394,6 +3553,78 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
     Json::Value& streams = meta["sam"]["streams"];
 
     /*
+     * Pre-decode QNAME (field 0) into decodedQnames. PNEXT (pnext_qname_rebuild
+     * mode) is rebuilt by pairing records with the same QNAME, so every line's
+     * QNAME must be known before PNEXT is reconstructed. QNAME is decoded with
+     * the per-sub-stream decoders already built by initDecoder (idDecoders),
+     * mirroring decompressIdField.
+     */
+    decodedQnames.clear();
+    decodedQnames.resize(samLine);
+    if (!idStreamOffsets.empty()) {
+        // Rebuild independent decoders from the recorded sub-stream offsets so we
+        // do not consume the idDecoders used by the main loop.
+        std::vector<std::shared_ptr<coder_io>> preIdIo;
+        std::vector<std::shared_ptr<coder>> preIdDec;
+        for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
+            std::shared_ptr<coder_io> io = makeCoderIo(buffer + idStreamOffsets[si], idStreamDstLens[si], "QNAME predecode");
+            preIdIo.push_back(io);
+            int32_t lvl = -1;
+            if (streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
+                streams[0]["streams"][si]["coder"].isMember("level")) {
+                lvl = streams[0]["streams"][si]["coder"]["level"].asInt();
+            }
+            if (idStreamCoders[si] == "coder_affix_match") {
+                auto dec = std::make_shared<coder_affix_match>(io.get());
+                if (lvl >= 0) dec->set_level(lvl);
+                preIdDec.push_back(dec);
+            } else if (idStreamCoders[si] == "coder_bwt_cm") {
+                auto dec = std::make_shared<coder_bwt_cm>(io.get());
+                if (lvl >= 0) dec->set_level(lvl);
+                preIdDec.push_back(dec);
+            } else if (idStreamCoders[si] == "coder_qname") {
+                preIdDec.push_back(std::make_shared<coder_qname>(io.get()));
+            } else {
+                preIdDec.push_back(nullptr);
+            }
+        }
+
+        char qnameBuf[512];
+        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+            std::string qname;
+            if (idUsesQnameCoder && !preIdDec.empty()) {
+                // Single-stream coder_qname: one QNAME per line (with trailing '\t').
+                bool hold = (idStreamCoders[0] == "coder_affix_match");
+                int32_t len = preIdDec[0]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), UINT8_MAX, hold);
+                if (len > 0) {
+                    int32_t strip = (qnameBuf[len - 1] == '\t') ? 1 : 0;
+                    qname.assign(qnameBuf, (size_t)len - strip);
+                }
+            } else {
+                // Reconstruct QNAME from split sub-streams. Each sub-stream
+                // encodes its segment including the trailing separator (the
+                // split symbol is part of the segment bytes), mirroring
+                // decompressIdField; so we simply append each decoded segment.
+                for (uint32_t si = 0; si < preIdDec.size(); ++si) {
+                    if (!preIdDec[si]) continue;
+                    uint8_t sep = (si < idSplitSymbols.size()) ? idSplitSymbols[si] : UINT8_MAX;
+                    // coder_affix_match keeps cross-line context in an internal
+                    // buffer only when need2hold is set; without it, it points
+                    // last at our fixed qnameBuf and the next line would corrupt
+                    // the prefix reference.
+                    bool hold = (idStreamCoders[si] == "coder_affix_match");
+                    int32_t len = preIdDec[si]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), sep, hold);
+                    if (len > 0) {
+                        int32_t strip = (qnameBuf[len - 1] == '\t') ? 1 : 0;
+                        qname.append(qnameBuf, (size_t)len - strip);
+                    }
+                }
+            }
+            decodedQnames[lineNo] = qname;
+        }
+    }
+
+    /*
      * Decode FLAG (field 1) first so that PNEXT (field 7) can be decoded
      * correctly: PNEXT is stored as delta against POS only when the mate
      * position is meaningful (FLAG bit 0x1 set and bit 0x8 clear), otherwise
@@ -3529,6 +3760,8 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
                 case 5:
                     cigarReadLen[lineNo] = parseCigarRefConsumed(tmpBuf, len);
                     baseLengthBuffer[lineNo] = parseCigar(tmpBuf, len);
+                    if (cigarOpList.size() <= lineNo) cigarOpList.resize(lineNo + 1);
+                    parseCigarOps(tmpBuf, (uint32_t)len, cigarOpList[lineNo]);
                     fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
                     break;
                 case 7:
@@ -3575,6 +3808,99 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
                     fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
                     break;
             }
+        }
+    }
+
+    /*
+     * PNEXT (field 7) in pnext_qname_rebuild mode stores only exception
+     * (line, delta) pairs in streams[7]["streams"][0]. Non-exception lines are
+     * rebuilt here by pairing records that share the same QNAME and are
+     * mutually mapped. mappedPos is already populated by the POS (field 3)
+     * pre-decode above. The result fills tlenPreDecodedFields[7] and
+     * nextMappedPos for every line.
+     */
+    std::string pnextMode = streams.isValidIndex(7) && streams[7].isMember("mode")
+        ? streams[7]["mode"].asString() : "";
+    if (pnextMode == "pnext_qname_rebuild") {
+        pnextCache.clear();
+        // Decode the exception stream (pairs of contentIdx, delta).
+        if (streams[7].isMember("streams") && streams[7]["streams"].size() > 0) {
+            Json::Value& excMeta = streams[7]["streams"][0];
+            uint32_t excOff = fieldIoStart[7];
+            uint32_t excDstLen = excMeta["dstlen"].asUInt();
+            std::string excCoderName = excMeta["coder"]["magic"].asString();
+            std::shared_ptr<coder_io> excIo = makeCoderIo(buffer + excOff, excDstLen, "PNEXT exc predecode");
+            std::shared_ptr<coder> excDec;
+            if (excCoderName == "coder_bwt_cm") {
+                excDec = std::make_shared<coder_bwt_cm>(excIo.get());
+            } else if (excCoderName == "coder_affix_match") {
+                excDec = std::make_shared<coder_affix_match>(excIo.get());
+            }
+            if (excDec) {
+                // Exception coder level: prefer the value stored in the sub-stream meta.
+                if (excMeta["coder"].isMember("level")) {
+                    excDec->set_level(excMeta["coder"]["level"].asInt());
+                } else {
+                    auto lvIt = fieldIoLevel.find(7);
+                    if (lvIt != fieldIoLevel.end()) excDec->set_level(lvIt->second);
+                }
+                int32_t pairCount = streams[7]["exceptions"].asUInt();
+                std::vector<int32_t> excBuf(pairCount * 2, 0);
+                excDec->decode_line((uint8_t*)excBuf.data(),
+                    (uint32_t)(pairCount * 2 * sizeof(int32_t)), UINT8_MAX, false);
+                for (int32_t i = 0; i < pairCount && (2 * i + 1) < pairCount * 2; ++i) {
+                    uint32_t contentIdx = (uint32_t)excBuf[2 * i];
+                    int32_t delta = excBuf[2 * i + 1];
+                    /* The exception stores the 0-based data-line index (contentIdx on
+                       the compression side, i.e. lineIdx - headEndLine). On this
+                       decompression side lineNo is also 0-based data-line indexed, so
+                       no headEndLine offset is added here. */
+                    uint32_t lineNo = contentIdx;
+                    int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                    pnextCache[lineNo] = delta + pos;
+                }
+            }
+        }
+
+        // Build qname -> lines mapping from decodedQnames (only mapped, paired lines).
+        std::unordered_map<std::string, std::vector<uint32_t>> qnameToLines;
+        qnameToLines.reserve(samLine);
+        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+            auto flagIt = mappedFlag.find(lineNo);
+            bool paired = flagIt != mappedFlag.end() && (flagIt->second & 0x1) && !(flagIt->second & 0x8);
+            if (paired && !decodedQnames[lineNo].empty()) {
+                qnameToLines[decodedQnames[lineNo]].push_back(lineNo);
+            }
+        }
+
+        // Rebuild PNEXT for every line.
+        std::vector<std::string>& pnextCacheOut = tlenPreDecodedFields[7];
+        pnextCacheOut.clear();
+        pnextCacheOut.reserve(samLine);
+        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+            int64_t pnext = 0;
+            auto cacheIt = pnextCache.find(lineNo);
+            if (cacheIt != pnextCache.end()) {
+                pnext = cacheIt->second; // exception: stored value
+            } else {
+                // Rebuild from mate: the encoder guarantees a non-exception line
+                // belongs to a QNAME group of exactly two mutually-mapped
+                // records, so the other record in the group is the mate.
+                auto flagIt = mappedFlag.find(lineNo);
+                bool paired = flagIt != mappedFlag.end() && (flagIt->second & 0x1) && !(flagIt->second & 0x8);
+                if (paired && !decodedQnames[lineNo].empty()) {
+                    const auto& mates = qnameToLines[decodedQnames[lineNo]];
+                    if (mates.size() == 2) {
+                        for (uint32_t ml : mates) {
+                            if (ml == lineNo) continue;
+                            pnext = mappedPos.count(ml) ? mappedPos[ml] : 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            nextMappedPos[lineNo] = pnext;
+            pnextCacheOut.emplace_back(std::to_string(pnext) + '\t');
         }
     }
 
@@ -3760,12 +4086,19 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                     outputBlock->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
                 }
             } else {
-                // Get position in reference genome
+                /*
+                 * CIGAR-segment-based reference rebuild, mirroring the
+                 * compression side exactly: M/=/X segments are restored from
+                 * the reference (decode_line yields the per-base 2-bit XOR
+                 * against the reference), I/S segments are direct 2-bit codes,
+                 * and D/N only advance the reference position. Same refPos
+                 * progression, so the round-trip is lossless.
+                 */
                 bool findMappedPos = false;
                 int64_t refeMappedPos = 0;
                 do {
                     uint16_t chrIdx = mappedChr.find(lineNo) == mappedChr.end() ? 0xFFFF : mappedChr[lineNo];
-                    if (chrIdx ==  0xFFFF) {
+                    if (chrIdx == 0xFFFF || chrIdx == 0xFFFE) {
                         break;
                     }
                     int64_t refeChrPos = SamInfo::getInstance().getPositionByIndex(chrIdx);
@@ -3773,8 +4106,10 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                         break;
                     }
                     refeMappedPos = refeChrPos + mappedPos[lineNo] - 1;
-                    uint32_t baseSquashLength = actualBaseLen / 4 + !!(actualBaseLen & 0x3) + 1;
-                    if ((refeMappedPos / 4) + baseSquashLength > pRefeGene->getSquashLength()) {
+                    auto crlIt = cigarReadLen.find(lineNo);
+                    uint32_t refConsumed = (crlIt != cigarReadLen.end()) ? crlIt->second : 0;
+                    uint64_t needSquash = (uint64_t)(refConsumed >> 2) + !!(refConsumed & 0x3) + 1;
+                    if (refeMappedPos < 0 || ((uint64_t)(refeMappedPos >> 2)) + needSquash > (uint64_t)pRefeGene->getSquashLength()) {
                         break;
                     }
                     findMappedPos = true;
@@ -3795,9 +4130,49 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                         LOG_ERROR("base decode failed in block %llu, line %d,expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                         return -1;
                     }
-                    pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, actualBaseLen, refeMappedPos);
-                    actgXor(refeStrecchBuffer, baseDiffSquashBuffer, baseSquashBuffer, actualBaseLen);
-                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, actualBaseLen, outputBlock->getCurrent());
+                    uint8_t* out = outputBlock->getCurrent();
+                    if (lineNo >= cigarOpList.size()) {
+                        // No CIGAR op list available: treat as direct 2-bit codes.
+                        for (uint32_t o = 0; o < actualBaseLen; ++o) {
+                            out[o] = atcg4[baseDiffSquashBuffer[o]];
+                        }
+                    } else {
+                        const std::vector<CigarOp>& ops = cigarOpList[lineNo];
+                        uint32_t readPos = 0;
+                        int64_t refPosLocal = refeMappedPos;
+                        for (size_t oi = 0; oi < ops.size(); ++oi) {
+                            const CigarOp& op = ops[oi];
+                            switch (op.op) {
+                                case 'M': case '=': case 'X':
+                                    if (readPos + op.len > actualBaseLen) { readPos = actualBaseLen; break; }
+                                    pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, op.len, refPosLocal);
+                                    for (uint32_t i = 0; i < op.len; ++i) {
+                                        baseSquashBuffer[i] = refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i];
+                                    }
+                                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, op.len, out + readPos);
+                                    readPos += op.len;
+                                    refPosLocal += op.len;
+                                    break;
+                                case 'I': case 'S':
+                                    if (readPos + op.len > actualBaseLen) { readPos = actualBaseLen; break; }
+                                    for (uint32_t i = 0; i < op.len; ++i) {
+                                        out[readPos + i] = atcg4[baseDiffSquashBuffer[readPos + i] & 0x3];
+                                    }
+                                    readPos += op.len;
+                                    break;
+                                case 'D': case 'N':
+                                    refPosLocal += op.len;
+                                    break;
+                                case 'H': case 'P':
+                                default:
+                                    break; // consume neither SEQ nor reference
+                            }
+                        }
+                        /* Any residual positions (e.g. inconsistent CIGAR) fall back to direct. */
+                        for (; readPos < actualBaseLen; ++readPos) {
+                            out[readPos] = atcg4[baseDiffSquashBuffer[readPos] & 0x3];
+                        }
+                    }
                 }
             }
 
@@ -3876,13 +4251,21 @@ int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, 
         LOG_ERROR("Decode cigar field(%u) failed: %d", fieldIdx, fieldLen);
         return -1;
     }
+    /* cigarOpList is indexed by the 0-based data line (lineIdx - headEndLine),
+       which is always non-negative here, so use an unsigned size_t index to
+       avoid signed/unsigned comparison warnings and resize clutter. */
+    const size_t contentIdx = static_cast<size_t>(lineIdx - headEndLine);
     if (fieldLen > 1) {
         uint32_t seqLength = parseCigar(outputBlock->getCurrent(), fieldLen);
         baseLengthBuffer[lineIdx] = seqLength;
         cigarReadLen[lineIdx] = parseCigarRefConsumed(outputBlock->getCurrent(), fieldLen);
+        if (cigarOpList.size() <= contentIdx) cigarOpList.resize(contentIdx + 1);
+        parseCigarOps(outputBlock->getCurrent(), (uint32_t)fieldLen, cigarOpList[contentIdx]);
     } else {
         baseLengthBuffer[lineIdx] = 0;
         cigarReadLen[lineIdx] = 0;
+        if (cigarOpList.size() <= contentIdx) cigarOpList.resize(contentIdx + 1);
+        cigarOpList[contentIdx].clear();
     }
 
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
@@ -3937,6 +4320,26 @@ uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength
         }
     }
     return seqLength;
+}
+
+void SamCodecActuator::parseCigarOps(uint8_t* cigarString, uint32_t cigarLength, std::vector<CigarOp>& ops) {
+    ops.clear();
+    if (cigarString == nullptr || cigarLength == 0) {
+        return;
+    }
+    uint32_t currentNumber = 0;
+    for (uint32_t i = 0; i < cigarLength; ++i) {
+        char ch = cigarString[i];
+        if (ch >= '0' && ch <= '9') {
+            currentNumber = currentNumber * 10 + (ch - '0');
+        } else {
+            if (currentNumber > 0 && (ch == 'M' || ch == 'I' || ch == 'D' || ch == 'N' ||
+                                      ch == 'S' || ch == 'H' || ch == 'P' || ch == '=' || ch == 'X')) {
+                ops.push_back(CigarOp{ch, currentNumber});
+            }
+            currentNumber = 0;
+        }
+    }
 }
 
 int32_t SamCodecActuator::buildSamIndex() {

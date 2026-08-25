@@ -1113,7 +1113,11 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
     default:
         break;
     }
-    if (offset == outLen) {
+    /* The left unaligned part may write up to 3 bytes even when outLen is
+       smaller (e.g. a 1- or 2-base M/=/X segment at an unaligned position).
+       Guard with >= so we never run the aligned loop with an underflowed
+       (outLen - offset), which would otherwise blow past the buffer. */
+    if (offset >= outLen) {
         return;
     }
 
@@ -1124,7 +1128,7 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
         offset += 4;
         p++;
     }
-    if (offset == outLen) {
+    if (offset >= outLen) {
         return;
     }
 

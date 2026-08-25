@@ -28,8 +28,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <sstream>
 #include <cstdint>
 #include <cstdio>
+#include <cctype>
 #include <random>
 
 #define private public
@@ -1317,4 +1319,173 @@ TEST_F(SamActuatorTest, testDecompressWithRefGenePosInvalidChr) {
     EXPECT_EQ(decompressor.refPosChrIndex, 65535);
 
     std::remove("invalid_chr_test.sam");
+}
+
+/*
+ * Byte-exact reference round trip across CIGAR segments.
+ *
+ * The reference-based SEQ codec must walk the CIGAR: M/=/X segments are XOR'd
+ * against the reference, I/S segments are stored directly, D/N only advance the
+ * reference position, and H/P consume nothing. This test exercises insertions,
+ * deletions, soft-clips, hard-clips, reference skips and =/X ops together with
+ * an unmapped read, an N base and a reverse-strand read, and verifies the
+ * decompressed output matches the input byte for byte.
+ */
+TEST_F(SamActuatorTest, testCigarSegmentRefRoundTripByteExact) {
+    // Build a periodic reference so reads can be derived from it.
+    auto makePeriodic = [](size_t len) {
+        static const char* pat = "AACCGGTTAACCGGTT";
+        std::string s;
+        s.reserve(len);
+        for (size_t i = 0; i < len; ++i) s.push_back(pat[i % 16]);
+        return s;
+    };
+    const std::string ref = makePeriodic(400);
+
+    std::ofstream refFile("test_cigar_ref.fa");
+    ASSERT_TRUE(refFile.is_open());
+    refFile << ">chr1\n";
+    for (size_t i = 0; i < ref.size(); i += 80) {
+        refFile << ref.substr(i, 80) << "\n";
+    }
+    refFile.close();
+
+    auto sub = [&](size_t b, size_t e) { return ref.substr(b, e - b); };
+
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:" << ref.size() << "\n";
+    /* Reads are unpaired (no mate in the block), so RNEXT is `*` and TLEN is 0.
+       The CIGAR/SEQ comparison below is independent of the PNEXT column. */
+    // 10M: pure match, reference span 10
+    file << "readA\t0\tchr1\t1\t60\t10M\t*\t0\t0\t" << sub(0, 10) << "\tIIIIIIIIII\tNM:i:0\n";
+    // 5M2I5M: insertion in the middle
+    file << "readB\t0\tchr1\t31\t60\t5M2I5M\t*\t0\t0\t" << sub(30, 35) << "TT" << sub(35, 40) << "\tJJJJJJJJJJJJ\tNM:i:0\n";
+    // 4M2D6M: deletion in the middle
+    file << "readC\t0\tchr1\t61\t60\t4M2D6M\t*\t0\t0\t" << sub(60, 64) << sub(66, 72) << "\tKKKKKKKKKK\tNM:i:0\n";
+    // 3S5M: soft clip at start
+    file << "readD\t0\tchr1\t91\t60\t3S5M\t*\t0\t0\tCCC" << sub(90, 95) << "\tLLLLLLLL\tNM:i:0\n";
+    // 4=2X4M: match and mismatch ops, all consume reference
+    file << "readE\t0\tchr1\t121\t60\t4=2X4M\t*\t0\t0\t" << sub(120, 130) << "\tMMMMMMMMMM\tNM:i:2\n";
+    // 5M2N3M: reference skip in the middle
+    file << "readF\t0\tchr1\t151\t60\t5M2N3M\t*\t0\t0\t" << sub(150, 155) << sub(157, 160) << "\tNNNNNNNN\tNM:i:0\n";
+    // 6M1H: hard clip at end (consumes nothing)
+    file << "readG\t0\tchr1\t181\t60\t6M1H\t*\t0\t0\t" << sub(180, 186) << "\tOOOOOO\tNM:i:0\n";
+    // unmapped read
+    file << "readH\t4\t*\t0\t0\t*\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n";
+    // reverse-strand read (flag 16), arbitrary SEQ not matching the reference
+    file << "readI\t16\tchr1\t201\t60\t8M\t*\t0\t0\tGATTACAG\t*\tNM:i:10\n";
+    // N base inside an 8M segment
+    file << "readJ\t0\tchr1\t231\t60\t8M\t*\t0\t0\t" << sub(230, 234) << "N" << sub(235, 238) << "\tPPPPPPPP\tNM:i:0\n";
+    file.close();
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    Reference reference("test_cigar_ref.fa", 1);
+    ASSERT_TRUE(reference.makeIndex());
+
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+
+    std::remove("test_cigar_ref.fa");
+}
+
+/*
+ * Measurement helper (not a correctness assertion): compress an indel-heavy,
+ * forward-strand SAM against a reference and report the compressed SEQ match
+ * stream size. Run this on both the old (contiguous reference window) and the
+ * new (CIGAR-segment) implementations to compare the reference-based SEQ
+ * compression ratio.
+ */
+TEST_F(SamActuatorTest, testMeasureIndelRefSeqStream) {
+    static const char* pat = "ACGTACGTGGCATTGCAACCGTAACCGGTT";
+    const size_t reflen = 2000000;
+    std::string ref;
+    ref.reserve(reflen);
+    for (size_t i = 0; i < reflen; ++i) ref.push_back(pat[i % 30]);
+
+    std::ofstream refFile("ratio_ref.fa");
+    ASSERT_TRUE(refFile.is_open());
+    refFile << ">chr1\n";
+    for (size_t i = 0; i < reflen; i += 80) refFile << ref.substr(i, 80) << "\n";
+    refFile.close();
+
+    std::mt19937 rng(7);
+    const char bases[] = "ACGT";
+    auto randseq = [&](int n) {
+        std::string s; s.reserve(n);
+        for (int i = 0; i < n; ++i) s.push_back(bases[rng() % 4]);
+        return s;
+    };
+    auto seqFor = [&](int pos, const std::string& cigar) {
+        std::string out; int rp = pos;
+        for (size_t i = 0; i < cigar.size();) {
+            size_t j = i; while (j < cigar.size() && isdigit(cigar[j])) ++j;
+            int L = std::stoi(cigar.substr(i, j - i)); char op = cigar[j]; i = j + 1;
+            if (op == 'M' || op == '=' || op == 'X') { out += ref.substr(rp, L); rp += L; }
+            else if (op == 'I' || op == 'S') { out += randseq(L); }
+            else if (op == 'D' || op == 'N') { rp += L; }
+        }
+        return out;
+    };
+
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:" << reflen << "\n";
+    int pos = 100;
+    for (int i = 0; i < 20000; ++i) {
+        double t = (double)(rng() % 1000) / 1000.0;
+        std::string cigar;
+        if (t < 0.30) cigar = std::to_string(40 + rng() % 41) + "M";
+        else if (t < 0.50) { int L = 35 + rng() % 26; cigar = std::to_string(L) + "M" + std::to_string(2 + rng() % 7) + "I" + std::to_string(L) + "M"; }
+        else if (t < 0.70) { int L = 35 + rng() % 26; cigar = std::to_string(L) + "M" + std::to_string(2 + rng() % 7) + "D" + std::to_string(L) + "M"; }
+        else if (t < 0.85) { int L = 40 + rng() % 31; cigar = std::to_string(2 + rng() % 9) + "S" + std::to_string(L) + "M"; }
+        else { int L = 40 + rng() % 31; cigar = std::to_string(L / 2) + "M" + std::to_string(2 + rng() % 7) + "N" + std::to_string(L / 2) + "M"; }
+        std::string seq = seqFor(pos, cigar);
+        std::string qual(seq.size(), 'I');
+        file << "read" << i << "\t0\tchr1\t" << pos << "\t60\t" << cigar << "\t*\t0\t0\t" << seq
+             << "\t" << qual << "\tNM:i:0\n";
+        pos += 1 + rng() % 60;
+    }
+    file.close();
+
+    loadSamData(SamTestData::testSamFile);
+    const size_t originalBytes = (size_t)pInBlock->getDataLen();
+
+    Reference reference("ratio_ref.fa", 1);
+    ASSERT_TRUE(reference.makeIndex());
+
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    /* All non-SEQ fields are identical between the old and new SEQ implementations,
+       so the total compressed size delta isolates the reference-based SEQ stream. */
+    std::ofstream out("/tmp/indel_seq_match_size.txt");
+    out << "original=" << originalBytes << " total_compressed=" << pOutBlock->getDataLen()
+        << " ratio=" << (pOutBlock->getDataLen() * 100.0) / originalBytes << "\n";
+    out.close();
+
+    std::remove("ratio_ref.fa");
 }
