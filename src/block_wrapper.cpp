@@ -703,6 +703,10 @@ size_t BamBlockReader::readRawFromSource(void* dst, size_t n) {
         }
         got = toCopy;
     }
+    /* NOTE: single non-blocking read; callers that need a full read must loop
+     * (see BamBlockReader::readBamBytes). This helper is also used by
+     * BamGzBlockReader to top up its compressed buffer, where a partial read is
+     * expected and handled by the inflate loop. */
     if (got < n) {
         got += ioReader->readIO((uint8_t*)dst + got, n - got);
     }
@@ -710,7 +714,16 @@ size_t BamBlockReader::readRawFromSource(void* dst, size_t n) {
 }
 
 size_t BamBlockReader::readBamBytes(void* dst, size_t n) {
-    return readRawFromSource(dst, n);
+    size_t got = 0;
+    uint8_t* out = (uint8_t*)dst;
+    while (got < n) {
+        const size_t nRead = readRawFromSource(out + got, n - got);
+        if (nRead == 0) {
+            break; // EOF
+        }
+        got += nRead;
+    }
+    return got;
 }
 
 size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
@@ -734,7 +747,22 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
                 inflateReset(&inflateState);
                 continue;
             }
-            break;
+            /* The current member ended at the end of the buffered input, yet more
+             * members may still follow in the file. Reading the next compressed
+             * member must not terminate the request with a short read, otherwise
+             * BamBlockReader::readBlock mistakes this for a premature EOF. */
+            if (gzInEof) {
+                break;
+            }
+            const size_t inRead = readRawFromSource(gzInBuf, sizeof(gzInBuf));
+            if (inRead == 0) {
+                gzInEof = true;
+                break;
+            }
+            inflateReset(&inflateState);
+            inflateState.next_in = gzInBuf;
+            inflateState.avail_in = (uInt)inRead;
+            continue;
         }
         if (rc != Z_OK && rc != Z_BUF_ERROR) {
             break;   /* Corrupted data */
