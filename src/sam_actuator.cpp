@@ -635,9 +635,9 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 3: // POS
                 /*
-                 * POS is compressed as the delta against the previous line's POS.
-                 * Empirically ~0.34 B/line, better than fixed-width binary
-                 * (1.00 B/line) and textual affix (0.53 B/line). Always uses the
+                 * POS is compressed as unsigned varint (LEB128) deltas against the
+                 * previous line's POS; the baseline resets at each chromosome
+                 * switch, so deltas stay small and non-negative. Always uses the
                  * delta path; not subject to coder selection.
                  */
                 fieldDstLen = compressPosFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
@@ -929,6 +929,12 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
     fieldSrcLen = 0;
     uint32_t deltaLength = 0;
     int64_t prevPos = 0;
+    /* Line indices (contentIdx) where the POS baseline resets because the
+     * RNAME (chromosome) changed. The decoder must reset its accumulator at
+     * exactly these lines, mirroring how CRAM resets AP per container. */
+    std::vector<uint32_t> posResets;
+    /* RNAME of the previous data line, to detect chromosome switches. */
+    std::string prevRname;
 
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -939,29 +945,54 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
         }
 
         uint32_t contentIdx = lineIdx - headEndLine;
+
+        /* Detect chromosome switch via the RNAME (field 2) content. */
+        std::string rname;
+        if (contentPos[contentIdx].size() > 2) {
+            uint32_t rnameStart = contentPos[contentIdx][1] + 1;
+            uint32_t rnameLen = contentPos[contentIdx][2] - contentPos[contentIdx][1] - 1;
+            rname.assign((char*)line + rnameStart, rnameLen);
+        }
+        if (contentIdx > 0 && rname != prevRname) {
+            prevPos = 0;
+            posResets.push_back(contentIdx);
+        }
+        prevRname = rname;
+
         uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
         uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
         uint8_t* fieldStart = line + prevTabPos + 1;
         uint32_t fieldLength = currTabPos - prevTabPos;
 
-        uint8_t buff[32] = {0};
-        int length = 0;
+        int64_t delta = 0;
         if (fieldLength > 1) {
             std::string posStr = std::string((char*)fieldStart, fieldLength - 1);
             int64_t posValue = (int64_t)std::stoll(posStr);
             mappedPos[lineIdx] = posValue;
-            int64_t delta = posValue - prevPos;
-            length = snprintf((char*)buff, sizeof(buff), "%" PRId64 "\t", delta);
+            delta = posValue - prevPos;
             fieldSrcLen += fieldLength;
             prevPos = posValue;
         } else {
             /* Empty/invalid values are treated as a delta of 0. */
             mappedPos[lineIdx] = 0;
-            length = snprintf((char*)buff, sizeof(buff), "0\t");
             fieldSrcLen += 2;
         }
-        fieldCoder->encode_line(buff, (uint32_t)length);
-        deltaLength += (uint32_t)length;
+        /*
+         * Delta is encoded as an unsigned varint (LEB128). After the baseline
+         * is reset at every RNAME change, coordinate-sorted deltas are
+         * non-negative, so the sign bit never needs to be stored.
+         */
+        uint64_t u = (uint64_t)delta;
+        uint8_t vbuf[10];
+        uint32_t vlen = 0;
+        do {
+            uint8_t b = (uint8_t)(u & 0x7f);
+            u >>= 7;
+            if (u) b |= 0x80;
+            vbuf[vlen++] = b;
+        } while (u);
+        fieldCoder->encode_line(vbuf, vlen);
+        deltaLength += vlen;
     }
 
     fieldCoder->encode_flush();
@@ -976,6 +1007,13 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
     fieldMeta["coder"] = fieldIo->meta;
     fieldMeta["field"] = fieldIdx;
     fieldMeta["mode"] = "pos_delta";
+    if (!posResets.empty()) {
+        Json::Value resetsArr(Json::arrayValue);
+        for (uint32_t r : posResets) {
+            resetsArr.append(r);
+        }
+        fieldMeta["resets"] = resetsArr;
+    }
 
     LOG_INFO("SAM field(%d) (POS) delta compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
@@ -2666,6 +2704,14 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
      * line and the main loop copies them directly, avoiding a second decode.
      */
     posDeltaPrev = 0;
+    posResets.clear();
+    posResetIdx = 0;
+    if (streams.isValidIndex(3) && streams[3].isMember("resets")) {
+        const Json::Value& arr = streams[3]["resets"];
+        for (Json::Value::const_iterator it = arr.begin(); it != arr.end(); ++it) {
+            posResets.push_back((uint32_t)it->asUInt());
+        }
+    }
     if (0 != preDecodeForTLEN()) {
         LOG_ERROR("Pre-decode for TLEN failed.");
         return -1;
@@ -3482,27 +3528,43 @@ int32_t SamCodecActuator::decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t 
 }
 
 int32_t SamCodecActuator::decompressPosFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
-    uint8_t deltaBuffer[32] = {0};
-    int32_t deltaLen = fieldDecoders[fieldIdx]->decode_line(deltaBuffer, sizeof(deltaBuffer), splitFlag, true);
-    if (deltaLen < 0) {
-        LOG_ERROR("Decode POS delta failed at line %u", lineNo);
-        return -1;
+    /*
+     * Decode an unsigned varint (LEB128), mirroring compressPosFieldDelta.
+     * Bytes are read one at a time (fixed-length decode_line) until the
+     * continuation bit is clear. At lines recorded in the compression
+     * metadata the baseline resets (RNAME change), so the accumulator is
+     * cleared there first.
+     */
+    auto& resets = posResets;
+    if (posResetIdx < resets.size() && lineNo == resets[posResetIdx]) {
+        posDeltaPrev = 0;
+        posResetIdx++;
     }
-
-    int64_t pos = posDeltaPrev;
-    if ((uint32_t)deltaLen > 1) {
-        std::string deltaStr((char*)deltaBuffer, (size_t)deltaLen - 1);
-        try {
-            pos += (int64_t)std::stoll(deltaStr);
-        } catch (const std::exception& e) {
-            LOG_ERROR("Failed to parse POS delta '%s' for line %d: %s", deltaStr.c_str(), lineNo, e.what());
+    uint64_t u = 0;
+    int32_t shift = 0;
+    int32_t deltaLen;
+    do {
+        uint8_t b = 0;
+        deltaLen = fieldDecoders[fieldIdx]->decode_line(&b, 1, UINT8_MAX, false);
+        if (deltaLen != 1) {
+            LOG_ERROR("Decode POS delta failed at line %u", lineNo);
             return -1;
         }
-    }
-    posDeltaPrev = pos;
+        u |= (uint64_t)(b & 0x7f) << shift;
+        if ((b & 0x80) == 0) break;
+        shift += 7;
+        if (shift >= 64) {
+            LOG_ERROR("Decode POS delta overlong varint at line %u", lineNo);
+            return -1;
+        }
+    } while (true);
+    int64_t delta = (int64_t)u;
+
+    posDeltaPrev += delta;
+    int64_t pos = posDeltaPrev;
     mappedPos[lineNo] = pos;
     char buff[32];
-    int posLen = snprintf(buff, sizeof(buff), "%" PRId64 "\t", pos);
+    int posLen = snprintf(buff, sizeof(buff), "%" PRId64 "%c", pos, splitFlag);
     memcpy(outputBlock->getCurrent(), buff, posLen);
     outputBlock->setDataLen(outputBlock->getDataLen() + posLen);
     return posLen;
@@ -3714,6 +3776,15 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
 
         /* Delta chain of pos_delta mode: the absolute POS reconstructed from the previous line. */
         int64_t posPrev = 0;
+        /* POS baseline resets at RNAME (chromosome) switches; see fieldMeta["resets"]. */
+        std::vector<uint32_t> resets;
+        if (f == 3 && mode == "pos_delta" && streams[f].isMember("resets")) {
+            const Json::Value& arr = streams[f]["resets"];
+            for (Json::Value::const_iterator it = arr.begin(); it != arr.end(); ++it) {
+                resets.push_back((uint32_t)it->asUInt());
+            }
+        }
+        std::vector<uint32_t>::const_iterator resetIt = resets.begin();
         for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
             /*
              * coder_affix_match points last at the caller's output buffer
@@ -3725,10 +3796,44 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
             /*
              * Field form: CIGAR is always textual (encoded line-wise by
              * compressCigar); POS/PNEXT default to fixed-width binary and are
-             * decoded as text only when mode is textual. Textual data must never
-             * be decoded as fixed-length, otherwise bwt_cm's fixed-length branch
-             * would spin past the block boundary.
+             * decoded as text only when mode is textual. POS uses a zigzag
+             * varint stream: the value is read byte-by-byte (fixed-length
+             * decode_line) until the continuation bit is clear. Textual data
+             * must never be decoded as fixed-length, otherwise bwt_cm's
+             * fixed-length branch would spin past the block boundary.
              */
+            if (f == 3 && mode == "pos_delta") {
+                /* Unsigned varint decode, mirroring compressPosFieldDelta. */
+                if (resetIt != resets.end() && lineNo == *resetIt) {
+                    posPrev = 0;
+                    ++resetIt;
+                }
+                uint64_t u = 0;
+                int32_t shift = 0;
+                int32_t vlen;
+                do {
+                    uint8_t b = 0;
+                    vlen = tmpDec->decode_line(&b, 1, UINT8_MAX, need2hold);
+                    if (vlen != 1) {
+                        LOG_ERROR("Decode POS delta failed at line %u", lineNo);
+                        return -1;
+                    }
+                    u |= (uint64_t)(b & 0x7f) << shift;
+                    if ((b & 0x80) == 0) break;
+                    shift += 7;
+                    if (shift >= 64) {
+                        LOG_ERROR("Decode POS delta overlong varint at line %u", lineNo);
+                        return -1;
+                    }
+                } while (true);
+                int64_t delta = (int64_t)u;
+                int64_t pos = posPrev + delta;
+                posPrev = pos;
+                mappedPos[lineNo] = pos;
+                fieldCache.emplace_back(std::to_string(pos) + '\t');
+                continue;
+            }
+
             bool binary = (f != 5) && (mode == "number" || mode == "");
             int32_t len;
             if (binary) {
@@ -3743,13 +3848,7 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
 
             switch (f) {
                 case 3:
-                    if (mode == "pos_delta") {
-                        int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
-                        int64_t pos = posPrev + delta;
-                        posPrev = pos;
-                        mappedPos[lineNo] = pos;
-                        fieldCache.emplace_back(std::to_string(pos) + '\t');
-                    } else if (binary) {
+                    if (binary) {
                         mappedPos[lineNo] = (int64_t)(uint32_t)(*(uint32_t*)tmpBuf);
                         fieldCache.emplace_back(std::to_string(mappedPos[lineNo]) + '\t');
                     } else {

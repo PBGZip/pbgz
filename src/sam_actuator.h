@@ -179,7 +179,7 @@ private:
     template<typename CoderType>
     int32_t compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    /* POS is compressed as text deltas against the previous line's POS; empirically better than fixed-width binary and textual affix. */
+    /* POS is compressed as unsigned varint (LEB128) deltas against the previous line's POS; the baseline resets at each chromosome switch and the decoder reads byte-by-byte. */
     template<typename CoderType>
     int32_t compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
@@ -318,6 +318,11 @@ private:
     std::vector<std::string> decodedQnames;
     /* Previous line's POS for delta decoding (used by the main-loop fallback path; preDecodeForTLEN uses a local variable). */
     int64_t posDeltaPrev = 0;
+    /* Line indices (data-line index, i.e. lineNo) where the POS delta baseline
+       resets due to a chromosome (RNAME) switch. Populated from the field
+       metadata before the main decode loop, consumed by decompressPosFieldDelta. */
+    std::vector<uint32_t> posResets;
+    uint32_t posResetIdx = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
     /* Per-line CIGAR operation list (op char, length), parsed once by
