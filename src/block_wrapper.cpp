@@ -1353,6 +1353,22 @@ BlockType BlockUtil::detectInputFileType(const std::string& fileName) {
  * subclass. Prefetched data is handed to the subclass to merge into the first block; for PBGZ the
  * file must return to its start so PbgzBlockReader can parse it itself.
  */
+/*
+ * SAM block granularity per level (1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000 reads).
+ * Kept in one place: the readers use it to split blocks and CodecSelector uses
+ * it to make the POS pre-selection trial run at real block volume.
+ */
+uint32_t BlockFactory::samReadsPerBlockOfLevel(uint8_t compressLevel)
+{
+    if (compressLevel >= 8) {
+        return 100000;
+    }
+    if (compressLevel >= 6) {
+        return 25000;
+    }
+    return 10000;
+}
+
 BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compressLevel, bool splitSamHeader) {
     if (ioReader == nullptr) {
         LOG_ERROR("Create block reader failed: io reader is null.");
@@ -1360,12 +1376,7 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
     }
 
     /* SAM data blocks are split by read line count: 1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000 */
-    uint32_t samReadsPerBlock = 10000;
-    if (compressLevel >= 8) {
-        samReadsPerBlock = 100000;
-    } else if (compressLevel >= 6) {
-        samReadsPerBlock = 25000;
-    }
+    uint32_t samReadsPerBlock = samReadsPerBlockOfLevel(compressLevel);
 
     uint8_t* detectBuf = MemoryUtil::safeAlloc<uint8_t>(BLOCK_TYPE_DETECT_SIZE);
     if (detectBuf == nullptr) {

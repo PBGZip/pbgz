@@ -307,6 +307,16 @@ public:
     static BlockReader* createBlockReader(IOReader* ioReader, uint8_t compressLevel = 0,
                                           bool splitSamHeader = true);
 
+    /*
+     * The SAM block granularity actually used by the readers for a level:
+     * 1-5 -> 10000 reads/block, 6-7 -> 25000, 8-9 -> 100000 (see createBlockReader).
+     * Exposed as a function so codec pre-selection can trial on the same volume
+     * that real compression feeds a coder; trialling on a much smaller sample
+     * misjudges coders whose cost is concentrated at block start (model cold
+     * start), e.g. coder_arith on the POS delta stream.
+     */
+    static uint32_t samReadsPerBlockOfLevel(uint8_t compressLevel);
+
     static BlockWriter* createBlockWriter(IOWriter* ioWriter);
 
     static PbgzBlockWriter* createPbgzBlockWriter(IOWriter* ioWriter);

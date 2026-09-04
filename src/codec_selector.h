@@ -80,7 +80,8 @@ public:
      * and written. It is a parameter rather than part of PreprocessInfo: the
      * latter is the product of the decision and should not double as an input.
      */
-    static int32_t analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info);
+    static int32_t analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
+                           uint8_t compressLevel = 5);
 
     /*
      * Trial-compress one byte stream with every candidate coder and return the
@@ -100,6 +101,23 @@ public:
     static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len,
                                            bool trialAffix = false,
                                            const std::vector<LineSample>* lines = nullptr);
+
+    /*
+     * Trial-compress the POS delta-varint stream (the actual byte stream fed to
+     * the POS coder, see compressPosFieldDelta) with coder_bwt_cm and
+     * coder_arith, and return the better one. The raw column text must not be
+     * used for this comparison: the varint delta stream has a very different
+     * distribution from the decimal POS text.
+     *
+     * posLines / chrLines are the per-line POS and RNAME samples (LineSample
+     * views including the trailing tab). The delta baseline resets at every
+     * RNAME change, mirroring compressPosFieldDelta's chromosome-switch logic.
+     * Returns SKIPPED when the rebuilt varint stream is too small to compare
+     * reliably; the actuator then falls back to bwt_cm.
+     */
+    static FieldCodecSelection selectPosDeltaCoder(const std::vector<LineSample>& posLines,
+                                                   const std::vector<LineSample>& chrLines,
+                                                   std::vector<uint64_t>* varintCounts = nullptr);
 
     /*
      * Cross-block training sample accumulator for the QUAL prior. Held by
@@ -137,7 +155,8 @@ public:
                                                     uint64_t* trainedBytes);
 
 private:
-    static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info);
+    static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
+                              uint8_t compressLevel);
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
@@ -161,6 +180,19 @@ private:
                                        std::vector<std::string>& fieldBufs,
                                        std::vector<std::vector<LineSample>>& fieldLines,
                                        uint32_t sampleBudget);
+
+    /*
+     * RNAME+POS line views collected by line count instead of the shared byte
+     * budget, for the POS delta-varint trial. Only pointers into the block
+     * buffer are stored, so sampling a whole block is almost free, and the
+     * trial then measures the coders at the volume real compression feeds them
+     * (a small sample overstates the cost of a coder that pays a model cold
+     * start once per block).
+     */
+    static uint32_t extractPosDeltaSamples(RoughIOBlock* block,
+                                           std::vector<LineSample>& posLines,
+                                           std::vector<LineSample>& chrLines,
+                                           uint32_t maxLines);
     static uint32_t extractFastqFieldSamples(RoughIOBlock* block,
                                          std::vector<std::string>& fieldBufs,
                                          uint32_t sampleBudget);

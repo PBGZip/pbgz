@@ -278,6 +278,11 @@ public:
     /* Absolute offset of the prior block's container header; the compression side writes it into the block meta and the decompression side uses it to look up the block. -1 means no prior. */
     virtual int64_t getQualPriorAddress() const { return -1; }
 
+    /* File-level POS delta prior (parsed from the file meta by the decoding
+     * engine; empty when the file has none). Unlike the QUAL prior it is a
+     * single file-wide table, so no package index is involved. */
+    virtual AuxPayloadPtr getPosPrior() { return AuxPayloadPtr(); }
+
 
     std::vector<AuxBlockConsumer*> auxConsumers;
 

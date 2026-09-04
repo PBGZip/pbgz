@@ -59,5 +59,6 @@ public:
      * must never make compression impossible.
      */
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
-                                      const std::vector<uint32_t>& freqByByte);
+                                      const std::vector<uint32_t>& freqByByte,
+                                      uint8_t compressLevel = 5);
 };

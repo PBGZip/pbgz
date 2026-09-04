@@ -34,10 +34,7 @@
 #include "coder_qual.h"
 #include "coder_fcv2.h"
 #include "reference.h"
-#include "sam_info.h"
 #include "coder_bwt_cm.h"
-#include "coder_qname.h"
-#include "pbgz_stat.h"
 
 // Forward declaration
 class CompressEngine;
@@ -91,6 +88,12 @@ public:
 
     int32_t decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock);
+
+    /* Read one record's worth of bytes from the SEQ match stream.
+       When matchBlockDecode is set (coder_fc, block-only) the bytes are sliced from
+       the pre-decoded matchBlockBuffer; otherwise they are decoded line by line.
+       Returns the number of bytes produced, or -1 on failure. */
+    int32_t readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_t len, uint32_t lineNo);
 
     int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock);
 
@@ -318,11 +321,6 @@ private:
     std::vector<std::string> decodedQnames;
     /* Previous line's POS for delta decoding (used by the main-loop fallback path; preDecodeForTLEN uses a local variable). */
     int64_t posDeltaPrev = 0;
-    /* Line indices (data-line index, i.e. lineNo) where the POS delta baseline
-       resets due to a chromosome (RNAME) switch. Populated from the field
-       metadata before the main decode loop, consumed by decompressPosFieldDelta. */
-    std::vector<uint32_t> posResets;
-    uint32_t posResetIdx = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
     /* Per-line CIGAR operation list (op char, length), parsed once by
@@ -357,6 +355,17 @@ private:
     std::vector<std::string> idStreamCoders;
     /* True when QNAME is compressed/decompressed with coder_qname (see decompressIdField). */
     bool idUsesQnameCoder = false;
+    /* State for numeric QNAME sub-streams (compressIdFieldSplit "mode":"numeric").
+       Such a stream carries no split-symbol terminator, so it cannot be decoded
+       one segment per line the way the textual path does; instead the whole varint
+       stream is decoded once per block and one value is served per line. Indexes
+       run parallel to idDecoders; entries for textual sub-streams stay null/zero. */
+    std::vector<uint8_t*> idNumericBufs;
+    std::vector<uint32_t> idNumericLens;
+    std::vector<uint32_t> idNumericPos;
+    std::vector<uint64_t> idNumericAcc;
+    /* Releases the buffers above; called before (re)populating them per block. */
+    void clearIdNumericState();
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     std::shared_ptr<coder_qual> qualCoder;
     /* Decoder for QUAL when compressed with fcv2; kept null when another coder was used. */
@@ -367,6 +376,18 @@ private:
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;
     uint8_t* refeStrecchBuffer;
+    /* SEQ match stream decoded as a whole block (coder_fc only supports block
+       decompression, unlike coder_bwt_cm which is decoded line by line).
+       When matchBlockDecode is true, the whole match stream is decoded up front
+       into matchBlockBuffer and each record is then served by slicing it with its
+       own length (see decompressBase). */
+    bool matchBlockDecode = false;
+    uint8_t* matchBlockBuffer = nullptr;
+    uint32_t matchBlockLength = 0;
+    uint32_t matchBlockOffset = 0;
+    /* Byte length of the extra "mval" sub-stream that follows the "m" sub-stream when
+       RLE is in use; used to advance readOffset past both sub-streams. */
+    uint32_t matchExtraOffset = 0;
     /* Reads with missing QUAL (*): expanded into seqLen '*' on compression so that
        each record's length in the quality stream matches the decompression side
        (which fetches each record by SEQ/CIGAR length). */

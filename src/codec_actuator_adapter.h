@@ -39,7 +39,7 @@ public:
         MemoryUtil::safeDeleteClass(codecActuator);
     }
 
-    int32_t process() {
+    int32_t process() override {
         if (codecActuator != nullptr) {
             return codecActuator->compress();
         }
@@ -47,7 +47,7 @@ public:
         return -1;
     }
 
-    int32_t initial() {
+    int32_t initial() override {
         codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzEngine);
         if (codecActuator == nullptr) {
             return -1;
@@ -78,7 +78,7 @@ public:
         MemoryUtil::safeDeleteClass(codecActuator);
     }
 
-    int32_t process() {
+    int32_t process() override {
         if (codecActuator != nullptr) {
             return codecActuator->decompress();
         }
@@ -86,7 +86,7 @@ public:
         return -1;
     }
 
-    int32_t initial() {
+    int32_t initial() override {
         codecActuator = MemoryUtil::safeNewClass<BinaryCodecActuator>(inBlockPtr, outBlockPtr, pbgzEngine);
         if (codecActuator == nullptr) {
             return -1;
@@ -118,7 +118,7 @@ public:
         MemoryUtil::safeDeleteClass(codecActuator);
     }
 
-    int32_t process() {
+    int32_t process() override {
         if (codecActuator != nullptr) {
             return codecActuator->compress();
         }
@@ -126,7 +126,7 @@ public:
         return -1;
     }
 
-    int32_t initial() {
+    int32_t initial() override {
         codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzEngine, pReference);
         if (codecActuator == nullptr) {
             return -1;
@@ -161,7 +161,7 @@ public:
         MemoryUtil::safeDeleteClass(codecActuator);
     }
 
-    int32_t process() {
+    int32_t process() override {
         if (codecActuator != nullptr) {
             return codecActuator->decompress();
         }
@@ -169,7 +169,7 @@ public:
         return -1;
     }
 
-    int32_t initial() {
+    int32_t initial() override {
         codecActuator = MemoryUtil::safeNewClass<T>(inBlockPtr, outBlockPtr, pbgzEngine, pReference);
         if (codecActuator == nullptr) {
             return -1;

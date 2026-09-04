@@ -73,6 +73,10 @@ public:
         return qualPriorConsumer.forPackage(packageIndex);
     }
 
+    AuxPayloadPtr getPosPrior() override {
+        return posPriorBlob;
+    }
+
     void setReadHeadFlag(bool flag) {
         readHeadBlockFlag = flag;
     }
@@ -123,6 +127,11 @@ private:
 private:
     bool readHeadBlockFlag;
     QualPriorConsumer qualPriorConsumer;
+    /* File-level POS delta prior, parsed once from the dynamic file meta
+     * (hex-encoded 512-byte weight table). Written by the engine init and read
+     * by worker threads only when decoders are constructed; publication before
+     * the first block dispatch gives the happens-before. */
+    AuxPayloadPtr posPriorBlob;
     std::string refPosChrName;
     uint32_t refPosBegin;
     uint32_t refPosEnd;

@@ -211,7 +211,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     const uint64_t inputTotalBytes = (fileReader != nullptr && fileReader->getFileSize() > 0)
                                      ? (uint64_t)fileReader->getFileSize() : 0;
 
-    if (0 != CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo)) {
+    if (0 != CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo,
+                                    parameter.compressLevel)) {
         LOG_INFO("File preprocessing (codec selection) failed, using default coders");
     } else if (parameter.verbose) {
         static const char* samFieldNames[] = {
@@ -278,6 +279,31 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         if (t == SAM || t == BAM || t == FASTQ_GEN2 || t == FASTQ_GEN3 || t == BINARY) {
             std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
             dynamicFileMeta.setMetaData("srcFileType", (Json::Value::UInt)t);
+        }
+    }
+
+    /*
+     * POS delta prior: already produced by analyze (no cross-block training
+     * needed), so write it into the file-level meta right away; the decoding
+     * side reads it before any data block. It is only ~512 bytes, hex-encoded,
+     * so unlike the QUAL prior it does not need an auxiliary block.
+     */
+    {
+        const std::vector<uint8_t>& posPrior = preprocessInfo.posPrior();
+        if (!posPrior.empty()) {
+            static const char hexd[] = "0123456789abcdef";
+            std::string hex;
+            hex.reserve(posPrior.size() * 2);
+            for (uint8_t b : posPrior) {
+                hex.push_back(hexd[b >> 4]);
+                hex.push_back(hexd[b & 0xf]);
+            }
+            std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
+            dynamicFileMeta.setMetaData("pos_prior", hex);
+            if (parameter.verbose) {
+                fprintf(stderr, "  POS prior: %zu bytes written to file meta\n",
+                        posPrior.size());
+            }
         }
     }
 

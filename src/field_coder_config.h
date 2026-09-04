@@ -58,7 +58,7 @@ inline const FieldCoderConfig kSamFieldCoderConfig[SAM_FIELD_COUNT_SELECT] = {
     /* QNAME */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM},
     /* FLAG  */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM},
     /* RNAME */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM},
-    /* POS   */ {{}, CoderType::BWT_CM},
+    /* POS   */ {{CoderType::BWT_CM, CoderType::ARITH}, CoderType::BWT_CM},
     /* MAPQ  */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM},
     /* CIGAR */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM},
     /* RNEXT */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM},

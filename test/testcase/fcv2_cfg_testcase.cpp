@@ -425,10 +425,12 @@ TEST_F(Fcv2CfgTest, QualSelectorCarriesWinningConfig)
         GTEST_SKIP() << "This synthetic sample did not select fcv2 (selected " << coderTypeToMagic(qualSel.selectedCoder)
                      << ", " << buf << "), so tier feedback cannot be verified";
     }
-    /* The preset must be one of the three candidates, and it must round-trip with the preset applied. */
+    /* The preset must be one of the known candidates (default / fine / coarse /
+     * ultra 4-2-ps0), and it must round-trip with the preset applied. */
     const QualFcv2Params& p = qualSel.fcv2Params;
     bool isKnownPreset = (p == QualFcv2Params()) ||
         (p.cycleBucket == 24 && p.deltaBucket == 12 && p.prevShift == 0 && p.useDelta) ||
-        (p.cycleBucket == 8 && p.deltaBucket == 4 && p.prevShift == 2 && p.useDelta);
+        (p.cycleBucket == 8 && p.deltaBucket == 4 && p.prevShift == 2 && p.useDelta) ||
+        (p.cycleBucket == 4 && p.deltaBucket == 2 && p.prevShift == 0 && p.useDelta);
     EXPECT_TRUE(isKnownPreset) << "fcv2Params is not one of the known candidate tiers";
 }

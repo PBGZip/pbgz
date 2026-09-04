@@ -43,6 +43,7 @@ enum class CoderType : uint8_t {
     FCV2,         /* coder_fcv2:   context-mixing coder for quality values, only for the SAM QUAL column */
     QUAL,         /* coder_qual:   quality-specific context model coder    */
     AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder, for regular SAM fields */
+    ARITH,        /* coder_arith:  order-0 adaptive arithmetic byte-stream coder */
     COUNT
 };
 
@@ -56,6 +57,7 @@ static inline const char* coderTypeToMagic(CoderType type)
     case CoderType::FCV2:      return "coder_fcv2";
     case CoderType::QUAL:      return "coder_qual";
     case CoderType::AFFIX_MATCH: return "coder_affix_match";
+    case CoderType::ARITH:     return "coder_arith";
     default:                   return "unknown";
     }
 }
@@ -244,6 +246,17 @@ struct PreprocessInfo {
     uint64_t qualPriorTrainingBytes;
 
     /*
+     * POS delta-varint file-level prior: a packed 256 x uint16 weight table
+     * (coder_arith::kPriorBytes bytes) trained by CodecSelector on the POS
+     * preprocessing sample. Unlike the QUAL prior it is produced directly
+     * during preprocessing (the distribution is stable, no cross-block
+     * accumulation is needed), so it travels from analyze to the compression
+     * side through this snapshot and is written into the file-level meta for
+     * the decoding side. Empty means no prior.
+     */
+    std::vector<uint8_t> posPriorSnapshot;
+
+    /*
      * analyze decides this file is worth training and publishing a QUAL prior for.
      * The decision is produced during preprocessing (the RUNNING stage) and read only
      * by the reader thread; the actual training is deferred until the reader thread has
@@ -265,6 +278,7 @@ struct PreprocessInfo {
         qualPriorSnapshot.clear();
         qualPriorTrainingBytes = 0;
         qualPriorRequested = false;
+        posPriorSnapshot.clear();
     }
 
     bool isDone() const
@@ -330,5 +344,15 @@ struct PreprocessInfo {
     {
         qualPriorSnapshot = std::move(snapshot);
         qualPriorTrainingBytes = qualPriorSnapshot.empty() ? 0 : trainedBytes;
+    }
+
+    const std::vector<uint8_t>& posPrior() const
+    {
+        return posPriorSnapshot;
+    }
+
+    void setPosPrior(std::vector<uint8_t>&& snapshot)
+    {
+        posPriorSnapshot = std::move(snapshot);
     }
 };

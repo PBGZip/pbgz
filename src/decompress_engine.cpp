@@ -25,11 +25,11 @@
 
 #include "decompress_engine.h"
 #include "utils/path_util.h"
-#include "coder.h"
 #include "coder_json.h"
 #include "coder_ppmd.h"
 #include "pbgz_types.h"
 #include "codec_actuator_adapter.h"
+#include "sam_info.h"
 
 #include <bzlib.h>
 
@@ -44,6 +44,33 @@ BlockReader* DecompressEngine::createBlockReader() {
     dynamicFileMeta = pbgzReader->getDynamicFileMeta();
     if (dynamicFileMeta.getMetaData().isMember("qual_prior")) {
         (void)unpackQualPrior(pbgzReader, dynamicFileMeta.getMetaData("qual_prior"));
+    }
+    /* POS delta prior: hex-encoded in the file meta (512 bytes -> 1024 hex
+     * chars). Parse it once here; the actuator applies it to every coder_arith
+     * instance it builds. */
+    if (dynamicFileMeta.getMetaData().isMember("pos_prior")) {
+        const std::string& hex = dynamicFileMeta.getMetaData("pos_prior").asString();
+        auto nib = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        bool ok = (hex.size() % 2 == 0);
+        std::vector<uint8_t> prior;
+        prior.reserve(hex.size() / 2);
+        for (size_t i = 0; ok && i + 1 < hex.size(); i += 2) {
+            int h = nib(hex[i]), l = nib(hex[i + 1]);
+            if (h < 0 || l < 0) {
+                ok = false;
+                break;
+            }
+            prior.push_back((uint8_t)((h << 4) | l));
+        }
+        if (ok && !prior.empty()) {
+            posPriorBlob = std::make_shared<const std::vector<uint8_t>>(std::move(prior));
+            LOG_INFO("Loaded POS prior: %zu bytes", posPriorBlob->size());
+        }
     }
 
     if (!initRefGene(pbgzReader)) {
@@ -494,8 +521,9 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
          */
         fileReader->seekIO((int64_t)blockReader->getCurrentFileStart() + offset);
     }
-    int64_t pcnt = parameter.threadNum;
-    RoughIOBlock* block[pcnt];
+    const int64_t pcnt = parameter.threadNum;
+    /* pcnt is runtime-dependent, so a heap vector replaces the non-standard VLA. */
+    std::vector<RoughIOBlock*> block((size_t)pcnt);
     for (int64_t n = 0; n < pcnt; n++) {
         block[n] = MemoryUtil::safeNewClass<RoughIOBlock>(maxLen);
     }
@@ -510,7 +538,7 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
         if (n < pcnt) {
             blockReader->readBlock(block[n]);
             inputPool.push(block[n]);
-            tpools.push_back(std::thread([&inputPool, &inputBlock, &refeSquash, &n]() {
+            tpools.push_back(std::thread([&inputPool, &inputBlock, &refeSquash]() {
                 for (;;) {
                     RoughIOBlock* currBlock = inputPool.get();
                     if (currBlock == nullptr) {

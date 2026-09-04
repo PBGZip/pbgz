@@ -264,37 +264,65 @@ QualFcv2Params toQualParams(const Fcv2Cfg& cfg)
  * not-yet-converged illusion, so with small samples only the default tier and
  * the coarse tier are kept.
  */
-std::vector<Fcv2Cfg> candidateFcv2Cfgs(size_t sampleLen)
+/* compress level -> SAM data-block read-count tier (see
+ * BlockFactory::createBlockReader): 1-5 -> ~10000 reads/block, 6-7 -> ~25000,
+ * 8-9 -> ~100000. The per-block QUAL volume (reads x read length) decides how
+ * fine the context buckets may be before they go sparse. */
+static int levelVolumeTier(uint8_t compressLevel)
+{
+    if (compressLevel >= 8) return 3;
+    if (compressLevel >= 6) return 2;
+    return 1;
+}
+
+/*
+ * fcv2 candidate tiers for the given compression level.
+ *
+ * Selection stays measurement-driven (each candidate is trial-compressed and
+ * the smallest wins), but the candidate set is pruned by the block-volume tier
+ * so trial time is not spent on tiers that cannot win at that volume. The
+ * pruning follows a grid scan on real SAM QUAL (test/qual_tier_scan.cpp,
+ * con_sorted.sam, 10k/25k/100k-read blocks):
+ *
+ *   - default: always kept (the conservative baseline).
+ *   - ultra (cycleBucket=4, deltaBucket=2, prevShift=0): best at every block
+ *     volume by 0.4%-1.2% over the previous best coarse; the coarse cycle bins
+ *     keep every slot populated while prevShift=0 keeps the order-2 context
+ *     informative.
+ *   - coarse (8/4/ps2): kept as a volume-independent fallback configuration.
+ *   - fine (24/12/ps0): only wins once the per-block QUAL volume is large
+ *     enough (measured only at ~27 MB, hundreds of thousands of reads) for its
+ *     fine buckets to stay populated; tried only at -l 8/9 (100k reads/block).
+ *
+ * The per-read average-quality tier (qa) and duplicate-read dedup were dropped
+ * from the candidates: on the measured data they lose by 1%-1.7% (qa) and are
+ * neutral (dedup), and neither is volume-dependent, so pruning them cannot be
+ * recovered by a tier choice on other volumes.
+ */
+std::vector<Fcv2Cfg> candidateFcv2Cfgs(uint8_t compressLevel)
 {
     std::vector<Fcv2Cfg> cfgs;
     cfgs.push_back(Fcv2Cfg());   /* default tier */
 
-    Fcv2Cfg dedup = Fcv2Cfg();   /* default tier + dedup of adjacent duplicate reads (strategy 3) */
-    dedup.useDedup = true;
-    cfgs.push_back(dedup);
+    Fcv2Cfg ultra;               /* coarsest cycle bins, no predecessor quantization */
+    ultra.cycleBucket = 4;
+    ultra.deltaBucket = 2;
+    ultra.prevShift = 0;
+    cfgs.push_back(ultra);
 
-    Fcv2Cfg qa = Fcv2Cfg();      /* default tier + per-read average-quality tier (strategy 4) */
-    qa.useQa = true;
-    cfgs.push_back(qa);
-
-    Fcv2Cfg fine;                /* small-alphabet style: fine tiers, predecessor not quantized */
-    fine.cycleBucket = 24;
-    fine.deltaBucket = 12;
-    fine.prevShift = 0;
-
-    Fcv2Cfg coarse;              /* large-alphabet/small-sample style: coarse tiers, predecessor shifted right two bits */
+    Fcv2Cfg coarse;              /* coarse tiers, predecessor shifted right two bits */
     coarse.cycleBucket = 8;
     coarse.deltaBucket = 4;
     coarse.prevShift = 2;
+    cfgs.push_back(coarse);
 
-    Fcv2Cfg coarseQa = coarse;   /* coarse tier + per-read average-quality tier (strategy 4, best measured combination) */
-    coarseQa.useQa = true;
-    cfgs.push_back(coarseQa);
-
-    if (sampleLen >= (1u << 20)) {
+    if (levelVolumeTier(compressLevel) >= 3) {
+        Fcv2Cfg fine;            /* fine tiers, predecessor not quantized */
+        fine.cycleBucket = 24;
+        fine.deltaBucket = 12;
+        fine.prevShift = 0;
         cfgs.push_back(fine);
     }
-    cfgs.push_back(coarse);
     return cfgs;
 }
 
@@ -368,7 +396,8 @@ QualRoundResult runRound(const std::vector<QualSampleRecord>& records,
 } /* namespace */
 
 FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& records,
-                                         const std::vector<uint32_t>& freqByByte)
+                                         const std::vector<uint32_t>& freqByByte,
+                                         uint8_t compressLevel)
 {
     FieldCodecSelection sel;
 
@@ -385,7 +414,7 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
         return sel;
     }
 
-    const std::vector<Fcv2Cfg> cfgs = candidateFcv2Cfgs(sampleLen);
+    const std::vector<Fcv2Cfg> cfgs = candidateFcv2Cfgs(compressLevel);
 
     /*
      * Multi-round convergence (strategy 7): start from a small sample and double

@@ -37,6 +37,7 @@
 #include "coder/coder_fc.h"
 #include "coder/coder_fcv2.h"
 #include "coder/coder_affix_match.h"
+#include "coder/coder_arith.h"
 #include "field_coder_config.h"
 
 namespace {
@@ -64,6 +65,70 @@ const uint32_t BWT_LEVEL_SIZE[10] = {
     0, 1u << 20, 1u << 22, 1u << 23, 0x00FFFFFFu,
     1u << 25, 1u << 26, 1u << 27, 1u << 28, 0x7FFFFFFFu
 };
+
+/*
+ * Minimum rebuilt POS delta-varint sample before trusting the bwt_cm vs
+ * coder_arith comparison. The preprocessing sample is capped at 4 MB of raw
+ * text, so the POS varint stream is only ~10 KB on typical short-read SAM;
+ * the generic 64 KB raw-text gate would never be reached (the varint stream
+ * is ~1/4 of the raw column), which is why POS needs its own gate. 8 KB of
+ * varints (~2-3K lines, a 1-3% coder difference is ~100-300 bytes) is enough
+ * to separate the two coders; the loser still falls back to bwt_cm.
+ */
+const uint32_t MIN_POS_DELTA_SAMPLE = 8u << 10;   /* 8 KB of varint bytes */
+
+/*
+ * Upper bound on the lines sampled for the POS delta trial.
+ *
+ * The trial must run at (or near) the block granularity real compression uses,
+ * otherwise a coder that pays its model cold start once per block - coder_arith
+ * is exactly that - is judged on a sample where that cost is amortized over
+ * far fewer bytes than in production, and loses to coder_bwt_cm even though it
+ * wins on real blocks (measured on con_sorted.sam, level 8 blocks of 100k
+ * lines: arith 31.86% vs bwt_cm 32.02%; on the ~13k-line generic sample:
+ * arith 36.23% vs bwt_cm 35.24% - the verdict flips).
+ *
+ * Sampling a full block is essentially free (only line views are stored), but
+ * trial-compressing it is not: bwt_cm's cost grows with the sample and
+ * pickBwtLevel() raises its level to fit, so the trial itself is what this cap
+ * bounds. 32k lines keeps the trial in the tens of milliseconds while staying
+ * on the same side of the verdict as a full block (see the measurements above).
+ */
+const uint32_t POS_TRIAL_MAX_LINES = 32u << 10;   /* 32768 lines */
+
+/*
+ * Minimum estimated total POS varint bytes in the whole file before a
+ * file-level prior is written. The packed prior costs ~512 bytes in the file
+ * meta; its gain is the per-block model cold-start loss it removes, measured
+ * at 0.4%-1.2% of the varint stream depending on block size. At a
+ * conservative 0.35% (large blocks), 512 bytes break even at ~150 KB of
+ * varints; 100 KB (~100K lines) with the observed 0.7% gain is comfortably
+ * net-positive, so it is the threshold below which the prior is skipped.
+ */
+const uint64_t POS_PRIOR_MIN_ESTIMATED = 100ull << 10;   /* 100 KB varint */
+
+/* Pack the varint byte histogram into the fixed 512-byte prior layout
+ * (256 little-endian uint16 weights scaled so the total ~2^14), matching
+ * coder_arith::kPriorBytes and its Order0Model::init_from_weights. */
+std::vector<uint8_t> packPosPriorBlob(const std::vector<uint64_t>& counts)
+{
+    std::vector<uint8_t> blob(coder_arith::kPriorBytes, 0);
+    uint64_t total = 0;
+    for (int i = 0; i < 256; ++i)
+        total += counts[i];
+    if (total == 0)
+        return {}; /* no data: no prior */
+    for (int i = 0; i < 256; ++i) {
+        uint64_t w = (counts[i] * (1u << 14)) / total;
+        if (w == 0 && counts[i] != 0)
+            w = 1;
+        if (w > 0xFFFFu)
+            w = 0xFFFFu;
+        blob[2 * i] = (uint8_t)(w & 0xff);
+        blob[2 * i + 1] = (uint8_t)(w >> 8);
+    }
+    return blob;
+}
 
 /*
  * Trial-compress a byte stream with one coder type and report the compressed
@@ -260,6 +325,111 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     sel.status = FieldStatus::SELECTED;
     sel.selectedCoder = bestCoder;
     sel.bestCompLen = bestLen;
+    return sel;
+}
+
+/*
+ * Rebuild the LEB128 delta-varint stream that compressPosFieldDelta feeds to
+ * the POS coder, then trial-compress it with coder_bwt_cm and coder_arith.
+ *
+ * The raw POS column text must not be used for the comparison: the coder never
+ * sees it — only the varint deltas (baseline reset at each RNAME change, sign
+ * never stored). The rebuilt stream mirrors the actuator loop exactly, so the
+ * measured sizes are what real compression produces.
+ *
+ * The chromosome-switch reset uses the RNAME text directly (as the
+ * compressChrName index is assigned per RNAME, comparing the indices is
+ * equivalent to comparing the strings).
+ */
+FieldCodecSelection CodecSelector::selectPosDeltaCoder(const std::vector<LineSample>& posLines,
+                                                       const std::vector<LineSample>& chrLines,
+                                                       std::vector<uint64_t>* varintCounts)
+{
+    FieldCodecSelection sel;
+
+    if (varintCounts != nullptr) {
+        varintCounts->assign(256, 0);
+    }
+
+    /* Rebuild the varint delta stream. */
+    std::vector<uint8_t> varint;
+    int64_t prevPos = 0;
+    std::string prevChr;
+    for (size_t i = 0; i < posLines.size(); ++i) {
+        std::string chr((const char*)chrLines[i].data, chrLines[i].len - 1); /* drop trailing tab */
+        if (i > 0 && !prevChr.empty() && chr != prevChr) {
+            prevPos = 0;
+        }
+        prevChr = chr;
+
+        int64_t pos = 0;
+        bool valid = false;
+        const uint8_t* p = posLines[i].data;
+        uint32_t n = posLines[i].len - 1; /* drop trailing tab */
+        if (n > 0) {
+            int64_t v = 0;
+            uint32_t k = 0;
+            while (k < n && p[k] >= '0' && p[k] <= '9') {
+                v = v * 10 + (p[k] - '0');
+                ++k;
+            }
+            if (k == n) {
+                pos = v;
+                valid = true;
+            }
+        }
+
+        int64_t delta = 0;
+        if (valid) {
+            delta = pos - prevPos;
+            prevPos = pos;
+        }
+        uint64_t u = (uint64_t)delta;
+        do {
+            uint8_t b = (uint8_t)(u & 0x7f);
+            u >>= 7;
+            if (u) b |= 0x80;
+            varint.push_back(b);
+            if (varintCounts != nullptr)
+                (*varintCounts)[b]++;
+        } while (u);
+    }
+
+    sel.sampleLen = (uint32_t)varint.size();
+    if (varint.size() < MIN_POS_DELTA_SAMPLE) {
+        sel.status = FieldStatus::SKIPPED;
+        return sel;
+    }
+    sel.decidedLen = (uint32_t)varint.size();
+    sel.rounds = 1;
+
+    uint32_t bwtLen = 0, bwtUs = 0, arithLen = 0, arithUs = 0, outLen = 0, outUs = 0;
+    bool okBwt = trialEncode<coder_bwt_cm>(varint.data(), (uint32_t)varint.size(),
+                                           pickBwtLevel((uint32_t)varint.size()), outLen, outUs);
+    if (okBwt) {
+        bwtLen = outLen;
+        bwtUs = outUs;
+    }
+    bool okArith = trialEncode<coder_arith>(varint.data(), (uint32_t)varint.size(), 0, outLen, outUs);
+    if (okArith) {
+        arithLen = outLen;
+        arithUs = outUs;
+    }
+
+    if (!okBwt && !okArith) {
+        sel.status = FieldStatus::FAILED;
+        return sel;
+    }
+
+    sel.selectedCoder = CoderType::BWT_CM;
+    sel.bestCompLen = bwtLen;
+    if (okArith && arithLen < bwtLen) {
+        sel.selectedCoder = CoderType::ARITH;
+        sel.bestCompLen = arithLen;
+    }
+    sel.status = FieldStatus::SELECTED;
+    sel.addTrial(CoderType::BWT_CM, bwtLen, bwtUs);
+    sel.addTrial(CoderType::ARITH, arithLen, arithUs);
     return sel;
 }
 
@@ -485,18 +655,90 @@ uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
             }
             fieldBufs[fieldIdx].append((const char*)(line + pos), (size_t)(tabPos - pos));
             /*
-             * affix's line-by-line trial compression needs line boundaries,
-             * which are lost when the whole column is concatenated. Only the
-             * pointers are recorded, no copy: SafeLineReader returns views into
-             * the block buffer, and the block contents stay unchanged during
+             * Line views are needed by two consumers: affix's line-by-line
+             * trial compression (fields that list AFFIX_MATCH as a candidate),
+             * and the POS delta-varint trial (POS + RNAME, to rebuild the
+             * delta chain with its chromosome-switch reset). Only the pointers
+             * are recorded, no copy: SafeLineReader returns views into the
+             * block buffer, and the block contents stay unchanged during
              * analyze. Including the trailing tab matches how compression feeds
              * the data (see compressRegularField).
              */
-            if (samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH)) {
+            if (samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH) ||
+                fieldIdx == (uint32_t)SAM_POS || fieldIdx == (uint32_t)SAM_RNAME) {
                 LineSample ls;
                 ls.data = line + pos;
                 ls.len = (uint32_t)(tabPos - pos) + 1;
                 fieldLines[fieldIdx].push_back(ls);
+            }
+            ++fieldIdx;
+            pos = tabPos + 1;
+        }
+    }
+    return reader.scannedBytes();
+}
+
+/*
+ * Collect RNAME+POS line views for the POS delta trial, bounded by line count
+ * rather than by the shared byte budget.
+ *
+ * Why a separate extractor: the generic sampler stops as soon as the byte
+ * budget is spent (a few MB), which for POS is only ~13k lines - far below the
+ * 100k-line blocks that level 8 produces. On such a sample coder_arith pays its
+ * per-block model cold start over 8x too often and consistently loses the trial
+ * to coder_bwt_cm, while at real block volume it wins (31.86% vs 32.02% on
+ * con_sorted.sam). Storing only pointers keeps the extra sampling cheap.
+ *
+ * The two vectors stay index-aligned: a line is recorded only when both RNAME
+ * and POS were located.
+ */
+uint32_t CodecSelector::extractPosDeltaSamples(RoughIOBlock* block,
+                                               std::vector<LineSample>& posLines,
+                                               std::vector<LineSample>& chrLines,
+                                               uint32_t maxLines)
+{
+    posLines.clear();
+    chrLines.clear();
+    if (maxLines == 0) {
+        return 0;
+    }
+
+    SafeLineReader reader(block);
+
+    const uint8_t* line = nullptr;
+    uint32_t lineLen = 0;
+    while (reader.nextLine(line, lineLen)) {
+        if (posLines.size() >= maxLines) {
+            break;
+        }
+        if (lineLen == 0 || line[0] == '@') {
+            continue;
+        }
+
+        uint32_t pos = 0;
+        uint32_t fieldIdx = 0;
+        bool haveChr = false;
+        LineSample chr;
+        while (pos <= lineLen && fieldIdx <= (uint32_t)SAM_POS) {
+            uint32_t tabPos = pos;
+            while (tabPos < lineLen && line[tabPos] != '\t') {
+                ++tabPos;
+            }
+            if (fieldIdx == (uint32_t)SAM_RNAME) {
+                chr.data = line + pos;
+                chr.len = (uint32_t)(tabPos - pos) + 1; /* trailing tab, as compression feeds it */
+                haveChr = true;
+            } else if (fieldIdx == (uint32_t)SAM_POS) {
+                /* Malformed/truncated line: drop it so the two views stay aligned. */
+                if (!haveChr) {
+                    break;
+                }
+                LineSample p;
+                p.data = line + pos;
+                p.len = (uint32_t)(tabPos - pos) + 1;
+                chrLines.push_back(chr);
+                posLines.push_back(p);
+                break;
             }
             ++fieldIdx;
             pos = tabPos + 1;
@@ -586,7 +828,8 @@ static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, ui
     return estimatedQual >= QUAL_PRIOR_MIN_TOTAL;
 }
 
-int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info)
+int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
+                                  uint8_t compressLevel)
 {
     std::vector<std::string> fieldBufs;
     std::vector<std::vector<LineSample>> fieldLines;
@@ -597,7 +840,14 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
     for (uint32_t f = 0; f < SAM_FIELD_COUNT_SELECT; ++f) {
         const std::string& buf = fieldBufs[f];
         totalSample += buf.size();
-        if (buf.size() < MIN_SELECT_SAMPLE) {
+        /*
+         * POS is exempted from the raw-text threshold: its delta-varint stream
+         * (the actual coder input) is about a quarter of the raw column, so the
+         * 64 KB raw-text gate would never be reached on typical samples. The
+         * POS branch below re-checks on the varint stream itself
+         * (MIN_POS_DELTA_SAMPLE).
+         */
+        if (buf.size() < MIN_SELECT_SAMPLE && f != (uint32_t)SAM_POS) {
             info.fields[f].status = FieldStatus::SKIPPED;
             info.fields[f].sampleLen = (uint32_t)buf.size();
             continue;
@@ -622,7 +872,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
              */
             extractQualSamples(block, qualRecs, qualFreq,
                                (uint32_t)block->getDataLen(), QUAL_PRIOR_TRAIN_MAX);
-            info.fields[f] = QualSelector::select(qualRecs, qualFreq);
+            info.fields[f] = QualSelector::select(qualRecs, qualFreq, compressLevel);
             /*
              * If the prior is worth training, record the request; the actual
              * training is deferred until the read thread finishes the
@@ -647,6 +897,68 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
         if (cfg == nullptr || cfg->candidates.empty()) {
             info.fields[f].status = FieldStatus::SKIPPED;
             info.fields[f].sampleLen = (uint32_t)buf.size();
+            continue;
+        }
+        /*
+         * POS is compressed through the delta-varint stream, not the raw
+         * column text, so its trial must run on the rebuilt varint stream;
+         * the generic selectCoder (which would compare raw POS text) would
+         * pick a coder that does not match what is actually compressed.
+         */
+        if (f == (uint32_t)SAM_POS) {
+            std::vector<uint64_t> posCounts;
+            /*
+             * Trial at the volume real compression uses: POS is fed to the coder
+             * one block at a time (samReadsPerBlock lines), so the trial must
+             * see one block's worth of lines, not the generic byte-budget
+             * sample (which is several times smaller and overstates per-block
+             * cold-start costs).
+             */
+            std::vector<LineSample> posLines, chrLines;
+            uint32_t posTrialLines = BlockFactory::samReadsPerBlockOfLevel(compressLevel);
+            /* Trial at block granularity, but cap the trial cost (see POS_TRIAL_MAX_LINES). */
+            if (posTrialLines > POS_TRIAL_MAX_LINES) {
+                posTrialLines = POS_TRIAL_MAX_LINES;
+            }
+            extractPosDeltaSamples(block, posLines, chrLines, posTrialLines);
+            if (posLines.size() > fieldLines[SAM_POS].size()) {
+                info.fields[f] = selectPosDeltaCoder(posLines, chrLines, &posCounts);
+            } else {
+                /* Block holds fewer lines than the target (small file): keep the
+                   generic sampler's views, they already cover the whole block. */
+                info.fields[f] = selectPosDeltaCoder(fieldLines[SAM_POS], fieldLines[SAM_RNAME],
+                                                     &posCounts);
+            }
+            LOG_DEBUG("Preprocess SAM field %u: sample=%u, coder=%s, comp=%u (%.2f%%)",
+                      f, info.fields[f].sampleLen, coderTypeToMagic(info.fields[f].selectedCoder),
+                      info.fields[f].bestCompLen, info.fields[f].ratio() * 100.0);
+            /*
+             * The file-level prior only helps the arithmetic backend (it
+             * removes each block's model cold start; bwt_cm has no such cost).
+             * Write it only when arith won the POS trial and the estimated
+             * whole-file varint volume is large enough that the ~512-byte
+             * packed prior pays for itself. When arith is not selected the
+             * prior would never be used by the compression side.
+             */
+            if (info.fields[f].status == FieldStatus::SELECTED &&
+                info.fields[f].selectedCoder == CoderType::ARITH &&
+                !posCounts.empty()) {
+                const uint64_t sampleBytes = (uint64_t)info.fields[f].sampleLen;
+                uint64_t estimated = 0;
+                if (inputTotalBytes > 0 && info.scannedBytes > 0) {
+                    estimated = (sampleBytes * inputTotalBytes) / info.scannedBytes;
+                } else {
+                    /* Unknown input size: conservatively assume the sample is
+                     * a small fraction, mirroring qualPriorPaysOff. */
+                    estimated = sampleBytes * 16;
+                }
+                if (estimated >= POS_PRIOR_MIN_ESTIMATED) {
+                    info.setPosPrior(packPosPriorBlob(posCounts));
+                    LOG_DEBUG("Preprocess SAM field %u: write POS prior (sample %llu varint bytes, est. total %llu)",
+                              f, (unsigned long long)sampleBytes,
+                              (unsigned long long)estimated);
+                }
+            }
             continue;
         }
         const bool trialAffix = samFieldCandidate(f, CoderType::AFFIX_MATCH);
@@ -684,7 +996,8 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, PreprocessInfo& info)
     return 0;
 }
 
-int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info)
+int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
+                               uint8_t compressLevel)
 {
     if (block == nullptr) {
         return -1;
@@ -693,7 +1006,7 @@ int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, Pr
     info.reset(type);
 
     if (BlockUtil::isSAMBlock(type)) {
-        return analyzeSam(block, inputTotalBytes, info);
+        return analyzeSam(block, inputTotalBytes, info, compressLevel);
     }
     if (BlockUtil::isFastqBlock(type)) {
         return analyzeFastq(block, info);

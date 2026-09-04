@@ -26,8 +26,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <vector>
-#include <algorithm>
-#include <string>
 #include <string.h>
 
 #include "utils/memory_util.h"

@@ -36,6 +36,7 @@
 
 #define private public
 #include "sam_actuator.h"
+#include "sam_info.h"
 #include <io_wrapper.h>
 #include <block_wrapper.h>
 #include "config_manager.h"

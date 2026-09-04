@@ -83,6 +83,7 @@ target_link_libraries(bwtcm_record_roundtrip PRIVATE
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
+
 add_subdirectory(googletest)
 
 # Optional: Add gtest support
