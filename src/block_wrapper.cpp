@@ -26,7 +26,6 @@
 #include "pbgz_types.h"
 #include <cstring>
 #include <set>
-#include "utils/md5_util.h"
 #include "pbgz_manager.h"
 #include "config_manager.h"
 #include <zlib.h>
