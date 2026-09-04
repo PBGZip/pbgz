@@ -22,8 +22,6 @@
  */
 
 #pragma once
-#include <initializer_list>
-#include <any>
 #include <log/logger.h>
 
 namespace MemoryUtil {
@@ -77,7 +75,7 @@ namespace MemoryUtil {
     }
 
     template <typename T>
-    T* safeReallocInit(size_t& size, T* ptr, int newSize, char ch) {
+    T* safeReallocInit(size_t& size, T* ptr, size_t newSize, char ch) {
         do {
             T* tempPtr = nullptr;
             if (newSize > size) {
