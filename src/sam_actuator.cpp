@@ -2250,10 +2250,8 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
      *
      * 对齐 FastqCodecActuator::compressBaseWithRef 的做法（src/fastq_actuator.cpp:954）：
      *   1) 先把整块的 2bit 结果累积到 matchBuffer，拿到总长度 matchLen；
-     *   2) 再按 (matchLen > FC_MIN_LEN && matchLen < FC_MAX_LEN) 在 coder_fc 与
-     *      coder_bwt_cm 之间择优 —— 之所以必须先攒够再编码，是因为 coder_fc 的
+     *   2) 先攒够再整体编码（见下面对 matchCoderType 的说明），因为 coder_fc 的
      *      decode_line 只支持整块解压（"only support block decompress"），不能逐行。
-     * 可用环境变量 PBGZ_SEQ_MATCH_CODER=fc|bwt_cm 强制指定，便于 A/B 实测对比。
      */
     std::unique_ptr<uint8_t[]> matchBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen() + 1);
     uint32_t matchLen = 0;
@@ -2454,38 +2452,18 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         rleValLen = vp;                     /* length of the value segment */
     }
 
-    /* Pick the SEQ match coder by total length, then encode the whole block once.
-       Same rule as FastqCodecActuator::compressBaseWithRef (fastq_actuator.cpp:954). */
-    CoderType matchCoderType;
-    {
-        const char* envCoder = getenv("PBGZ_SEQ_MATCH_CODER");
-        if (envCoder != nullptr && std::strcmp(envCoder, "bwt_cm") == 0) {
-            matchCoderType = CoderType::BWT_CM;
-        } else if (envCoder != nullptr && std::strcmp(envCoder, "fc") == 0) {
-            matchCoderType = CoderType::FC;
-        } else if (envCoder != nullptr && std::strcmp(envCoder, "arith") == 0) {
-            matchCoderType = CoderType::ARITH;
-        } else {
-            /*
-             * 实测结论（con_sorted.sam 100 万条读, -l8，双流 RLE 布局）：
-             *   coder_bwt_cm : SEQ 362,880 B（总 26,454,323 B）  <- 默认
-             *   coder_fc     : SEQ 440,989 B（总 26,532,192 B）  <- 反而大 17%
-             *   coder_arith  : SEQ 580,606 B（总 26,672,129 B）  <- 大 60%，且解压全块失败
-             * 原因是 SEQ match 流是「99.45% 符号为 0 的稀疏 2bit 流」，BWT+上下文建模
-             * 对这种长游程/低熵结构更契合；coder_fc 走 LZP+BWT+MTF 的通用文本链路，
-             * 在这类数据上并不占优。Fastq 侧对 mpos/mpair 用 FC 是因为那类流是位置/方向
-             * 整数流，数据特征与 match 流不同，不宜直接照搬结论。
-             *
-             * 关于 coder_arith：它是 order-0（无上下文），在 POS-delta 整数流上与 bwt_cm
-             * 打平（~2.58 bit/line，见 coder_arith.h），但**该结论不可推广到 match 流**——
-             * match 流的长游程与跨读段相似模式必须靠上下文建模才能吃到，order-0 完全
-             * 无能为力，实测劣化 60%。其块式 bitstream 布局（u32 len + u8 flags + payload）
-             * 也与 RLE 子流的一次性整块解码不匹配，解压会全块失败。
-             * 因此默认仍用 BWT_CM；FC / ARITH 保留为可选项，便于 A/B 复核。
-             */
-            matchCoderType = CoderType::BWT_CM;
-        }
-    }
+    /* Pick the SEQ match coder, then encode the whole block once.
+       Same rule as FastqCodecActuator::compressBaseWithRef (fastq_actuator.cpp:954).
+
+       BWT_CM is the fixed choice. Measured on con_sorted.sam (1M reads, -l8,
+       dual-stream RLE layout):
+         coder_bwt_cm : SEQ 362,880 B   <- default
+         coder_fc     : SEQ 440,989 B   (+17%; generic LZP+BWT+MTF text path)
+         coder_arith  : SEQ 580,606 B   (+60%, and its whole-block decode fails)
+       The SEQ match stream is a sparse ~99.45%-zero 2-bit stream; its long runs
+       and cross-read patterns need context modeling, which order-0 arith cannot
+       provide and the generic fc text path does not suit. */
+    const CoderType matchCoderType = CoderType::BWT_CM;
     /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
     {
         const uint32_t payLen = useRle ? rleRunLen : matchLen;
