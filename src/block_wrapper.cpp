@@ -325,6 +325,50 @@ BlockType FastqBlockReader::analyzeBlock(RoughIOBlock* blockPtr, BlockType /*fil
 }
 
 /*
+ * CRAM-style block slicing for SAM/BAM data blocks: a block ends when EITHER
+ * the read-count limit (readsPerBlock) is reached OR the total number of
+ * sequenced bases reaches the block base cap (blockMaxBases), whichever comes
+ * first. Following htslib's CRAM rule, bases_per_slice = seqs_per_slice * 500
+ * (see samtools-1.23.1 htslib/cram/cram_structs.h: SEQS_PER_SLICE 10000,
+ * BASES_PER_SLICE = SEQS_PER_SLICE*500). With the per-level reads tiers
+ * 1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000, this gives the three base caps
+ * 5M / 12.5M / 50M. Long reads (e.g. Nanopore) therefore cannot accumulate
+ * into an unbounded block, and -l only hints at the initial buffer allocation:
+ * the actual encoded output buffer is grown on demand from the block's real
+ * data length (see SamCodecActuator::compress), so -l never caps a block.
+ */
+
+/* Return the number of sequenced bases of one SAM record line (the SEQ column,
+   field 10, i.e. the text between the 9th and 10th tab). Returns 0 for header
+   lines, a '*' sequence and malformed rows that have fewer than 9 tabs. */
+static size_t samRowSeqLength(const uint8_t* row, size_t len) {
+    int tabs = 0;
+    size_t seqStart = 0;
+    size_t i = 0;
+    for (; i < len; ++i) {
+        if (row[i] == '\t') {
+            ++tabs;
+            if (tabs == 9) {
+                seqStart = i + 1;
+            } else if (tabs == 10) {
+                break;   /* i now points at the tab that terminates SEQ */
+            }
+        }
+    }
+    if (tabs < 9) {
+        return 0;
+    }
+    const size_t seqEnd = (tabs >= 10) ? i : len;   /* no 10th tab -> SEQ runs to the line end */
+    if (seqEnd <= seqStart) {
+        return 0;
+    }
+    if (seqEnd - seqStart == 1 && row[seqStart] == '*') {
+        return 0;
+    }
+    return seqEnd - seqStart;
+}
+
+/*
  * SAM/SAM-GZ block reading:
  *   1. The header (@ lines) is returned as its own block;
  *   2. The data region is split into blocks of readsPerBlock reads (10000/25000/100000
@@ -376,15 +420,30 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     const size_t readTarget = (splitHeader && startsWithHeader) ? 1 : readsPerBlock;
 
     size_t dataLineCount = 0;
+    size_t blockBases = 0;    /* sequenced bases already kept in this block */
     size_t lineStart = 0;
     size_t scanPos = 0;
+
+    /* Slice the block on "reads reached" OR "bases reached" (whichever first).
+       A whole data line that would overshoot the base cap is left in the buffer
+       and becomes the start of the next block via the tail-cache handoff below.
+       A single data line larger than the cap still fills a block by itself so
+       reading always makes progress (reads are never split). */
+    bool reachedBaseCap = false;
 
     while (dataLineCount < readTarget) {
         // First scan the bytes already present in the current buffer
         size_t i = scanPos;
         while (i < totalLen) {
             if (buffer[i] == '\n') {
-                if (buffer[lineStart] != '@') {
+                const bool isDataLine = (buffer[lineStart] != '@');
+                if (isDataLine) {
+                    const size_t rowBases = samRowSeqLength(buffer + lineStart, i - lineStart);
+                    if (dataLineCount > 0 && blockMaxBases > 0 && blockBases + rowBases > blockMaxBases) {
+                        reachedBaseCap = true; /* this line and everything after it belongs to the next block */
+                        break;
+                    }
+                    blockBases += rowBases;
                     ++dataLineCount;
                 }
                 npos.push_back(i);
@@ -396,7 +455,7 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
             ++i;
         }
         scanPos = i;
-        if (dataLineCount >= readTarget) {
+        if (reachedBaseCap || dataLineCount >= readTarget) {
             break;
         }
 
@@ -1000,8 +1059,33 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         }
     }
 
-    // Data region: decompress each read into a SAM line until readsPerBlock reads are filled
+    // Data region: decompress each read into a SAM line until readsPerBlock reads
+    // are filled or SAM_BLOCK_MAX_BASES sequenced bases are reached.
     uint32_t reads = 0;
+    size_t blockBases = 0;   /* sequenced bases already kept in this block */
+
+    /* A whole read that would push this data block over the base cap is parked
+       in pendingSamLine and becomes the first line of the next block, so very
+       long reads (e.g. Nanopore) can never accumulate into an unbounded block
+       and reads are never split. */
+    if (!pendingSamLine.empty()) {
+        if (outLen + pendingSamLine.size() + 1 > blockPtr->getBufferSize()) {
+            if (0 != blockPtr->ensureCapacity(outLen + pendingSamLine.size() + 1)) {
+                return -1;
+            }
+            out = blockPtr->getBuffer();
+        }
+        memcpy(out + outLen, pendingSamLine.data(), pendingSamLine.size());
+        outLen += pendingSamLine.size();
+        out[outLen] = '\n';
+        npos.push_back(outLen);
+        outLen += 1;
+        blockBases += samRowSeqLength((const uint8_t*)pendingSamLine.data(), pendingSamLine.size());
+        pendingSamLine.clear();
+        ++reads;
+        lastBlockHasData = true;
+    }
+
     while (reads < readsPerBlock) {
         int32_t blockSize = 0;
         if (readBamBytes(&blockSize, 4) != 4) {
@@ -1010,25 +1094,42 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         if (blockSize <= 0 || blockSize > (1 << 30)) {
             break;
         }
-        std::vector<uint8_t> rec((size_t)blockSize);
-        if (readBamBytes(rec.data(), rec.size()) != rec.size()) {
+        recBuf.resize((size_t)blockSize);
+        if (readBamBytes(recBuf.data(), recBuf.size()) != recBuf.size()) {
             break;
         }
-        std::string line;
-        if (0 != parseBamRecord(rec.data(), blockSize, line)) {
+        /* l_seq (SEQ length) is the fixed field of the 32-byte BAM core at offset 16. */
+        int32_t seqLen = 0;
+        if (recBuf.size() >= 20) {
+            const uint8_t* pCore = recBuf.data() + 16;
+            seqLen = bamI32(pCore);
+            if (seqLen < 0) {
+                seqLen = 0;
+            }
+        }
+        lineBuf.clear();
+        if (0 != parseBamRecord(recBuf.data(), blockSize, lineBuf)) {
             break;
         }
-        if (outLen + line.size() + 1 > blockPtr->getBufferSize()) {
-            if (0 != blockPtr->ensureCapacity(outLen + line.size() + 1)) {
+        /* Slice the block on "reads reached" OR "bases reached": this whole read is
+           parked for the next block instead of overshooting the cap. reads > 0
+           guarantees progress when a single read alone exceeds the cap. */
+        if (reads > 0 && blockMaxBases > 0 && (uint64_t)blockBases + (uint64_t)seqLen > blockMaxBases) {
+            pendingSamLine.assign(lineBuf);   // copy keeps lineBuf capacity reusable
+            break;
+        }
+        if (outLen + lineBuf.size() + 1 > blockPtr->getBufferSize()) {
+            if (0 != blockPtr->ensureCapacity(outLen + lineBuf.size() + 1)) {
                 break;
             }
             out = blockPtr->getBuffer();
         }
-        memcpy(out + outLen, line.data(), line.size());
-        outLen += line.size();
+        memcpy(out + outLen, lineBuf.data(), lineBuf.size());
+        outLen += lineBuf.size();
         out[outLen] = '\n';
         npos.push_back(outLen);
         outLen += 1;
+        blockBases += (uint64_t)(seqLen > 0 ? (uint32_t)seqLen : 0);
         ++reads;
         lastBlockHasData = true;
     }

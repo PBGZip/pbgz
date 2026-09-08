@@ -194,7 +194,10 @@ public:
 
     void flushIO() {
         if (fo.mappedAddress != nullptr && fo.fileSize > 0) {
-            (void)msync(fo.mappedAddress, fo.fileSize, MS_ASYNC);  // Optimization to write back early; failures are caught by the fsync in closeIO
+            /* Synchronous write-back: data must be durable before the call returns. */
+            if (0 != msync(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
+                latchWriteError(errno);
+            }
         }
     }
 

@@ -194,6 +194,10 @@ public:
                    uint32_t readsPerBlock = 10000, bool splitHeader = true)
         : BlockReader(reader, preReadData, preReadLen), readsPerBlock(readsPerBlock), splitHeader(splitHeader) {
         lastBlockHasData = false;
+        /* CRAM rule: bases_per_slice = seqs_per_slice * 500. With the per-level
+           seqs tiers (1-5:10000, 6-7:25000, 8-9:100000) this yields the three
+           base caps 5M / 12.5M / 50M per data block. */
+        blockMaxBases = (size_t)readsPerBlock * 500;
     }
 
     virtual int64_t readBlock(RoughIOBlock* blockPtr, BlockType fileType = TYPE_UNKNOW) override;
@@ -207,6 +211,7 @@ protected:
 
 protected:
     uint32_t readsPerBlock;      /* Maximum number of reads per data block */
+    size_t blockMaxBases;        /* Base-count cap per data block (= readsPerBlock*500, CRAM rule) */
     bool splitHeader;            /* Whether the header forms its own block */
     bool lastBlockHasData;       /* Whether the most recently read block contains data lines (queried by the engine) */
 };
@@ -226,6 +231,9 @@ public:
         headerParsed = false;
         headerWritten = false;
         lastBlockHasData = false;
+        /* CRAM rule: bases_per_slice = seqs_per_slice * 500 (5M / 12.5M / 50M
+           for the three per-level reads tiers). */
+        blockMaxBases = (size_t)readsPerBlock * 500;
     }
 
     virtual int64_t readBlock(RoughIOBlock* blockPtr, BlockType fileType = TYPE_UNKNOW) override;
@@ -251,8 +259,23 @@ protected:
     bool headerParsed;
     bool headerWritten;
     uint32_t readsPerBlock;            /* Maximum number of reads per data block */
+    size_t blockMaxBases;              /* Base-count cap per data block (= readsPerBlock*500, CRAM rule) */
     bool splitHeader;                  /* Whether the header forms its own block */
     bool lastBlockHasData;
+
+    /*
+     * A read whose SAM line would push the current data block past the -l byte
+     * budget is parked here (fully parsed) and emitted as the first line of the
+     * next data block, so blocks never exceed the budget and over-long reads are
+     * never lost. Empty normally.
+     */
+    std::string pendingSamLine;
+
+    /* Reused scratch buffers for one BAM record + its parsed SAM line, so the
+       read thread does not allocate/free per record (allocation churn dominated
+       the read side on long-read data). Capacity is kept across records. */
+    std::vector<uint8_t> recBuf;
+    std::string lineBuf;
 };
 
 /* GZ-compressed BAM format: the inner layer is still a BGZF stream; inflate it to raw BAM first, then convert to SAM */
@@ -278,7 +301,7 @@ protected:
 private:
     z_stream inflateState;
     bool inflateReady;
-    uint8_t gzInBuf[64 * 1024];        /* BGZF input buffer */
+    uint8_t gzInBuf[1 << 20];          /* BGZF input buffer (1MB: fewer read/refill rounds) */
     size_t gzInLen;
     bool gzInEof;
 };

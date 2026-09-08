@@ -468,6 +468,33 @@ int32_t SamCodecActuator::compress() {
         return -1;
     }
 
+    /*
+     * Grow the output block to the real size of this input block before any
+     * stream is written. The engine pool hands out output blocks whose initial
+     * buffer only follows -l; with long reads a SAM/BAM data block (bounded by
+     * the read-count/base-count slicer in BlockReader) can be far larger than
+     * that, and a fixed -l-sized coder_io would overflow and abort compression.
+     * So -l is only an allocation hint here, never a cap on the encoded block.
+     * The formula mirrors the decompression side (see SamCodecActuator:decompress).
+     */
+    if (pbgzEngine != nullptr) {
+        size_t bs = pbgzEngine->getFileBlockSize();
+        if (bs == 0) {
+            bs = ConfigManager::getInstance().getBlockSizeByCompressLevel(pbgzEngine->getParameter().compressLevel);
+        }
+        size_t outCapacity = bs * 2;
+        const size_t inDataLen = (size_t)inBlockPtr->getDataLen();
+        if (inDataLen > outCapacity) {
+            outCapacity = inDataLen;
+        }
+        if (outBlockPtr->getBufferSize() < outCapacity) {
+            if (0 != outBlockPtr->ensureCapacity(outCapacity)) {
+                LOG_ERROR("Preallocate output buffer failed, need=%zu bytes", outCapacity);
+                return -1;
+            }
+        }
+    }
+
     if (headEndLine > 0) {
         if (0 != compressSamHeader()) {
             LOG_ERROR("Compress SAM header failed.");
@@ -721,6 +748,11 @@ int32_t SamCodecActuator::compressSamByFields() {
     samMeta["fieldcount"] = fieldCount;
     samMeta["totalsrclen"] = totalSrcLen;
     samMeta["totaldstlen"] = totalDstLen;
+    /* Exact decoded-text size of this block, so the decompressor can size its
+       output buffer from the real block length instead of guessing from -l or
+       from the compressed payload length (which under-allocates for large
+       long-read blocks and caused out-of-bounds writes on decode). */
+    samMeta["textlen"] = (Json::Value::UInt64)inBlockPtr->getDataLen();
     samMeta["streams"] = streamMeta;
     meta["sam"] = samMeta;
 
@@ -1167,8 +1199,17 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
             const uint32_t payloadLen = hasSep ? segmentLength - 1 : segmentLength;
             std::string seg((char*)segmentStart, segmentLength);
             std::string payload((char*)segmentStart, payloadLen);
-            if (!payload.empty() && payload.find_first_not_of("0123456789") != std::string::npos) {
-                allNumeric = false;
+            if (!payload.empty()) {
+                if (payload.find_first_not_of("0123456789") != std::string::npos) {
+                    allNumeric = false;
+                } else if (payload.size() > 1 && payload[0] == '0') {
+                    /* A numeric segment with a leading zero (e.g. a zero-padded
+                       date/month "01" inside a Nanopore QNAME) cannot round-trip
+                       through the zigzag-delta varint stream: the decoder re-emits
+                       plain decimal text and would silently drop the "0". Force the
+                       lossless textual path for such segments. */
+                    allNumeric = false;
+                }
             }
             segTexts.push_back(seg);
             segPayloads.push_back(payload);
@@ -2952,6 +2993,15 @@ int32_t SamCodecActuator::decompress() {
     size_t outCapacity = bs * 2;
     if ((size_t)inBlockPtr->getDataLen() > outCapacity) {
         outCapacity = (size_t)inBlockPtr->getDataLen();
+    }
+    /* The block records its original decoded text length (textlen, written by
+       the compressor): that is the exact output bound, independent of -l and of
+       how large the compressed payload happens to be. */
+    if (meta.isMember("sam") && meta["sam"].isMember("textlen")) {
+        const uint64_t textLen = meta["sam"]["textlen"].asUInt64();
+        if ((uint64_t)outCapacity < textLen) {
+            outCapacity = (size_t)textLen;
+        }
     }
     if (outBlockPtr->ensureCapacity(outCapacity) != 0) {
         LOG_ERROR("preallocate output buffer failed, need=%zu", outCapacity);
@@ -4932,7 +4982,14 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
             } else if (fieldMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
-                int32_t decLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), maxBaseLength, '\t', false);
+                /* decode_line's split mode reports BUF_SMALL as soon as it has
+                   filled out_len characters without yet seeing the split char.
+                   A row whose SEQ is exactly maxBaseLength long still needs one
+                   more character for its trailing '\t', so the per-row limit
+                   must be maxBaseLength + 1 (the row text is stored with its
+                   terminating tab). Without this, a max-length row always
+                   fails with CODER_ERR_BUF_SMALL. */
+                int32_t decLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), maxBaseLength + 1, '\t', false);
                 if (decLen <= 0) {
                     LOG_ERROR("base decode failed in block %lld, line %d: %d", (long long)inBlockPtr->getBlockId(), lineNo, decLen);
                     return -1;

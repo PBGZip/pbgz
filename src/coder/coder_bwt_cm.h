@@ -223,7 +223,6 @@ public:
     void encode_line(const uint8_t *in, const uint32_t in_len,
                      [[maybe_unused]] bool need2hold = false) override
     {
-        int32_t i;
         if (io->m != coder_io::MENC)
         { /* Initialize when not initialized */
             int32_t len_buf, len_bwt, len_arr;
@@ -263,32 +262,61 @@ public:
             buf_arr = (uint32_t *)(buf_bwt + len_bwt);
         }
 
-        int32_t len2add = bsize - curr_incache;
-        if ((int32_t)in_len < len2add)
-        { /* Cache when not enough for one block */
-            memcpy(coder_buff + curr_incache, in, in_len);
-            curr_incache += in_len;
-        }
-        else
-        { /* Compress when enough for one block and cache uncompressed part */
-            memcpy(coder_buff + curr_incache, in, len2add);
-
-            const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, bsize);
+        /*
+         * Feed the whole input without ever writing past coder_buff:
+         * an overlong single encode_line input used to copy bsize bytes in,
+         * then memcpy() the whole remainder on top of coder_buff (heap
+         * overflow) and hand libsai_bwt a length >= bsize, crashing inside
+         * libsais_main_8u.  Chunking on bsize boundaries keeps the stream
+         * format unchanged: every emitted block carries its own
+         * put32(len)+put32(idx) header, so old archives and the decode side
+         * (which loops over multiple blocks) are both unaffected.
+         */
+        const auto emitBlock = [&](int32_t n) {
+            const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, n);
             check_exit(idx >= 1,  coder_ns::CODER_ERR_INNER, "coder transform failed: idx %d", idx);
-            // if (!(idx >= 1)) {
-            //     coder_logger(coder_ns::ERROR, "coder transform failed: idx %d", idx);
-            //     return coder_ns::CODER_ERR_INNER;
-            // }
 
-            put32(bsize); /* Encode current length */
+            put32(n); /* Encode current length */
             put32(idx);   /* Encode BWT index */
 
-            for (i = 0; i < bsize; i++) /* Encode transformed data */
-                put(buf_bwt[i]);
+            for (int32_t k = 0; k < n; k++) /* Encode transformed data */
+                put(buf_bwt[k]);
+        };
 
-            curr_incache = in_len - len2add;
-            if (curr_incache > 0)
-                memcpy(coder_buff, in + len2add, curr_incache);
+        int32_t left = (int32_t)in_len;
+        const uint8_t* src = in;
+
+        /* 1. Top up the partially filled buffer; flush once it reaches bsize. */
+        while (curr_incache > 0 && left > 0)
+        {
+            int32_t take = bsize - curr_incache;
+            if (left < take)
+                take = left;
+            memcpy(coder_buff + curr_incache, src, take);
+            curr_incache += take;
+            src += take;
+            left -= take;
+            if (curr_incache == bsize)
+            {
+                emitBlock(bsize);
+                curr_incache = 0;
+            }
+        }
+
+        /* 2. Compress the bulk of the input in whole bsize blocks. */
+        while (left >= bsize)
+        {
+            memcpy(coder_buff, src, bsize);
+            emitBlock(bsize);
+            src += bsize;
+            left -= bsize;
+        }
+
+        /* 3. Keep the tail (< bsize) cached for encode_flush(). */
+        if (left > 0)
+        {
+            memcpy(coder_buff, src, left);
+            curr_incache = left;
         }
     }
 

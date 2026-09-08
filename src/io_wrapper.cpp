@@ -332,6 +332,27 @@ static int32_t msyncMapped(uint8_t* addr, size_t len, int flags)
     return msync(addr, len, flags);
 }
 
+/* Synchronously flush the byte range [startOff, endOff) of the mapping to disk
+   (page-aligned). Used by writeIO/writeIOAt so that data is durable before the
+   write call returns instead of only being handed to the kernel page cache and
+   written back asynchronously. */
+static int32_t msyncRangeSync(uint8_t* addr, size_t startOff, size_t endOff)
+{
+    if (addr == nullptr || endOff <= startOff) {
+        return 0;
+    }
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) {
+        pageSize = 4096;
+    }
+    const size_t alignedStart = (startOff / (size_t)pageSize) * (size_t)pageSize;
+    const size_t alignedEnd = ((endOff + (size_t)pageSize - 1) / (size_t)pageSize) * (size_t)pageSize;
+    if (alignedEnd <= alignedStart) {
+        return 0;
+    }
+    return msync(addr + alignedStart, alignedEnd - alignedStart, MS_SYNC);
+}
+
 int32_t FileWriter::openIO() {
     if (0 != fo.openIO()) {
         LOG_ERROR("File writer open failed.");
@@ -398,13 +419,24 @@ size_t FileWriter::getMappedSize(size_t fileSize) {
 }
 
 size_t FileWriter::calculateNextMapSize() {
-    const size_t INITIAL_SIZE = 64 * 1024 * 1024; // 64MB initial size
+    /*
+     * File/mapping growth policy:
+     *   1) start small (1MB) and double while the mapping is below 32MB;
+     *   2) once it reaches 32MB, stop doubling and grow by a fixed 32MB step,
+     *      so very large outputs no longer reserve exponentially sized mappings.
+     */
+    const size_t INITIAL_SIZE     = 1 << 20;      // 1MB initial mapping
+    const size_t LINEAR_THRESHOLD = 32u << 20;    // 32MB: switch from doubling to linear growth
+    const size_t LINEAR_STEP      = 16u << 20;    // fixed increment added per remap above the threshold
 
     if (initialMapSize == 0) {
         initialMapSize = INITIAL_SIZE;
         return INITIAL_SIZE;
     }
 
+    if (mapSize >= LINEAR_THRESHOLD) {
+        return mapSize + LINEAR_STEP;
+    }
     return mapSize * 2;
 }
 
@@ -422,8 +454,8 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
         size_t newSize = fo.fileSize + writeLen;
     if (newSize > mapSize) {
         // If file size exceeds mapping size, need to remap
-        // Flush content to disk first - use ASYNC for better performance
-        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
+        // Flush content to disk first - synchronous
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
             LOG_ERROR("msync before remap failed: %s", strerror(errno));
             latchWriteError(errno);
         }
@@ -520,6 +552,11 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     }
     fo.fileSize = newSize;
     fo.position = fo.fileSize;
+    /* Synchronous write: make the just-written bytes durable before returning. */
+    if (0 != msyncRangeSync(fo.mappedAddress, newSize - writeLen, newSize)) {
+        LOG_ERROR("msync(MS_SYNC) after write failed: %s", strerror(errno));
+        latchWriteError(errno);
+    }
     /*
      * Returns the number of bytes actually written this call, not the cumulative
      * file position newSize.
@@ -545,8 +582,8 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
 
     if (requiredSize > mapSize) {
          // If file size exceeds mapping size, need to remap
-        // Flush content to disk first - use ASYNC for better performance
-        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
+        // Flush content to disk first - synchronous
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
             LOG_ERROR("msync before remap failed: %s", strerror(errno));
             latchWriteError(errno);
         }
@@ -574,6 +611,11 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
     (void)memcpy(fo.mappedAddress + seekOffset, pBuffer, writeLen);
     fo.fileSize = newFileSize;
     fo.position = seekOffset + writeLen;
+    /* Synchronous write: make the just-written bytes durable before returning. */
+    if (0 != msyncRangeSync(fo.mappedAddress, seekOffset, seekOffset + writeLen)) {
+        LOG_ERROR("msync(MS_SYNC) after writeIOAt failed: %s", strerror(errno));
+        latchWriteError(errno);
+    }
     return newFileSize;
 }
 
