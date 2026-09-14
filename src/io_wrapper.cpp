@@ -353,6 +353,28 @@ static int32_t msyncRangeSync(uint8_t* addr, size_t startOff, size_t endOff)
     return msync(addr + alignedStart, alignedEnd - alignedStart, MS_SYNC);
 }
 
+/* Non-blocking variant of msyncRangeSync: schedules the dirty pages for
+   write-back and returns immediately. The caller's closeIO() performs the
+   final synchronous msync + fsync, so on a clean shutdown durability is
+   unchanged; only the per-write blocking cost (which serialised the whole
+   writer thread to disk latency, ~46 MB/s on a spinning volume) disappears. */
+static int32_t msyncRangeAsync(uint8_t* addr, size_t startOff, size_t endOff)
+{
+    if (addr == nullptr || endOff <= startOff) {
+        return 0;
+    }
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) {
+        pageSize = 4096;
+    }
+    const size_t alignedStart = (startOff / (size_t)pageSize) * (size_t)pageSize;
+    const size_t alignedEnd = ((endOff + (size_t)pageSize - 1) / (size_t)pageSize) * (size_t)pageSize;
+    if (alignedEnd <= alignedStart) {
+        return 0;
+    }
+    return msync(addr + alignedStart, alignedEnd - alignedStart, MS_ASYNC);
+}
+
 int32_t FileWriter::openIO() {
     if (0 != fo.openIO()) {
         LOG_ERROR("File writer open failed.");
@@ -374,12 +396,12 @@ int32_t FileWriter::openIO() {
 
 void FileWriter::closeIO() {
     /*
-     * Writes go through mmap. Previously the return values of
-     * msync/ftruncate/munmap/close were all discarded, so when the write-back
-     * failed the file length was right but the content was all zeros, and the
-     * process still exited with 0—empirically this produced a 12MB "normal"
-     * compressed file that was entirely zeros after the first 5MiB on an external
-     * volume. Now each call is checked and errors are latched onto writeErr.
+     * Writes go through mmap, and all of msync/ftruncate/munmap/close must be
+     * checked: discarding them would leave the file length right but the content
+     * all zeros when the write-back fails, while still exiting with 0 - observed
+     * in practice as a 12MB "normal" compressed file that was entirely zeros after
+     * the first 5MiB on an external volume. Each call is checked and errors are
+     * latched onto writeErr.
      */
     if (fo.mappedAddress != nullptr) {
         if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
@@ -422,8 +444,8 @@ size_t FileWriter::calculateNextMapSize() {
     /*
      * File/mapping growth policy:
      *   1) start small (1MB) and double while the mapping is below 32MB;
-     *   2) once it reaches 32MB, stop doubling and grow by a fixed 32MB step,
-     *      so very large outputs no longer reserve exponentially sized mappings.
+     *   2) once it reaches 32MB, stop doubling and grow by a fixed 16MB step, so
+     *      very large outputs do not reserve exponentially sized mappings.
      */
     const size_t INITIAL_SIZE     = 1 << 20;      // 1MB initial mapping
     const size_t LINEAR_THRESHOLD = 32u << 20;    // 32MB: switch from doubling to linear growth
@@ -454,9 +476,10 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
         size_t newSize = fo.fileSize + writeLen;
     if (newSize > mapSize) {
         // If file size exceeds mapping size, need to remap
-        // Flush content to disk first - synchronous
-        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
-            LOG_ERROR("msync before remap failed: %s", strerror(errno));
+        // Dirty pages stay in the page cache across the remap (same fd/inode);
+        // only nudge write-back without blocking.
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
+            LOG_ERROR("msync(MS_ASYNC) before remap failed: %s", strerror(errno));
             latchWriteError(errno);
         }
         // Unmap
@@ -552,9 +575,10 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     }
     fo.fileSize = newSize;
     fo.position = fo.fileSize;
-    /* Synchronous write: make the just-written bytes durable before returning. */
-    if (0 != msyncRangeSync(fo.mappedAddress, newSize - writeLen, newSize)) {
-        LOG_ERROR("msync(MS_SYNC) after write failed: %s", strerror(errno));
+    /* Schedule the just-written bytes for write-back without blocking the
+       writer thread (final durability is guaranteed by closeIO's msync+fsync). */
+    if (0 != msyncRangeAsync(fo.mappedAddress, newSize - writeLen, newSize)) {
+        LOG_ERROR("msync(MS_ASYNC) after write failed: %s", strerror(errno));
         latchWriteError(errno);
     }
     /*
@@ -582,9 +606,10 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
 
     if (requiredSize > mapSize) {
          // If file size exceeds mapping size, need to remap
-        // Flush content to disk first - synchronous
-        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
-            LOG_ERROR("msync before remap failed: %s", strerror(errno));
+        // Dirty pages stay in the page cache across the remap (same fd/inode);
+        // only nudge write-back without blocking.
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
+            LOG_ERROR("msync(MS_ASYNC) before remap failed: %s", strerror(errno));
             latchWriteError(errno);
         }
         // Unmap
@@ -611,9 +636,9 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
     (void)memcpy(fo.mappedAddress + seekOffset, pBuffer, writeLen);
     fo.fileSize = newFileSize;
     fo.position = seekOffset + writeLen;
-    /* Synchronous write: make the just-written bytes durable before returning. */
-    if (0 != msyncRangeSync(fo.mappedAddress, seekOffset, seekOffset + writeLen)) {
-        LOG_ERROR("msync(MS_SYNC) after writeIOAt failed: %s", strerror(errno));
+    /* Schedule write-back without blocking (closeIO guarantees durability). */
+    if (0 != msyncRangeAsync(fo.mappedAddress, seekOffset, seekOffset + writeLen)) {
+        LOG_ERROR("msync(MS_ASYNC) after writeIOAt failed: %s", strerror(errno));
         latchWriteError(errno);
     }
     return newFileSize;

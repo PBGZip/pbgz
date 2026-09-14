@@ -1475,10 +1475,10 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         uint32_t qualFreqSrcLen = streamsMeta[1]["srclen"].asUInt();
         /*
          * The element count must be uint32_t: the array is allocated by this count,
-         * while decode_line writes the untruncated qualFreqSrcLen bytes. It used to be
-         * uint8_t; once the quality-value alphabet exceeded 127 symbols
-         * (qualFreqSrcLen > 510) the count wrapped, the allocation shrank but the
-         * write did not, overflowing the heap.
+         * while decode_line writes the untruncated qualFreqSrcLen bytes. A narrower
+         * count would wrap once the quality-value alphabet exceeds 127 symbols
+         * (qualFreqSrcLen > 510), shrinking the allocation while the write does not,
+         * which overflows the heap.
          */
         uint32_t qualFreqArrLen = qualFreqSrcLen / sizeof(uint16_t);
         uint16_t* qualFreqArray = new uint16_t[qualFreqArrLen];

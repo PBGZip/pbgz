@@ -402,8 +402,15 @@ TEST_F(CodecSelectorTest, QualPriorKeptWhenInputSizeUnknown)
     ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
 
     if (info.fields[SAM_QUAL].selectedCoder == CoderType::FCV2) {
-        EXPECT_FALSE(info.qualPrior().empty());
-        EXPECT_TRUE(gated.qualPrior().empty());
+        /*
+         * analyze() only records the request; the snapshot itself is trained
+         * later, once the reader thread has accumulated the pre-training blocks
+         * (see CompressEngine::finalizePretrain). So the decision must be read
+         * from wantQualPrior(), not from qualPrior(), which is still empty here
+         * by design.
+         */
+        EXPECT_TRUE(info.wantQualPrior());
+        EXPECT_FALSE(gated.wantQualPrior());
     }
 }
 
@@ -436,7 +443,15 @@ TEST_F(CodecSelectorTest, SamFieldCoderConfigTable)
     ASSERT_FALSE(samFieldCandidate(SAM_QNAME, CoderType::AFFIX_MATCH));
     ASSERT_TRUE(samFieldCoderConfig(SAM_PNEXT)->candidates.empty());
     ASSERT_TRUE(samFieldCoderConfig(SAM_TLEN)->candidates.empty());
-    ASSERT_TRUE(samFieldCoderConfig(SAM_QUAL)->candidates.empty());
+    /* QUAL is the one field whose candidates are consumed by a dedicated path
+     * (QualSelector) instead of the generic trial, so they are asserted through
+     * the qualCoderCandidate accessor the selector itself uses. AFFIX_MATCH must
+     * stay out of the row: it would drag QUAL into the generic affix trial. */
+    ASSERT_TRUE(qualCoderCandidate(CoderType::QUAL));
+    ASSERT_TRUE(qualCoderCandidate(CoderType::FCV2));
+    ASSERT_TRUE(qualCoderCandidate(CoderType::BWT_CM));
+    ASSERT_FALSE(qualCoderCandidate(CoderType::FC));
+    ASSERT_FALSE(samFieldCandidate(SAM_QUAL, CoderType::AFFIX_MATCH));
     ASSERT_EQ(samFieldCoderConfig(SAM_SEQ)->fallback, CoderType::FC);
     ASSERT_EQ(samFieldCoderConfig(SAM_QUAL)->fallback, CoderType::QUAL);
     ASSERT_TRUE(samFieldCandidate(11u, CoderType::AFFIX_MATCH));   /* OPTION */

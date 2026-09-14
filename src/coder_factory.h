@@ -1,15 +1,10 @@
 /*
  * coder_factory.h - create encoders/decoders by type or magic
  *
- * Previously each actuator directly new'd a concrete encoder class, with the
- * encoder type hard-coded in the code. The preprocessing phase (CodecSelector)
- * trial-compressed to find the best encoder per field and stored it in
- * PreprocessInfo, but actuators never read it, so the selection result never
- * took effect.
- *
- * This factory centralizes the "type -> instance" mapping so actuators can
- * create encoders dynamically according to the preprocessing result, while
- * guaranteeing a usable fallback under any abnormal condition.
+ * The factory centralizes the "type -> instance" mapping, so actuators create
+ * encoders from the preprocessing result - the coder CodecSelector chose per field
+ * and stored in PreprocessInfo - instead of new'ing a hard-coded concrete class,
+ * while still guaranteeing a usable fallback under any abnormal condition.
  *
  * Note that this header deliberately includes no concrete encoder headers; all
  * implementations live in coder_factory.cpp. The reason is that coder_fc.h

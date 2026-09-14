@@ -83,6 +83,25 @@ target_link_libraries(bwtcm_record_roundtrip PRIVATE
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
+# How many mixing models fcv2 should use for QUAL. The mixer's cost is one
+# counter update per model per coded bit, so the count sets its speed; this tool
+# measures size and throughput per count on real QUAL data (see its file header).
+add_executable(qual_model_scan qual_model_scan.cpp)
+target_link_libraries(qual_model_scan PRIVATE
+    pbgz_coder
+    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
+)
+
+# Which fcv2 context tier (cycleMax / cycleBucket / deltaMax / deltaBucket /
+# prevShift) is best for a given QUAL volume. The axis is selected on the command
+# line; see the file header for why cycleMax is the axis that had never been
+# swept, and for the bwt_cm reference row.
+add_executable(qual_tier_scan qual_tier_scan.cpp)
+target_link_libraries(qual_tier_scan PRIVATE
+    pbgz_coder
+    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
+)
+
 
 add_subdirectory(googletest)
 

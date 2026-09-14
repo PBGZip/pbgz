@@ -175,6 +175,19 @@ PBGZ uses subcommand format with the following main parameters:
 - `-z, --gz`: Decompress to gzip format
 - `-f, --force`: Force overwrite output file
 
+### Environment Variables
+
+- `PBGZ_PROF`: set to `1` (or `on`) to run with the built-in pipeline profiler. It times the phases of
+  the read → parallel compress → write pipeline — the reader, worker and writer threads, and the
+  per-column cost inside the SAM actuator — with only a couple of clock reads per block, and prints a
+  table of total time, call count and share of wall time to **stderr** when the run ends. When the
+  variable is unset the timers are not read at all, so an unprofiled run is unaffected. The categories
+  are documented in `src/profile_stats.h`.
+
+```bash
+PBGZ_PROF=1 pbgz compress sample.bam -r hg38.fa -o sample.pbgz -t 16 -l 9
+```
+
 ### Usage Examples
 
 #### Example 1: Compress FASTQ Files

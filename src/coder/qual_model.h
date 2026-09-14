@@ -43,7 +43,13 @@ struct QUAL_MODEL
 {
     enum
     {
-        STEP = 8,  //18//16//12 , 18 is better, 20 seems to have the best effect, 24 will get worse ,   TODO : dynamically set STEP based on data type and the same data
+        /* Frequency increment added to a symbol on every update, i.e. the
+           adaptation rate of the model. The running total is renormalized once it
+           passes QUAL_MAX_FREQ, so STEP only sets how fast the model tracks the
+           data. Tuning notes: 12/16/18/20/24 were measured, with 18 better than
+           16, 20 the best of them and 24 worse; the value below is 8. Open work:
+           pick it per data type. */
+        STEP = 8,
     };
 
     QUAL_MODEL(){};

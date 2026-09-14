@@ -6,9 +6,8 @@
  *
  * First, the candidates differ. Generic fields are evaluated with byte-stream
  * compressors such as coder_bwt_cm and coder_fc, while quality values are
- * actually compressed with coder_qual and fcv2. Previously the preprocessing
- * evaluated the quality-value column with bwt_cm and fc, but compressQuality
- * used the other two, so the evaluation result was never actually used.
+ * compressed with coder_qual and fcv2, so the generic evaluation would rank a
+ * different set of coders than the column actually uses.
  *
  * Second, the input shape differs. Generic evaluation concatenates the whole
  * column into one contiguous byte stream, losing record boundaries; but both of
@@ -36,6 +35,22 @@ struct QualSampleRecord {
     std::string seq;    /* corresponding base sequence, used by coder_qual as context */
     bool        rev;    /* strand direction, taken from bit 0x10 of FLAG, used by fcv2 to recover the cycle index */
 };
+
+/*
+ * Mean record length, in bytes of quality value, at which a file counts as
+ * long-read. It decides fcv2's model count (see qualModelCountForMeanLen); the
+ * measured short- and long-read files sit at ~90 and ~14000 bytes per record, so
+ * the exact value only has to land inside that gap.
+ */
+extern const uint32_t QUAL_LONG_READ_LEN;
+
+/*
+ * How many mixing models fcv2 should use for a sample with this mean record
+ * length: the default mix for short reads, a trimmed one for long reads. Exposed
+ * rather than kept private because the choice ends up in the stream header and
+ * therefore has to stay under test even when no dataset at hand exercises it.
+ */
+int qualModelCountForMeanLen(uint64_t meanLen);
 
 class QualSelector {
 public:

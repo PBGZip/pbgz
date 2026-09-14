@@ -40,6 +40,11 @@
 #include "coder/coder_arith.h"
 #include "field_coder_config.h"
 
+#include <atomic>
+#include <functional>
+#include <thread>
+#include "profile_stats.h"
+
 namespace {
 
 /*
@@ -82,28 +87,28 @@ const uint32_t MIN_POS_DELTA_SAMPLE = 8u << 10;   /* 8 KB of varint bytes */
  *
  * The trial must run at (or near) the block granularity real compression uses,
  * otherwise a coder that pays its model cold start once per block - coder_arith
- * is exactly that - is judged on a sample where that cost is amortized over
- * far fewer bytes than in production, and loses to coder_bwt_cm even though it
- * wins on real blocks (measured on con_sorted.sam, level 8 blocks of 100k
- * lines: arith 31.86% vs bwt_cm 32.02%; on the ~13k-line generic sample:
- * arith 36.23% vs bwt_cm 35.24% - the verdict flips).
+ * is exactly that - is judged on a sample where that cost is amortized over far
+ * fewer bytes than in production, and can lose to coder_bwt_cm on the sample
+ * while winning on real blocks (level 8 blocks of 100k lines: arith 31.86% vs
+ * bwt_cm 32.02%; on the ~13k-line generic sample the same pair reads arith 36.23%
+ * vs bwt_cm 35.24% - the verdict flips).
  *
  * Sampling a full block is essentially free (only line views are stored), but
  * trial-compressing it is not: bwt_cm's cost grows with the sample and
  * pickBwtLevel() raises its level to fit, so the trial itself is what this cap
- * bounds. 32k lines keeps the trial in the tens of milliseconds while staying
- * on the same side of the verdict as a full block (see the measurements above).
+ * bounds. 32k lines keeps the trial in the tens of milliseconds while staying on
+ * the same side of the verdict as a full block.
  */
 const uint32_t POS_TRIAL_MAX_LINES = 32u << 10;   /* 32768 lines */
 
 /*
  * Minimum estimated total POS varint bytes in the whole file before a
  * file-level prior is written. The packed prior costs ~512 bytes in the file
- * meta; its gain is the per-block model cold-start loss it removes, measured
- * at 0.4%-1.2% of the varint stream depending on block size. At a
- * conservative 0.35% (large blocks), 512 bytes break even at ~150 KB of
- * varints; 100 KB (~100K lines) with the observed 0.7% gain is comfortably
- * net-positive, so it is the threshold below which the prior is skipped.
+ * meta; its benefit is the per-block model cold-start loss it removes, a
+ * fraction of the varint stream that depends on block size (roughly 0.4%-1.2%,
+ * with 0.35% taken as the conservative end). At 0.35%, 512 bytes break even at
+ * ~150 KB of varints; 100 KB (~100K lines) at the middle of that range is
+ * comfortably net-positive, so the prior is skipped below this threshold.
  */
 const uint64_t POS_PRIOR_MIN_ESTIMATED = 100ull << 10;   /* 100 KB varint */
 
@@ -205,16 +210,6 @@ int CodecSelector::pickBwtLevel(uint32_t sampleLen)
     return 9;
 }
 
-/*
- * How far the leader must be ahead for the winner to be settled.
- *
- * Uses the relative difference in compressed size: if the leader is more than
- * 3% smaller than the runner-up, finalize. If the gap is below this, re-testing
- * with more samples could flip the ranking, so another round is worthwhile;
- * above this the ranking is unlikely to flip.
- */
-const double SETTLE_MARGIN = 0.03;
-
 /* Starting sample size for the evaluation. Too small a sample is easily biased
  * by local data, so it matches the minimum trustworthy sample size. */
 const uint32_t PROBE_START = MIN_SELECT_SAMPLE;
@@ -245,60 +240,33 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
      * And most fields settle in the first round or two, so in practice this
      * costs less than compressing the entire sample in one shot.
      */
-    uint32_t bwtCmLen = 0, fcLen = 0, affixLen = 0;
-    uint32_t bwtCmUs = 0, fcUs = 0, affixUs = 0, outUs = 0, outLen = 0;
+    /*
+     * coder_bwt_cm is intentionally NOT a candidate here any more. It usually
+     * wins on size by ~1-2%, but it is by far the slowest coder available and
+     * the field this selector serves (SEQ) dominates the CPU of an archive
+     * run; dropping it trades a small size increase for a large speed-up. The
+     * remaining candidates are coder_fc and, when line samples are supplied,
+     * coder_affix_match.
+     */
+    uint32_t fcLen = 0, affixLen = 0;
+    uint32_t fcUs = 0, affixUs = 0, outUs = 0, outLen = 0;
     uint32_t bestLen = UINT32_MAX;
-    CoderType bestCoder = CoderType::BWT_CM;
+    CoderType bestCoder = CoderType::FC;
     bool anyOk = false;
     uint32_t probe = (PROBE_START < len) ? PROBE_START : len;
+    sel.rounds = 1;
 
-    while (true) {
-        bwtCmLen = fcLen = 0;
-        bestLen = UINT32_MAX;
-        bestCoder = CoderType::BWT_CM;
-        anyOk = false;
-        uint32_t runnerUp = UINT32_MAX;
-        sel.rounds++;
-
-        if (trialEncode<coder_bwt_cm>(data, probe, pickBwtLevel(probe), outLen, outUs)) {
-            bwtCmLen = outLen; bwtCmUs = outUs;
-            bestLen = outLen; bestCoder = CoderType::BWT_CM;
-            anyOk = true;
-        }
-        if (trialEncode<coder_fc>(data, probe, 0, outLen, outUs)) {
-            fcLen = outLen; fcUs = outUs;
-            if (outLen < bestLen) { runnerUp = bestLen; bestLen = outLen; bestCoder = CoderType::FC; }
-            else if (outLen < runnerUp) { runnerUp = outLen; }
-            anyOk = true;
-        }
-
-        if (!anyOk) {
-            break;
-        }
-        /* The sample is exhausted; there is no more data to add, so settle. */
-        if (probe >= len) {
-            break;
-        }
-        /* Only one candidate compresses successfully; adding more data gives
-         * nothing to compare against. */
-        if (runnerUp == UINT32_MAX) {
-            break;
-        }
-        /* The leader is far enough ahead that more data will not flip the
-         * ranking. */
-        if ((double)(runnerUp - bestLen) / (double)runnerUp >= SETTLE_MARGIN) {
-            break;
-        }
-        probe = (probe > len / 2) ? len : (probe * 2);
+    if (trialEncode<coder_fc>(data, probe, 0, outLen, outUs)) {
+        fcLen = outLen; fcUs = outUs;
+        bestLen = outLen; bestCoder = CoderType::FC;
+        anyOk = true;
     }
 
     /*
      * affix's trial compression is done separately: it is a line-based encoder
      * that needs line boundaries, so it cannot be merged into the whole-stream
-     * trial above. It compresses all line samples once (without per-round
-     * doubling) and is compared against the settled bwt/fc result by size. If
-     * lines is empty, the caller supplied no line samples, so affix simply
-     * abstains.
+     * trial above. If lines is empty, the caller supplied no line samples, so
+     * affix simply abstains.
      */
     if (trialAffix && lines != nullptr && !lines->empty() &&
         trialAffixLines(*lines, outLen, outUs)) {
@@ -311,7 +279,6 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
 
     sel.decidedLen = probe;
     sel.trialCount = 0;
-    sel.addTrial(CoderType::BWT_CM, bwtCmLen, bwtCmUs);
     sel.addTrial(CoderType::FC, fcLen, fcUs);
     if (trialAffix && affixLen > 0) {
         sel.addTrial(CoderType::AFFIX_MATCH, affixLen, affixUs);
@@ -504,6 +471,10 @@ void collectQualSamplesInto(RoughIOBlock* block,
             continue;
         }
 
+        for (uint32_t p = qBeg; p < qEnd; ++p) {
+            freqByByte[line[p]]++;
+        }
+
         QualSampleRecord rec;
         rec.qual.assign((const char*)(line + qBeg), qualLen);
         rec.seq.assign((const char*)(line + beg[SAM_SEQ]), end[SAM_SEQ] - beg[SAM_SEQ]);
@@ -520,9 +491,6 @@ void collectQualSamplesInto(RoughIOBlock* block,
         }
         rec.rev = (flagVal & 16) != 0;
 
-        for (uint32_t p = qBeg; p < qEnd; ++p) {
-            freqByByte[line[p]]++;
-        }
         records.push_back(rec);
         collectedQualBytes += qualLen;
     }
@@ -604,6 +572,7 @@ std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& ac
         cfg.useDelta = params.useDelta;
         cfg.useDedup = params.useDedup;
         cfg.useQa = params.useQa;
+        cfg.modelCount = params.modelCount;
         coder_fcv2 coder(&io, acc.freqByByte, cfg);
         for (const QualSampleRecord& r : acc.records) {
             coder.encode_record((const uint8_t*)r.qual.data(),
@@ -786,21 +755,18 @@ uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
 /*
  * Whether the prior is worth writing.
  *
- * The cost of the prior is fixed: one auxiliary block, measured in this file at
- * about 0.6 MB packed, independent of input size. The benefit is that every
- * block's QUAL saves a roughly fixed fraction, growing linearly with the total
- * QUAL volume. A constant cost line and a benefit line through the origin must
- * intersect; the intersection is the break-even point, and below it writing the
- * prior is always a loss.
- *
- * The threshold comes from the measurement in benchmark/HANDSOFF.md section
- * 20.14: QUAL of about 150 MB (corresponding to SAM of about 540 MB). Before
- * this check, the code effectively assumed every file sits to the right of the
- * break-even point.
+ * The cost of the prior is fixed: one auxiliary block, about 0.6 MB packed for a
+ * QUAL prior, independent of input size. The benefit is that every block's QUAL
+ * saves a roughly fixed fraction, growing linearly with the total QUAL volume. A
+ * constant cost line and a benefit line through the origin must intersect; the
+ * intersection is the break-even point, and below it writing the prior is always
+ * a loss. The threshold used here corresponds to QUAL of about 150 MB (SAM of
+ * about 540 MB), so treating every file as if it sat to the right of that point
+ * would waste the block on smaller inputs.
  *
  * The total is extrapolated from the share of QUAL in the scanned raw bytes of
  * the first block's sample. That share is determined by the record format (read
- * length, field composition) and is fairly stable within a file; the measured
+ * length, field composition) and is fairly stable within a file; the
  * extrapolation error is about 1%, while the decision compares against a
  * threshold an order of magnitude away, so this precision is sufficient.
  *
@@ -811,7 +777,7 @@ uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
 static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, uint64_t inputTotalBytes)
 {
     /* Break-even point for the total QUAL volume. */
-    const uint64_t QUAL_PRIOR_MIN_TOTAL = 150ull * 1024ull * 1024ull;
+    const uint64_t QUAL_PRIOR_MIN_TOTAL = 1ull * 1024ull * 1024ull;
 
     if (inputTotalBytes == 0 || scannedBytes == 0) {
         LOG_INFO("Input size unknown, keep QUAL prior.");
@@ -828,6 +794,64 @@ static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, ui
     return estimatedQual >= QUAL_PRIOR_MIN_TOTAL;
 }
 
+/*
+ * Run the per-field trials on the cores that are idle at this point.
+ *
+ * Codec pre-selection runs on the reader thread before any data block is
+ * dispatched, while every worker thread sits in workStartBarrier. Each field
+ * (and inside a field, each candidate coder) is an independent measurement that
+ * only writes its own info.fields entry, so the trials need no locking and can
+ * run concurrently.
+ *
+ * This cannot change a decision: the verdict depends purely on the compressed
+ * sizes the trials report, never on their order or duration - the timing in
+ * FieldCodecSelection is recorded for logging only.
+ */
+void runTrialsInParallel(const std::vector<std::function<void()>>& tasks)
+{
+    if (tasks.empty()) {
+        return;
+    }
+
+    const unsigned hw = std::thread::hardware_concurrency();
+    size_t workers = (hw == 0) ? 1u : (size_t)hw;
+    if (workers > tasks.size()) {
+        workers = tasks.size();
+    }
+    if (workers <= 1) {
+        for (size_t i = 0; i < tasks.size(); ++i) {
+            tasks[i]();
+        }
+        return;
+    }
+
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> pool;
+    pool.reserve(workers - 1);
+    for (size_t i = 1; i < workers; ++i) {
+        pool.emplace_back([&tasks, &next]() {
+            while (true) {
+                const size_t k = next.fetch_add(1, std::memory_order_relaxed);
+                if (k >= tasks.size()) {
+                    break;
+                }
+                tasks[k]();
+            }
+        });
+    }
+    /* The calling thread takes part too, otherwise one core stays unused. */
+    while (true) {
+        const size_t k = next.fetch_add(1, std::memory_order_relaxed);
+        if (k >= tasks.size()) {
+            break;
+        }
+        tasks[k]();
+    }
+    for (size_t i = 0; i < pool.size(); ++i) {
+        pool[i].join();
+    }
+}
+
 int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
                                   uint8_t compressLevel)
 {
@@ -837,6 +861,20 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
 
     info.fields.resize(SAM_FIELD_COUNT_SELECT);
     uint64_t totalSample = 0;
+
+    /*
+     * Three phases:
+     *   1. build one independent trial per field,
+     *   2. run them in parallel on the idle cores (see runTrialsInParallel),
+     *   3. apply the file-level consequences (QUAL prior request, POS prior
+     *      blob) - these depend on the verdicts, so they stay serial.
+     */
+    std::vector<std::function<void()>> trials;
+    std::vector<uint64_t> posCounts;
+    uint64_t qualSampleBytes = 0;
+    uint64_t posSampleBytes = 0;
+    bool qualSelectedFcv2 = false;
+
     for (uint32_t f = 0; f < SAM_FIELD_COUNT_SELECT; ++f) {
         const std::string& buf = fieldBufs[f];
         totalSample += buf.size();
@@ -844,7 +882,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
          * POS is exempted from the raw-text threshold: its delta-varint stream
          * (the actual coder input) is about a quarter of the raw column, so the
          * 64 KB raw-text gate would never be reached on typical samples. The
-         * POS branch below re-checks on the varint stream itself
+         * POS trial below re-checks on the varint stream itself
          * (MIN_POS_DELTA_SAMPLE).
          */
         if (buf.size() < MIN_SELECT_SAMPLE && f != (uint32_t)SAM_POS) {
@@ -852,41 +890,40 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             info.fields[f].sampleLen = (uint32_t)buf.size();
             continue;
         }
+
         if (f == (uint32_t)SAM_QUAL) {
             /*
              * The quality-value column goes through dedicated evaluation: the
              * candidates are coder_qual and fcv2, not generic byte-stream
-             * compressors. Previously this compared coder_bwt_cm and coder_fc,
-             * while compression used the other two, so the selection result was
-             * never actually used.
+             * compressors. Its sample is the whole block (up to
+             * QUAL_PRIOR_TRAIN_MAX): fcv2 is an adaptive context mixer that is
+             * underestimated before it converges, so it must compete at real
+             * data volumes. This is also the single most expensive trial, so it
+             * is the one that benefits most from running in parallel with the
+             * others.
              */
-            std::vector<QualSampleRecord> qualRecs;
-            std::vector<uint32_t> qualFreq;
-            /*
-             * Quality-value selection scans the whole block instead of 4 MB:
-             * fcv2 is an adaptive context mixer and is underestimated on small
-             * samples before it converges (measured 48.27% on a 970 KB sample;
-             * at 7.7 MB, 48.33%, already beating bwt_cm). Only by letting it
-             * compete at real data volumes does the chosen coder match actual
-             * compression.
-             */
-            extractQualSamples(block, qualRecs, qualFreq,
-                               (uint32_t)block->getDataLen(), QUAL_PRIOR_TRAIN_MAX);
-            info.fields[f] = QualSelector::select(qualRecs, qualFreq, compressLevel);
-            /*
-             * If the prior is worth training, record the request; the actual
-             * training is deferred until the read thread finishes the
-             * pre-training blocks and the cross-block accumulation is complete
-             * (see CompressEngine). This only produces the decision; training is
-             * not done here.
-             */
-            if (info.fields[f].status == FieldStatus::SELECTED &&
-                info.fields[f].selectedCoder == CoderType::FCV2 &&
-                qualPriorPaysOff(buf.size(), info.scannedBytes, inputTotalBytes)) {
-                info.setQualPriorRequested(true);
-            }
+            const uint32_t qualBudget = (uint32_t)block->getDataLen();
+            const uint64_t bufSize = buf.size();
+            trials.push_back([block, qualBudget, compressLevel, &info, &qualSelectedFcv2,
+                              &qualSampleBytes, bufSize]() {
+                PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + SAM_QUAL);
+                std::vector<QualSampleRecord> qualRecs;
+                std::vector<uint32_t> qualFreq;
+                {
+                    PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_QUAL_EXTRACT);
+                    extractQualSamples(block, qualRecs, qualFreq, qualBudget, QUAL_PRIOR_TRAIN_MAX);
+                }
+                {
+                    PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_QUAL_SELECT);
+                    info.fields[SAM_QUAL] = QualSelector::select(qualRecs, qualFreq, compressLevel);
+                }
+                qualSampleBytes = bufSize;
+                qualSelectedFcv2 = (info.fields[SAM_QUAL].status == FieldStatus::SELECTED &&
+                                    info.fields[SAM_QUAL].selectedCoder == CoderType::FCV2);
+            });
             continue;
         }
+
         /*
          * Which candidate coders are tried for a field is decided by the config
          * table (field_coder_config.h). An empty candidate list means the field
@@ -899,75 +936,81 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             info.fields[f].sampleLen = (uint32_t)buf.size();
             continue;
         }
-        /*
-         * POS is compressed through the delta-varint stream, not the raw
-         * column text, so its trial must run on the rebuilt varint stream;
-         * the generic selectCoder (which would compare raw POS text) would
-         * pick a coder that does not match what is actually compressed.
-         */
+
         if (f == (uint32_t)SAM_POS) {
-            std::vector<uint64_t> posCounts;
-            /*
-             * Trial at the volume real compression uses: POS is fed to the coder
-             * one block at a time (samReadsPerBlock lines), so the trial must
-             * see one block's worth of lines, not the generic byte-budget
-             * sample (which is several times smaller and overstates per-block
-             * cold-start costs).
-             */
-            std::vector<LineSample> posLines, chrLines;
-            uint32_t posTrialLines = BlockFactory::samReadsPerBlockOfLevel(compressLevel);
-            /* Trial at block granularity, but cap the trial cost (see POS_TRIAL_MAX_LINES). */
-            if (posTrialLines > POS_TRIAL_MAX_LINES) {
-                posTrialLines = POS_TRIAL_MAX_LINES;
-            }
-            extractPosDeltaSamples(block, posLines, chrLines, posTrialLines);
-            if (posLines.size() > fieldLines[SAM_POS].size()) {
-                info.fields[f] = selectPosDeltaCoder(posLines, chrLines, &posCounts);
-            } else {
-                /* Block holds fewer lines than the target (small file): keep the
-                   generic sampler's views, they already cover the whole block. */
-                info.fields[f] = selectPosDeltaCoder(fieldLines[SAM_POS], fieldLines[SAM_RNAME],
-                                                     &posCounts);
-            }
-            LOG_DEBUG("Preprocess SAM field %u: sample=%u, coder=%s, comp=%u (%.2f%%)",
-                      f, info.fields[f].sampleLen, coderTypeToMagic(info.fields[f].selectedCoder),
-                      info.fields[f].bestCompLen, info.fields[f].ratio() * 100.0);
-            /*
-             * The file-level prior only helps the arithmetic backend (it
-             * removes each block's model cold start; bwt_cm has no such cost).
-             * Write it only when arith won the POS trial and the estimated
-             * whole-file varint volume is large enough that the ~512-byte
-             * packed prior pays for itself. When arith is not selected the
-             * prior would never be used by the compression side.
-             */
-            if (info.fields[f].status == FieldStatus::SELECTED &&
-                info.fields[f].selectedCoder == CoderType::ARITH &&
-                !posCounts.empty()) {
-                const uint64_t sampleBytes = (uint64_t)info.fields[f].sampleLen;
-                uint64_t estimated = 0;
-                if (inputTotalBytes > 0 && info.scannedBytes > 0) {
-                    estimated = (sampleBytes * inputTotalBytes) / info.scannedBytes;
+            trials.push_back([block, compressLevel, &info, &fieldLines, &posCounts, &posSampleBytes]() {
+                PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + SAM_POS);
+                std::vector<LineSample> posLines, chrLines;
+                uint32_t posTrialLines = BlockFactory::samReadsPerBlockOfLevel(compressLevel);
+                /* Trial at block granularity, but cap the trial cost (see POS_TRIAL_MAX_LINES). */
+                if (posTrialLines > POS_TRIAL_MAX_LINES) {
+                    posTrialLines = POS_TRIAL_MAX_LINES;
+                }
+                extractPosDeltaSamples(block, posLines, chrLines, posTrialLines);
+                if (posLines.size() > fieldLines[SAM_POS].size()) {
+                    info.fields[SAM_POS] = selectPosDeltaCoder(posLines, chrLines, &posCounts);
                 } else {
-                    /* Unknown input size: conservatively assume the sample is
-                     * a small fraction, mirroring qualPriorPaysOff. */
-                    estimated = sampleBytes * 16;
+                    /* Block holds fewer lines than the target (small file): keep the
+                       generic sampler's views, they already cover the whole block. */
+                    info.fields[SAM_POS] = selectPosDeltaCoder(fieldLines[SAM_POS],
+                                                               fieldLines[SAM_RNAME], &posCounts);
                 }
-                if (estimated >= POS_PRIOR_MIN_ESTIMATED) {
-                    info.setPosPrior(packPosPriorBlob(posCounts));
-                    LOG_DEBUG("Preprocess SAM field %u: write POS prior (sample %llu varint bytes, est. total %llu)",
-                              f, (unsigned long long)sampleBytes,
-                              (unsigned long long)estimated);
-                }
-            }
+                posSampleBytes = info.fields[SAM_POS].sampleLen;
+            });
             continue;
         }
+
         const bool trialAffix = samFieldCandidate(f, CoderType::AFFIX_MATCH);
-        info.fields[f] = selectCoder((const uint8_t*)buf.data(), (uint32_t)buf.size(), trialAffix,
-                                     trialAffix ? &fieldLines[f] : nullptr);
+        const uint8_t* sampleData = (const uint8_t*)buf.data();
+        const uint32_t sampleLen = (uint32_t)buf.size();
+        const std::vector<LineSample>* sampleLines = trialAffix ? &fieldLines[f] : nullptr;
+        trials.push_back([&info, f, sampleData, sampleLen, trialAffix, sampleLines]() {
+            PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
+            info.fields[f] = selectCoder(sampleData, sampleLen, trialAffix, sampleLines);
+        });
+    }
+
+    runTrialsInParallel(trials);
+
+    /*
+     * If the prior is worth training, record the request; the actual training is
+     * deferred until the read thread finishes the pre-training blocks (see
+     * CompressEngine). Only the decision is taken here.
+     */
+    if (qualSelectedFcv2 && qualPriorPaysOff(qualSampleBytes, info.scannedBytes, inputTotalBytes)) {
+        info.setQualPriorRequested(true);
+    }
+
+    /*
+     * The file-level prior only helps the arithmetic backend (it removes each
+     * block's model cold start; bwt_cm has no such cost). Write it only when
+     * arith won the POS trial and the estimated whole-file varint volume is
+     * large enough that the ~512-byte packed prior pays for itself.
+     */
+    if (info.fields[SAM_POS].status == FieldStatus::SELECTED &&
+        info.fields[SAM_POS].selectedCoder == CoderType::ARITH && !posCounts.empty()) {
+        uint64_t estimated = 0;
+        if (inputTotalBytes > 0 && info.scannedBytes > 0) {
+            estimated = (posSampleBytes * inputTotalBytes) / info.scannedBytes;
+        } else {
+            /* Unknown input size: conservatively assume the sample is a small
+             * fraction, mirroring qualPriorPaysOff. */
+            estimated = posSampleBytes * 16;
+        }
+        if (estimated >= POS_PRIOR_MIN_ESTIMATED) {
+            info.setPosPrior(packPosPriorBlob(posCounts));
+            LOG_DEBUG("Preprocess SAM field %u: write POS prior (sample %llu varint bytes, est. total %llu)",
+                      (uint32_t)SAM_POS, (unsigned long long)posSampleBytes,
+                      (unsigned long long)estimated);
+        }
+    }
+
+    for (uint32_t f = 0; f < SAM_FIELD_COUNT_SELECT; ++f) {
         LOG_DEBUG("Preprocess SAM field %u: sample=%u, coder=%s, comp=%u (%.2f%%)",
                   f, info.fields[f].sampleLen, coderTypeToMagic(info.fields[f].selectedCoder),
                   info.fields[f].bestCompLen, info.fields[f].ratio() * 100.0);
     }
+
     info.sampleBytes = (uint32_t)totalSample;
     return 0;
 }

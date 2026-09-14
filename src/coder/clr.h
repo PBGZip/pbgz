@@ -115,11 +115,10 @@ public:
         if (err) return;
 
         /*
-         * This used to be abort(): killing the process deep inside a library
-         * function, with no logging and bypassing the engine's error
-         * aggregation. Changed to setting an error—a contradictory model means
-         * the data or state is already corrupt, and it is left to the surrounding
-         * code to decide.
+         * A contradictory model means the data or state is already corrupt, so this
+         * sets an error instead of aborting: killing the process deep inside a library
+         * function would bypass the engine's error aggregation and leave no log, while
+         * the error lets the surrounding code decide.
          */
         if (!totFreq || cumFreq + freq > totFreq) { err = -1; return; }
 

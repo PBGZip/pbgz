@@ -27,9 +27,11 @@
 #include <map>
 
 #include "io_block.h"
+#include "bam_columns.h"
 #include "io_wrapper.h"
 #include "pbgz_file_wrapper.h"
 #include "utils/memory_util.h"
+#include "bgzf_parallel.h"
 
 namespace BlockUtil {
     bool isFastqBlock(BlockType type);
@@ -242,6 +244,8 @@ public:
         return lastBlockHasData;
     }
 
+    void setStructMode(bool on) { structMode = on; }
+
 protected:
     /* Read the raw BAM byte stream (prefetched data + ioReader); BamGzBlockReader overrides this to inflate */
     virtual size_t readBamBytes(void* dst, size_t n);
@@ -252,6 +256,13 @@ protected:
     int32_t parseBamHeader();
     int32_t parseBamRecord(const uint8_t* data, int32_t size, std::string& samLine);
 
+    /*
+     * Structured mode: instead of rendering every record into a SAM line, the
+     * reader only appends the raw BAM record bytes ([u32 size][record]...) to
+     * the block. BamCodecActuator then parses the records into columns on its
+     * own thread (one block per worker), so the record->column work is fanned
+     * out over the coder threads instead of serialising on the reader.
+     */
 protected:
     struct BamRef { std::string name; int32_t len; };
     std::vector<BamRef> refs;          /* BAM reference sequence list (name + length) */
@@ -276,6 +287,9 @@ protected:
        the read side on long-read data). Capacity is kept across records. */
     std::vector<uint8_t> recBuf;
     std::string lineBuf;
+    bool structMode = false;
+    std::shared_ptr<BamColumns> colsCur;      /* columns of the block being read */
+    std::vector<uint8_t> pendingBamRecord;    /* a read parked to keep blocks inside the base cap */
 };
 
 /* GZ-compressed BAM format: the inner layer is still a BGZF stream; inflate it to raw BAM first, then convert to SAM */
@@ -287,16 +301,28 @@ public:
         inflateReady = false;
         gzInLen = 0;
         gzInEof = false;
+        parStarted = false;
+        parMode = false;
+        parThreads = 4;
     }
 
     ~BamGzBlockReader() {
+        if (parStarted) {
+            bgzfPar.stop();
+        }
         if (inflateReady) {
             inflateEnd(&inflateState);
         }
     }
 
+    /* Number of inflate workers for the parallel BGZF decoder (>=1). */
+    void setParThreads(int n) { parThreads = (n >= 1) ? n : 4; }
+
 protected:
     virtual size_t readBamBytes(void* dst, size_t n) override;
+
+    /* Serial fallback used when the stream is not cuttable BGZF. */
+    size_t readRawBam(void* dst, size_t n);
 
 private:
     z_stream inflateState;
@@ -304,6 +330,12 @@ private:
     uint8_t gzInBuf[1 << 20];          /* BGZF input buffer (1MB: fewer read/refill rounds) */
     size_t gzInLen;
     bool gzInEof;
+
+    BgzfParallelDecoder bgzfPar;
+    bool parStarted;                   /* probe done */
+    bool parMode;                      /* running the parallel decoder */
+    int parThreads;
+    std::vector<uint8_t> probeBuf;     /* stream head read once for the probe */
 };
 
 class BlockWriter;
@@ -328,7 +360,8 @@ public:
      * downstream consumers such as sorting that need a self-contained @SQ within the block.
      */
     static BlockReader* createBlockReader(IOReader* ioReader, uint8_t compressLevel = 0,
-                                          bool splitSamHeader = true);
+                                          bool splitSamHeader = true,
+                                          bool bamStructMode = false);
 
     /*
      * The SAM block granularity actually used by the readers for a level:
@@ -463,7 +496,13 @@ private:
  */
 class BamWriter : public BlockWriter {
 public:
-    explicit BamWriter(IOWriter* pIoWriter);
+    /*
+     * maxThreads caps how many threads the writer may use to convert SAM text
+     * into BAM records and to deflate the resulting BGZF blocks; 0 means "as
+     * many as the machine has". The engine passes -t, so `-t N` also bounds the
+     * writer instead of letting it saturate every core behind the user's back.
+     */
+    explicit BamWriter(IOWriter* pIoWriter, uint32_t maxThreads = 0);
 
     virtual ~BamWriter();
 
@@ -480,20 +519,28 @@ private:
     /* Parse the reference sequence list from SAM header lines and write the BAM header; returns pos (offset of the first data line) or dataLen */
     int32_t writeBamHeader(const uint8_t* data, size_t len, size_t& dataStart);
 
-    /* Convert one SAM alignment line into a BAM record and write it */
-    int32_t writeBamRecord(const uint8_t* line, size_t len);
-
     /* Process the data lines in a span of SAM text (converting each into a BAM record) */
     int32_t writeDataLines(const uint8_t* buffer, size_t start, size_t end);
 
     /* Write as-is (pass-through mode, or the underlying write for BGZF) */
     int32_t writeRaw(const void* data, size_t len);
 
-    /* Write through BGZF block compression (the container of standard BAM) */
+    /* Buffer uncompressed BAM bytes and frame every complete BGZF block */
     int32_t bgzfWrite(const void* data, size_t len);
 
-    /* Compress the bytes accumulated in the buffer into one BGZF block and write it */
-    int32_t bgzfFlushBlock();
+    /*
+     * Frame the buffered uncompressed bytes into BGZF blocks. Every complete
+     * 64KB block is deflated independently, so a batch is compressed in
+     * parallel (the writer thread is otherwise the pipeline bottleneck, and
+     * single threaded BGZF deflate was ~90% of `-b` wall time). Block
+     * boundaries, parameters and output order are unchanged, so the byte
+     * stream is identical to the serial path. Only the writer thread calls
+     * this, and the helper threads do nothing but deflate.
+     *
+     * bgzfWrite() emits every complete 64KB block it can; bgzfFlushRemaining()
+     * emits the trailing partial block at end of stream.
+     */
+    int32_t bgzfFlushRemaining();
 
 private:
     struct BamRef {
@@ -508,9 +555,14 @@ private:
     bool passThrough;                      /* Set when the first block is not SAM; pass through as-is */
     bool finished;                         /* finish() has been executed (prevents duplicate EOF markers) */
 
-    /* BGZF block compression state */
-    uint8_t bgzfBuf[65536];
-    size_t bgzfLen;
-    z_stream bgzfZs;
-    bool bgzfReady;
+    /*
+     * Uncompressed BAM bytes not yet framed into BGZF blocks. bgzfWrite()
+     * drains every complete 64KB block; finish() drains the trailing partial
+     * block. Kept across writeBlock calls, so block boundaries only depend on
+     * the byte offset in the stream - exactly as the previous per-call flush
+     * loop behaved.
+     */
+    std::vector<uint8_t> bgzfPending;
+
+    uint32_t maxThreads;   /* 0 = hardware_concurrency (see the constructor) */
 };

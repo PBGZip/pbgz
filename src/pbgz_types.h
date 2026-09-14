@@ -27,6 +27,14 @@
 #include <unistd.h>
 #include <chrono>
 
+/* Compression mode, mirroring CRAM's archive/fast split: archive (default) uses
+ * the high-ratio textual SAM/BAM path; fast uses the structured column path,
+ * which is quicker on BAM but trades a little ratio (and is experimental). */
+enum {
+    PBGZ_MODE_ARCHIVE = 0,
+    PBGZ_MODE_FAST    = 1
+};
+
 typedef struct PbgzParameter{
     std::string inputFile;
     bool isDecToGZ;   // Whether to decompress to GZ format
@@ -37,6 +45,7 @@ typedef struct PbgzParameter{
     std::string referenceGenic;      // Reference genome
     std::string niIndexFile;         // Prebuilt index; it is only an acceleration aid, the reference genome is always authoritative via referenceGenic
     bool isUnpackRef;  
+    uint8_t mode;              /* PBGZ_MODE_ARCHIVE or PBGZ_MODE_FAST */
     uint32_t threadNum; 
     uint8_t compressLevel;
     bool isRemoveOriginFile;    // Whether to remove source file

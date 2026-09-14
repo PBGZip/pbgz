@@ -60,11 +60,12 @@ public:
      * auxiliary block lands, the earlier package's blocks are often still being decoded.
      * Overwriting would silently make them use the wrong data.
      *
-     * The "absolute file offset" used to serve as the identity here, and that was
-     * wrong: under a non-seekable pipe input the offset collapses to 0, the claimant
-     * registers under 0 while data blocks look up by in-package relative offset, and
-     * every lookup misses. The package sequence number depends only on the number of
-     * parsed package headers, so it holds equally for files and pipes.
+     * The identity here is the package sequence number rather than the absolute
+     * file offset: under a non-seekable pipe input the offset collapses to 0, so
+     * the claimant would register under 0 while data blocks look up by in-package
+     * relative offset and every lookup would miss. The sequence number depends
+     * only on the number of parsed package headers, so it holds equally for files
+     * and pipes.
      *
      * It is currently assumed that a package contains at most one auxiliary block of
      * each kind, which holds until priors are sharded. Once sharding lands, the key

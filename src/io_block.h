@@ -27,15 +27,18 @@
 #include <stdlib.h>
 #include <vector>
 #include <string.h>
+#include <memory>
+#include <string>
 
 #include "utils/memory_util.h"
+#include "bam_columns.h"
 
 const size_t BLOCK_SIZE = 268435456;
 
 /* Number of bytes the Creator reads ahead to determine the file format. This data is later merged into the first block / first package header, so nothing is wasted. */
 const size_t BLOCK_TYPE_DETECT_SIZE = 1 << 20;
 
-/* Initial allocation size for an input block: no longer allocates one large buffer for -l up front; starts at a fixed 1MB and grows on demand with realloc while reading. */
+/* Initial allocation size for an input block: the buffer is not sized for the whole input up front; it starts at a fixed 1MB and grows on demand with realloc while reading. */
 const size_t FIXED_INPUT_BLOCK_SIZE = 1 << 20;
 
 typedef enum
@@ -82,6 +85,10 @@ public:
         syncAux = false;
         packageStart = 0;
         packageIndex = -1;
+        md5Hex.clear();
+        md5Ready = false;
+        bamCols.reset();
+        bamPrebuilt = false;
     }
 
     /*
@@ -250,6 +257,55 @@ public:
     size_t getBlockSize() const {
         return blockSize;
     }
+
+    /*
+     * MD5 of the raw block text. It is a pure function of the input, so the
+     * reader thread computes it before dispatching the block and the actuator
+     * only copies it into the meta, so the worker threads (the busiest resource in
+     * the pipeline) do not hash the block themselves. setMd5/hasMd5 are only
+     * touched by the thread that owns the block at that moment.
+     */
+    bool hasMd5() const {
+        return md5Ready;
+    }
+
+    std::string getMd5() const {
+        return md5Hex;
+    }
+
+    void setMd5(const std::string& value) {
+        md5Hex = value;
+        md5Ready = true;
+    }
+
+    /*
+     * Structured BAM columns carried alongside the raw record bytes. Set by
+     * BamBlockReader in structured mode and consumed by BamCodecActuator; empty
+     * for every other block. reset() drops it so a recycled block never sees
+     * the previous one's columns.
+     */
+    std::shared_ptr<BamColumns> getBamColumns() const {
+        return bamCols;
+    }
+
+    void setBamColumns(const std::shared_ptr<BamColumns>& c) {
+        bamCols = c;
+    }
+
+    /*
+     * Set when the block's payload already is the BAM byte stream of its records
+     * (BamCodecActuator::decompress built it on a decompression worker when `-b`
+     * asked for BAM). BamWriter then frames the bytes into BGZF blocks directly
+     * instead of re-parsing SAM text on the single writer thread, which is what
+     * made `-b` output the slowest part of decompression.
+     */
+    bool isBamPrebuilt() const {
+        return bamPrebuilt;
+    }
+
+    void setBamPrebuilt(bool value) {
+        bamPrebuilt = value;
+    }
     
 private:
     uint8_t *buffer;
@@ -264,4 +320,8 @@ private:
     int64_t dataLen;
     size_t maxLineLen;
     size_t metaLen;
+    std::string md5Hex;            /* Cached MD5 of the raw block, filled on the read side */
+    bool md5Ready = false;
+    std::shared_ptr<BamColumns> bamCols;
+    bool bamPrebuilt = false;      /* payload already is a BAM byte stream (see setBamPrebuilt) */
 };

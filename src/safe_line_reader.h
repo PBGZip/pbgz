@@ -36,8 +36,8 @@
  * out-of-order npos table can never drive an out-of-bounds read through this
  * API -- malformed lines are silently skipped.
  *
- * This centralises the bounds-safety that field extractors previously
- * duplicated, so the guarantee lives in exactly one location.
+ * Every field extractor iterates through this class, so the bounds guarantee
+ * lives in exactly one location.
  */
 class SafeLineReader {
 public:

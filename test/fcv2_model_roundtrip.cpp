@@ -39,7 +39,7 @@ size_t expectedBlobSize(int alpha)
         8 * 96 * 64 +                                  /* m5 delta context (default deltaBucket=8) */
         4 * 96 * 64;                                   /* m6 average-quality bucket (QA_BINS=4) */
     return kHeaderBytes + (size_t)alpha + (size_t)alpha * 2 + 2 + 2 + counters * 2 +
-           16 * 64 * 7 * 4;                            /* weights: position buckets x tree nodes x 7 models x 4 bytes */
+           16 * 64 * FCV2_MODEL_COUNT * 4;             /* weights: position buckets x tree nodes x active models x 4 bytes */
 }
 
 std::vector<uint8_t> makeQualityData()

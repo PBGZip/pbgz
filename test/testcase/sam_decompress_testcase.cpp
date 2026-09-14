@@ -557,14 +557,14 @@ protected:
 // Test 1: ID field covering all separator characters
 TEST_F(SamDecompressTest, TestIDFieldSeparators) {
     generateSamFileWithSeparators("test_id_separators.sam");
-    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
+    // Only the compression/decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_id_separators.sam"));
 }
 
 // Test 2: Missing fields scenario, triggering segment compression logic
 TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
     generateSamFileWithMissingFields("test_missing_fields.sam");
-        // After optimization, only verify compression and decompression return codes, no longer compare file content
+        // Only the compression and decompression return codes are verified here; the file content is not compared
         // Load input file (invalid content is loaded as raw bytes to verify the actuator's pre-analysis rejection logic)
         loadSamDataRaw("test_missing_fields.sam");
 
@@ -579,48 +579,48 @@ TEST_F(SamDecompressTest, TestMissingFieldsSegmentCompression) {
 // Test 3: FLAG field matching, unmatched, forward matching, reverse matching
 TEST_F(SamDecompressTest, TestFlagVariants) {
     generateSamFileWithFlagVariants("test_flag_matching.sam");
-    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
+    // Only the compression/decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_flag_matching.sam"));
 }
 
 // Test 4.1: Fixed-length Base field scenario
 TEST_F(SamDecompressTest, TestBaseFieldFixed) {
     generateSamFileWithFixedBase("test_base_fixed.sam");
-    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
+    // Only the compression/decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_base_fixed.sam"));
 }
 
 // Test 4.2: Variable-length Base field scenario
 TEST_F(SamDecompressTest, TestBaseFieldVariable) {
     generateSamFileWithVariableBase("test_base_variable.sam");
-    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
+    // Only the compression/decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_base_variable.sam"));
 }
 
 // Test 4.3: 3rd generation fastq scenario
 TEST_F(SamDecompressTest, TestBaseFieldFastq3) {
     generateSamFileWithFastq3Base("test_base_fastq3.sam");
-    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
+    // Only the compression/decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_base_fastq3.sam"));
 }
 
 // Test 5.1: With optional fields
 TEST_F(SamDecompressTest, TestOptionalFieldsPresent) {
     generateSamFileWithOptionalFields("test_optional_fields.sam");
-    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
+    // Only the compression/decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_optional_fields.sam"));
 }
 
 // Test 5.2: Without optional fields
 TEST_F(SamDecompressTest, TestNoOptionalFields) {
     generateSamFileWithoutOptionalFields("test_no_optional_fields.sam");
-    // After optimization, only the compression/decompression return codes are verified; file content is no longer compared
+    // Only the compression/decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_no_optional_fields.sam"));
 }
 
 /* Reads with missing quality (a single '*'): the compression side expands them to SEQ length and
  * the decompression side folds them back to '*', keeping the quality-value stream aligned with
- * record lengths. Regression case: previously a '*' read corrupted the whole QUAL column. */
+ * record lengths. A '*' read must not disturb the rest of the QUAL column. */
 TEST_F(SamDecompressTest, TestMissingQuality) {
     std::ofstream file("test_missing_quality.sam");
     ASSERT_TRUE(file.is_open());
@@ -658,7 +658,7 @@ TEST_F(SamDecompressTest, TestMixedScenarios) {
     file << "read4\t16\tchr2\t3\t60\t200M\t*\t0\t0\tATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG_ATCGATCG_ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG\t!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\tNM:i:10\n";
     file.close();
 
-    // After optimization, only verify compression and decompression return codes, no longer compare file content
+    // Only the compression and decompression return codes are verified here; the file content is not compared
     // Load input file (contains invalid records with missing fields; load as raw bytes to verify the actuator's pre-analysis rejection logic)
     loadSamDataRaw("test_mixed.sam");
 
@@ -714,7 +714,7 @@ TEST_F(SamDecompressTest, TestCompressionPerformance) {
 
     file.close();
 
-    // After optimization, only verify compression and decompression return codes, no longer compare file content
+    // Only the compression and decompression return codes are verified here; the file content is not compared
     EXPECT_NO_THROW(compressAndDecompress("test_large.sam"));
 }
 

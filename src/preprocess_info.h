@@ -25,6 +25,8 @@
 
 #include <stdint.h>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,6 +46,7 @@ enum class CoderType : uint8_t {
     QUAL,         /* coder_qual:   quality-specific context model coder    */
     AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder, for regular SAM fields */
     ARITH,        /* coder_arith:  order-0 adaptive arithmetic byte-stream coder */
+    RANS,         /* coder_rans:   static order-0 entropy coder, fast preset only (never a trial candidate) */
     COUNT
 };
 
@@ -58,6 +61,7 @@ static inline const char* coderTypeToMagic(CoderType type)
     case CoderType::QUAL:      return "coder_qual";
     case CoderType::AFFIX_MATCH: return "coder_affix_match";
     case CoderType::ARITH:     return "coder_arith";
+    case CoderType::RANS:      return "coder_rans";
     default:                   return "unknown";
     }
 }
@@ -70,12 +74,16 @@ enum class FieldStatus : uint8_t {
 };
 
 /*
- * Context parameter tier for the fcv2 quality coder. QualSelector picks it based on
- * data characteristics (quality alphabet size, sample size, mean read length) and
- * includes it in trial compression; once selected it travels with PreprocessInfo to
- * the compression side and prior training. The decoder reads the same parameter set
- * back from the stream header and does not rely on this struct. Field semantics are
- * defined in Fcv2Cfg in coder_fcv2.h.
+ * Context parameter tier for the fcv2 quality coder. QualSelector picks it by trial
+ * compression among a candidate set, and the set is shaped by two data
+ * characteristics: the block-volume tier that follows the compression level, and
+ * the mean read length, which decides modelCount (see qualModelCountForMeanLen).
+ * The quality alphabet size is not used to pick a tier, even though the tier
+ * rationale is stated in those terms - measurements do not support using it, see
+ * candidateFcv2Cfgs. Once selected it travels with PreprocessInfo to the
+ * compression side and prior training. The decoder reads the same parameter set
+ * back from the stream header and does not rely on this struct. Field semantics
+ * are defined in Fcv2Cfg in coder_fcv2.h.
  */
 struct QualFcv2Params {
     int  cycleMax    = 96;
@@ -86,13 +94,21 @@ struct QualFcv2Params {
     bool useDelta    = true;
     bool useDedup    = false;
     bool useQa       = false;
+    /*
+     * How many mixing models fcv2 uses. It must travel with the tier: the prior
+     * snapshot is sized by it, so training and compression have to agree (the
+     * decoder gets it from the stream header). The default mirrors Fcv2Cfg's,
+     * which is the measured best (see FCV2_MODEL_COUNT in coder_fcv2.h).
+     */
+    int  modelCount  = 6;
 
     bool operator==(const QualFcv2Params& o) const
     {
         return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
                deltaMax == o.deltaMax && deltaBucket == o.deltaBucket &&
                prevShift == o.prevShift && useDelta == o.useDelta &&
-               useDedup == o.useDedup && useQa == o.useQa;
+               useDedup == o.useDedup && useQa == o.useQa &&
+               modelCount == o.modelCount;
     }
     bool operator!=(const QualFcv2Params& o) const { return !(*this == o); }
 };
@@ -108,12 +124,9 @@ struct FieldCodecSelection {
      * Trial-compression results for each candidate coder: which coder, how many bytes
      * it produced, and how many microseconds it took.
      *
-     * This used to be two hard-coded field pairs (trialBwtCmLen / trialFcLen) because
-     * the generic path happened to have only two candidates, bwt_cm and fc. The QUAL
-     * column has a different candidate set, so the same field pair had to be repurposed
-     * for other coders and the labels swapped at print time - once there are more than
-     * two candidates, that reuse becomes self-contradictory. With an array, each field
-     * declares its own candidate set and the print side just reads them off.
+     * The candidate set differs per field (the QUAL column has its own), so each
+     * field declares its list and the print side reads it off, rather than
+     * assuming a fixed pair of coders.
      *
      * The trial time exists so the selection policy can trade off compression ratio
      * against speed instead of always picking the minimum: it is common for two coders
@@ -146,7 +159,7 @@ struct FieldCodecSelection {
      * Number of sample bytes actually used to finalize the decision, and how many
      * rounds were run to get there.
      *
-     * Evaluation no longer "compresses the whole sample"; instead it starts from a
+     * Evaluation does not compress the whole sample in one pass: it starts from a
      * small sample and doubles it each round, stopping as soon as the leader opens up
      * enough of a gap. Most fields are decided within the first round or two, leaving
      * the remaining budget for the genuinely hard-to-separate fields. decidedLen being
@@ -257,6 +270,46 @@ struct PreprocessInfo {
     std::vector<uint8_t> posPriorSnapshot;
 
     /*
+     * Which coder codes the SEQ match stream ("m"). This is the transformed stream,
+     * not the SEQ field's ASCII sample, so the decision cannot be taken with the rest
+     * of the field trials during preprocessing: building the stream needs the
+     * reference.
+     *
+     * BWT_CM and FC both code the stream and the smaller wins, decided on the first
+     * block that carries it and reused by every later block. On ERR14949932 FC loses
+     * on the aggregated stream by 6.40% (-l5) / 4.61% (-l8) and wins none of the
+     * 335 / 34 blocks, while deciding per block instead cost 10.8% / 3.3% of the
+     * compression time and changed no byte of the output.
+     *
+     * Holds one of CoderType's values, or -1 while undecided.
+     */
+    std::atomic<int32_t> seqMatchCoder;
+
+    /*
+     * Which form the block's N positions travel in: 0 = absolute 4-byte offsets
+     * ("npos"), 1 = deltas in varints ("nposd"), -1 while undecided.
+     *
+     * Both forms are measured and the smaller wins. The absolute offsets are monotone
+     * and smooth, which compresses better when Ns are sparse; the deltas are small and
+     * nearly constant, which wins when they are dense (ERR14949932, 11.3% N: the stream
+     * went from two thirds of the archive to a few MB; con_sorted, 0.002% N: the
+     * absolute form stays smaller). Which applies is a property of the file - the N
+     * layout is set by the sequencing data and the masking, not by the block - so it is
+     * measured on the first block that has positions and reused, which keeps the cost at
+     * one trial per file rather than one per block.
+     */
+    std::atomic<int32_t> nposForm;
+
+    /*
+     * Serialises the per-file verdicts above. They are written by the lowest block that
+     * can measure them, and the blocks running alongside it wait on decideCond instead
+     * of each repeating the same trial; see SamCodecActuator::decideOncePerFile for why
+     * the deciding block is pinned rather than left to whoever gets there first.
+     */
+    std::mutex decideMutex;
+    std::condition_variable decideCond;
+
+    /*
      * analyze decides this file is worth training and publishing a QUAL prior for.
      * The decision is produced during preprocessing (the RUNNING stage) and read only
      * by the reader thread; the actual training is deferred until the reader thread has
@@ -265,8 +318,10 @@ struct PreprocessInfo {
      */
     bool qualPriorRequested;
 
+    /* The initializers follow the declaration order of the members, as the language requires them
+       to be applied in it. */
     PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
-                       qualPriorTrainingBytes(0), qualPriorRequested(false) {}
+                       qualPriorTrainingBytes(0), seqMatchCoder(-1), nposForm(-1), qualPriorRequested(false) {}
 
     void reset(BlockType type)
     {
@@ -279,6 +334,8 @@ struct PreprocessInfo {
         qualPriorTrainingBytes = 0;
         qualPriorRequested = false;
         posPriorSnapshot.clear();
+        seqMatchCoder.store(-1, std::memory_order_relaxed);
+        nposForm.store(-1, std::memory_order_relaxed);
     }
 
     bool isDone() const

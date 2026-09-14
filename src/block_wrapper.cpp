@@ -22,13 +22,18 @@
  */
 
 #include "block_wrapper.h"
+#include "profile_stats.h"
 #include "log/logger.h"
 #include "pbgz_types.h"
 #include <cstring>
 #include <set>
+#include <atomic>
+#include <thread>
 #include "pbgz_manager.h"
 #include "config_manager.h"
 #include <zlib.h>
+
+#include "bam_record.h"
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -373,7 +378,7 @@ static size_t samRowSeqLength(const uint8_t* row, size_t len) {
  *   1. The header (@ lines) is returned as its own block;
  *   2. The data region is split into blocks of readsPerBlock reads (10000/25000/100000
  *      depending on the compression level).
- * Block size is determined by the read line count and is no longer bounded by byte blockSize;
+ * Block size is determined by the read line count, not bounded by a byte blockSize;
  * the buffer grows on demand when it is insufficient.
  */
 int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/) {
@@ -785,6 +790,40 @@ size_t BamBlockReader::readBamBytes(void* dst, size_t n) {
 }
 
 size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
+    PBGZ_PROF_SCOPE(pbgzprof::READ_INFLATE);
+    if (!parStarted) {
+        parStarted = true;
+        /* Probe the stream head once. The probe bytes belong to the stream and
+           are replayed either by the parallel decoder (as its head input) or
+           by the serial fallback (readRawBam drains probeBuf first). */
+        probeBuf.resize(1 << 16);
+        size_t got = 0;
+        while (got < probeBuf.size()) {
+            const size_t r = readRawFromSource(probeBuf.data() + got, probeBuf.size() - got);
+            if (r == 0) {
+                break;
+            }
+            got += r;
+        }
+        probeBuf.resize(got);
+
+        if (got >= 12) {
+            auto rawFn = [](void* c, void* d, size_t len) -> size_t {
+                return static_cast<BamGzBlockReader*>(c)->readRawFromSource(d, len);
+            };
+            if (bgzfPar.start(this, rawFn, probeBuf.data(), probeBuf.size(), parThreads)) {
+                parMode = true;
+            }
+        }
+    }
+
+    if (parMode) {
+        return bgzfPar.read(dst, n);
+    }
+
+    /* Serial fallback: plain gzip (not cuttable BGZF). Same algorithm as the
+       pre-parallel decoder, except the compressed input first comes from the
+       probe bytes already read above (readRawBam). */
     if (!inflateReady) {
         memset(&inflateState, 0, sizeof(inflateState));
         inflateInit2(&inflateState, 32 + MAX_WBITS);
@@ -800,19 +839,16 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
         const int rc = inflate(&inflateState, Z_NO_FLUSH);
         got = n - inflateState.avail_out;
         if (rc == Z_STREAM_END) {
-            /* BGZF is a concatenation of multiple gzip members; reset and continue inflating the remaining input */
+            /* gzip is a concatenation of multiple members; reset and continue
+               inflating the remaining input */
             if (inflateState.avail_in > 0) {
                 inflateReset(&inflateState);
                 continue;
             }
-            /* The current member ended at the end of the buffered input, yet more
-             * members may still follow in the file. Reading the next compressed
-             * member must not terminate the request with a short read, otherwise
-             * BamBlockReader::readBlock mistakes this for a premature EOF. */
             if (gzInEof) {
                 break;
             }
-            const size_t inRead = readRawFromSource(gzInBuf, sizeof(gzInBuf));
+            const size_t inRead = readRawBam(gzInBuf, sizeof(gzInBuf));
             if (inRead == 0) {
                 gzInEof = true;
                 break;
@@ -829,7 +865,7 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
             if (gzInEof) {
                 break;
             }
-            const size_t inRead = readRawFromSource(gzInBuf, sizeof(gzInBuf));
+            const size_t inRead = readRawBam(gzInBuf, sizeof(gzInBuf));
             if (inRead == 0) {
                 gzInEof = true;
                 break;
@@ -837,6 +873,23 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
             inflateState.next_in = gzInBuf;
             inflateState.avail_in = (uInt)inRead;
         }
+    }
+    return got;
+}
+
+/* Raw source for the serial fallback: drain the probe bytes first, then the
+   underlying source. */
+size_t BamGzBlockReader::readRawBam(void* dst, size_t n) {
+    uint8_t* out = (uint8_t*)dst;
+    size_t got = 0;
+    while (got < n && !probeBuf.empty()) {
+        const size_t c = (probeBuf.size() < n - got) ? probeBuf.size() : (n - got);
+        memcpy(out + got, probeBuf.data(), c);
+        probeBuf.erase(probeBuf.begin(), probeBuf.begin() + (ptrdiff_t)c);
+        got += c;
+    }
+    if (got < n) {
+        got += readRawFromSource(out + got, n - got);
     }
     return got;
 }
@@ -1005,6 +1058,8 @@ int32_t BamBlockReader::parseBamRecord(const uint8_t* data, int32_t size, std::s
     return 0;
 }
 
+
+
 /*
  * BAM reading: the header is returned as an independent block (converted to a SAM header);
  * alignment reads are decompressed into SAM lines and grouped into a SAM block of
@@ -1059,6 +1114,11 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         }
     }
 
+    if (structMode) {
+        colsCur = std::make_shared<BamColumns>();
+        colsCur->recordStreamOffset = (uint32_t)outLen;
+    }
+
     // Data region: decompress each read into a SAM line until readsPerBlock reads
     // are filled or SAM_BLOCK_MAX_BASES sequenced bases are reached.
     uint32_t reads = 0;
@@ -1086,6 +1146,27 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         lastBlockHasData = true;
     }
 
+    if (structMode && !pendingBamRecord.empty()) {
+        /* A record parked to keep the previous block inside its base cap; it
+           streams into this block like any other record (the columns of the
+           block are built later by the compressing worker). */
+        std::vector<uint8_t> pend;
+        pend.swap(pendingBamRecord);
+        if (outLen + 4 + pend.size() > blockPtr->getBufferSize()) {
+            if (0 != blockPtr->ensureCapacity(outLen + 4 + pend.size())) {
+                return -1;
+            }
+            out = blockPtr->getBuffer();
+        }
+        int32_t pendSize = (int32_t)pend.size();
+        memcpy(out + outLen, &pendSize, 4);
+        outLen += 4;
+        memcpy(out + outLen, pend.data(), pend.size());
+        outLen += pend.size();
+        ++reads;
+        lastBlockHasData = true;
+    }
+
     while (reads < readsPerBlock) {
         int32_t blockSize = 0;
         if (readBamBytes(&blockSize, 4) != 4) {
@@ -1107,6 +1188,31 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
                 seqLen = 0;
             }
         }
+        if (structMode) {
+            if (reads > 0 && blockMaxBases > 0 &&
+                (uint64_t)blockBases + (uint64_t)(seqLen > 0 ? (uint32_t)seqLen : 0) > blockMaxBases) {
+                pendingBamRecord.assign(recBuf.begin(), recBuf.end());
+                break;
+            }
+            /* Raw record bytes only: [u32 size][record]. Parsing into columns
+               is deferred to the worker that compresses this block, so the
+               reader thread just keeps streaming (see BamCodecActuator). */
+            if (outLen + 4 + (size_t)blockSize > blockPtr->getBufferSize()) {
+                if (0 != blockPtr->ensureCapacity(outLen + 4 + (size_t)blockSize)) {
+                    break;
+                }
+                out = blockPtr->getBuffer();
+            }
+            memcpy(out + outLen, &blockSize, 4);
+            outLen += 4;
+            memcpy(out + outLen, recBuf.data(), (size_t)blockSize);
+            outLen += (size_t)blockSize;
+            blockBases += (uint64_t)(seqLen > 0 ? (uint32_t)seqLen : 0);
+            ++reads;
+            lastBlockHasData = true;
+            continue;
+        }
+
         lineBuf.clear();
         if (0 != parseBamRecord(recBuf.data(), blockSize, lineBuf)) {
             break;
@@ -1140,6 +1246,11 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
 
     blockPtr->setDataLen((int64_t)outLen);
     blockPtr->setBlockType(BAM);
+    if (structMode && colsCur != nullptr) {
+        colsCur->nRecords = reads;   /* payload parsed later, by the worker */
+        colsCur->columnsBuilt = false;
+        blockPtr->setBamColumns(colsCur);
+    }
     return (int64_t)outLen;
 }
 
@@ -1248,8 +1359,8 @@ namespace {
 
     /* Validate every line within the entire detection length, preventing a file whose first
      * record looks like FASTQ/SAM but whose remainder does not from entering the corresponding
-     * reader. If any line in the sample is malformed, the whole sample is judged BINARY, so the
-     * analyzeBlock fallback scenario no longer arises. */
+     * reader. If any line in the sample is malformed, the whole sample is judged BINARY, so
+     * the reader never receives a block it cannot parse. */
     bool isSamSample(const uint8_t* buf, size_t len) {
         if (len < 4 || buf[0] != '@') {
             return false;
@@ -1469,7 +1580,8 @@ uint32_t BlockFactory::samReadsPerBlockOfLevel(uint8_t compressLevel)
     return 10000;
 }
 
-BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compressLevel, bool splitSamHeader) {
+BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compressLevel, bool splitSamHeader,
+                                              bool bamStructMode) {
     if (ioReader == nullptr) {
         LOG_ERROR("Create block reader failed: io reader is null.");
         return nullptr;
@@ -1500,10 +1612,18 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
     } else if (isBamSample(detectBuf, detectLen)) {
         if (startsWithBamMagic(detectBuf, detectLen)) {
             /* Already a raw BAM byte stream (the io layer has inflated BGZF, e.g. .bam) */
-            reader = MemoryUtil::safeNewClass<BamBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
+            BamBlockReader* bamReader = MemoryUtil::safeNewClass<BamBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
+            if (bamReader != nullptr && bamStructMode) {
+                bamReader->setStructMode(true);
+            }
+            reader = bamReader;
         } else {
             /* The inner layer is still BGZF (e.g. .bam.gz); inflate it to raw BAM first */
-            reader = MemoryUtil::safeNewClass<BamGzBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
+            BamGzBlockReader* bamReader = MemoryUtil::safeNewClass<BamGzBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
+            if (bamReader != nullptr && bamStructMode) {
+                bamReader->setStructMode(true);
+            }
+            reader = bamReader;
         }
     } else if (isSamSample(detectBuf, detectLen)) {
         reader = MemoryUtil::safeNewClass<SamBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
@@ -1727,123 +1847,6 @@ int32_t PbgzBlockWriter::writeBlock(RoughIOBlock* blockPtr) {
 
 namespace {
 
-    /* ---- Little-endian byte stream output ---- */
-    inline void putU8(std::vector<uint8_t>& out, uint8_t v) {
-        out.push_back(v);
-    }
-    inline void putU16(std::vector<uint8_t>& out, uint16_t v) {
-        out.push_back((uint8_t)(v & 0xFF));
-        out.push_back((uint8_t)((v >> 8) & 0xFF));
-    }
-    inline void putI32(std::vector<uint8_t>& out, int32_t v) {
-        uint32_t u = (uint32_t)v;
-        out.push_back((uint8_t)(u & 0xFF));
-        out.push_back((uint8_t)((u >> 8) & 0xFF));
-        out.push_back((uint8_t)((u >> 16) & 0xFF));
-        out.push_back((uint8_t)((u >> 24) & 0xFF));
-    }
-    inline void putU32(std::vector<uint8_t>& out, uint32_t v) {
-        putI32(out, (int32_t)v);
-    }
-
-    /* ---- BAM CIGAR opcodes (indices match BAM_CIGAR_OPS "MIDNSHP=XB") ---- */
-    int cigarOpCode(char c) {
-        switch (c) {
-        case 'M': return 0;
-        case 'I': return 1;
-        case 'D': return 2;
-        case 'N': return 3;
-        case 'S': return 4;
-        case 'H': return 5;
-        case 'P': return 6;
-        case '=': return 7;
-        case 'X': return 8;
-        default:  return -1;
-        }
-    }
-
-    /* CIGAR operations that consume reference length: M/D/N/=/X */
-    bool cigarConsumesRef(int code) {
-        return code == 0 || code == 2 || code == 3 || code == 7 || code == 8;
-    }
-
-    /* Parse a CIGAR string (returns true with no ops for "*" or empty); refSpan is the reference length consumed */
-    bool parseCigar(const char* s, size_t n, std::vector<uint32_t>& ops, int64_t& refSpan) {
-        ops.clear();
-        refSpan = 0;
-        size_t i = 0;
-        while (i < n) {
-            size_t j = i;
-            while (j < n && s[j] >= '0' && s[j] <= '9') {
-                ++j;
-            }
-            if (j == i) {
-                return false;   // Missing length
-            }
-            uint32_t len = 0;
-            for (size_t k = i; k < j; ++k) {
-                len = len * 10 + (uint32_t)(s[k] - '0');
-            }
-            if (j >= n) {
-                return false;   // Missing operator
-            }
-            const int code = cigarOpCode(s[j]);
-            if (code < 0) {
-                return false;
-            }
-            ops.push_back((len << 4) | (uint32_t)code);
-            if (cigarConsumesRef(code)) {
-                refSpan += len;
-            }
-            i = j + 1;
-        }
-        return true;
-    }
-
-    /* BAM 4-bit base encoding: char -> index (inverse of the read-side BAM_BASE_MAP) */
-    int baseNibble(char c) {
-        switch (c) {
-        case '=': return 0;
-        case 'A': return 1;
-        case 'C': return 2;
-        case 'M': return 3;
-        case 'G': return 4;
-        case 'R': return 5;
-        case 'S': return 6;
-        case 'V': return 7;
-        case 'T': return 8;
-        case 'W': return 9;
-        case 'Y': return 10;
-        case 'H': return 11;
-        case 'K': return 12;
-        case 'D': return 13;
-        case 'B': return 14;
-        case 'N': return 15;
-        default:  return 15;
-        }
-    }
-
-    /* Classic reg2bin: beg is the 0-based start, end is the 0-based exclusive end */
-    uint16_t samReg2Bin(int64_t beg, int64_t end) {
-        const int64_t e = end - 1;
-        if ((beg >> 14) == (e >> 14)) {
-            return (uint16_t)(((1 << 15) - 1) / 7 + (beg >> 14));
-        }
-        if ((beg >> 17) == (e >> 17)) {
-            return (uint16_t)(((1 << 12) - 1) / 7 + (beg >> 17));
-        }
-        if ((beg >> 20) == (e >> 20)) {
-            return (uint16_t)(((1 << 9) - 1) / 7 + (beg >> 20));
-        }
-        if ((beg >> 23) == (e >> 23)) {
-            return (uint16_t)(((1 << 6) - 1) / 7 + (beg >> 23));
-        }
-        if ((beg >> 26) == (e >> 26)) {
-            return (uint16_t)(((1 << 3) - 1) / 7 + (beg >> 26));
-        }
-        return 0;
-    }
-
     /* Extract the value of a TAG field from an @SQ line ("SN:" / "LN:") */
     std::string sqFieldValue(const std::string& line, const char* tag) {
         const size_t pos = line.find(tag);
@@ -1858,154 +1861,164 @@ namespace {
         return line.substr(valStart, end - valStart);
     }
 
-    /*
-     * Convert one SAM optional field "TAG:TYPE:VALUE" into BAM aux bytes (including TAG and
-     * type); returns -1 on failure (the caller skips that field). Named differently from the
-     * read-side appendBamAux (BAM->SAM).
-     */
-    int appendSamAuxToBam(const char* opt, size_t n, std::vector<uint8_t>& out) {
-        size_t p = 0;
-        while (p < n && opt[p] != ':') {
-            ++p;
-        }
-        if (p != 2) {
-            return -1;   // TAG must be 2 characters
-        }
-        if (p + 3 > n || opt[p + 2] != ':') {
-            return -1;   // Expected "TAG:TYPE:VALUE"
-        }
-        const char type = opt[p + 1];
-        const char* value = opt + p + 3;
-        const size_t vlen = n - (p + 3);
+}  // namespace
 
-        putU8(out, (uint8_t)opt[0]);
-        putU8(out, (uint8_t)opt[1]);
-        switch (type) {
-        case 'A': {
-            if (vlen != 1) {
-                return -1;
-            }
-            putU8(out, (uint8_t)'A');
-            putU8(out, (uint8_t)value[0]);
-            break;
+namespace {
+
+/* Uncompressed payload of one BGZF block; the format caps a block at 64KB. */
+const size_t kBgzfBlockBytes = 65536;
+
+/*
+ * Deflate one independent chunk (a full 64KB block, or the trailing partial
+ * one) into a complete BGZF block: the 18-byte gzip header carrying the "BC"
+ * extra field, the raw deflate payload, then the crc32/isize trailer.
+ *
+ * Every call owns its z_stream: separate zlib streams are independent, which is
+ * what lets a whole batch of blocks be deflated concurrently. The parameters
+ * and the resulting bytes are the same as the previous serial implementation.
+ */
+int32_t bgzfCompressBlock(const uint8_t* src, size_t srcLen, std::vector<uint8_t>& out)
+{
+    z_stream zs;
+    memset(&zs, 0, sizeof(zs));
+    /* Raw deflate stream: the gzip header/trailer is assembled by the BGZF block itself */
+    if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        LOG_ERROR("BamWriter: deflateInit2 failed.");
+        return -1;
+    }
+
+    out.resize(deflateBound(&zs, (uLong)srcLen) + 26);   /* + 18 header + 8 trailer */
+    zs.next_in = (Bytef*)src;
+    zs.avail_in = (uInt)srcLen;
+    zs.next_out = out.data() + 18;   /* leave room for the 18-byte gzip header */
+    zs.avail_out = (uInt)(out.size() - 18);
+    const int rc = deflate(&zs, Z_FINISH);
+    if (rc != Z_STREAM_END) {
+        LOG_ERROR("BamWriter: deflate block failed, rc=%d.", rc);
+        deflateEnd(&zs);
+        return -1;
+    }
+    const size_t compLen = (out.size() - 18) - zs.avail_out;
+    deflateEnd(&zs);
+
+    const uint32_t crc = crc32(0L, src, (uInt)srcLen);
+    const uint32_t total = (uint32_t)(18 + compLen + 8);
+    const uint8_t header[18] = {
+        0x1f, 0x8b, 0x08, 0x04,          /* gzip magic + deflate + FEXTRA */
+        0, 0, 0, 0,                       /* mtime */
+        0, 0xff,                          /* XFL / OS */
+        0x06, 0x00,                       /* XLEN = 6 */
+        0x42, 0x43,                       /* "BC" */
+        0x02, 0x00,                       /* SLEN = 2 */
+        (uint8_t)((total - 1) & 0xFF), (uint8_t)(((total - 1) >> 8) & 0xFF)   /* BSIZE */
+    };
+    /* Shrink to [header][deflate payload][trailer]; the payload already sits at
+       offset 18 and is not moved. */
+    out.resize(18 + compLen + 8);
+    memcpy(out.data(), header, sizeof(header));
+    const uint32_t isize = (uint32_t)srcLen;
+    memcpy(out.data() + 18 + compLen, &crc, 4);
+    memcpy(out.data() + 18 + compLen + 4, &isize, 4);
+    return 0;
+}
+
+/*
+ * Run fn(i) for every i in [0, n) on the calling thread plus up to
+ * hardware_concurrency()-1 helpers. fn must only touch storage it owns.
+ *
+ * Used by the BamWriter thread for the two independent-work stages of `-b`
+ * output: turning SAM records into BAM bytes, and deflating the resulting BGZF
+ * blocks. Both are order-preserving (each task owns its output slot and the
+ * caller consumes the slots in index order), so the byte stream is identical to
+ * running the stages serially. Threads are created per call, which is cheap
+ * relative to the work and avoids a pool that would have to be torn down with
+ * the writer.
+ */
+template <typename Fn>
+void parallelFor(size_t n, uint32_t maxThreads, const Fn& fn)
+{
+    if (n == 0) {
+        return;
+    }
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) {
+        hw = 2;
+    }
+    if (maxThreads == 0 || maxThreads > hw) {
+        maxThreads = hw;
+    }
+    if (maxThreads == 0) {
+        maxThreads = 1;
+    }
+    size_t helpers = (size_t)maxThreads - 1;
+    if (helpers > n - 1) {
+        helpers = n - 1;
+    }
+    if (helpers == 0) {
+        for (size_t i = 0; i < n; ++i) {
+            fn(i);
         }
-        case 'i': {
-            long long v = 0;
-            try {
-                v = std::stoll(std::string(value, vlen));
-            } catch (...) {
-                return -1;
-            }
-            if (v >= INT8_MIN && v <= INT8_MAX) {
-                putU8(out, (uint8_t)'c');
-                putU8(out, (uint8_t)(int8_t)v);
-            } else if (v >= 0 && v <= UINT8_MAX) {
-                putU8(out, (uint8_t)'C');
-                putU8(out, (uint8_t)v);
-            } else if (v >= INT16_MIN && v <= INT16_MAX) {
-                putU8(out, (uint8_t)'s');
-                putU16(out, (uint16_t)(int16_t)v);
-            } else if (v >= 0 && v <= UINT16_MAX) {
-                putU8(out, (uint8_t)'S');
-                putU16(out, (uint16_t)v);
-            } else if (v >= INT32_MIN && v <= INT32_MAX) {
-                putU8(out, (uint8_t)'i');
-                putI32(out, (int32_t)v);
-            } else {
-                putU8(out, (uint8_t)'I');
-                putU32(out, (uint32_t)v);
-            }
-            break;
+        return;
+    }
+    std::atomic<size_t> next(0);
+    auto work = [&]() {
+        size_t i;
+        while ((i = next.fetch_add(1, std::memory_order_relaxed)) < n) {
+            fn(i);
         }
-        case 'f': {
-            double d = strtod(std::string(value, vlen).c_str(), nullptr);
-            float f = (float)d;
-            putU8(out, (uint8_t)'f');
-            uint8_t raw[4];
-            memcpy(raw, &f, 4);
-            out.insert(out.end(), raw, raw + 4);
-            break;
-        }
-        case 'Z':
-        case 'H': {
-            putU8(out, (uint8_t)type);
-            out.insert(out.end(), value, value + vlen);
-            putU8(out, 0);
-            break;
-        }
-        case 'B': {
-            /* VALUE has the form "SUBTYPE,V1,V2,..." */
-            if (vlen < 3 || value[1] != ',') {
-                return -1;
-            }
-            const char sub = value[0];
-            std::vector<double> vals;
-            {
-                size_t i = 2;
-                while (i <= vlen) {
-                    size_t j = i;
-                    while (j < vlen && value[j] != ',') {
-                        ++j;
-                    }
-                    try {
-                        vals.push_back(std::stod(std::string(value + i, j - i)));
-                    } catch (...) {
-                        return -1;
-                    }
-                    i = j + 1;
-                }
-            }
-            putU8(out, (uint8_t)'B');
-            putU8(out, (uint8_t)sub);
-            const size_t countPos = out.size();
-            putI32(out, 0);   // Count placeholder, backfilled below
-            for (double dv : vals) {
-                switch (sub) {
-                case 'c': putU8(out, (uint8_t)(int8_t)dv); break;
-                case 'C': putU8(out, (uint8_t)dv); break;
-                case 's': putU16(out, (uint16_t)(int16_t)dv); break;
-                case 'S': putU16(out, (uint16_t)dv); break;
-                case 'i': putI32(out, (int32_t)dv); break;
-                case 'I': putU32(out, (uint32_t)dv); break;
-                case 'f': {
-                    float f = (float)dv;
-                    uint8_t raw[4];
-                    memcpy(raw, &f, 4);
-                    out.insert(out.end(), raw, raw + 4);
-                    break;
-                }
-                default:
-                    return -1;
-                }
-            }
-            const int32_t cnt = (int32_t)vals.size();
-            out[countPos] = (uint8_t)(cnt & 0xFF);
-            out[countPos + 1] = (uint8_t)((cnt >> 8) & 0xFF);
-            out[countPos + 2] = (uint8_t)((cnt >> 16) & 0xFF);
-            out[countPos + 3] = (uint8_t)((cnt >> 24) & 0xFF);
-            break;
-        }
-        default:
-            return -1;
-        }
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(helpers);
+    for (size_t k = 0; k < helpers; ++k) {
+        pool.emplace_back(work);
+    }
+    work();
+    for (size_t k = 0; k < pool.size(); ++k) {
+        pool[k].join();
+    }
+}
+
+/*
+ * Compress `total` contiguous bytes into consecutive BGZF blocks in parallel,
+ * preserving order. The caller (the writer thread) participates in the work, so
+ * no cores stay idle, and the helper threads touch nothing but their own
+ * output slot - the resulting byte stream is identical to compressing serially.
+ */
+int32_t bgzfCompressRange(const uint8_t* src, size_t total, uint32_t maxThreads,
+                          std::vector<std::vector<uint8_t>>& out)
+{
+    const size_t nBlocks = (total + kBgzfBlockBytes - 1) / kBgzfBlockBytes;
+    if (nBlocks == 0) {
         return 0;
     }
+    out.resize(nBlocks);
+
+    std::atomic<bool> failed(false);
+    parallelFor(nBlocks, maxThreads, [&](size_t i) {
+        const size_t off = i * kBgzfBlockBytes;
+        size_t len = kBgzfBlockBytes;
+        if (off + len > total) {
+            len = total - off;
+        }
+        if (0 != bgzfCompressBlock(src + off, len, out[i])) {
+            failed.store(true, std::memory_order_relaxed);
+        }
+    });
+    return failed.load() ? -1 : 0;
+}
 
 }  // namespace
 
-BamWriter::BamWriter(IOWriter* pIoWriter) : BlockWriter(pIoWriter) {
+BamWriter::BamWriter(IOWriter* pIoWriter, uint32_t maxThreads)
+    : BlockWriter(pIoWriter), maxThreads(maxThreads) {
     headerWritten = false;
     passThrough = false;
     finished = false;
-    bgzfLen = 0;
-    bgzfReady = false;
-    memset(&bgzfZs, 0, sizeof(bgzfZs));
 }
 
 BamWriter::~BamWriter() {
-    if (bgzfReady) {
-        (void)finish();   // Fallback: flush the remaining block and the EOF marker
-        deflateEnd(&bgzfZs);
+    if (!finished && !passThrough) {
+        (void)finish();   // Fallback: flush the trailing block and the EOF marker
     }
 }
 
@@ -2021,78 +2034,53 @@ int32_t BamWriter::writeRaw(const void* data, size_t len) {
     return 0;
 }
 
-int32_t BamWriter::bgzfFlushBlock() {
-    if (bgzfLen == 0) {
+int32_t BamWriter::bgzfWrite(const void* data, size_t len) {
+    if (len == 0) {
         return 0;
     }
-    if (!bgzfReady) {
-        memset(&bgzfZs, 0, sizeof(bgzfZs));
-        /* Raw deflate stream: the gzip header/trailer is assembled by the BGZF block itself */
-        if (deflateInit2(&bgzfZs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-            LOG_ERROR("BamWriter: deflateInit2 failed.");
+    /*
+     * Accumulate, then frame every complete 64KB block the buffer holds into a
+     * single parallel batch. A decompressed block arrives here as one write and
+     * is normally several BGZF blocks, so this batches naturally; any remainder
+     * shorter than a block stays buffered for the next call / finish().
+     */
+    const size_t base = bgzfPending.size();
+    bgzfPending.resize(base + len);
+    memcpy(bgzfPending.data() + base, data, len);
+
+    const size_t consumed = (bgzfPending.size() / kBgzfBlockBytes) * kBgzfBlockBytes;
+    if (consumed == 0) {
+        return 0;
+    }
+    std::vector<std::vector<uint8_t>> blocks;
+    if (0 != bgzfCompressRange(bgzfPending.data(), consumed, maxThreads, blocks)) {
+        return -1;
+    }
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (0 != writeRaw(blocks[i].data(), blocks[i].size())) {
             return -1;
         }
-        bgzfReady = true;
     }
-
-    const size_t uncomprLen = bgzfLen;
-    std::vector<uint8_t> comp(deflateBound(&bgzfZs, (uLong)uncomprLen) + 64);
-    bgzfZs.next_in = bgzfBuf;
-    bgzfZs.avail_in = (uInt)uncomprLen;
-    bgzfZs.next_out = comp.data() + 18;   // Leave room for the 18-byte gzip header
-    bgzfZs.avail_out = (uInt)(comp.size() - 18);
-    const int rc = deflate(&bgzfZs, Z_FINISH);
-    if (rc != Z_STREAM_END) {
-        LOG_ERROR("BamWriter: deflate block failed, rc=%d.", rc);
-        return -1;
-    }
-    const size_t compLen = (comp.size() - 18) - bgzfZs.avail_out;
-    if (deflateReset(&bgzfZs) != Z_OK) {
-        return -1;
-    }
-
-    const uint32_t crc = crc32(0L, bgzfBuf, (uInt)uncomprLen);
-    const uint32_t total = (uint32_t)(18 + compLen + 8);
-    const uint8_t header[18] = {
-        0x1f, 0x8b, 0x08, 0x04,          /* gzip magic + deflate + FEXTRA */
-        0, 0, 0, 0,                       /* mtime */
-        0, 0xff,                          /* XFL / OS */
-        0x06, 0x00,                       /* XLEN = 6 */
-        0x42, 0x43,                       /* "BC" */
-        0x02, 0x00,                       /* SLEN = 2 */
-        (uint8_t)((total - 1) & 0xFF), (uint8_t)(((total - 1) >> 8) & 0xFF)   /* BSIZE */
-    };
-    uint8_t trailer[8];
-    memcpy(trailer, &crc, 4);
-    const uint32_t isize = (uint32_t)uncomprLen;
-    memcpy(trailer + 4, &isize, 4);
-
-    if (0 != writeRaw(header, sizeof(header)) ||
-        0 != writeRaw(comp.data() + 18, compLen) ||
-        0 != writeRaw(trailer, sizeof(trailer))) {
-        return -1;
-    }
-    bgzfLen = 0;
+    bgzfPending.erase(bgzfPending.begin(), bgzfPending.begin() + (std::ptrdiff_t)consumed);
     return 0;
 }
 
-int32_t BamWriter::bgzfWrite(const void* data, size_t len) {
-    const uint8_t* p = (const uint8_t*)data;
-    while (len > 0) {
-        size_t n = sizeof(bgzfBuf) - bgzfLen;
-        if (n > len) {
-            n = len;
-        }
-        memcpy(bgzfBuf + bgzfLen, p, n);
-        bgzfLen += n;
-        p += n;
-        len -= n;
-        if (bgzfLen == sizeof(bgzfBuf)) {
-            if (0 != bgzfFlushBlock()) {
-                return -1;
-            }
+int32_t BamWriter::bgzfFlushRemaining() {
+    if (bgzfPending.empty()) {
+        return 0;
+    }
+    /* The final block may be shorter than 64KB; BGZF only allows that at the
+       very end of the stream, which is exactly where finish() calls this. */
+    std::vector<std::vector<uint8_t>> blocks;
+    if (0 != bgzfCompressRange(bgzfPending.data(), bgzfPending.size(), maxThreads, blocks)) {
+        return -1;
+    }
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (0 != writeRaw(blocks[i].data(), blocks[i].size())) {
+            return -1;
         }
     }
+    bgzfPending.clear();
     return 0;
 }
 
@@ -2104,7 +2092,7 @@ int32_t BamWriter::finish() {
     if (passThrough) {
         return 0;   // Pass-through mode has no BGZF state
     }
-    if (0 != bgzfFlushBlock()) {
+    if (0 != bgzfFlushRemaining()) {
         return -1;
     }
     /* BGZF EOF marker (empty block), the terminating block of a standard BAM */
@@ -2164,207 +2152,114 @@ int32_t BamWriter::writeBamHeader(const uint8_t* data, size_t len, size_t& dataS
     hdr.push_back('A');
     hdr.push_back('M');
     hdr.push_back(1);
-    putI32(hdr, (int32_t)headerText.size());
+    bamrec::putI32(hdr, (int32_t)headerText.size());
     hdr.insert(hdr.end(), headerText.begin(), headerText.end());
-    putI32(hdr, (int32_t)refs.size());
+    bamrec::putI32(hdr, (int32_t)refs.size());
     for (const BamRef& r : refs) {
-        putI32(hdr, (int32_t)(r.name.size() + 1));
+        bamrec::putI32(hdr, (int32_t)(r.name.size() + 1));
         hdr.insert(hdr.end(), r.name.begin(), r.name.end());
         hdr.push_back(0);
-        putI32(hdr, r.len);
+        bamrec::putI32(hdr, r.len);
     }
 
     dataStart = pos;
     return bgzfWrite(hdr.data(), hdr.size());
 }
 
-int32_t BamWriter::writeBamRecord(const uint8_t* line, size_t len) {
-    /* Strip trailing newline/carriage return */
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-        --len;
-    }
-    if (len == 0) {
-        return 0;
-    }
-
-    /* Split fields on \t */
-    std::vector<const char*> fields;
-    std::vector<size_t> flens;
-    {
-        size_t start = 0;
-        for (size_t i = 0; i <= len; ++i) {
-            if (i == len || line[i] == '\t') {
-                fields.push_back((const char*)line + start);
-                flens.push_back(i - start);
-                start = i + 1;
-            }
-        }
-    }
-    if (fields.size() < 11) {
-        LOG_WARNING("BamWriter: SAM record with too few fields, skipped.");
-        return 0;
-    }
-
-    const char* qname = fields[0];
-    const size_t qlen = flens[0];
-    const char* rname = fields[2];
-    const size_t rlen = flens[2];
-    const char* rnext = fields[6];
-    const size_t rnextLen = flens[6];
-    const char* cigarStr = fields[5];
-    const size_t clen = flens[5];
-    const char* seqStr = fields[9];
-    const size_t slen = flens[9];
-    const char* qualStr = fields[10];
-    const size_t qlen2 = flens[10];
-
-    if (qlen == 0) {
-        return 0;   // QNAME must not be empty; skip the invalid record
-    }
-
-    const uint16_t flag = (uint16_t)strtoul(fields[1], nullptr, 10);
-    const uint8_t mapq = (uint8_t)strtoul(fields[4], nullptr, 10);
-    const int64_t pos1 = strtoll(fields[3], nullptr, 10);      // 1-based
-    const int64_t pnext1 = strtoll(fields[7], nullptr, 10);    // 1-based
-    const int32_t btlen = (int32_t)strtol(fields[8], nullptr, 10);
-
-    /* refID: RNAME '*' / empty -> -1, otherwise look up the reference sequence list */
-    int32_t refId = -1;
-    if (rlen > 0 && !(rlen == 1 && rname[0] == '*')) {
-        const std::string nm(rname, rlen);
-        std::map<std::string, int32_t>::const_iterator it = refIndex.find(nm);
-        if (it != refIndex.end()) {
-            refId = it->second;
-        } else {
-            LOG_WARNING("BamWriter: RNAME '%s' not in @SQ, treat as unmapped.", nm.c_str());
-        }
-    }
-    int32_t bpos = (refId >= 0 && pos1 > 0) ? (int32_t)(pos1 - 1) : -1;
-
-    int32_t nextRefId = -1;
-    if (rnextLen == 1 && rnext[0] == '=') {
-        nextRefId = refId;   // '=' means the same reference as RNAME
-    } else if (rnextLen > 0 && !(rnextLen == 1 && rnext[0] == '*')) {
-        const std::string nm(rnext, rnextLen);
-        std::map<std::string, int32_t>::const_iterator it = refIndex.find(nm);
-        if (it != refIndex.end()) {
-            nextRefId = it->second;
-        }
-    }
-    int32_t bnext = (nextRefId >= 0 && pnext1 > 0) ? (int32_t)(pnext1 - 1) : -1;
-
-    /* CIGAR */
-    std::vector<uint32_t> cigarOps;
-    int64_t refSpan = 0;
-    if (!(clen == 1 && cigarStr[0] == '*')) {
-        if (!parseCigar(cigarStr, clen, cigarOps, refSpan)) {
-            LOG_WARNING("BamWriter: invalid CIGAR, treat as no CIGAR.");
-            cigarOps.clear();
-            refSpan = 0;
-        }
-    }
-    const uint16_t nCigar = (uint16_t)cigarOps.size();
-
-    /* bin */
-    uint16_t bin = 0;
-    if (refId >= 0 && bpos >= 0) {
-        const int64_t end = (int64_t)bpos + (refSpan > 0 ? refSpan : 1);
-        bin = samReg2Bin(bpos, end);
-    }
-
-    /* SEQ */
-    int32_t lSeq = 0;
-    std::vector<uint8_t> packedSeq;
-    if (slen > 0 && !(slen == 1 && seqStr[0] == '*')) {
-        lSeq = (int32_t)slen;
-        packedSeq.resize((size_t)((slen + 1) / 2), 0);
-        for (size_t i = 0; i < slen; ++i) {
-            const int nib = baseNibble(seqStr[i]);
-            if (i & 1) {
-                packedSeq[i >> 1] |= (uint8_t)(nib & 0xF);
-            } else {
-                packedSeq[i >> 1] = (uint8_t)((nib & 0xF) << 4);
-            }
-        }
-    }
-
-    /* QUAL: all 0xFF when missing (*); otherwise per-byte ascii-33 */
-    std::vector<uint8_t> quals;
-    const bool qualMissing = (qlen2 == 0) || (qlen2 == 1 && qualStr[0] == '*');
-    if (!qualMissing) {
-        size_t qn = (qlen2 < (size_t)lSeq) ? qlen2 : (size_t)lSeq;
-        quals.resize(qn);
-        for (size_t i = 0; i < qn; ++i) {
-            int phred = (int)(uint8_t)qualStr[i] - 33;
-            if (phred < 0) {
-                phred = 0;
-            }
-            if (phred > 93) {
-                phred = 93;
-            }
-            quals[i] = (uint8_t)phred;
-        }
-    }
-
-    /* read_name (BAM requires l_read_name <= 255, including the trailing \0) */
-    size_t qn = (qlen < 254) ? qlen : 254;
-    const uint8_t lReadName = (uint8_t)(qn + 1);
-
-    /* Assemble the record */
-    std::vector<uint8_t> rec;
-    rec.reserve(32 + qn + cigarOps.size() * 4 + packedSeq.size() + quals.size() + 16);
-    putI32(rec, 0);   // block_size placeholder
-    putI32(rec, refId);
-    putI32(rec, bpos);
-    putU8(rec, lReadName);
-    putU8(rec, mapq);
-    putU16(rec, bin);
-    putU16(rec, nCigar);
-    putU16(rec, flag);
-    putI32(rec, lSeq);
-    putI32(rec, nextRefId);
-    putI32(rec, bnext);
-    putI32(rec, btlen);
-    rec.insert(rec.end(), qname, qname + qn);
-    rec.push_back(0);
-    for (size_t i = 0; i < cigarOps.size(); ++i) {
-        putU32(rec, cigarOps[i]);
-    }
-    rec.insert(rec.end(), packedSeq.begin(), packedSeq.end());
-    /* QUAL: append per byte when present; pad with 0xFF when missing (*) or shorter than SEQ, keeping the record length consistent with the BAM layout */
-    if (!quals.empty()) {
-        rec.insert(rec.end(), quals.begin(), quals.end());
-    }
-    for (int32_t i = (int32_t)quals.size(); i < lSeq; ++i) {
-        rec.push_back(0xFF);
-    }
-    for (size_t i = 11; i < fields.size(); ++i) {
-        if (0 != appendSamAuxToBam(fields[i], flens[i], rec)) {
-            LOG_WARNING("BamWriter: skip invalid SAM option field.");
-        }
-    }
-
-    const int32_t blockSize = (int32_t)(rec.size() - 4);
-    memcpy(rec.data(), &blockSize, 4);
-
-    return bgzfWrite(rec.data(), rec.size());
-}
-
 int32_t BamWriter::writeDataLines(const uint8_t* buffer, size_t start, size_t end) {
-    size_t pos = start;
-    while (pos < end) {
-        size_t nl = pos;
-        while (nl < end && buffer[nl] != '\n') {
-            ++nl;
-        }
-        if (nl > pos && buffer[pos] != '@') {
-            if (0 != writeBamRecord(buffer + pos, nl - pos)) {
-                return -1;
-            }
-        }
-        pos = nl + 1;
+    if (start >= end) {
+        return 0;
     }
-    return 0;
+    const size_t len = end - start;
+
+    /*
+     * The writer thread is the pipeline bottleneck for `-b`, and turning SAM
+     * lines into BAM records was the larger half of its work (the archive path
+     * hands it SAM text; the fast path pre-builds records in the decompression
+     * workers and never reaches here). Split the span at line boundaries and
+     * convert the pieces in parallel. Each piece owns its output buffer and the
+     * pieces are concatenated in order, so the resulting record stream is
+     * identical to converting the span serially.
+     *
+     * One chunk per 512KB, clamped to the same thread budget the BGZF stage
+     * uses: a small block stays sequential, a full 3MB SAM block spreads out.
+     */
+    uint32_t budget = maxThreads;
+    if (budget == 0) {
+        budget = std::thread::hardware_concurrency();
+        if (budget == 0) {
+            budget = 2;
+        }
+    }
+    size_t nChunks = (len + (512 * 1024) - 1) / (512 * 1024);
+    if (nChunks > (size_t)budget) {
+        nChunks = (size_t)budget;
+    }
+    if (nChunks < 1) {
+        nChunks = 1;
+    }
+
+    /* Line-aligned chunk boundaries. */
+    std::vector<size_t> bounds;
+    bounds.reserve(nChunks + 1);
+    bounds.push_back(start);
+    for (size_t c = 1; c < nChunks; ++c) {
+        size_t p = start + (len * c) / nChunks;
+        while (p < end && buffer[p] != '\n') {
+            ++p;
+        }
+        if (p < end) {
+            ++p;   /* the next chunk starts just after the newline */
+        }
+        if (p > bounds.back()) {
+            bounds.push_back(p);
+        }
+    }
+    bounds.push_back(end);
+
+    const size_t nParts = bounds.size() - 1;
+    std::vector<std::vector<uint8_t>> parts(nParts);
+    std::atomic<bool> failed(false);
+    parallelFor(nParts, maxThreads, [&](size_t i) {
+        bamrec::BamRecordScratch scratch;
+        const uint8_t* p = buffer + bounds[i];
+        const uint8_t* e = buffer + bounds[i + 1];
+        std::vector<uint8_t>& out = parts[i];
+        while (p < e) {
+            const uint8_t* nl = (const uint8_t*)memchr(p, '\n', (size_t)(e - p));
+            const size_t lineLen = (nl != nullptr) ? (size_t)(nl - p) : (size_t)(e - p);
+            if (lineLen > 0 && *p != '@') {
+                const int32_t built = bamrec::buildBamRecordFromSamLine(p, lineLen, refIndex, scratch);
+                if (built < 0) {
+                    failed.store(true, std::memory_order_relaxed);
+                    return;
+                }
+                if (built > 0) {
+                    out.insert(out.end(), scratch.rec.begin(), scratch.rec.end());
+                }
+            }
+            p += lineLen + 1;
+        }
+    });
+    if (failed.load()) {
+        return -1;
+    }
+
+    /* Hand the whole record stream to BGZF at once, so its deflate batch is as
+       large as possible. */
+    size_t total = 0;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        total += parts[i].size();
+    }
+    if (total == 0) {
+        return 0;
+    }
+    std::vector<uint8_t> joined;
+    joined.reserve(total);
+    for (size_t i = 0; i < parts.size(); ++i) {
+        joined.insert(joined.end(), parts[i].begin(), parts[i].end());
+    }
+    return bgzfWrite(joined.data(), joined.size());
 }
 
 int32_t BamWriter::writeBlock(RoughIOBlock* blockPtr) {
@@ -2375,6 +2270,21 @@ int32_t BamWriter::writeBlock(RoughIOBlock* blockPtr) {
     const int64_t dataLen = blockPtr->getDataLen();
     if (dataLen <= 0) {
         return 0;
+    }
+
+    /*
+     * Prebuilt block: the decompression worker that produced this block already
+     * turned its records into BAM binary (see BamCodecActuator::decompress), so
+     * the writer thread only frames the bytes into BGZF blocks instead of
+     * re-parsing SAM text. The SAM header always forms its own block and
+     * precedes every data block, so refs/refIndex are ready by this point.
+     */
+    if (!passThrough && blockPtr->isBamPrebuilt()) {
+        if (!headerWritten) {
+            LOG_ERROR("BamWriter: prebuilt BAM block arrived before the SAM header block.");
+            return -1;
+        }
+        return bgzfWrite(buffer, (size_t)dataLen);
     }
 
     if (!passThrough && !headerWritten) {

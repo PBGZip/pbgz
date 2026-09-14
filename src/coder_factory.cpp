@@ -32,6 +32,7 @@
 #include "coder/coder_fc.h"
 #include "coder/coder_affix_match.h"
 #include "coder/coder_arith.h"
+#include "coder/coder_rans.h"
 #include "field_coder_config.h"
 
 std::shared_ptr<coder> CoderFactory::makeEncoder(CoderType type, coder_io* io)
@@ -45,6 +46,9 @@ std::shared_ptr<coder> CoderFactory::makeEncoder(CoderType type, coder_io* io)
 
     case CoderType::ARITH:
         return std::make_shared<coder_arith>(io);
+
+    case CoderType::RANS:
+        return std::make_shared<coder_rans>(io);
 
     /*
      * QUAL goes through the fallback: coder_qual does not inherit from the
@@ -75,6 +79,9 @@ std::shared_ptr<coder> CoderFactory::makeDecoder(const std::string& magic, coder
     }
     if (magic == "coder_arith") {
         return std::make_shared<coder_arith>(io);
+    }
+    if (magic == "coder_rans") {
+        return std::make_shared<coder_rans>(io);
     }
     return nullptr;
 }
@@ -115,5 +122,6 @@ bool CoderFactory::coderSupports(CoderType type, uint32_t fileType, uint32_t fie
 bool CoderFactory::canMake(CoderType type)
 {
     return type == CoderType::BWT_CM || type == CoderType::FC ||
-           type == CoderType::AFFIX_MATCH || type == CoderType::ARITH;
+           type == CoderType::AFFIX_MATCH || type == CoderType::ARITH ||
+           type == CoderType::RANS;
 }

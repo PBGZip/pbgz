@@ -23,12 +23,38 @@
 #include <string.h>
 #include <chrono>
 #include <memory>
+#include <atomic>
+#include <functional>
+#include <thread>
 
 #include "coder/coder_io.h"
 #include "coder/coder_qual.h"
 #include "coder/coder_fcv2.h"
 #include "coder/coder_bwt_cm.h"
+#include "field_coder_config.h"
 #include "log/logger.h"
+
+/* How many of m0..m6 the long-read mix keeps: the count is close to a pure speed
+ * lever there (4 models is ~28% faster than 6 for ~0.1% more bytes, and 5 is not
+ * smaller than 4), and fcv2's per-bit mix-and-update accounts for ~99% of the
+ * value selection's wall time on long-read files. */
+const int LONG_READ_MODEL_COUNT = 4;
+
+/*
+ * The model count is the one fcv2 knob that follows the data regime rather than
+ * the block volume, so it is decided before the trial instead of inside it: the
+ * count has to be fixed for every candidate of one trial, and the short- and
+ * long-read regimes are far apart (~90 vs ~14000 bytes per record), so the
+ * threshold only has to land inside that gap rather than nail a boundary. Short
+ * reads keep the default mix because they are the regime fcv2 wins on, and
+ * trimming m5 there costs 0.08%-0.46% of size.
+ */
+const uint32_t QUAL_LONG_READ_LEN = 500;
+
+int qualModelCountForMeanLen(uint64_t meanLen)
+{
+    return (meanLen >= (uint64_t)QUAL_LONG_READ_LEN) ? LONG_READ_MODEL_COUNT : FCV2_MODEL_COUNT;
+}
 
 namespace {
 
@@ -177,18 +203,11 @@ bool trialFcv2(const std::vector<QualSampleRecord>& records, size_t recordCount,
 /*
  * Trial-compress with coder_bwt_cm.
  *
- * This candidate was originally not in the quality-value candidate set — generic
- * fields only try bwt_cm through CodecSelector, while the quality-value column
- * chose only between coder_qual and fcv2. Measurement showed this was a real
- * gap: on 4 MB of real quality values, fcv2 25.81%, bwt_cm 26.31%, coder_qual
- * 33.74%; fcv2 still wins, but bwt_cm beats coder_qual by 7.4 percentage
- * points, and coder_qual happens to be the current fallback choice.
- *
- * fcv2 has clearly inapplicable scenarios: it needs each record's length and
- * strand direction, which only the QUAL column of an aligned SAM can provide
- * (see CoderFactory::coderSupports). In those scenarios falling back to bwt_cm
- * instead of coder_qual reduces the cost from 7.4 percentage points to 0.49
- * percentage points.
+ * It is in the QUAL candidate set (see field_coder_config.h) because it is the
+ * best of the three on long-read quality values, and because it is what the
+ * column falls back to where fcv2 is not applicable: fcv2 needs each record's
+ * length and strand direction, which only the QUAL column of an aligned SAM can
+ * provide (see CoderFactory::coderSupports).
  *
  * Records are fed one encode_line at a time, matching how sam_actuator actually
  * calls it. The internal block size is chosen per this round's sample size
@@ -240,6 +259,7 @@ QualFcv2Params toQualParams(const Fcv2Cfg& cfg)
     p.useDelta = cfg.useDelta;
     p.useDedup = cfg.useDedup;
     p.useQa = cfg.useQa;
+    p.modelCount = cfg.modelCount;
     return p;
 }
 
@@ -251,18 +271,21 @@ QualFcv2Params toQualParams(const Fcv2Cfg& cfg)
  * sparse, so finer positional bucketing can be used and the predecessor quality
  * values do not need quantization; when the alphabet is large or the sample is
  * small, the context is sparse, so bucketing is coarser and the predecessor is
- * shifted more. But the statistical rule is only a prior; measurements (on a
- * synthetic 30 MB of quality values, the fine tier beats the coarse tier by
- * about 0.3 percentage points) show that which tier actually wins depends on
- * the data, so several tiers are put into the candidate set and select()
- * trial-compresses them all, picking the smallest compressed size — parameter
- * choice is driven by measurement.
+ * shifted more.
  *
- * The only data-characteristic decision is the sample size: the fine tier needs
- * enough sample to converge, and with a small sample including it as a candidate
- * only adds trial-compression time and risks being wrongly chosen by a
- * not-yet-converged illusion, so with small samples only the default tier and
- * the coarse tier are kept.
+ * That statistical rule is NOT implemented as a rule. It is the rationale for
+ * which tiers exist, but the winner is decided by measurement: several tiers are
+ * put into the candidate set and select() trial-compresses them all, keeping the
+ * smallest. The tie between the two is not reliable - the winner is not monotone
+ * in the alphabet, and the preferred cycle span depends on the read length - so
+ * the candidates are chosen to span the plausible winners rather than to encode a
+ * prediction.
+ *
+ * The only data-characteristic decision that prunes rather than spans is the
+ * block-volume tier: the fine tier needs enough sample to converge, and with a
+ * small sample including it as a candidate only adds trial-compression time and
+ * risks being wrongly chosen by a not-yet-converged illusion, so with small
+ * samples only the always-kept tiers compete.
  */
 /* compress level -> SAM data-block read-count tier (see
  * BlockFactory::createBlockReader): 1-5 -> ~10000 reads/block, 6-7 -> ~25000,
@@ -276,52 +299,51 @@ static int levelVolumeTier(uint8_t compressLevel)
 }
 
 /*
- * fcv2 candidate tiers for the given compression level.
+ * fcv2 candidate tiers for the given compression level and model count.
  *
- * Selection stays measurement-driven (each candidate is trial-compressed and
- * the smallest wins), but the candidate set is pruned by the block-volume tier
- * so trial time is not spent on tiers that cannot win at that volume. The
- * pruning follows a grid scan on real SAM QUAL (test/qual_tier_scan.cpp,
- * con_sorted.sam, 10k/25k/100k-read blocks):
+ * The model count is not a tier: every candidate in one trial carries the same
+ * count (see qualModelCountForMeanLen), because it is a property of the read length
+ * rather than of the block volume, and letting the candidates differ in it would
+ * make one trial compare two different questions at once.
  *
- *   - default: always kept (the conservative baseline).
- *   - ultra (cycleBucket=4, deltaBucket=2, prevShift=0): best at every block
- *     volume by 0.4%-1.2% over the previous best coarse; the coarse cycle bins
- *     keep every slot populated while prevShift=0 keeps the order-2 context
- *     informative.
- *   - coarse (8/4/ps2): kept as a volume-independent fallback configuration.
- *   - fine (24/12/ps0): only wins once the per-block QUAL volume is large
- *     enough (measured only at ~27 MB, hundreds of thousands of reads) for its
- *     fine buckets to stay populated; tried only at -l 8/9 (100k reads/block).
+ * The presets themselves are the FCV2_PRESETS table in coder_fcv2.h, so they can
+ * be printed, measured and compared as data; this function only decides which of
+ * them take part. That pruning is by the block-volume tier and by the mean read
+ * length (FCV2_PRESETS[i].minMeanReadLen), so trial time is not spent on presets
+ * that cannot win on this kind of data:
  *
- * The per-read average-quality tier (qa) and duplicate-read dedup were dropped
- * from the candidates: on the measured data they lose by 1%-1.7% (qa) and are
- * neutral (dedup), and neither is volume-dependent, so pruning them cannot be
- * recovered by a tier choice on other volumes.
+ *   - default / ultra / ultra-80 / coarse: always kept. ultra is the coarse-binned
+ *     variant (cycleBucket=4, prevShift=0), which leads at every measured block
+ *     volume by 0.4%-1.2% over coarse; ultra-80 is the same over a shorter cycle
+ *     span, coarse is the coarse tier with quantized predecessors, and default is
+ *     the conservative baseline.
+ *   - fine (24/12/ps0): needs a per-block QUAL volume large enough for its fine
+ *     buckets to stay populated (it only wins at ~27 MB and up), so it is tried
+ *     only at -l 8/9 (100k reads/block).
+ *
+ * Which of them actually wins is not predicted here; see the table's comment for
+ * why a feature rule is not used.
+ *
+ * The per-read average-quality tier (qa) and duplicate-read dedup are not
+ * presets: qa loses 1%-1.7% of ratio, dedup is neutral, and neither depends on
+ * the block volume, so leaving them out cannot be recovered by a tier choice at
+ * another volume.
  */
-std::vector<Fcv2Cfg> candidateFcv2Cfgs(uint8_t compressLevel)
+std::vector<Fcv2Cfg> candidateFcv2Cfgs(uint8_t compressLevel, int modelCount, uint64_t meanLen)
 {
     std::vector<Fcv2Cfg> cfgs;
-    cfgs.push_back(Fcv2Cfg());   /* default tier */
-
-    Fcv2Cfg ultra;               /* coarsest cycle bins, no predecessor quantization */
-    ultra.cycleBucket = 4;
-    ultra.deltaBucket = 2;
-    ultra.prevShift = 0;
-    cfgs.push_back(ultra);
-
-    Fcv2Cfg coarse;              /* coarse tiers, predecessor shifted right two bits */
-    coarse.cycleBucket = 8;
-    coarse.deltaBucket = 4;
-    coarse.prevShift = 2;
-    cfgs.push_back(coarse);
-
-    if (levelVolumeTier(compressLevel) >= 3) {
-        Fcv2Cfg fine;            /* fine tiers, predecessor not quantized */
-        fine.cycleBucket = 24;
-        fine.deltaBucket = 12;
-        fine.prevShift = 0;
-        cfgs.push_back(fine);
+    const int volumeTier = levelVolumeTier(compressLevel);
+    for (int i = 0; i < FCV2_PRESET_COUNT; ++i) {
+        if (volumeTier < FCV2_PRESETS[i].minVolumeTier) {
+            continue;
+        }
+        if (FCV2_PRESETS[i].minMeanReadLen > 0 &&
+            meanLen < (uint64_t)FCV2_PRESETS[i].minMeanReadLen) {
+            continue;
+        }
+        Fcv2Cfg cfg = FCV2_PRESETS[i].cfg;
+        cfg.modelCount = modelCount;
+        cfgs.push_back(cfg);
     }
     return cfgs;
 }
@@ -344,36 +366,102 @@ struct QualRoundResult {
     uint32_t cmUs = 0;
 };
 
-QualRoundResult runRound(const std::vector<QualSampleRecord>& records,
-                         const std::vector<uint32_t>& freqByByte,
-                         const std::vector<Fcv2Cfg>& cfgs,
-                         uint32_t probe)
+/*
+ * Run the trial-compressions on every core that is idle at this point.
+ *
+ * Codec pre-selection happens before any data block is dispatched, so all
+ * worker threads are parked in workStartBarrier and the machine is empty. The
+ * quality-value selection dominates the decision's wall time, and it is a ladder
+ * of independent measurements: each rung (sample size) x each candidate coder
+ * writes only its own slot.
+ *
+ * Every rung is executed even when an earlier one would already have settled.
+ * That spends more CPU but no more wall time - the rungs run concurrently - and
+ * the verdict is taken from the rung the ladder logic stops at, so running them
+ * together cannot change the decision.
+ */
+void runInParallel(const std::vector<std::function<void()>>& tasks)
+{
+    if (tasks.empty()) {
+        return;
+    }
+    const unsigned hw = std::thread::hardware_concurrency();
+    size_t workers = (hw == 0) ? 1u : (size_t)hw;
+    if (workers > tasks.size()) {
+        workers = tasks.size();
+    }
+    if (workers <= 1) {
+        for (size_t i = 0; i < tasks.size(); ++i) {
+            tasks[i]();
+        }
+        return;
+    }
+
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> pool;
+    pool.reserve(workers - 1);
+    for (size_t i = 1; i < workers; ++i) {
+        pool.emplace_back([&tasks, &next]() {
+            while (true) {
+                const size_t k = next.fetch_add(1, std::memory_order_relaxed);
+                if (k >= tasks.size()) {
+                    break;
+                }
+                tasks[k]();
+            }
+        });
+    }
+    while (true) {
+        const size_t k = next.fetch_add(1, std::memory_order_relaxed);
+        if (k >= tasks.size()) {
+            break;
+        }
+        tasks[k]();
+    }
+    for (size_t i = 0; i < pool.size(); ++i) {
+        pool[i].join();
+    }
+}
+
+/* One rung's raw measurements, written by the parallel tasks. */
+struct RoundSlots {
+    std::vector<bool>     fcv2Ok;
+    std::vector<uint32_t> fcv2Len;
+    std::vector<uint32_t> fcv2Us;
+    bool     qualOk = false;
+    uint32_t qualLen = 0;
+    uint32_t qualUs = 0;
+    bool     cmOk = false;
+    uint32_t cmLen = 0;
+    uint32_t cmUs = 0;
+};
+
+/* Reduce one rung to a verdict - the same comparison the serial code did. */
+QualRoundResult assembleRound(const RoundSlots& s, const std::vector<Fcv2Cfg>& cfgs)
 {
     QualRoundResult r;
-    size_t count = recordsForBudget(records, probe);
-
-    if (trialQual(records, count, freqByByte, r.qualLen, r.qualUs)) {
+    if (s.qualOk) {
         r.qualOk = true;
+        r.qualLen = s.qualLen;
+        r.qualUs = s.qualUs;
         r.anyOk = true;
         r.bestLen = r.qualLen;
         r.bestCoder = CoderType::QUAL;
     }
 
-    /* Pick the smallest among the several fcv2 tiers; this represents fcv2 when
-     * compared against coder_qual / bwt_cm. */
-    bool fcv2Picked = false;
+    bool picked = false;
     for (size_t i = 0; i < cfgs.size(); i++) {
-        uint32_t len = 0, us = 0;
-        if (trialFcv2(records, count, freqByByte, cfgs[i], len, us)) {
-            if (!fcv2Picked || len < r.fcv2Len) {
-                r.fcv2Len = len;
-                r.fcv2Us = us;
-                r.fcv2Cfg = cfgs[i];
-                fcv2Picked = true;
-            }
+        if (!s.fcv2Ok[i]) {
+            continue;
+        }
+        if (!picked || s.fcv2Len[i] < r.fcv2Len) {
+            r.fcv2Len = s.fcv2Len[i];
+            r.fcv2Us = s.fcv2Us[i];
+            r.fcv2Cfg = cfgs[i];
+            picked = true;
         }
     }
-    if (fcv2Picked) {
+    if (picked) {
         r.fcv2Ok = true;
         r.anyOk = true;
         if (r.fcv2Len < r.bestLen || !r.qualOk) {
@@ -382,8 +470,10 @@ QualRoundResult runRound(const std::vector<QualSampleRecord>& records,
         }
     }
 
-    if (trialBwtCm(records, count, bwtLevelFor(probe), r.cmLen, r.cmUs)) {
+    if (s.cmOk) {
         r.cmOk = true;
+        r.cmUs = s.cmUs;
+        r.cmLen = s.cmLen;
         r.anyOk = true;
         if (r.cmLen < r.bestLen || (!r.qualOk && !r.fcv2Ok)) {
             r.bestLen = r.cmLen;
@@ -414,7 +504,28 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
         return sel;
     }
 
-    const std::vector<Fcv2Cfg> cfgs = candidateFcv2Cfgs(compressLevel);
+    /* The mean record length of the sample picks the model count (see
+     * qualModelCountForMeanLen); the winning candidate - count included - is
+     * handed to the compression side and to prior training through fcv2Params
+     * below, and the decoder reads it back from the stream header. The same mean
+     * length also prunes the candidate set (see the preset table). */
+    const uint64_t meanLen = (uint64_t)sampleLen / (uint64_t)records.size();
+    const int modelCount = qualModelCountForMeanLen(meanLen);
+
+    /*
+     * Which quality coders are in play is the config table's decision, not this
+     * file's: only what the QUAL row of kSamFieldCoderConfig lists is trialled
+     * (see qualCoderCandidate). An empty row therefore means "no selection" and
+     * the column falls through to the field's fallback coder.
+     */
+    const bool tryQual = qualCoderCandidate(CoderType::QUAL);
+    const bool tryFcv2 = qualCoderCandidate(CoderType::FCV2);
+    const bool tryBwtCm = qualCoderCandidate(CoderType::BWT_CM);
+
+    /* The candidate tiers are only built when fcv2 is in play; the slots below
+     * keep the same shape either way, with every tier marked as not-tried. */
+    const std::vector<Fcv2Cfg> cfgs =
+        tryFcv2 ? candidateFcv2Cfgs(compressLevel, modelCount, meanLen) : std::vector<Fcv2Cfg>();
 
     /*
      * Multi-round convergence (strategy 7): start from a small sample and double
@@ -426,24 +537,80 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
      * see selectCoder in codec_selector.cpp.
      *
      * Early finalization has a precondition: the sample must be large enough
-     * that the adaptive encoders have converged. Measured on this file's quality
-     * values, bwt_cm leads fcv2 by 2%-5% on small samples (64 KB-512 KB; it
-     * compresses unusually well in this range), but the lead narrows as the
-     * sample grows and fcv2 overtakes it around 2-4 MB. Finalizing immediately
-     * at the 3% lead threshold would wrongly pick bwt_cm in the first round.
-     * Hence a minimum finalization sample size is set: below it, only double,
-     * never finalize.
+     * that the adaptive encoders have converged. On small samples bwt_cm
+     * compresses unusually well and leads fcv2, a lead it loses only once the
+     * sample grows, so finalizing at the lead threshold before that point would
+     * wrongly pick bwt_cm. Hence a minimum finalization sample size: below it,
+     * only double, never finalize.
      */
     const uint32_t MIN_SETTLE_PROBE = 1u << 20;   /* 1 MB */
 
-    uint32_t probe = (MIN_QUAL_SAMPLE < sampleLen) ? MIN_QUAL_SAMPLE : sampleLen;
+    /*
+     * Build the whole probe ladder up front and trial-compress every candidate
+     * at every rung in parallel (see runInParallel). The ladder doubles the
+     * sample from 64 KB until it is exhausted, and never finalizes below
+     * MIN_SETTLE_PROBE, so that an adaptive encoder cannot win on a sample where
+     * it has not converged yet.
+     */
+    std::vector<uint32_t> probes;
+    {
+        uint32_t p = (MIN_QUAL_SAMPLE < sampleLen) ? MIN_QUAL_SAMPLE : sampleLen;
+        while (true) {
+            probes.push_back(p);
+            if (p >= sampleLen) {
+                break;
+            }
+            p = (p > sampleLen / 2) ? sampleLen : (p * 2);
+        }
+    }
+
+    std::vector<RoundSlots> slots(probes.size());
+    for (size_t i = 0; i < probes.size(); i++) {
+        slots[i].fcv2Ok.assign(cfgs.size(), false);
+        slots[i].fcv2Len.assign(cfgs.size(), 0);
+        slots[i].fcv2Us.assign(cfgs.size(), 0);
+    }
+
+    std::vector<std::function<void()>> tasks;
+    tasks.reserve(probes.size() * (cfgs.size() + (size_t)tryQual + (size_t)tryBwtCm));
+    for (size_t i = 0; i < probes.size(); i++) {
+        const uint32_t probe = probes[i];
+        const size_t count = recordsForBudget(records, probe);
+        if (tryQual) {
+            tasks.push_back([&records, &freqByByte, &slots, i, count]() {
+                slots[i].qualOk = trialQual(records, count, freqByByte, slots[i].qualLen, slots[i].qualUs);
+            });
+        }
+        for (size_t c = 0; c < cfgs.size(); c++) {
+            tasks.push_back([&records, &freqByByte, &slots, &cfgs, i, c, count]() {
+                uint32_t len = 0;
+                uint32_t us = 0;
+                if (trialFcv2(records, count, freqByByte, cfgs[c], len, us)) {
+                    slots[i].fcv2Ok[c] = true;
+                    slots[i].fcv2Len[c] = len;
+                    slots[i].fcv2Us[c] = us;
+                }
+            });
+        }
+        if (tryBwtCm) {
+            const int bwtLevel = bwtLevelFor(probe);
+            tasks.push_back([&records, &slots, i, count, bwtLevel]() {
+                slots[i].cmOk = trialBwtCm(records, count, bwtLevel, slots[i].cmLen, slots[i].cmUs);
+            });
+        }
+    }
+    runInParallel(tasks);
+
     QualRoundResult final;
     bool finalSet = false;
+    uint32_t settleProbe = sampleLen;
 
-    while (true) {
-        QualRoundResult r = runRound(records, freqByByte, cfgs, probe);
+    for (size_t i = 0; i < probes.size(); i++) {
+        const uint32_t probe = probes[i];
+        QualRoundResult r = assembleRound(slots[i], cfgs);
         final = r;
         finalSet = true;
+        settleProbe = probe;
         sel.rounds++;
 
         if (!r.anyOk) {
@@ -453,11 +620,10 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
             break;
         }
         if (probe < MIN_SETTLE_PROBE) {
-            probe = (probe > sampleLen / 2) ? sampleLen : (probe * 2);
-            continue;
+            continue;   /* too early to trust the ranking, just keep doubling */
         }
-        /* Only one candidate compresses successfully; adding more data gives
-         * nothing to compare against. */
+        /* Only one candidate compresses successfully; more data cannot change
+         * the comparison. */
         {
             uint32_t runnerUp = UINT32_MAX;
             if (r.bestCoder == CoderType::QUAL) {
@@ -479,14 +645,21 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
                 break;
             }
         }
-        probe = (probe > sampleLen / 2) ? sampleLen : (probe * 2);
     }
 
-    sel.decidedLen = finalSet ? probe : sampleLen;
+    sel.decidedLen = finalSet ? settleProbe : sampleLen;
     sel.trialCount = 0;
-    sel.addTrial(CoderType::QUAL, final.qualOk ? final.qualLen : 0, final.qualUs);
-    sel.addTrial(CoderType::FCV2, final.fcv2Ok ? final.fcv2Len : 0, final.fcv2Us);
-    sel.addTrial(CoderType::BWT_CM, final.cmOk ? final.cmLen : 0, final.cmUs);
+    /* Only the coders the config table put in play are reported; a coder that was
+     * never trialled is absent rather than listed with a zero length. */
+    if (tryQual) {
+        sel.addTrial(CoderType::QUAL, final.qualOk ? final.qualLen : 0, final.qualUs);
+    }
+    if (tryFcv2) {
+        sel.addTrial(CoderType::FCV2, final.fcv2Ok ? final.fcv2Len : 0, final.fcv2Us);
+    }
+    if (tryBwtCm) {
+        sel.addTrial(CoderType::BWT_CM, final.cmOk ? final.cmLen : 0, final.cmUs);
+    }
 
     if (!final.anyOk) {
         sel.status = FieldStatus::FAILED;
@@ -502,10 +675,20 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     }
     sel.status = FieldStatus::SELECTED;
 
-    LOG_DEBUG("Qual codec trial: coder_qual=%u (%u us), fcv2=%u (%u us), bwt_cm=%u (%u us), picked=%s",
+    /*
+     * Name the winning preset, not just the coder: "picked=coder_fcv2" does not
+     * say which of the presets was chosen, which is the thing worth seeing when
+     * comparing a run against the table.
+     */
+    const char* preset = (final.bestCoder == CoderType::FCV2) ? fcv2PresetName(final.fcv2Cfg) : nullptr;
+    LOG_DEBUG("Qual codec trial: coder_qual=%u (%u us), fcv2=%u (%u us), bwt_cm=%u (%u us), "
+              "mean_read_len=%llu, picked=%s%s%s",
               final.qualOk ? final.qualLen : 0, final.qualUs,
               final.fcv2Ok ? final.fcv2Len : 0, final.fcv2Us,
               final.cmOk ? final.cmLen : 0, final.cmUs,
-              coderTypeToMagic(sel.selectedCoder));
+              (unsigned long long)meanLen,
+              coderTypeToMagic(sel.selectedCoder),
+              (preset != nullptr) ? "/" : "",
+              (preset != nullptr) ? preset : "");
     return sel;
 }

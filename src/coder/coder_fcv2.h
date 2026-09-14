@@ -44,6 +44,64 @@
 class fcv2_impl;
 
 /*
+ * Mixing models available to fcv2: m0..m6. Fcv2Cfg::modelCount selects how many
+ * of them actually take part, in order, so a trimmed configuration drops the
+ * tail models.
+ *
+ * The tail is the less valuable end: m6 duplicates m1 while useQa is off (its
+ * context index degenerates to m1's), and m5's transition-count context overlaps
+ * what m2/m3 already carry. Each model costs a mix-and-update per bit, which is
+ * the hot loop, so a smaller mix is faster; it can also compress better, because
+ * fewer weights are easier to fit. Which of the two dominates for a given trim is
+ * a property of the data rather than of the model.
+ *
+ * modelCount travels in the stream header, so the decoder builds the same mix
+ * without depending on a compile-time agreement (see encode_record /
+ * begin_decode).
+ *
+ * This value is the default for a caller that does not state a count, overridable
+ * at compile time (-DFCV2_MODEL_COUNT=n). The default is 6 rather than the maximum
+ * 7: dropping m6 makes aligned QUAL 0.04% smaller and 12% faster on short reads,
+ * 0.01% smaller and 10% faster on long reads. Dropping m5 as well is another
+ * ~15%/~12% faster, but its effect on the ratio depends on the file (-0.01% on
+ * long reads against +0.08%-0.46% on short ones), so 5 is deliberately not the
+ * default. 4 (dropping m3 too) buys ~1.45x throughput for ~0.4% (short reads) to
+ * ~0.1% (long reads) of size.
+ *
+ * A file's count does not have to be this value: QualSelector picks it from the
+ * mean read length of its sample (see qualModelCountForMeanLen in
+ * qual_selector.h) - 6 for short reads, 4 for long ones - and it travels inside
+ * the tier, so the decoder reads it back with the rest of the parameters. Long
+ * reads get 4 because their value selection is dominated by the per-bit
+ * mix-and-update, which makes the count close to a pure speed lever there.
+ */
+const int FCV2_MAX_MODEL_COUNT = 7;
+#ifndef FCV2_MODEL_COUNT
+#define FCV2_MODEL_COUNT 6
+#endif
+
+/*
+ * Version of the fcv2 stream header (see encode_record / begin_decode), written as the stream's
+ * first symbol.
+ *
+ * The header carries the context tiers and the model count, which together fix the model layout,
+ * so a reader that assumes a different layout misparses the rest of the stream instead of
+ * failing at the header. Before this byte existed there was no way to tell an older stream from a
+ * corrupted one: an archive written then (alpha followed by the eight tier bytes) reports nothing
+ * more specific than "begin_decode failed". Bump this whenever the parameter set, their order or
+ * the model state layout changes, and readStreamHeader reads the previous layout back so that
+ * archives from before the change keep decoding; what fits neither is answered with
+ * CODER_ERR_UNSUPPORTED_VERSION rather than a guess.
+ *
+ * History:
+ *   none   alpha, then cycleMax, cycleBucket, deltaMax, deltaBucket, prevShift, useDelta,
+ *          useDedup, useQa, with the mix always using every model (MODEL_COUNT = 7 then). Still
+ *          read: see readStreamHeader.
+ *   1      this byte, then alpha, then the same eight tiers, then modelCount.
+ */
+const uint8_t FCV2_STREAM_VERSION = 1;
+
+/*
  * Parameter tiers of the fcv2 context model. The default values are the
  * historical fixed constants; QualSelector chooses a parameter set for trial
  * compression based on data characteristics (quality-value alphabet size,
@@ -68,6 +126,9 @@ class fcv2_impl;
  *              (strategy 4, fqzcomp's do_qa): each record first computes its
  *              average quality, quantizes it to 4 tiers written into the
  *              stream, and the tier serves as the m6 context.
+ *   modelCount how many of m0..m6 the mix uses (1..FCV2_MAX_MODEL_COUNT).
+ *              Appended last so the aggregate initializers that list the eight
+ *              tier fields keep their meaning.
  */
 struct Fcv2Cfg {
     int  cycleMax    = 96;
@@ -78,17 +139,107 @@ struct Fcv2Cfg {
     bool useDelta    = true;
     bool useDedup    = false;
     bool useQa       = false;
+    int  modelCount  = FCV2_MODEL_COUNT;
 
     bool operator==(const Fcv2Cfg& o) const
     {
         return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
                deltaMax == o.deltaMax && deltaBucket == o.deltaBucket &&
                prevShift == o.prevShift && useDelta == o.useDelta &&
-               useDedup == o.useDedup && useQa == o.useQa;
+               useDedup == o.useDedup && useQa == o.useQa &&
+               modelCount == o.modelCount;
     }
     bool operator!=(const Fcv2Cfg& o) const { return !(*this == o); }
 };
 
+/*
+ * The QUAL context presets, as a table rather than as code in the selector.
+ *
+ * They are the configurations worth trial-compressing against each other; which
+ * of them wins is a property of the data, not something a rule predicts, so the
+ * selector trials them and keeps the smallest. This table is what makes that set
+ * explicit, shared with the measurement tools, and printable under its own name.
+ *
+ *   cycleMax     reach of the positional context; cycles at or beyond it collapse
+ *                into one slot, and it also sets the bucket width (cycleMax /
+ *                cycleBucket cycles per bin)
+ *   cycleBucket  position bins for m3 and for the mixing-weight rows
+ *   deltaBucket  bins of m5's transition-count context
+ *   prevShift    quantization of m3's predecessor quality values (0 = none)
+ *
+ * minVolumeTier is the levelVolumeTier() value from which trial-compressing this
+ * preset starts being worth the time; see levelVolumeTier in qual_selector.cpp.
+ * The fine preset needs enough per-block QUAL for its fine buckets to stay
+ * populated, and below that it only spends trial time.
+ *
+ * modelCount is not part of a preset: it follows the mean read length and is
+ * applied to whichever preset is used (see qualModelCountForMeanLen).
+ */
+struct Fcv2Preset {
+    const char* name;
+    int         minVolumeTier;
+    int         minMeanReadLen;   /* 0 = usable at any read length */
+    Fcv2Cfg     cfg;
+};
+
+const int FCV2_PRESET_COUNT = 5;
+
+/*
+ * Naming is by what the preset changes, not by a ranking: they are alternatives.
+ *
+ * minMeanReadLen bounds a preset to the read lengths at which trialling it is
+ * worth the time. Read length is what separates those cases, not the alphabet
+ * size (the 90 bp files have alphabets 38 and 46, the 101-103 bp files 47 and 51):
+ * at 90 bp the best preset is 1.7-3.4 points ahead of bwt_cm, while at 101-103 bp
+ * coarse is already 0.23-0.25 points behind it at the same block volume. Below
+ * 95 bp coarse therefore only spends trial time, hence its bound; above it the
+ * preset is kept even where bwt_cm wins, because a 0.2-point margin is too small
+ * to justify dropping fcv2 from the trial.
+ */
+const Fcv2Preset FCV2_PRESETS[FCV2_PRESET_COUNT] = {
+    { "default",  0,     0, { 96, 16, 32,  8, 1, true, false, false, FCV2_MODEL_COUNT } },
+    { "ultra",    0,     0, { 96,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT } },
+    { "ultra-80", 0,     0, { 80,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT } },
+    { "coarse",   0,    95, { 96,  8, 32,  4, 2, true, false, false, FCV2_MODEL_COUNT } },
+    { "fine",     3,     0, { 96, 24, 32, 12, 0, true, false, false, FCV2_MODEL_COUNT } },
+};
+
+/* The name of a configuration, or nullptr when it is not one of the presets. */
+inline const char* fcv2PresetName(const Fcv2Cfg& cfg)
+{
+    for (int i = 0; i < FCV2_PRESET_COUNT; ++i) {
+        const Fcv2Cfg& p = FCV2_PRESETS[i].cfg;
+        if (cfg.cycleMax == p.cycleMax && cfg.cycleBucket == p.cycleBucket &&
+            cfg.deltaMax == p.deltaMax && cfg.deltaBucket == p.deltaBucket &&
+            cfg.prevShift == p.prevShift && cfg.useDelta == p.useDelta &&
+            cfg.useDedup == p.useDedup && cfg.useQa == p.useQa) {
+            return FCV2_PRESETS[i].name;
+        }
+    }
+    return nullptr;
+}
+
+/*
+ * The alphabet is data-derived: only the quality values that occur in the block
+ * are admitted, kept in ascending byte order. That keeps the Huffman tree
+ * shallow, but it also means the coder can only code the values it was built
+ * from - a byte outside the alphabet is skipped by encode_record, not rejected -
+ * so a coder is only ever used on the data it was built for.
+ *
+ * The tree cap (TREE_CAP in coder_fcv2.cpp) is a real ceiling in practice.
+ * Measured quality-byte ranges fall into two conventions, which matters when
+ * reasoning about how close a file is to that ceiling:
+ *
+ *   Phred+33   bytes 33..93    (measured: 34..80 and 34..93, i.e. phred 1..60)
+ *   Phred+64   bytes 64..105   (measured: 66..105, i.e. phred 2..41 - legacy
+ *                               Illumina/Solexa encoding, still present in data
+ *                               that predates the +33 switch)
+ *
+ * A file in one convention stays under the cap, but a file spanning both would
+ * need 73 symbols, which does not fit: the constructor then leaves alphaSize at 0
+ * and the coder is unusable, which the upper layer is expected to notice (see
+ * CoderFactory::coderSupports).
+ */
 class coder_fcv2 {
 public:
     /*

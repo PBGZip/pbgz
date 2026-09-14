@@ -212,9 +212,23 @@ Fcv2Cfg dedupCfg()
     return cfg;
 }
 
-Fcv2Cfg qaCfg()
+/*
+ * The average-quality context lives in m6, the last model of the mix, and the
+ * default model count trims that tail (see FCV2_MODEL_COUNT). A test of the
+ * strategy itself therefore has to ask for the full mix: with a trimmed count
+ * useQa has no model to act on and both sides of a comparison are the same
+ * coder.
+ */
+Fcv2Cfg fullMixCfg()
 {
     Fcv2Cfg cfg;
+    cfg.modelCount = FCV2_MAX_MODEL_COUNT;
+    return cfg;
+}
+
+Fcv2Cfg qaCfg()
+{
+    Fcv2Cfg cfg = fullMixCfg();
     cfg.useQa = true;
     return cfg;
 }
@@ -257,6 +271,51 @@ TEST_F(Fcv2CfgTest, RoundTripUnderNonDefaultConfigs)
     EXPECT_TRUE(roundtripWithCfg(recs, noDeltaCfg()));     /* delta context disabled */
     EXPECT_TRUE(roundtripWithCfg(recs, dedupCfg()));       /* dedup (no duplicate data) */
     EXPECT_TRUE(roundtripWithCfg(recs, qaCfg()));          /* average-quality preset */
+}
+
+/*
+ * Tier values at and above their maxima must survive the stream header, which
+ * writes every one of them as a single byte.
+ *
+ * The above-maximum case is the one that discriminates. deltaMax can be set to
+ * 256, which normalizeCfg accepts, but the header can only carry a byte: 256 is
+ * written as 0 and read back as the 8 that normalizeCfg clamps it to, so the two
+ * sides disagree on the context layout and the stream decodes into garbage with
+ * nothing reported (the header carries no checksum, and the model-layout
+ * comparison only runs when a prior is loaded). The preset round trips above all
+ * sit on moderate values and never reach this.
+ *
+ * A literal 255 cannot catch it: 255 is representable, so it round-trips either
+ * way. Only a value above the maximum does, because that is what makes the
+ * encoder depend on the header carrying its clamped result.
+ */
+TEST_F(Fcv2CfgTest, OverMaximalTierRoundTrip)
+{
+    Fcv2Cfg over;              /* every field above its maximum */
+    over.cycleMax = 4096;      /* clamps to 128 */
+    over.cycleBucket = 512;    /* clamps to 32 */
+    over.deltaMax = 256;       /* would truncate to 0 in the header */
+    over.deltaBucket = 64;     /* clamps to 16 */
+    over.prevShift = 9;        /* clamps to 3 */
+    over.modelCount = 99;      /* clamps to FCV2_MAX_MODEL_COUNT */
+
+    std::vector<Rec> recs = makeCycleRecords(1200, 4000, 23);
+    EXPECT_TRUE(roundtripWithCfg(recs, over));
+}
+
+/* The same, with every field sitting exactly on its maximum at once. */
+TEST_F(Fcv2CfgTest, MaximalTierRoundTrip)
+{
+    Fcv2Cfg cfg;
+    cfg.cycleMax = 128;
+    cfg.cycleBucket = 32;
+    cfg.deltaMax = 255;
+    cfg.deltaBucket = 16;
+    cfg.prevShift = 3;
+    cfg.modelCount = FCV2_MAX_MODEL_COUNT;
+
+    std::vector<Rec> recs = makeCycleRecords(1200, 4000, 23);
+    EXPECT_TRUE(roundtripWithCfg(recs, cfg));
 }
 
 /* Dedup round trip: with adjacent duplicate reads, the result must be restored byte for byte. */
@@ -325,7 +384,7 @@ TEST_F(Fcv2CfgTest, QaSavesBytesOnVariedQuality)
     for (const Rec& r : recs) total += r.qual.size();
     std::vector<uint8_t> c1(total * 2 + (1u << 16), 0), c2(total * 2 + (1u << 16), 0);
     coder_io io1(c1.data(), (int32_t)c1.size());
-    coder_fcv2 e1(&io1, freq, Fcv2Cfg());
+    coder_fcv2 e1(&io1, freq, fullMixCfg());   /* the baseline differs only in useQa */
     ASSERT_TRUE(encodeAll(e1, recs));
     coder_io io2(c2.data(), (int32_t)c2.size());
     coder_fcv2 e2(&io2, freq, qaCfg());
@@ -391,6 +450,41 @@ TEST_F(Fcv2CfgTest, StreamHeaderCarriesConfigSelfDescribe)
     }
 }
 
+/*
+ * The model count follows the read length, and this is the only place that
+ * decides it: with the datasets at hand fcv2 is only ever selected on short
+ * reads, so the long-read branch would otherwise never run in any test or in
+ * production, and a silent regression in it would go unnoticed until some future
+ * file happened to select fcv2 there.
+ */
+TEST_F(Fcv2CfgTest, ModelCountFollowsReadLength)
+{
+    /* Short reads, on both sides of anything an Illumina run produces. */
+    EXPECT_EQ(qualModelCountForMeanLen(35), FCV2_MODEL_COUNT);
+    EXPECT_EQ(qualModelCountForMeanLen(90), FCV2_MODEL_COUNT);      /* con_sorted */
+    EXPECT_EQ(qualModelCountForMeanLen(151), FCV2_MODEL_COUNT);
+    EXPECT_EQ(qualModelCountForMeanLen(QUAL_LONG_READ_LEN - 1), FCV2_MODEL_COUNT);
+
+    /* Long reads start at the threshold itself, and stay there however long. */
+    EXPECT_EQ(qualModelCountForMeanLen(QUAL_LONG_READ_LEN), 4);
+    EXPECT_EQ(qualModelCountForMeanLen(14044), 4);                 /* ERR11436629 */
+    EXPECT_EQ(qualModelCountForMeanLen(100000), 4);
+
+    /* A trimmed long-read count must still be a usable mix (1..max). */
+    EXPECT_GE(qualModelCountForMeanLen(14044), 1);
+    EXPECT_LE(qualModelCountForMeanLen(14044), FCV2_MAX_MODEL_COUNT);
+}
+
+/* The trimmed count must produce a stream that decodes under its own count. */
+TEST_F(Fcv2CfgTest, LongReadCountRoundTrip)
+{
+    Fcv2Cfg cfg;
+    cfg.modelCount = qualModelCountForMeanLen(14044);
+    ASSERT_EQ(cfg.modelCount, 4);
+    std::vector<Rec> recs = makeCycleRecords(1500, 4000, 17);   /* long-read shaped */
+    EXPECT_TRUE(roundtripWithCfg(recs, cfg));
+}
+
 /* With a large enough sample, QualSelector should select a candidate and bring back the winning preset. */
 TEST_F(Fcv2CfgTest, QualSelectorCarriesWinningConfig)
 {
@@ -426,11 +520,57 @@ TEST_F(Fcv2CfgTest, QualSelectorCarriesWinningConfig)
                      << ", " << buf << "), so tier feedback cannot be verified";
     }
     /* The preset must be one of the known candidates (default / fine / coarse /
-     * ultra 4-2-ps0), and it must round-trip with the preset applied. */
+     * ultra 4-2-ps0 / ultra-80), and it must round-trip with the preset applied. */
     const QualFcv2Params& p = qualSel.fcv2Params;
     bool isKnownPreset = (p == QualFcv2Params()) ||
         (p.cycleBucket == 24 && p.deltaBucket == 12 && p.prevShift == 0 && p.useDelta) ||
         (p.cycleBucket == 8 && p.deltaBucket == 4 && p.prevShift == 2 && p.useDelta) ||
-        (p.cycleBucket == 4 && p.deltaBucket == 2 && p.prevShift == 0 && p.useDelta);
+        (p.cycleBucket == 4 && p.deltaBucket == 2 && p.prevShift == 0 && p.useDelta) ||
+        (p.cycleMax == 80 && p.cycleBucket == 4 && p.deltaBucket == 2 && p.prevShift == 0 && p.useDelta);
     EXPECT_TRUE(isKnownPreset) << "fcv2Params is not one of the known candidate tiers";
+}
+
+/*
+ * The stream header states its format version as the stream's first symbol (see
+ * FCV2_STREAM_VERSION), and a decoder reads either that layout or the one from before the byte
+ * existed (alphabet size first, no model count, seven models). A stream that fits neither is
+ * refused with CODER_ERR_UNSUPPORTED_VERSION instead of being parsed on a guess - which is what
+ * an archive from an unknown layout looks like from here. The first case checks the stream this
+ * build writes is accepted; the second alters the stream's leading code words, so it no longer
+ * decodes to this version and its alphabet size lands outside TREE_CAP as well, leaving neither
+ * layout applicable.
+ */
+TEST_F(Fcv2CfgTest, StreamVersionIsChecked)
+{
+    const std::vector<Rec> recs = makeRecords(24, 60, 11);
+    const std::vector<uint32_t> freq = frequencies(recs);
+    size_t total = 0;
+    for (const Rec& r : recs) {
+        total += r.qual.size();
+    }
+
+    std::vector<uint8_t> comp(total * 2 + (1u << 16), 0);
+    coder_io io(comp.data(), (int32_t)comp.size());
+    coder_fcv2 enc(&io, freq);
+    ASSERT_TRUE(encodeAll(enc, recs));
+    const int32_t packed = enc.encode_flush();
+    ASSERT_GT(packed, 8);
+
+    {
+        coder_io dio(comp.data(), packed);
+        coder_fcv2 dec(&dio, freq);
+        EXPECT_EQ(dec.begin_decode(), 0);
+    }
+
+    {
+        /* The range decoder's starting code is read from the stream's first words, so writing
+           them changes the version the header states. */
+        std::vector<uint8_t> tampered(comp.begin(), comp.begin() + packed);
+        for (size_t i = 2; i < 6 && i < tampered.size(); ++i) {
+            tampered[i] = 0xFF;
+        }
+        coder_io dio(tampered.data(), packed);
+        coder_fcv2 dec(&dio, freq);
+        EXPECT_EQ(dec.begin_decode(), coder_ns::CODER_ERR_UNSUPPORTED_VERSION);
+    }
 }

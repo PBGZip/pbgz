@@ -110,8 +110,10 @@ BlockReader* DecompressEngine::createBlockReader() {
 
 BlockWriter* DecompressEngine::createBlockWriter() {
     if (parameter.isDecToBam) {
-        /* -b: convert the decompressed SAM text to standard BAM when writing */
-        BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(ioWriter);
+        /* -b: convert the decompressed SAM text to standard BAM when writing.
+           The writer does its SAM->BAM conversion and BGZF deflate in parallel;
+           -t bounds how many threads it may use. */
+        BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(ioWriter, parameter.threadNum);
         if (blockWriter == nullptr) {
             LOG_ERROR("Failed to create bam writer.");
             return nullptr;

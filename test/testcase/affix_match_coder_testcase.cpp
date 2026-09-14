@@ -42,11 +42,10 @@ public:
         coder_ns::register_free_func(MemoryUtil::safeFree<void>);
 
         /*
-         * The allocation size must match the capacity reported to coder_io. Previously this
-         * code allocated 10 MB but declared only 1 MB, so when incompressible data pushed the
-         * encoder beyond 1 MB nobody noticed: the extra 9 MB of headroom masked the overflow.
-         * In production coder_io receives the block's true remaining size, so the same pattern
-         * would become a heap overflow.
+         * The allocation size must match the capacity reported to coder_io: allocating more than
+         * is declared leaves unreported headroom, so an encoder that runs past the declared
+         * capacity goes unnoticed here. In production coder_io receives the block's true remaining
+         * size, and the same pattern becomes a heap overflow.
          */
         test_data = (uint8_t*) malloc(BUFFER_SIZE);
         compressed_data = (uint8_t*) malloc(BUFFER_SIZE);

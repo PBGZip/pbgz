@@ -62,11 +62,11 @@ struct LineSample {
  */
 class CodecSelector {
 public:
-    /* Prior training uses at most 45 MB of QUAL. The measured gain at this
-     * point is about 1.84 percentage points; going to 90 MB adds only about
-     * 0.10 percentage points, yet the extra time falls in the serial phase
-     * before parallel compression kicks in, directly delaying worker-thread
-     * startup, so training must be cut off before the gain curve flattens. */
+    /* Prior training uses at most 45 MB of QUAL. The gain at this point is about
+     * 1.84 percentage points; going to 90 MB adds only about 0.10 points, while
+     * the extra time falls in the serial phase before parallel compression kicks
+     * in and directly delays worker-thread startup, so training is cut off
+     * there. */
     static constexpr uint32_t QUAL_PRIOR_TRAIN_MAX = 45u * 1024u * 1024u; // TEMP
 
     /*

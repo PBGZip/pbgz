@@ -145,8 +145,8 @@ protected:
      * This is a return value rather than letting each engine override the whole
      * readOneBlock because the skeleton of the read loop (acquire free block / read /
      * first-block decision / enqueue / count) is identical for all engines; the only
-     * step that genuinely differs is "is this block mine". Previously each of the three
-     * engines duplicated the skeleton, so any change to the skeleton missed two copies.
+     * step that genuinely differs is "is this block mine". Duplicating the skeleton per
+     * engine would mean every change to it has to be made in every copy.
      */
     enum class BlockIntake {
         DISPATCH,   /* Normal data block; enqueue it for the worker threads */
@@ -172,13 +172,21 @@ protected:
      * release/acquire semantics, so visibility of the decision result is covered too;
      * no waiting between worker threads or extra synchronization flags are needed.
      *
-     * A property gained along the way: the decision always happens on the reader thread
-     * and is always based on block 0, so the sample no longer drifts with scheduling;
+     * Two properties follow: the decision always happens on the reader thread and is
+     * always based on block 0, so the sample does not drift with scheduling;
      * and when a synchronous auxiliary block (such as the QUAL prior) is emitted the
      * writer thread has not yet received any data block, turning "the auxiliary block
      * physically precedes all data blocks" from a timing coincidence into a positional fact.
      */
     virtual void fileDecisionProc(RoughIOBlock* /*firstBlock*/) { }
+
+    /*
+     * Called by the reader thread after a block has been read and fully
+     * classified but before it is pushed to the workers. Compression uses it to
+     * move work that depends only on the input (currently the block MD5) off the
+     * worker threads. Decompression does nothing here.
+     */
+    virtual void preDispatchBlock(RoughIOBlock* /*blockPtr*/) { }
 
     virtual void updateInputStatics(RoughIOBlock*) { }
 
@@ -237,6 +245,13 @@ public:
     std::unique_ptr<BlockingQueueType> freeOutputPool;  // Compression/decompression tasks get blocks from this queue to write processed data, output tasks write free blocks to this queue after processing
     std::unique_ptr<BlockingQueueType> outputDataPool;  // After compression/decompression is completed, write to this queue, output tasks get data from this queue
     PbgzParameter parameter;
+    /*
+     * SAM QNAME coder decision, shared by every block of the file:
+     * -1 undecided, 0 = coder_qname, 1 = affix split. The first block that
+     * reaches the QNAME field runs the trial and publishes the verdict; the
+     * others reuse it (see SamCodecActuator::compressSamByFields).
+     */
+    std::atomic<int> samQnameUseAffix{-1};
     IOReader* ioReader;
     IOWriter* ioWriter;
     std::list<RoughIOBlock*> outputSortedCache;
@@ -258,6 +273,13 @@ public:
     /* File preprocessing result (codec pre-selection). Only the compression
        engine populates this; other engines return nullptr. */
     virtual const PreprocessInfo* getPreprocessInfo() { return nullptr; }
+
+    /*
+     * Mutable view of the same object, for the one decision the coder side writes back
+     * while coding instead of the preprocessing side producing it (see
+     * PreprocessInfo::seqMatchCoder). Null wherever getPreprocessInfo() is null.
+     */
+    virtual PreprocessInfo* getPreprocessInfoMut() { return nullptr; }
 
     /*
      * Fetch the QUAL prior model snapshot. The two sides obtain it from different
@@ -313,9 +335,7 @@ public:
     /*
      * First-block serialization: the coder thread with id==0 finishes processing block 0
      * before releasing the other threads, so concurrent preAnalysis cannot misclassify a
-     * block as binary while SamInfo is not yet populated. This mechanism originally
-     * existed in the perf branch and was accidentally removed when the prior latch
-     * (workStartBarrier) was integrated; restored here. The release happens only once.
+     * block as binary while SamInfo is not yet populated. The release happens only once.
      */
     mutable std::mutex coderStartMutex;
     std::condition_variable coderStartCond;

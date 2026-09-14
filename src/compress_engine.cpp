@@ -23,6 +23,8 @@
 
 
 #include "compress_engine.h"
+#include "profile_stats.h"
+#include "utils/md5_util.h"
 #include "utils/path_util.h"
 #include "coder_ppmd.h"
 #include "coder_json.h"
@@ -90,7 +92,8 @@ CompressEngine::~CompressEngine() {
 }
 
 BlockReader* CompressEngine::createBlockReader() {
-    BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel);
+    const bool bamStruct = (parameter.mode == PBGZ_MODE_FAST);
+    BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel, true, bamStruct);
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
     }
@@ -168,10 +171,9 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
  * the sole source of data, so the sampled bytes are always the same segment of block 0;
  * the trial-compression signal for every field is identical, the coder selected for
  * all subsequent blocks is stable across the file, and the compressed output is
- * reproducible at the byte level. Previously, if the preAnalysis of the first block
- * failed, this function would instead be triggered by some parallel worker thread on
- * its own block, so the sampled content drifted with scheduling — that was the real
- * hazard.
+ * reproducible at the byte level. If preAnalysis of the first block fails, this
+ * function must not be left to some parallel worker thread on its own block: the
+ * sampled content would then drift with scheduling.
  * Third, only the reader thread holds file-level information (total input length,
  * whether the input is seekable), which grounds whole-file judgments such as whether
  * a prior is worthwhile.
@@ -191,6 +193,35 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
  * is independent and side-effect free), which is not the same as the pipeline's
  * "different data blocks on different worker threads".
  */
+/*
+ * Checksum of the raw block text.
+ *
+ * The actuators used to hash the block at the end of compression, i.e. on the
+ * worker threads, which are the pipeline's bottleneck (measured: 24.5 s of CPU
+ * over 636 blocks, ~3 s of wall time at 8 threads). The checksum depends only on
+ * the input, and the reader thread has spare capacity (it was idle ~32% of the
+ * time waiting for a free block), so it is computed here instead.
+ */
+void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
+    if (blockPtr == nullptr) {
+        return;
+    }
+    const BlockType type = blockPtr->getBlockType();
+    if (!BlockUtil::isSAMBlock(type) && !BlockUtil::isFastqBlock(type) && type != BINARY) {
+        return;
+    }
+    if (blockPtr->getBamColumns() != nullptr) {
+        /* Structured BAM block: hashing is deferred to the worker that parses
+           and compresses it (BamCodecActuator has a hasMd5 fallback), so the
+           reader thread does not run a per-block md5 pass on top of inflate. */
+        return;
+    }
+    PBGZ_PROF_SCOPE(pbgzprof::READ_MD5);
+    std::string md5;
+    calcMd5sum(md5, blockPtr->getBuffer(), (uint32_t)blockPtr->getDataLen());
+    blockPtr->setMd5(md5);
+}
+
 void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     CodecEngine::fileDecisionProc(inBlockPtr);
 
@@ -237,10 +268,9 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
             if (sel.status == FieldStatus::SELECTED) {
                 /*
                  * The candidate coders are declared by FieldCodecSelection itself; here
-                 * we simply echo them. Previously this was two hardcoded slots plus a
-                 * patch that relabeled the quality-value line; that approach broke once
-                 * there were more than two candidates. Throughput is derived as sample
-                 * bytes / trial-compression time, in MB/s.
+                 * we simply echo them, which is what keeps the printout correct for any
+                 * number of candidates. Throughput is derived as sample bytes /
+                 * trial-compression time, in MB/s.
                  */
                 std::string trials;
                 for (uint32_t t = 0; t < sel.trialCount; ++t) {
@@ -357,6 +387,7 @@ void CompressEngine::pretrainBlockProc(RoughIOBlock* blockPtr) {
  * any data block; publication completes synchronously within this function.
  */
 void CompressEngine::finalizePretrain() {
+    PBGZ_PROF_SCOPE(pbgzprof::READ_PRETRAIN_TRAIN);
     if (!pretraining) {
         return;
     }
@@ -458,10 +489,9 @@ void CompressEngine::emitQualPrior() {
     outBlock->setBlockType(QUAL_PRIOR);
     /*
      * The auxiliary block gets no data-block id: it is addressed by position, and the
-     * writer thread writes it as soon as it is seen. Previously this did
-     * blockId2Write++, using the writer thread's cursor as an id generator; emitting
-     * before any data block had been written would directly overwrite the position of
-     * block 0.
+     * writer thread writes it as soon as it is seen. Taking an id from the writer
+     * thread's cursor instead would overwrite the position of block 0 when the
+     * auxiliary block is emitted before any data block has been written.
      */
     outBlock->setBlockId(-1);
 
@@ -692,23 +722,18 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
   * This only fills the reference genome description into the base file metadata; it
   * performs no I/O.
   *
-  * This content used to be written together with packReference in startWorkPreProc
-  * below, but startWorkPreProc runs only after the writer thread has started. As soon
-  * as the writer thread starts it writes baseFileMeta to disk, so "the main thread
-  * filling in refe" and "the writer thread writing baseFileMeta" became two threads
-  * racing over the same JSON: if the writer thread won, the file header had no refe;
-  * if the main thread won, it did.
+  * It has to run before the writer thread starts. The writer thread writes baseFileMeta
+  * to disk as soon as it starts, so filling refe in from startWorkPreProc (which runs
+  * later, once the writer is ready) would leave the two racing over the same JSON, and
+  * whether the file header carries refe would depend on who wins: compressing the same
+  * input twice could produce different bytes, shifting everything downstream. Both
+  * variants decompress correctly, because the decompressor tolerates a missing refe (see
+  * the note in decompress_engine.cpp about refe possibly living in baseFileMeta or
+  * dynamicFileMeta).
   *
-  * The consequence was that compressing the same input twice produced different bytes
-  * (two stable variants were measured to differ by 128 bytes, exactly the compressed
-  * length of the refe JSON member), shifting everything downstream. Both results
-  * decompress correctly, because the decompressor tolerates a missing refe (see the
-  * note in decompress_engine.cpp about refe possibly living in baseFileMeta or
-  * dynamicFileMeta), which is why the problem never surfaced.
-  *
-  * Now the construction of this pure metadata is moved before the writer thread starts,
-  * eliminating the race; packReference, which genuinely needs the writer thread to be
-  * ready, stays in startWorkPreProc.
+  * So this pure metadata is built here, before the writer thread starts, while
+  * packReference - which genuinely needs the writer thread to be ready - stays in
+  * startWorkPreProc.
   */
  int32_t CompressEngine::prepareFileMeta() {
     /*
@@ -786,6 +811,9 @@ Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock*
             parameter.isMakeIndex = false;
         }
         pActuator = MemoryUtil::safeNewClass<FastqCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
+    } else if (inBlockPtr->getBamColumns() != nullptr) {
+        /* Structured BAM block (PBGZ_BAM_STRUCT=1): columns instead of SAM text. */
+        pActuator = MemoryUtil::safeNewClass<BamCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (BlockUtil::isSAMBlock(inBlockPtr->getBlockType()) || BlockUtil::isBAMBlock(inBlockPtr->getBlockType())) {
         pActuator = MemoryUtil::safeNewClass<SamCompressActuator>(inBlockPtr, outBlockPtr, this, pRefGene);
     } else if (inBlockPtr->getBlockType() == BINARY) {

@@ -397,12 +397,11 @@ std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName)
 }
 
 /*
- * Only serializes an already-built squash. The fasta parsing implementation exists in
- * exactly one place, initSquashFromFasta: this code used to have its own parse loop,
- * and it dropped the trailing residue of fewer than 4 bases at the end of the file, so
- * the same reference produced squashes of different lengths through the two paths.
- * Keeping a single implementation for the same thing is what prevents the fork from
- * happening again.
+ * Only serializes an already-built squash. Fasta parsing lives in exactly one place,
+ * initSquashFromFasta, and this function parses nothing itself: a second parse loop here
+ * would produce squashes that differ from the ones built by that path (for instance over
+ * the trailing residue of fewer than 4 bases), i.e. the same reference yielding two
+ * different results depending on which path built it.
  */
 bool Reference::writeNiFile(const std::string& niFile) {
     if (refGeneSquash == nullptr || refGeneSquashlen <= 0) {

@@ -175,6 +175,17 @@ PBGZ 使用子命令格式，主要参数如下：
 - `-z, --gz`: 解压为gzip格式
 - `-f, --force`: 强制覆盖输出文件
 
+### 环境变量
+
+- `PBGZ_PROF`：设为 `1`（或 `on`）开启内置流水线剖析器。它统计「读取 → 并行压缩 → 写出」各阶段耗时
+  （reader / worker / writer 三个线程，以及 SAM 执行器内部逐列的开销），每块只读几次时钟；程序结束时
+  把各分类的总耗时、调用次数与占墙钟比例打印到 **stderr**。未设置该变量时完全不读时钟，对正常运行无影响。
+  分类定义见 `src/profile_stats.h`。
+
+```bash
+PBGZ_PROF=1 pbgz compress sample.bam -r hg38.fa -o sample.pbgz -t 16 -l 9
+```
+
 ### 使用示例
 
 #### 示例1：压缩 FASTQ 文件

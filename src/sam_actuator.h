@@ -87,7 +87,7 @@ public:
     int32_t decompressChrName(uint32_t fieldIdx, uint32_t lineNo, RoughIOBlock* outputBlock);
 
     int32_t decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
-                                    uint32_t& nposOffset, uint32_t& totalBaseLen, RoughIOBlock* outputBlock);
+                                    uint32_t& totalBaseLen, RoughIOBlock* outputBlock);
 
     /* Read one record's worth of bytes from the SEQ match stream.
        When matchBlockDecode is set (coder_fc, block-only) the bytes are sliced from
@@ -166,6 +166,22 @@ private:
 
     /* The coder type chosen by preprocessing; returns fallback when the engine provides none or the decision is not yet made. */
     CoderType pickedCoderFor(uint32_t fieldIdx, CoderType fallback) const;
+
+    /*
+     * The coder for the SEQ match stream: BWT_CM and FC are each tried on the first
+     * block that carries the stream and the smaller wins, which every later block then
+     * reuses. The verdict lives in PreprocessInfo (file-level); BWT_CM is returned
+     * where there is nowhere to keep it. See the definition for the cost of deciding
+     * per block instead.
+     */
+    CoderType seqMatchCoderFor(const uint8_t* payBuf, uint32_t payLen);
+
+    /* Runs measure() once for the whole file and caches it in slot; see the definition. */
+    int32_t decideOncePerFile(std::atomic<int32_t>* slot, int32_t fallback,
+                              const std::function<int32_t()>& measure);
+
+    /* The file-level preprocessing result, or nullptr when there is no engine to hold one. */
+    PreprocessInfo* preprocessInfoMut() const;
 
     /* A single CIGAR operation (op char + length). */
     struct CigarOp { char op; uint32_t len; };
@@ -329,8 +345,26 @@ private:
        and by TLEN reconstruction. Indexed by lineNo - headEndLine. */
     std::vector<std::vector<CigarOp>> cigarOpList;
 
+private:
     uint32_t baseNCount;
-    uint32_t* baseNPosBuffer;
+
+    /*
+     * A decoded SEQ exception stream for the current block: the character it carries, and
+     * its positions, which increase strictly. One stream per character that occurs, so the
+     * set of streams follows the data instead of a fixed list of classes - a character that
+     * never occurs has no stream and no meta at all (see the layout note on
+     * SeqExceptionClass in sam_actuator.cpp).
+     *
+     * The cursor lives here rather than in a local because it is read per record: a record's
+     * refill picks up where the previous record stopped.
+     */
+    struct SeqExcStream {
+        uint8_t byte;
+        std::vector<uint32_t> pos;
+        uint32_t off = 0;
+    };
+    std::vector<SeqExcStream> seqExc;
+
     uint32_t* baseLengthBuffer;
     uint32_t minBaseLength = UINT32_MAX;
     uint32_t maxBaseLength = 0;

@@ -48,9 +48,14 @@ public:
 
     virtual const PreprocessInfo* getPreprocessInfo() override { return &preprocessInfo; }
 
+    virtual PreprocessInfo* getPreprocessInfoMut() override { return &preprocessInfo; }
+
     void initStatsBasedOnFileType(BlockType fileType);
 
     virtual void fileDecisionProc(RoughIOBlock* firstBlock) override;
+
+    /* Computes the block MD5 on the reader thread (see PbgzEngine::readOneBlock). */
+    virtual void preDispatchBlock(RoughIOBlock* blockPtr) override;
 
 protected:
     /*

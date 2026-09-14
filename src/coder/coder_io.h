@@ -45,9 +45,9 @@ struct coder_io
      * silently writing past the end and corrupting the heap, or silently returning
      * '\0' and producing a "successful" file with wrong content.
      *
-     * Read-side exhaustion used to return '\0', but '\0' can also be real data
-     * (quality value '!'-'!'=0), so the return value alone cannot distinguish a
-     * real zero from "nothing left to read"; a flag is used instead.
+     * Read-side exhaustion cannot be signalled by the returned byte: '\0' is
+     * also real data (quality value '!'-'!'=0), so the return value alone cannot
+     * distinguish a real zero from "nothing left to read"; a flag carries it.
      */
     enum io_err {
         IO_OK = 0,
@@ -185,14 +185,13 @@ private:
  *
  * coder_io is a bounded view over the block buffer; processing one block opens
  * over a dozen views. "Did this block pass overflow?" is a property of the block
- * pass as a whole, not of any individual view; it used to be split across a
- * dozen unrelated local err values, only reachable if the caller remembered to
- * check—as a result, SAM checked 12 of them, FASTQ checked none, and the index
- * checked none. Patching in the missing 30 checks would just repeat that
- * forgetfulness; the next newly added stream would still leak.
+ * pass as a whole, not of any individual view. A per-view error value is only
+ * reachable if the caller remembers to check it, which a newly added stream can
+ * as easily forget, and then every stream has to repeat the same checks.
  *
- * So the answer is collected in one place: the moment a view sets its error it
- * is reported here, and the caller asks once at the exit of the block pass. The
+ * The answer is therefore collected in one place: the moment a view sets its
+ * error it is reported here, and the caller asks once at the exit of the block
+ * pass. The
  * aggregation point hangs off the Actuator, and since the executor is created
  * per block and destroyed after use, it is naturally "one per block,
  * thread-exclusive": no cleanup needed and never shared across threads.

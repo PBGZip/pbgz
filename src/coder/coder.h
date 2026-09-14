@@ -62,6 +62,10 @@ namespace coder_ns {
         CODER_ERR_BUF_SMALL = CODER_ERR_INVALID_STATE - 1,
         /* Input stream exhausted early: the end was reached with data still missing (io->err = IO_READ_EMPTY); the stream is corrupt or the length metadata is wrong. */
         CODER_ERR_STREAM_END = CODER_ERR_BUF_SMALL - 1,
+        /* The stream states a format version this build does not implement: it was written by an
+           incompatible version whose layout cannot be recovered from the bytes (see
+           FCV2_STREAM_VERSION). Reported apart from corruption so the caller can say which it is. */
+        CODER_ERR_UNSUPPORTED_VERSION = CODER_ERR_STREAM_END - 1,
 
     };
 
@@ -91,15 +95,14 @@ void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...);
 /*
  * Error exit path for the coder layer.
  *
- * Previously coder_exit/check_exit eventually called _Exit(), killing the process
- * deep inside a library function: it neither went through LOG_ERROR nor the
- * engine's taskFailed aggregation, so all the caller could see was a bare exit
- * code (empirically observed to be 253). And the 69 check_exit sites all live in
- * template/hot paths; converting each one to a return value would thread through
- * the entire encode/decode chain. So instead it throws an exception: the call
- * sites stay untouched, while the error propagates up the stack and is caught at
- * PbgzEngine's single-block processing boundary, where it is turned into an
- * ordinary failed return value.
+ * coder_exit/check_exit throw an exception rather than calling _Exit(): killing
+ * the process deep inside a library function would bypass LOG_ERROR and the
+ * engine's taskFailed aggregation, leaving the caller a bare exit code (253 in
+ * practice). The 69 check_exit sites all live in template/hot paths, and
+ * converting each one to a return value would thread through the entire
+ * encode/decode chain, whereas throwing leaves them untouched: the error
+ * propagates up the stack and is caught at PbgzEngine's single-block processing
+ * boundary, where it is turned into an ordinary failed return value.
  */
 class coder_exception : public std::exception {
 public:
@@ -129,10 +132,10 @@ public:
     /*
      * Encode a piece of data.
      *
-     * A unified three-parameter form is used: coder_bwt_cm originally took only
-     * two parameters, and the third was added so it can be called through a
-     * base-class pointer; it does not use need2hold internally. The third
-     * parameter has a default value, so two-argument callers are unaffected.
+     * A unified three-parameter form is used so that every coder can be called
+     * through a base-class pointer; coder_bwt_cm does not use need2hold
+     * internally. The third parameter has a default value, so two-argument
+     * callers are unaffected.
      *
      * Default empty implementation: subclasses that only decode and never encode
      * need not override it.

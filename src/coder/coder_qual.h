@@ -71,6 +71,18 @@ public:
         this->io->m = coder_io::MUNSET;
         this->io->appen_magic("coder_qual");
 
+        /*
+         * The base context is a five-symbol alphabet: A, C, G, T and one bucket for
+         * anything else. Every byte has to get a bucket: leaving the rest of L[] as it
+         * comes makes the encoder and the decoder read different indeterminate values for
+         * any SEQ character outside that set (IUPAC codes, '=', '.', ...), so their
+         * contexts disagree and the quality stream decodes into garbage. Mapping them all
+         * to the N bucket keeps the two sides consistent, and treats "ambiguous or
+         * unknown base" as one thing, which is what it is.
+         */
+        for (int i = 0; i < 256; ++i) {
+            L[i] = 4;
+        }
         L[static_cast<unsigned char>('A')] = L[static_cast<unsigned char>('a')] = 0;
         L[static_cast<unsigned char>('C')] = L[static_cast<unsigned char>('c')] = 1;
         L[static_cast<unsigned char>('G')] = L[static_cast<unsigned char>('g')] = 2;

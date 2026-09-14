@@ -25,13 +25,11 @@
 #include "coder_fc.h"
 
 /*
- * The four callbacks used to default to null pointers and were only bound when
- * the engine was constructed. As a result, any entry point that bypasses the
- * engine (e.g., explicitly building a reference index) would reach the codec
- * layer with empty implementations: safe_alloc returned nullptr and threw on the
- * spot, and safe_free simply leaked silently. Dependencies should not be
- * guaranteed by call order; self-sufficient defaults are provided here, and
- * registration degrades to an optional override.
+ * The four callbacks have self-sufficient defaults, and registration is an
+ * optional override on top of them. An entry point that bypasses the engine
+ * (e.g., explicitly building a reference index) must not reach the codec layer
+ * with empty implementations, where safe_alloc would fail on the spot and
+ * safe_free would silently leak; dependencies are not guaranteed by call order.
  */
 static uint8_t* defaultAllocProc(size_t size) {
     return size > 0 ? static_cast<uint8_t*>(calloc(size, 1)) : nullptr;
@@ -157,10 +155,9 @@ void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...) 
 }
 
 /*
- * No longer calls exit_proc / exit(): errors are thrown as exceptions instead
- * and caught by the caller (PbgzEngine's single-block processing boundary),
- * which then follows the normal failed-return path, ensuring every error is
- * eventually handled.
+ * Errors are thrown as exceptions and caught by the caller (PbgzEngine's
+ * single-block processing boundary), which then follows the normal failed-return
+ * path, ensuring every error is eventually handled.
  */
 void coder_exit(int16_t exit_code, const char* exit_msg_format, ...) {
     char exit_message[2048];

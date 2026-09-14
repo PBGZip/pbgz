@@ -27,6 +27,7 @@ class PbgzEngine;
 #include "binary_actuator.h"
 #include "fastq_actuator.h"
 #include "sam_actuator.h"
+#include "bam_actuator.h"
 #include "utils/memory_util.h"
 
 class BinaryCompressActuator : public Actuator {
@@ -195,4 +196,5 @@ using FastqDecompressActuator = DecompressActuator<FastqCodecActuator>;
 
 
 using SamCompressActuator = CompressActuator<SamCodecActuator>;
+using BamCompressActuator = CompressActuator<BamCodecActuator>;
 using SamDecompressActuator = DecompressActuator<SamCodecActuator>;

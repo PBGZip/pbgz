@@ -29,10 +29,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cctype>
+#include <algorithm>
+#include <map>
 #include <random>
+#include <utility>
 
 #define private public
 #include "sam_actuator.h"
+#include "coder/coder_json.h"
 #include "sam_info.h"
 #include <io_wrapper.h>
 #include <block_wrapper.h>
@@ -421,6 +425,406 @@ TEST_F(SamActuatorTest, testCompressBaseWithRef) {
     EXPECT_GT(result, 0);
 }
 
+/*
+ * The SEQ exception streams hold one sub-stream per character the 2-bit path cannot carry,
+ * so each character keeps its own statistics and a character that never occurs costs
+ * nothing at all - no stream and no meta entry. The tests below pin that layout through the
+ * field meta compressBaseWithRef returns, and check that every character, case included,
+ * survives a round trip.
+ */
+
+namespace {
+
+/* A SAM whose every line is a mapped read on chr1 with the given SEQ. A reference is always
+   handed to the actuator, because SEQ is coded against it only when one is present - and
+   that is the path whose 2-bit layout needs exception streams. */
+void writeSeqSamFile(const std::vector<std::string>& seqs)
+{
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    for (size_t i = 0; i < seqs.size(); ++i) {
+        file << "read" << i << "\t0\tchr1\t" << (i * 20 + 1) << "\t60\t" << seqs[i].size()
+             << "M\t*\t0\t0\t" << seqs[i] << "\t" << std::string(seqs[i].size(), 'I') << "\n";
+    }
+    file.close();
+}
+
+/* The exception streams of a compressed SEQ field, keyed by the character each carries
+   ("ch"). The run-length and value sub-streams of the 2-bit layout are not among them. */
+std::map<char, Json::Value> seqExceptionStreams(const Json::Value& fieldMeta)
+{
+    std::map<char, Json::Value> streams;
+    const Json::Value& all = fieldMeta["streams"];
+    for (Json::Value::ArrayIndex i = 0; i < all.size(); ++i) {
+        const std::string name = all[i]["sname"].asString();
+        if (name == "nposd" || name == "npos" || name == "nposr") {
+            streams[(char)all[i]["ch"].asUInt()] = all[i];
+        }
+    }
+    return streams;
+}
+
+/* A read of one repeated base, which the 2-bit path carries on its own. */
+std::string plainBases(size_t len = 76)
+{
+    return std::string(len, 'A');
+}
+
+}  // namespace
+
+TEST_F(SamActuatorTest, testSeqExceptionStreamsPerCharacter) {
+    std::string upperN = plainBases();
+    upperN[5] = 'N';
+    upperN[40] = 'N';
+    std::string iupacR = plainBases();
+    iupacR[1] = 'R';
+    std::string iupacY = plainBases();
+    iupacY[70] = 'Y';
+    iupacY[71] = 'Y';
+    std::string lowerN = plainBases();
+    lowerN[3] = 'n';
+    lowerN[60] = 'n';
+    writeSeqSamFile({upperN, iupacR, iupacY, lowerN, plainBases()});
+
+    loadSamData(SamTestData::testSamFile);
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(actuator.preAnalysis(), 0);
+
+    uint32_t fieldSrcLen = 0;
+    Json::Value fieldMeta;
+    ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
+
+    const std::map<char, Json::Value> streams = seqExceptionStreams(fieldMeta);
+
+    /* Exactly the characters that occur, each once, in ascending character order - the
+       layout follows the set of characters, not the order they first appear in. */
+    std::vector<char> order;
+    for (const auto& entry : streams) {
+        order.push_back(entry.first);
+    }
+    EXPECT_EQ(order, std::vector<char>({'N', 'R', 'Y', 'n'}));
+
+    const std::vector<std::pair<char, uint32_t>> expected = {{'N', 2}, {'R', 1}, {'Y', 2}, {'n', 2}};
+    for (const auto& pair : expected) {
+        const auto it = streams.find(pair.first);
+        ASSERT_NE(it, streams.end()) << "no exception stream for '" << pair.first << "'";
+        EXPECT_EQ(it->second["count"].asUInt(), pair.second) << "on '" << pair.first << "'";
+        EXPECT_GT(it->second["dstlen"].asUInt(), 0u);
+        EXPECT_EQ(it->second["coder"]["magic"].asString(), "coder_bwt_cm");
+        if (pair.first == 'N') {
+            /* The only character whose forms are measured against each other. */
+            const std::string name = it->second["sname"].asString();
+            EXPECT_TRUE(name == "nposd" || name == "npos" || name == "nposr") << name;
+        } else {
+            EXPECT_EQ(it->second["sname"].asString(), "nposd");
+        }
+    }
+
+    /* Characters that never occur write neither a stream nor a meta entry, and the 'N'
+       count is also what the field-level "ncount" carries. */
+    EXPECT_EQ(streams.count('K'), 0u);
+    EXPECT_EQ(streams.count('a'), 0u);
+    EXPECT_EQ(fieldMeta["ncount"].asUInt(), 2u);
+}
+
+TEST_F(SamActuatorTest, testSeqExceptionRoundTripKeepsCharacters) {
+    /* Upper and lower case N, lower case bases, IUPAC codes and the '=' of a full-length
+       match. The first layout folded all of these into one list and wrote an 'N' back, so a
+       byte-exact trip is what tells the per-character layout apart. */
+    std::string mixed = plainBases();
+    mixed[0] = 'N';
+    mixed[30] = 'n';
+    mixed[50] = 'R';
+    mixed[75] = 'Y';
+    std::string lower = plainBases();
+    lower[10] = 'a';
+    lower[20] = 'c';
+    lower[40] = 'g';
+    lower[60] = 't';
+    std::string rare = plainBases();
+    rare[5] = '=';
+    rare[6] = '.';
+    rare[7] = 'K';
+    rare[8] = 'N';
+    writeSeqSamFile({mixed, lower, rare, plainBases()});
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(),
+           pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+}
+
+TEST_F(SamActuatorTest, testSeqExceptionNoneForPlainBases) {
+    writeSeqSamFile({plainBases(), plainBases(50)});
+
+    loadSamData(SamTestData::testSamFile);
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(actuator.preAnalysis(), 0);
+
+    uint32_t fieldSrcLen = 0;
+    Json::Value fieldMeta;
+    ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
+
+    EXPECT_TRUE(seqExceptionStreams(fieldMeta).empty());
+    EXPECT_EQ(fieldMeta["ncount"].asUInt(), 0u);
+}
+
+TEST_F(SamActuatorTest, testSeqExceptionAbsoluteFormStream) {
+    std::string upperN = plainBases();
+    upperN[5] = 'N';
+    upperN[40] = 'N';
+    writeSeqSamFile({upperN, plainBases()});
+
+    loadSamData(SamTestData::testSamFile);
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    /* Pin the per-file form trial (see PreprocessInfo::nposForm) to the absolute form, which
+       is what the first layout always wrote. */
+    ASSERT_NE(engine.getPreprocessInfoMut(), nullptr);
+    engine.getPreprocessInfoMut()->nposForm.store(0);
+
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(actuator.preAnalysis(), 0);
+
+    uint32_t fieldSrcLen = 0;
+    Json::Value fieldMeta;
+    ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
+
+    const std::map<char, Json::Value> streams = seqExceptionStreams(fieldMeta);
+    ASSERT_EQ(streams.size(), 1u);
+    const std::pair<const char, Json::Value>& only = *streams.begin();
+    EXPECT_EQ(only.first, 'N');
+    EXPECT_EQ(only.second["sname"].asString(), "npos");
+    EXPECT_EQ(only.second["count"].asUInt(), 2u);
+    /* Absolute offsets: four bytes per position, which is what "npos" has always held. */
+    EXPECT_EQ(only.second["srclen"].asUInt(), 4u * only.second["count"].asUInt());
+}
+
+TEST_F(SamActuatorTest, testSeqExceptionAbsoluteFormRoundTrip) {
+    std::string upperN = plainBases();
+    upperN[2] = 'N';
+    upperN[70] = 'N';
+    std::string lowerN = plainBases();
+    lowerN[9] = 'n';
+    writeSeqSamFile({upperN, lowerN, plainBases()});
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    engine.getPreprocessInfoMut()->nposForm.store(0);   /* the absolute form, as above */
+
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(),
+           pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    /* 'N' comes back from the absolute list and 'n' from its own stream. */
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+}
+
+/* Unmapped reads of differing lengths: with no CIGAR there is nothing to imply a length
+   from, so every read's length has to be written out - the case the read-length table (the
+   "baselen" sub-stream) exists for. */
+const size_t kUnmappedReadCount = 6;
+
+void writeUnmappedReadsSamFile()
+{
+    static const size_t lens[kUnmappedReadCount] = {40, 52, 61, 40, 75, 33};
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    for (size_t i = 0; i < kUnmappedReadCount; ++i) {
+        file << "read" << i << "\t4\t*\t0\t0\t*\t*\t0\t0\t" << std::string(lens[i], 'A')
+             << "\t" << std::string(lens[i], 'I') << "\n";
+    }
+    file.close();
+}
+
+/*
+ * The read-length table is written as (ordinal, length) pairs in forward-delta+varint form,
+ * the ordinals as one run ahead of the lengths. With every read unmapped the whole ordinal
+ * run collapses into the same repeated delta, which is what makes this shape cheap; the
+ * stream is asserted through the field meta, and the round trip below checks the decode.
+ */
+TEST_F(SamActuatorTest, testSeqReadLengthTableDeltaForm) {
+    writeUnmappedReadsSamFile();
+
+    loadSamData(SamTestData::testSamFile);
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(actuator.preAnalysis(), 0);
+
+    /* CIGAR comes first in the field order because it is what fills the read-length table's
+       source: every read whose CIGAR is '*' is left at length 0 there, and those are exactly
+       the reads SEQ then has to write a length for. */
+    uint32_t cigarSrcLen = 0;
+    Json::Value cigarMeta;
+    ASSERT_GT(actuator.compressCigar(5, cigarSrcLen, cigarMeta), 0);
+
+    uint32_t fieldSrcLen = 0;
+    Json::Value fieldMeta;
+    ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
+
+    const Json::Value& streams = fieldMeta["streams"];
+    const Json::Value* lenStream = nullptr;
+    for (Json::Value::ArrayIndex i = 0; i < streams.size(); ++i) {
+        if (streams[i]["sname"].asString() == "baselen") {
+            lenStream = &streams[i];
+        }
+    }
+    ASSERT_NE(lenStream, nullptr) << "no read-length stream";
+    EXPECT_TRUE((*lenStream)["delta"].isUInt());
+    EXPECT_EQ((*lenStream)["count"].asUInt(), kUnmappedReadCount);
+    /* Two runs of varints, so the source stays far below the 8 B/read pairs it replaced. */
+    EXPECT_LT((*lenStream)["srclen"].asUInt(), kUnmappedReadCount * 8u);
+}
+
+TEST_F(SamActuatorTest, testSeqReadLengthTableRoundTrip) {
+    writeUnmappedReadsSamFile();
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(),
+           pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+}
+
+/* A read with two runs of Ns, the shape the run form is for (see SeqExceptionClass). */
+std::string basesWithNRuns()
+{
+    std::string seq = plainBases();
+    for (size_t i = 0; i < 35; ++i) {
+        seq[10 + i] = 'N';
+    }
+    for (size_t i = 0; i < 20; ++i) {
+        seq[50 + i] = 'N';
+    }
+    return seq;
+}
+
+/*
+ * Runs of consecutive positions: the run form writes one gap and one length per run instead of
+ * one varint per position, so a stream that arrives in long runs is a fraction of the size
+ * before the coder sees it. 'N' is the character the per-file trial measures, so a block whose
+ * Ns come in runs is written that way.
+ */
+TEST_F(SamActuatorTest, testSeqExceptionRunFormStream) {
+    const std::string runs = basesWithNRuns();
+    writeSeqSamFile({runs, runs, runs, plainBases()});
+
+    loadSamData(SamTestData::testSamFile);
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(actuator.preAnalysis(), 0);
+
+    uint32_t fieldSrcLen = 0;
+    Json::Value fieldMeta;
+    ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
+
+    const std::map<char, Json::Value> streams = seqExceptionStreams(fieldMeta);
+    const auto it = streams.find('N');
+    ASSERT_NE(it, streams.end());
+    EXPECT_EQ(it->second["sname"].asString(), "nposr");
+    EXPECT_EQ(it->second["count"].asUInt(), 3u * 55u);   /* positions */
+    EXPECT_EQ(it->second["runs"].asUInt(), 3u * 2u);     /* runs */
+    /* The gap and length columns stay far below one byte per position. */
+    EXPECT_LT(it->second["srclen"].asUInt(), it->second["count"].asUInt());
+}
+
+TEST_F(SamActuatorTest, testSeqExceptionRunFormRoundTrip) {
+    const std::string runs = basesWithNRuns();
+    writeSeqSamFile({runs, runs, plainBases(), runs});
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(),
+           pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+}
+
 TEST_F(SamActuatorTest, testCompressIdFieldSplit) {
     loadSamData(SamTestData::testSamFile);
     PbgzParameter para;
@@ -594,6 +998,111 @@ TEST_F(SamActuatorTest, testPNextDeltaTlenRoundTripByteExact) {
 
     std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
     EXPECT_EQ(roundtrip, original);
+}
+
+namespace {
+
+/*
+ * A SAM of one normal pair - both TLEN values follow from POS and PNEXT - plus, when asked for,
+ * one unpaired line whose TLEN is not 0. Inference cannot produce that value, so it is the one
+ * that has to be stored as an exception.
+ */
+void writePairedTlenSamFile(bool withTlenException)
+{
+    const std::string seq = std::string(76, 'A');
+    const std::string qual = std::string(76, '!');
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000000\n";
+    file << "read1\t99\tchr1\t100\t60\t76M\t=\t300\t276\t" << seq << "\t" << qual << "\n";
+    file << "read2\t147\tchr1\t300\t60\t76M\t=\t100\t-276\t" << seq << "\t" << qual << "\n";
+    if (withTlenException) {
+        file << "read3\t0\tchr1\t2000\t60\t76M\t*\t0\t123\t" << seq << "\t" << qual << "\n";
+    }
+    file.close();
+}
+
+/*
+ * Compresses the fixture and hands back the block meta, decoded the way the decoder decodes it
+ * (see initMetaInfo). The field metas live under "sam"/"streams", indexed by field number.
+ */
+Json::Value compressSamBlockMeta(SamCodecActuator& compressor, RoughIOBlock* outBlock)
+{
+    EXPECT_EQ(compressor.compress(), 0);
+    coder_json metaCoder;
+    Json::Value meta;
+    metaCoder.decoder(outBlock->getMetaBuffer(), outBlock->getMetaLen(), meta);
+    return meta;
+}
+
+bool hasExceptionStream(const Json::Value& fieldMeta, const std::string& sname)
+{
+    for (Json::Value::ArrayIndex i = 0; i < fieldMeta["streams"].size(); ++i) {
+        if (fieldMeta["streams"][i]["sname"].asString() == sname) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+/*
+ * The TLEN exception stream is written in the varint layout and says so in its field meta, under
+ * the short key "exc" (see tlenDecodeVarints): that marker is what a reader trusts, while an
+ * archive without it holds the fixed int32 layout of the revisions up to 2026-08-19. So the key
+ * has to be there exactly when a stream is, and has to name the varint layout.
+ */
+TEST_F(SamActuatorTest, testTlenExceptionStreamLayout) {
+    writePairedTlenSamFile(true);
+
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    const Json::Value meta = compressSamBlockMeta(compressor, pOutBlock);
+
+    const Json::Value& pnextMeta = meta["sam"]["streams"][7];
+    const Json::Value& tlenMeta = meta["sam"]["streams"][8];
+
+    /* The unpaired line is the one exception, and it travels as a stream. */
+    ASSERT_EQ(tlenMeta["exceptions"].asUInt(), 1u);
+    EXPECT_TRUE(hasExceptionStream(tlenMeta, "tlenexc"));
+
+    /* Marker beside the stream, naming the varint layout (1 = TLEN_EXC_LAYOUT_VARINT). */
+    ASSERT_TRUE(tlenMeta.isMember("exc"));
+    EXPECT_EQ(tlenMeta["exc"].asUInt(), 1u);
+    /* The key PNEXT uses for the same purpose is not written for TLEN. */
+    EXPECT_FALSE(tlenMeta.isMember("exc_enc"));
+
+    /* PNEXT's own marker has to agree with whether it wrote an exception stream. */
+    ASSERT_TRUE(pnextMeta.isMember("exc_enc"));
+    EXPECT_EQ(pnextMeta["exc_enc"].asString(),
+              hasExceptionStream(pnextMeta, "pnextexc") ? "varint2" : "none");
+}
+
+/*
+ * The other half of the rule: when every TLEN follows from POS and PNEXT, no exception stream is
+ * written, and then the marker for it must not be written either - a key describing a stream that
+ * is not there would cost bytes in every such block and could only mislead a reader.
+ */
+TEST_F(SamActuatorTest, testTlenExceptionStreamAbsentWhenInferred) {
+    writePairedTlenSamFile(false);
+
+    loadSamData(SamTestData::testSamFile);
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    const Json::Value meta = compressSamBlockMeta(compressor, pOutBlock);
+
+    const Json::Value& tlenMeta = meta["sam"]["streams"][8];
+
+    EXPECT_EQ(tlenMeta["exceptions"].asUInt(), 0u);
+    EXPECT_FALSE(hasExceptionStream(tlenMeta, "tlenexc"));
+    EXPECT_FALSE(tlenMeta.isMember("exc"));
 }
 
 TEST_F(SamActuatorTest, testDecompressWithRef) {
@@ -1404,6 +1913,94 @@ TEST_F(SamActuatorTest, testCigarSegmentRefRoundTripByteExact) {
     EXPECT_EQ(roundtrip, original);
 
     std::remove("test_cigar_ref.fa");
+}
+
+/*
+ * SEQ characters the 2-bit path cannot carry travel as their own sub-streams and are
+ * written back on decode: every character that occurs gets a position list of its own
+ * (named by its "ch"), so "N", "n", the IUPAC codes and the lower-case A/C/G/T whose case
+ * the 2-bit path drops each keep their statistics apart. A single N cannot tell whether any
+ * of that is done right - with one offset, a stale zero in the freshly allocated buffer
+ * makes the absolute form come out correct by accident, which is why the round trip above
+ * passed while the two sides still disagreed about the meaning of the stream - so this
+ * block carries many, of several characters, in runs, at both ends of a read, and the
+ * comparison is byte for byte. The 'R' also covers the quality coder's base context, which
+ * reads a table indexed by the SEQ byte and must see the same character on both sides.
+ */
+TEST_F(SamActuatorTest, testSeqExceptionClassesRoundTripByteExact) {
+    auto makePeriodic = [](size_t len) {
+        static const char* pat = "AACCGGTTAACCGGTT";
+        std::string s;
+        s.reserve(len);
+        for (size_t i = 0; i < len; ++i) s.push_back(pat[i % 16]);
+        return s;
+    };
+    const std::string ref = makePeriodic(1024);
+
+    std::ofstream refFile("test_npos_ref.fa");
+    ASSERT_TRUE(refFile.is_open());
+    refFile << ">chr1\n";
+    for (size_t i = 0; i < ref.size(); i += 80) {
+        refFile << ref.substr(i, 80) << "\n";
+    }
+    refFile.close();
+
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:" << ref.size() << "\n";
+    for (int r = 0; r < 24; ++r) {
+        const size_t start = (size_t)r * 12;
+        std::string seq = ref.substr(start, 30);
+        seq[3] = 'N';
+        seq[5] = 'n';               /* lower case N has its own stream */
+        if (r % 2 == 0) {           /* an ambiguity code: the general class */
+            seq[7] = 'R';
+        }
+        if (r % 3 == 0) {           /* a run of consecutive Ns */
+            seq[10] = 'N';
+            seq[11] = 'N';
+            seq[12] = 'N';
+        }
+        if (r % 4 == 0) {           /* exceptions at both ends of the read */
+            seq[0] = 'N';
+            seq[29] = 'n';
+        }
+        if (r % 5 == 0) {           /* lower case A/C/G/T keep their case */
+            seq[15] = 'a';
+            seq[16] = 't';
+        }
+        file << "read" << r << "\t0\tchr1\t" << (start + 1) << "\t60\t30M\t*\t0\t0\t"
+             << seq << "\t" << std::string(30, 'I') << "\tNM:i:0\n";
+    }
+    file.close();
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    Reference reference("test_npos_ref.fa", 1);
+    ASSERT_TRUE(reference.makeIndex());
+
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &reference);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &reference);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+
+    std::remove("test_npos_ref.fa");
 }
 
 /*

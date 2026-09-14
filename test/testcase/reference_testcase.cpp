@@ -141,10 +141,9 @@ TEST_F(ReferenceTest, Constructor) {
 
 /*
  * makeIndex() only builds an in-memory index from the FASTA on the fly and does not touch .ni:
- * the latter is produced and loaded only when an explicit path is given. Previously this case
- * asserted the getNiFilePath() filename, which tested it against a post-condition of a different
- * path; it had been failing ever since the case was introduced, and meanwhile the return value
- * that actually matters was never checked.
+ * the latter is produced and loaded only when an explicit path is given. So this case asserts the
+ * return value of makeIndex(), not the getNiFilePath() filename, which would be a post-condition of
+ * a different path.
  */
 TEST_F(ReferenceTest, ReferenceMakeIndex) {
     Reference refe(testFastaFile, 1);
@@ -198,8 +197,8 @@ TEST_F(ReferenceTest, MakeSquashIndexMatchesMakeIndex) {
 /*
  * updateMatchedGene must not return early just because actgPos == 0: reference position 0 (e.g.,
  * the 1-based position 1 of the first alignment on chr1) is a valid position, and skipping it lets
- * sanitizeRefSquash zero out that region so decompression restores it as all A or all N. Regression
- * case: previously a read at chr1 position 1 always failed the MD5 check after compress-decompress.
+ * sanitizeRefSquash zero out that region so decompression restores it as all A or all N. A read at
+ * that position must survive a compress/decompress cycle with its MD5 intact.
  */
 TEST_F(ReferenceTest, UpdateMatchedGeneAtPositionZero) {
     Reference ref(testFastaFile, 1);

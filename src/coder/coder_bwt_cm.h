@@ -147,12 +147,12 @@ private:
             while ((low ^ high) < (1 << 24))
             {
                 /*
-                 * Read-side exhaustion sets IO_READ_EMPTY and returns: previously
-                 * it would read past the end of the code stream into adjacent
-                 * fields' data, producing wrong content that was still reported
-                 * as "success". After latching, subsequent decode_bit calls spin
-                 * harmlessly and the decode_line exit checks err and reports the
-                 * error (same as the in_end check in RC_Decode).
+                 * Read-side exhaustion sets IO_READ_EMPTY and returns: reading past
+                 * the end of the code stream would consume adjacent fields' data,
+                 * producing wrong content that is still reported as "success". After
+                 * latching, subsequent decode_bit calls spin harmlessly and the
+                 * decode_line exit checks err and reports the error (same as the
+                 * in_end check in RC_Decode).
                  */
                 if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_READ_EMPTY); return bit; }
                 low <<= 8;
@@ -187,6 +187,7 @@ public:
         coder_buff = nullptr;
         buf_bwt = nullptr;
         buf_arr = nullptr;
+        cap = 0;
         flushed = false;
         run = 0;
         c1 = 0;
@@ -219,14 +220,55 @@ public:
             safe_free((void**)&coder_buff);
     }
 
+    /*
+     * Size the work buffers for at least n bytes of input, never above the chunk size
+     * bsize.
+     *
+     * bsize is what decides where the blocks inside the stream end, so it must not
+     * change with the data; the buffers, though, only ever hold what the caller feeds
+     * in. Allocating them for bsize costs 6x that (input + BWT output + suffix array)
+     * up front whatever the input is - 1.5 GB from level 8 up, where bsize is 256 MB -
+     * for streams of a few MB, and that dominates the peak memory of a run (measured
+     * on ERR14949932: 780 MB at -l5 against 1947 MB at -l8). Growing on demand keeps
+     * the emitted blocks identical and the peak proportional to the data.
+     *
+     * What is already cached is carried over: encode_line may be called again for the
+     * rest of the stream and the tail it left behind has to survive the move.
+     */
+    void ensureCapacity(int32_t need)
+    {
+        if (need <= cap)
+            return;
+        int32_t want = (cap > 0) ? (cap << 1) : 4096;
+        if (want < need)
+            want = need;
+        want = (want + 7) & ~7; /* keep buf_arr 4-byte aligned */
+        if (want > bsize)
+            want = bsize; /* the one size the alignment rounding must not push past */
+
+        uint8_t* grown = static_cast<uint8_t*>(safe_alloc((uint64_t)want * 6));
+        check_exit(grown, coder_ns::CODER_ERR_MEM_ALLOC_FAIL,
+                   "Error: Insufficient memory: need %" PRIu64 " MB\n",
+                   ((uint64_t)want * 6) >> 20);
+        if (coder_buff != nullptr)
+        {
+            if (curr_incache > 0)
+                memcpy(grown, coder_buff, curr_incache);
+            safe_free((void**)&coder_buff);
+        }
+
+        coder_buff = grown;
+        buf_bwt = coder_buff + want;
+        buf_arr = (uint32_t *)(buf_bwt + want); /* 4 bytes per position */
+        cap = want;
+    }
+
     /* External compression interface */
     void encode_line(const uint8_t *in, const uint32_t in_len,
                      [[maybe_unused]] bool need2hold = false) override
     {
         if (io->m != coder_io::MENC)
         { /* Initialize when not initialized */
-            int32_t len_buf, len_bwt, len_arr;
-            // int32_t len2enc;
             const int32_t tab[10] =
                 {
                     0,
@@ -248,25 +290,15 @@ public:
             check_exit(level <= 9 && level >= 0,  coder_ns::CODER_ERR_BAD_ARGS, "coder level should in [0, 9], current is %d", level);
             const int32_t BLOCK_SIZE = (268435456);
 
-            bsize = std::min(tab[level], BLOCK_SIZE); /* Block size */
-            len_buf = bsize;
-            len_bwt = bsize;
-            len_arr = bsize << 2; /* int32_t type */
-            coder_buff = static_cast<uint8_t*>(safe_alloc(len_buf + len_bwt + len_arr));
-            check_exit(coder_buff, coder_ns::CODER_ERR_MEM_ALLOC_FAIL,
-                       "Error: Insufficient memory: need %" PRIu64 " MB\n",
-                       (static_cast<uint64_t>(sizeof(uint8_t)) *
-                        ((uint64_t)len_buf + len_bwt + len_arr)) >> 20);
-
-            buf_bwt = coder_buff + len_buf;
-            buf_arr = (uint32_t *)(buf_bwt + len_bwt);
+            /* Block size only; the work buffers follow the data (see ensureCapacity). */
+            bsize = std::min(tab[level], BLOCK_SIZE);
         }
 
         /*
-         * Feed the whole input without ever writing past coder_buff:
-         * an overlong single encode_line input used to copy bsize bytes in,
-         * then memcpy() the whole remainder on top of coder_buff (heap
-         * overflow) and hand libsai_bwt a length >= bsize, crashing inside
+         * Feed the whole input without ever writing past coder_buff: an
+         * overlong single encode_line input must not copy more than bsize bytes
+         * and memcpy() the remainder on top of coder_buff (heap overflow), nor
+         * hand libsai_bwt a length >= bsize, which crashes inside
          * libsais_main_8u.  Chunking on bsize boundaries keeps the stream
          * format unchanged: every emitted block carries its own
          * put32(len)+put32(idx) header, so old archives and the decode side
@@ -292,6 +324,7 @@ public:
             int32_t take = bsize - curr_incache;
             if (left < take)
                 take = left;
+            ensureCapacity(curr_incache + take);
             memcpy(coder_buff + curr_incache, src, take);
             curr_incache += take;
             src += take;
@@ -306,6 +339,7 @@ public:
         /* 2. Compress the bulk of the input in whole bsize blocks. */
         while (left >= bsize)
         {
+            ensureCapacity(bsize);
             memcpy(coder_buff, src, bsize);
             emitBlock(bsize);
             src += bsize;
@@ -315,6 +349,7 @@ public:
         /* 3. Keep the tail (< bsize) cached for encode_flush(). */
         if (left > 0)
         {
+            ensureCapacity(left);
             memcpy(coder_buff, src, left);
             curr_incache = left;
         }
@@ -692,6 +727,7 @@ private:
     int32_t curr_incache; /* Length of currently cached data */
     uint8_t *buf_bwt;
     uint32_t *buf_arr;
+    int32_t cap;          /* Bytes each of coder_buff/buf_bwt currently holds (buf_arr holds 4x) */
     int32_t bsize;
     int32_t bidx;
     int32_t curr_out_offset; /* Offset position during decompression */

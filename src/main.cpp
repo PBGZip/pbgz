@@ -67,8 +67,9 @@ static PbgzArg pbgzArgs =
     {'G', "logfile", required_argument, "sepcify log file"},
     {'p', "position", required_argument, "sepecify the reference gene posision"},
     {'i', "index", no_argument, "make index"},
-    {'s', "stat ", no_argument, "show statistics data"},
+    {'s', "stat", no_argument, "show statistics data"},
     {'v', "verbose", no_argument, "show codec selection per field and compression speed (MB/s)"},
+    {'m', "mode", required_argument, "<archive|fast> compression mode. archive: highest ratio, textual BAM/SAM path (default); fast: structured column path for BAM, quicker but slightly larger. use for compress"},
 };
 
 class CommandProc {
@@ -625,7 +626,7 @@ static std::vector<SubCommand> subCommands = {
     {
         "compress",
         "Compress file to pbgz format",
-        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 'n', 't', 'l', 'e', 'i', 'g', 'G', 's'},
+        {'h', 'v', 'o', 'O', 'f', 'r', 'N', 'n', 't', 'l', 'm', 'e', 'i', 'g', 'G', 's'},
         [](PbgzParameter& para) {
             return MemoryUtil::safeNewClass<CompressCmdProc>(para);
         },
@@ -685,6 +686,9 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
         fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
         fprintf(fp, "  pbgz index human.sam.gz.pbgz\n\n");
+
+        fprintf(fp, "Environment:\n");
+        fprintf(fp, "  PBGZ_PROF=1   time the pipeline phases (reader/worker/writer) and print them to stderr when the run ends\n\n");
     } else {
         // Display specific subcommand help information
         SubCommand* targetCmd = nullptr;
@@ -910,6 +914,16 @@ int main(int argc, char** argv) {
         case 'v':
             parameter.verbose = true;
             break;
+        case 'm': {
+            /* archive is the default; only an explicit "fast" (or "f") changes it. */
+            parameter.mode = PBGZ_MODE_ARCHIVE;
+            if (optarg != nullptr && (strcmp(optarg, "fast") == 0 || strcmp(optarg, "f") == 0)) {
+                parameter.mode = PBGZ_MODE_FAST;
+            } else if (optarg != nullptr && (strcmp(optarg, "archive") != 0 && strcmp(optarg, "a") != 0)) {
+                fprintf(stdout, "Unknown mode '%s' (expected archive|fast); using archive.\n", optarg);
+            }
+            break;
+        }
         default:
             fprintf(stdout, "Use pbgz help %s to show usage.\n\n", selectedSubCommand->name.c_str());
             return 0;

@@ -32,9 +32,9 @@
  * Behavior of the out-of-bounds error sink.
  *
  * These cases guard one property: "any stream that overflows during a single block process must
- * be queryable at the exit point." Previously this relied on every call site checking its own err;
- * the result was that SAM checked all 12 streams while FASTQ and the index checked none, so data
- * corrupted by an overflow was written out as if it had succeeded.
+ * be queryable at the exit point." Relying on every call site to check its own err does not hold
+ * that property: a stream whose check is forgotten writes corrupted data out as if it had
+ * succeeded.
  */
 class CoderIoErrSinkTest : public ::testing::Test {};
 

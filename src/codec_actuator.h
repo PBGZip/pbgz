@@ -48,11 +48,6 @@ public:
      * of this block's processing */
     const coder_err_sink& ioError() const { return ioErrSink; }
 
-#if defined(TEST_MODE) || defined(GTEST_ENABLED)
-    // Test-only constructor: creates a dummy engine wrapper
-    static PbgzEngine* createTestEngine(const PbgzParameter& para);
-#endif
-
 protected:
     /*
      * The compression level from the engine parameters; returns 0 when there is
@@ -67,9 +62,9 @@ protected:
      * Create an encoder for a field, with the type taken from the
      * trial-compression result of the preprocessing phase.
      *
-     * fallback is the encoder that this field previously hard-coded. All three
-     * of the following cases fall back to it unchanged, so behavior stays
-     * exactly as before preprocessing selection was wired in:
+     * fallback is the field's fixed encoder (the one its row in
+     * kSamFieldCoderConfig registers as the default). All three of the following
+     * cases fall back to it, so there is always something to compress with:
      *   1. The engine provides no preprocessing info (both decompression and
      *      test engines return a null pointer)
      *   2. Preprocessing has not finished yet, or it failed
@@ -85,6 +80,22 @@ protected:
     std::shared_ptr<coder> makeFieldEncoder(uint32_t fieldIdx, CoderType fallback,
                                             coder_io* io, bool lineMode)
     {
+        /*
+         * fast preset: every field is coded by the fixed static order-0 entropy
+         * coder (coder_rans). No preselection result is consulted, so the reader
+         * thread's trial work is irrelevant here - this is what makes the fast
+         * path deterministic and quick (per-symbol O(1), no BWT/context model).
+         * The block format is self-describing (the magic travels in meta), so
+         * the decoding side needs no preset information.
+         */
+        const uint8_t mode = (pbgzEngine != nullptr) ? pbgzEngine->getParameter().mode
+                                                    : (uint8_t)PBGZ_MODE_ARCHIVE;
+        if (mode == PBGZ_MODE_FAST) {
+            (void)fieldIdx;
+            CoderFactory::applyLevel(io, CoderType::RANS, engineCompressLevel());
+            return CoderFactory::makeEncoder(CoderType::RANS, io);
+        }
+
         CoderType picked = fallback;
         const PreprocessInfo* preInfo = (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
         if (preInfo != nullptr) {
@@ -99,10 +110,10 @@ protected:
          * Preprocessing trial compression always measures whole-block, so the
          * picked encoder may not be usable line by line. When this field must
          * be fed line by line but the picked encoder does not support it, fall
-         * back to the encoder this field originally hard-coded, whose usage is
-         * verified. Better a slightly worse compression ratio than data that
-         * cannot be decompressed. The level must also be reapplied for the
-         * fallback type (the two encoder types accept different level ranges).
+         * back to the field's fixed encoder, whose line-mode usage is verified.
+         * Better a slightly worse compression ratio than data that cannot be
+         * decompressed. The level must also be reapplied for the fallback type
+         * (the two encoder types accept different level ranges).
          */
         if (lineMode && !enc->supportsLineMode()) {
             CoderFactory::applyLevel(io, fallback, level);
