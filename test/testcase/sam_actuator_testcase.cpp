@@ -474,6 +474,24 @@ std::string plainBases(size_t len = 76)
 
 }  // namespace
 
+/*
+ * The field steps the pipeline runs before SEQ, in that order. They are what fills the tracking
+ * maps SEQ reads to decide whether a record takes its bases from the reference: FLAG says whether
+ * the record is mapped, RNAME gives its chromosome index, POS its position and CIGAR the op list to
+ * walk - and a record missing any of them is one SEQ cannot code against the reference, so it puts
+ * its characters in the payload instead of writing exception streams (see the encoder's fallback).
+ * Compressing them here is what puts the reads below on the reference-coded path.
+ */
+void compressFieldsBeforeSeq(SamCodecActuator& actuator)
+{
+    uint32_t stepSrcLen = 0;
+    Json::Value stepMeta;
+    ASSERT_GT(actuator.compressRegularField(1, stepSrcLen, stepMeta), 0);   /* FLAG */
+    ASSERT_GT(actuator.compressChrName(2, stepSrcLen, stepMeta), 0);        /* RNAME */
+    ASSERT_GT(actuator.compressRegularField(3, stepSrcLen, stepMeta), 0);   /* POS */
+    ASSERT_GT(actuator.compressCigar(5, stepSrcLen, stepMeta), 0);          /* CIGAR */
+}
+
 TEST_F(SamActuatorTest, testSeqExceptionStreamsPerCharacter) {
     std::string upperN = plainBases();
     upperN[5] = 'N';
@@ -494,6 +512,8 @@ TEST_F(SamActuatorTest, testSeqExceptionStreamsPerCharacter) {
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     ASSERT_EQ(actuator.preAnalysis(), 0);
+
+    compressFieldsBeforeSeq(actuator);
 
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
@@ -614,6 +634,8 @@ TEST_F(SamActuatorTest, testSeqExceptionAbsoluteFormStream) {
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     ASSERT_EQ(actuator.preAnalysis(), 0);
 
+    compressFieldsBeforeSeq(actuator);
+
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
     ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
@@ -662,6 +684,139 @@ TEST_F(SamActuatorTest, testSeqExceptionAbsoluteFormRoundTrip) {
     /* 'N' comes back from the absolute list and 'n' from its own stream. */
     std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
     EXPECT_EQ(roundtrip, original);
+}
+
+/*
+ * A read that cannot consult the reference puts its bases into the payload as themselves, so N,
+ * lower case and IUPAC codes survive there with no stream per character - while in the same block a
+ * read that does consult the reference still writes the exception streams its 2-bit payload needs.
+ * The two encodings share the payload without overlapping (a 2-bit code is 0..3, a SEQ character is
+ * at least '='), and each side decides per record by the same test, so a disagreement here would
+ * decode to garbage rather than fail loudly: this round trip is what checks that they agree.
+ */
+void writeMixedMappingSamFile()
+{
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+
+    std::string mapped = plainBases();
+    mapped[5] = 'N';              /* reference-coded: an exception, as before */
+    std::string unmapped = plainBases();
+    unmapped[3] = 'N';            /* not reference-coded: the character itself rides in the payload */
+    unmapped[9] = 'n';
+    unmapped[71] = 'R';
+    std::string noOps = plainBases();
+    noOps[20] = 'Y';              /* FLAG says mapped but the CIGAR is "*": the same fallback */
+
+    file << "mapped0\t0\tchr1\t1\t60\t76M\t*\t0\t0\t" << mapped << "\t"
+         << std::string(mapped.size(), 'I') << "\n";
+    file << "unmapped0\t4\t*\t0\t0\t*\t*\t0\t0\t" << unmapped << "\t*\n";
+    file << "star0\t0\tchr1\t200\t60\t*\t*\t0\t0\t" << noOps << "\t*\n";
+    file.close();
+}
+
+TEST_F(SamActuatorTest, testSeqCharactersInPayloadRoundTrip) {
+    writeMixedMappingSamFile();
+
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+    Reference refGene = createTestReference();
+    PbgzParameter para;
+    CompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(),
+           pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &refGene);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+}
+
+/* Every character SAMv1 allows in SEQ (its [A-Za-z=.]+), padded to the 76 bases the records
+   below use. */
+std::string everyLegalSeqCharacter()
+{
+    static const char kLegal[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz=.";
+    std::string seq(kLegal);
+    seq.append(76 - seq.size(), 'A');
+    return seq;
+}
+
+/* One mapped and one unmapped record, both carrying every character SAMv1 allows in SEQ. */
+void writeLegalCharacterSamFile()
+{
+    const std::string seq = everyLegalSeqCharacter();
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    file << "mapped0\t0\tchr1\t1\t60\t76M\t*\t0\t0\t" << seq << "\t"
+         << std::string(seq.size(), 'I') << "\n";
+    file << "unmapped0\t4\t*\t0\t0\t*\t*\t0\t0\t" << seq << "\t*\n";
+    file.close();
+}
+
+/*
+ * Every legal SEQ character has to come back unchanged, through both representations a block can
+ * hold at once: the payload as written (the unmapped record, whose characters ride in it because
+ * it cannot consult the reference) and the exception streams (the mapped record, whose 2-bit
+ * payload carries only A/C/G/T).
+ *
+ * Which characters the payload itself carries is a property of the coder it is handed, not a
+ * constant of the format: the encoder keeps A/C/G/T/N there and records everything else, because
+ * the match stream is a DNA-oriented coder that does not hand back every byte it is given. That is
+ * what makes this test the place the property is pinned - the same block goes through both
+ * candidates the trial chooses between, so a coder that starts folding a character, or an encoder
+ * change that stops moving it to the exception streams, fails here rather than inside an archive.
+ */
+TEST_F(SamActuatorTest, testSeqKeepsEveryLegalCharacter) {
+    for (int coder = 0; coder < 2; ++coder) {
+        writeLegalCharacterSamFile();
+
+        loadSamData(SamTestData::testSamFile);
+        std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+
+        Reference refGene = createTestReference();
+        PbgzParameter para;
+        CompressEngine engine(para);
+        /* Pin the per-file coder trial (see PreprocessInfo::seqMatchCoder) to one candidate, so
+           both halves of the trial are exercised rather than whichever one wins on this data. */
+        ASSERT_NE(engine.getPreprocessInfoMut(), nullptr);
+        engine.getPreprocessInfoMut()->seqMatchCoder.store(
+            coder == 0 ? (int32_t)CoderType::BWT_CM : (int32_t)CoderType::FC);
+
+        SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &refGene);
+        ASSERT_EQ(compressor.preAnalysis(), 0);
+        ASSERT_EQ(compressor.compress(), 0);
+
+        pInBlock->reset();
+        memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(),
+               pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+        pInBlock->setDataLen(pOutBlock->getDataLen());
+        pInBlock->setMetaLen(pOutBlock->getMetaLen());
+        pInBlock->setBlockType(pOutBlock->getBlockType());
+        pOutBlock->reset();
+
+        SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &refGene);
+        ASSERT_EQ(decompressor.decompress(), 0);
+
+        std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+        EXPECT_EQ(roundtrip, original) << "match-stream coder " << (coder == 0 ? "BWT_CM" : "FC");
+        pOutBlock->reset();
+    }
 }
 
 /* Unmapped reads of differing lengths: with no CIGAR there is nothing to imply a length
@@ -782,6 +937,8 @@ TEST_F(SamActuatorTest, testSeqExceptionRunFormStream) {
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     ASSERT_EQ(actuator.preAnalysis(), 0);
 
+    compressFieldsBeforeSeq(actuator);
+
     uint32_t fieldSrcLen = 0;
     Json::Value fieldMeta;
     ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
@@ -823,6 +980,145 @@ TEST_F(SamActuatorTest, testSeqExceptionRunFormRoundTrip) {
 
     std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
     EXPECT_EQ(roundtrip, original);
+}
+
+/*
+ * The 2-bit match stream is split into run lengths ("m") and values ("mval") only when the block
+ * really is mostly taken from the reference: with nothing to match, the zeros are just the 'A's and
+ * come in short runs, and the split then costs 3-19% of the SEQ column (measured; the crossover is
+ * at 98% zeros, see compressBaseWithRef). A block of unmapped reads is written whole instead - the
+ * layout from before the split existed - and the reading side tells the two apart by the "rle"
+ * member of the run-length sub-stream, which is what this pins.
+ *
+ * Only the whole-stream half is asserted here: making a record actually map needs the engine's
+ * reference and chromosome setup (SamInfo's chromosome table is filled while the engine loads the
+ * reference), which a unit test that constructs a Reference itself does not reproduce - every record
+ * then looks unmapped and the block would take this same branch. The matching half is verified
+ * end-to-end instead, on a real all-mapped file (con_sorted: 10 of its 11 blocks are 98.7%-99.5%
+ * zeros and keep the split, the small eleventh is 96.7% and switches to the whole stream, which the
+ * crossover measurement says is the better of the two for it).
+ */
+namespace {
+
+/* A one-chromosome reference. Its sequence is only needed to give the block something to be coded
+   against; the bases are fixed so the file is reproducible. */
+void writeKnownReference(const std::string& path, const std::string& chr1)
+{
+    std::ofstream file(path);
+    ASSERT_TRUE(file.is_open());
+    file << ">chr1\n";
+    for (size_t i = 0; i < chr1.size(); i += 60) {
+        file << chr1.substr(i, 60) << "\n";
+    }
+    file.close();
+}
+
+/* A reference sequence with no long runs and no long-range pattern, from a fixed generator. */
+std::string knownChr1(size_t len = 1000)
+{
+    std::string s;
+    uint32_t x = 12345u;
+    for (size_t i = 0; i < len; ++i) {
+        x = x * 1103515245u + 12345u;
+        s.push_back("ACGT"[(x >> 16) & 3u]);
+    }
+    return s;
+}
+
+/* A SAM whose every line is unmapped - FLAG 0x4, no RNAME, POS or CIGAR - so that no record can
+   consult the reference, with the given SEQ and a matching QUAL. */
+void writeUnmappedSeqSamFile(const std::vector<std::string>& seqs)
+{
+    std::ofstream file(SamTestData::testSamFile);
+    ASSERT_TRUE(file.is_open());
+    file << "@HD\tVN:1.6\tSO:coordinate\n";
+    file << "@SQ\tSN:chr1\tLN:1000\n";
+    for (size_t i = 0; i < seqs.size(); ++i) {
+        file << "read" << i << "\t4\t*\t0\t0\t*\t*\t0\t0\t" << seqs[i] << "\t"
+             << std::string(seqs[i].size(), 'I') << "\n";
+    }
+    file.close();
+}
+
+/* Whether a compressed SEQ field was written with the split layout. */
+struct SeqSplitLayout {
+    bool hasStreams = false;
+    bool runLengths = false;   /* "m" holds run lengths, i.e. the split is on */
+    bool values = false;       /* "mval" present, the split's second half */
+};
+
+SeqSplitLayout seqSplitLayoutOf(const Json::Value& fieldMeta)
+{
+    SeqSplitLayout out;
+    const Json::Value& all = fieldMeta["streams"];
+    if (!all.isArray()) {
+        return out;
+    }
+    out.hasStreams = true;
+    for (Json::Value::ArrayIndex i = 0; i < all.size(); ++i) {
+        const std::string name = all[i]["sname"].asString();
+        if (name == "m") {
+            out.runLengths = all[i].isMember("rle") && all[i]["rle"].asUInt() != 0;
+        } else if (name == "mval") {
+            out.values = true;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_F(SamActuatorTest, testSeqMatchStreamWrittenWholeWhenNothingIsMapped) {
+    const std::string refPath = "seq_split_reference.fa";
+    writeKnownReference(refPath, knownChr1());
+
+    /* Reads with no mapping at all, and bases that are not all 'A', so the zeros of the match stream
+       stay in short runs - the situation the whole-stream layout exists for. */
+    std::vector<std::string> seqs;
+    for (int r = 0; r < 8; ++r) {
+        std::string s;
+        for (int i = 0; i < 76; ++i) {
+            s.push_back("ACGT"[(i + r) % 4]);
+        }
+        seqs.push_back(s);
+    }
+    writeUnmappedSeqSamFile(seqs);
+
+    Reference ref(refPath, 1);
+    ref.makeIndex();
+    PbgzParameter para;
+    CompressEngine engine(para);
+
+    loadSamData(SamTestData::testSamFile);
+    SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(actuator.preAnalysis(), 0);
+    uint32_t fieldSrcLen = 0;
+    Json::Value fieldMeta;
+    ASSERT_GT(actuator.compressBaseWithRef(9, fieldSrcLen, fieldMeta), 0);
+    const SeqSplitLayout layout = seqSplitLayoutOf(fieldMeta);
+    ASSERT_TRUE(layout.hasStreams);
+    EXPECT_FALSE(layout.runLengths) << "a block with no mapped read must be written whole";
+    EXPECT_FALSE(layout.values);
+
+    /* And that form has to survive a round trip. */
+    loadSamData(SamTestData::testSamFile);
+    std::string original((char*)pInBlock->getBuffer(), pInBlock->getDataLen());
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(),
+           pOutBlock->getDataLen() + pOutBlock->getMetaLen());
+    pInBlock->setDataLen(pOutBlock->getDataLen());
+    pInBlock->setMetaLen(pOutBlock->getMetaLen());
+    pInBlock->setBlockType(pOutBlock->getBlockType());
+    pOutBlock->reset();
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+    std::string roundtrip((char*)pOutBlock->getBuffer(), pOutBlock->getDataLen());
+    EXPECT_EQ(roundtrip, original);
+
+    std::remove(refPath.c_str());
 }
 
 TEST_F(SamActuatorTest, testCompressIdFieldSplit) {

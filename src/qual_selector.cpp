@@ -309,8 +309,8 @@ static int levelVolumeTier(uint8_t compressLevel)
  * The presets themselves are the FCV2_PRESETS table in coder_fcv2.h, so they can
  * be printed, measured and compared as data; this function only decides which of
  * them take part. That pruning is by the block-volume tier and by the mean read
- * length (FCV2_PRESETS[i].minMeanReadLen), so trial time is not spent on presets
- * that cannot win on this kind of data:
+ * length (FCV2_PRESETS[i].minMeanReadLen / maxMeanReadLen), so trial time is not
+ * spent on presets that cannot win on this kind of data:
  *
  *   - default / ultra / ultra-80 / coarse: always kept. ultra is the coarse-binned
  *     variant (cycleBucket=4, prevShift=0), which leads at every measured block
@@ -320,6 +320,8 @@ static int levelVolumeTier(uint8_t compressLevel)
  *   - fine (24/12/ps0): needs a per-block QUAL volume large enough for its fine
  *     buckets to stay populated (it only wins at ~27 MB and up), so it is tried
  *     only at -l 8/9 (100k reads/block).
+ *   - short-trained: bounded to its own read-length range (maxMeanReadLen), so
+ *     trial time is not spent on 55-90 bp settings for a long-read block.
  *
  * Which of them actually wins is not predicted here; see the table's comment for
  * why a feature rule is not used.
@@ -341,8 +343,19 @@ std::vector<Fcv2Cfg> candidateFcv2Cfgs(uint8_t compressLevel, int modelCount, ui
             meanLen < (uint64_t)FCV2_PRESETS[i].minMeanReadLen) {
             continue;
         }
+        if (FCV2_PRESETS[i].maxMeanReadLen > 0 &&
+            meanLen >= (uint64_t)FCV2_PRESETS[i].maxMeanReadLen) {
+            continue;
+        }
         Fcv2Cfg cfg = FCV2_PRESETS[i].cfg;
-        cfg.modelCount = modelCount;
+        /*
+         * A trained row carries the model count it was trained with (ownModelCount): the count and
+         * the context parameters interact, so the pair only means what was measured when both
+         * travel together - that is why it is not overwritten by the read-length rule here.
+         */
+        if (!FCV2_PRESETS[i].ownModelCount) {
+            cfg.modelCount = modelCount;
+        }
         cfgs.push_back(cfg);
     }
     return cfgs;

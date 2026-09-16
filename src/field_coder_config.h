@@ -50,7 +50,13 @@
  */
 
 struct FieldCoderConfig {
-    std::vector<CoderType> candidates; /* candidate coders, trial-compressed in order */
+    /*
+     * Which coders may compete for this field. Only the membership is read - the order they end up
+     * being trialled in is fixed by the selector (coder_fc, then affix where line samples are
+     * available, then coder_bwt_cm where the run allows it). An empty list means the field does not
+     * take part in the generic selection at all (PNEXT/TLEN are differenced/inferred instead).
+     */
+    std::vector<CoderType> candidates;
     CoderType fallback;                /* default coder */
 };
 

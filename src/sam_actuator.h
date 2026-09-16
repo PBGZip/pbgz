@@ -35,6 +35,7 @@
 #include "coder_fcv2.h"
 #include "reference.h"
 #include "coder_bwt_cm.h"
+#include "coder/id_int_model.h"
 
 // Forward declaration
 class CompressEngine;
@@ -398,6 +399,29 @@ private:
     std::vector<uint32_t> idNumericLens;
     std::vector<uint32_t> idNumericPos;
     std::vector<uint64_t> idNumericAcc;
+    /* State for value-domain QNAME sub-streams (compressIdFieldSplit "mode":"intd"): the payload is
+       the coded values themselves, so no outer coder is involved and a range decoder walks them one
+       value per line. Indexes run parallel to idNumericBufs; other sub-streams leave their entry
+       untouched, so the two layouts cannot be confused at reconstruction time. */
+    std::vector<RangeCoder> idIntCoders;
+    std::vector<id_int::Model> idIntModes;
+    std::vector<uint8_t> idIntActive;
+    /* The text of a constant QNAME sub-stream (compressIdFieldSplit "mode":"const"): such a segment
+       repeats the same bytes in every line, so the encoder stores it once and the reconstruction
+       appends it without touching a coder. Empty for every other kind of sub-stream. */
+    std::vector<std::string> idConstTexts;
+    /* A "dict" sub-stream's texts, indexed by the per-line index it carries (see the layout in
+       compressIdFieldSplit). Empty for every other kind of sub-stream. */
+    std::vector<std::vector<std::string>> idDictEntries;
+    /* A "hexd" sub-stream's per-line payloads are drawn from this alphabet, each character at
+       log2(size) bits (see the layout in compressIdFieldSplit). Empty for every other layout. */
+    struct IdHexAlphabet {
+        std::string chars;
+        uint32_t minLen = 0;
+        uint32_t maxLen = 0;
+    };
+    std::vector<IdHexAlphabet> idHexAlphabets;
+    std::vector<RangeCoder> idHexCoders;
     /* Releases the buffers above; called before (re)populating them per block. */
     void clearIdNumericState();
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;

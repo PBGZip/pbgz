@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "pbgz_types.h"
 #include "preprocess_info.h"
 #include "qual_selector.h"
 
@@ -81,7 +82,31 @@ public:
      * latter is the product of the decision and should not double as an input.
      */
     static int32_t analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                           uint8_t compressLevel = 5);
+                           uint8_t compressLevel = 5, bool allowBwtCm = false);
+
+    /*
+     * The lowest -l at which a field's trial may include coder_bwt_cm (see
+     * fieldTrialAllowsBwtCm for why it is not always a candidate).
+     */
+    static constexpr uint8_t kBwtCmMinLevel = 8;
+
+    /*
+     * Whether the generic per-field trial may compare against coder_bwt_cm for this run.
+     *
+     * coder_bwt_cm is the stronger coder for SAM regular columns on size - it typically wins by 1-2%
+     * on SEQ, and more on base-heavy data - but it is the slowest of them, and the columns that list
+     * it dominate the CPU of an archive run. So it competes only where the caller asked for size over
+     * speed: the two highest levels, archive mode. Below that, and in fast mode (where every field is
+     * coded by coder_rans regardless of the verdict), the trials run with the always-present
+     * candidates only, exactly as before.
+     *
+     * Which fields actually compare against it is decided by their row in kSamFieldCoderConfig, the
+     * same way the affix candidate is, so this is only the run-level gate.
+     */
+    inline static bool fieldTrialAllowsBwtCm(uint8_t mode, uint8_t level)
+    {
+        return mode == PBGZ_MODE_ARCHIVE && level >= kBwtCmMinLevel;
+    }
 
     /*
      * Trial-compress one byte stream with every candidate coder and return the
@@ -97,10 +122,13 @@ public:
      * per-line sample. When it is empty the trial degrades to one whole-stream
      * encode_line call, whose result is not trustworthy, so affix is excluded
      * from the comparison in that case.
+     *
+     * allowBwtCm adds coder_bwt_cm to the comparison (see fieldTrialAllowsBwtCm).
      */
     static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len,
                                            bool trialAffix = false,
-                                           const std::vector<LineSample>* lines = nullptr);
+                                           const std::vector<LineSample>* lines = nullptr,
+                                           bool allowBwtCm = false);
 
     /*
      * Trial-compress the POS delta-varint stream (the actual byte stream fed to
@@ -156,7 +184,7 @@ public:
 
 private:
     static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                              uint8_t compressLevel);
+                              uint8_t compressLevel, bool allowBwtCm);
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */

@@ -180,9 +180,16 @@ struct Fcv2Preset {
     int         minVolumeTier;
     int         minMeanReadLen;   /* 0 = usable at any read length */
     Fcv2Cfg     cfg;
+    /*
+     * Extras for rows that came out of training rather than from hand-picking (see
+     * test/fcv2_len_train.cpp). Zero on the shipped rows - "no upper bound" and "take the model
+     * count from the read-length rule" - which is the old behaviour.
+     */
+    int         maxMeanReadLen;   /* 0 = no upper bound */
+    bool        ownModelCount;    /* keep cfg.modelCount instead of the length rule's */
 };
 
-const int FCV2_PRESET_COUNT = 5;
+const int FCV2_PRESET_COUNT = 6;
 
 /*
  * Naming is by what the preset changes, not by a ranking: they are alternatives.
@@ -197,11 +204,25 @@ const int FCV2_PRESET_COUNT = 5;
  * to justify dropping fcv2 from the trial.
  */
 const Fcv2Preset FCV2_PRESETS[FCV2_PRESET_COUNT] = {
-    { "default",  0,     0, { 96, 16, 32,  8, 1, true, false, false, FCV2_MODEL_COUNT } },
-    { "ultra",    0,     0, { 96,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT } },
-    { "ultra-80", 0,     0, { 80,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT } },
-    { "coarse",   0,    95, { 96,  8, 32,  4, 2, true, false, false, FCV2_MODEL_COUNT } },
-    { "fine",     3,     0, { 96, 24, 32, 12, 0, true, false, false, FCV2_MODEL_COUNT } },
+    { "default",  0,     0, { 96, 16, 32,  8, 1, true, false, false, FCV2_MODEL_COUNT }, 0, false },
+    { "ultra",    0,     0, { 96,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
+    { "ultra-80", 0,     0, { 80,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
+    { "coarse",   0,    95, { 96,  8, 32,  4, 2, true, false, false, FCV2_MODEL_COUNT }, 0, false },
+    { "fine",     3,     0, { 96, 24, 32, 12, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
+    /*
+     * Trained on 40k reads of 55-90 bytes with a 2 MB sample (test/fcv2_len_train.cpp):
+     * 19.723% of QUAL against 19.987% for "default" and 20.516% for coder_bwt_cm on that sample.
+     * What it changes against ultra-80 - same cycle span, same cycle bins, same predecessor
+     * quantization - is the delta context: deltaMax 64 and deltaBucket 16 instead of 32 and 2, i.e.
+     * eight times finer transition-count bins. Both knobs and the model count were searched
+     * together, so the row carries its own count (6, which is also what the length rule gives short
+     * reads today, kept explicit so a change to that rule cannot silently alter this row).
+     *
+     * The sample size matters more than it looks: fcv2 is adaptive, so a 26 KB bucket (the first
+     * run) picked a different and worse configuration than a 2 MB one. Rows from this tool are only
+     * worth wiring in at samples of roughly a block's worth of QUAL.
+     */
+    { "short-trained", 0, 0, { 80, 4, 64, 16, 0, true, false, false, 6 }, 500, true },
 };
 
 /* The name of a configuration, or nullptr when it is not one of the presets. */

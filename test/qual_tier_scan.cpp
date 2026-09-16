@@ -363,6 +363,35 @@ std::vector<Fcv2Cfg> buildGrid(int axis)
                 }
             }
         }
+    } else if (axis == 7) {
+        /*
+         * The order-2 question. A second-order context is already in the mix (m3 uses the previous
+         * two quality values), but it is quantized by prevShift and crossed with the cycle bucket,
+         * so the axes above measure it diluted. The conditional entropy of this data says the
+         * second and third predecessors still carry ~0.02 and ~0.06 bit/symbol - about 0.5% to
+         * 1.5% of the QUAL column - so the question is whether the models that exist can reach it
+         * when nothing is quantized away: prevShift 0 with a coarse cycle context, a combination no
+         * other axis tries (axis 1 sweeps cycleBucket at prevShift 1, axis 6 fixes it at 8).
+         */
+        const int kOrder2CycleBucket[] = {2, 3, 4, 6, 8};
+        const int kOrder2DeltaBucket[] = {4, 8, 16};
+        const int kOrder2CycleMax[] = {32, 48};
+        for (int cm : kOrder2CycleMax) {
+            for (int cb : kOrder2CycleBucket) {
+                for (int db : kOrder2DeltaBucket) {
+                    Fcv2Cfg c;
+                    c.cycleMax = cm;
+                    c.cycleBucket = cb;
+                    c.deltaMax = 32;
+                    c.deltaBucket = db;
+                    c.prevShift = 0;
+                    c.useDelta = true;
+                    c.useDedup = false;
+                    c.useQa = false;
+                    grid.push_back(c);
+                }
+            }
+        }
     } else if (axis == 5) {
         /*
          * Exactly the shipped preset table (FCV2_PRESETS), without the
@@ -432,6 +461,7 @@ const char* axisName(int axis)
     case 4: return "finalists from axes 0-3, per prevShift (for every block volume)";
     case 5: return "the shipped preset table (FCV2_PRESETS), unpruned";
     case 6: return "long-read hypotheses: small cycleMax x deltaMax x useQa";
+    case 7: return "order-2 focus: prevShift 0 with coarse cycle buckets";
     default: return "full grid: cycleMax x (cycleBucket, deltaBucket) x prevShift";
     }
 }

@@ -52,6 +52,21 @@
 #include "field_coder_config.h"
 
 namespace {
+    /*
+     * A QNAME segment that takes only a handful of distinct values inside a block - a tile number, a
+     * lane - is a dictionary that block can carry once. The "dict" layout in compressIdFieldSplit is
+     * built on this cap.
+     */
+    const uint32_t kMaxDictEntries = 16;
+
+    /*
+     * Caps for the fixed-alphabet layout ("hexd", see compressIdFieldSplit). A UUID chunk draws from
+     * 16 characters, a base32 barcode from 32; past that a uniform character code costs more than the
+     * textual layout's model, and the layout is measured against it anyway.
+     */
+    const uint32_t kMaxHexAlphabet = 32;
+    const uint32_t kMaxHexLen = 64;
+
     uint16_t mapFieldIdxToStatUnitId(uint16_t fieldIdx) {
         switch (fieldIdx) {
             case 0: return StatObjectId::SAM_QNAME;
@@ -881,6 +896,13 @@ static uint32_t nposFormSize(const uint8_t* data, uint32_t len, uint8_t level)
  * is not in the payload either: the stream's own meta carries it ("ch"), so the payload is
  * only the positions.
  *
+ * A record that cannot use the reference at all - unmapped, an unknown RNAME, a position outside
+ * the reference, no CIGAR to walk - does not go through any of this: its bases are written into
+ * the payload as the characters they are (the field meta says so with "litbases", see the
+ * fallback in the record loop), so N, lower case and IUPAC codes survive there without a stream
+ * per character and without the 2-bit path's fold. These streams describe the characters the
+ * 2-bit path had to fold, which is a property of the records that do consult the reference.
+ *
  * The positions are written in one of three forms, and the stream name says which one:
  *   "nposd" - forward deltas, varint (every character; the default)
  *   "npos"  - absolute 4-byte block offsets
@@ -1378,6 +1400,11 @@ void SamCodecActuator::clearIdNumericState() {
     idNumericLens.clear();
     idNumericPos.clear();
     idNumericAcc.clear();
+    idIntCoders.clear();
+    idIntModes.clear();
+    idIntActive.clear();
+    idConstTexts.clear();
+    idDictEntries.clear();
 }
 
 int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
@@ -1458,9 +1485,237 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
             srcLength += segmentLength;
         }
 
-        bool numericMode = false;
+        /*
+         * A segment holding the same text in every line of the block is stored once and costs
+         * nothing per line. That is what the constant parts of a naming scheme are - instrument,
+         * run, flowcell, lane - and every layout below still spends a fraction of a bit per line
+         * repeating them.
+         */
+        bool constMode = false;
+        std::string constText;
+        if (!segTexts.empty() && !segTexts[0].empty()) {
+            constText = segTexts[0];
+            constMode = true;
+            for (size_t k = 1; k < segTexts.size(); ++k) {
+                /* A segment that some line does not carry at all is not constant: the other lines
+                   would be given text they never had. */
+                if (segTexts[k].empty() || segTexts[k] != constText) {
+                    constMode = false;
+                    break;
+                }
+            }
+        }
+
+        /*
+         * A segment with a handful of distinct texts in the block - a tile number, a lane - travels
+         * as a dictionary plus one index per line: the texts are written once and each line then
+         * costs the entropy of its index, which for a value that changes once or twice in a block is
+         * a few hundredths of a bit. Measured on a coordinate-sorted BAM whose tile takes two or
+         * three values per block, this was the largest single item left in the field: the textual
+         * layout spent 420 B per block on a segment that changes twice.
+         *
+         * The payload is built in a buffer of its own so that the layouts below can still be tried
+         * and compared against it; the smallest of them wins at the end of this loop body.
+         */
+        bool dictMode = false;
+        std::vector<std::string> dictEntries;
+        std::vector<uint8_t> dictBuf;
+        uint32_t dictLen = 0;
+        uint32_t dictStepWidth = 1;
+        uint32_t dictStepLowBits = 0;
+        uint32_t dictValues = 0;
+        if (!constMode) {
+            for (size_t k = 0; k < segTexts.size(); ++k) {
+                if (segTexts[k].empty()) {
+                    /* A row that does not carry this segment is not a dictionary entry. */
+                    dictEntries.clear();
+                    break;
+                }
+                bool known = false;
+                for (size_t e = 0; e < dictEntries.size(); ++e) {
+                    if (dictEntries[e] == segTexts[k]) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (known) {
+                    continue;
+                }
+                if (dictEntries.size() >= kMaxDictEntries) {
+                    dictEntries.clear();
+                    break;
+                }
+                dictEntries.push_back(segTexts[k]);
+            }
+            dictMode = (dictEntries.size() >= 2);
+        }
+        if (dictMode) {
+            uint8_t head[16];
+            const uint32_t hn = tlenPutVarint(head, (uint32_t)dictEntries.size());
+            dictBuf.assign(head, head + hn);
+            for (size_t e = 0; e < dictEntries.size(); ++e) {
+                uint8_t lb[8];
+                const uint32_t ln = tlenPutVarint(lb, (uint32_t)dictEntries[e].size());
+                dictBuf.insert(dictBuf.end(), lb, lb + ln);
+                dictBuf.insert(dictBuf.end(), dictEntries[e].begin(), dictEntries[e].end());
+            }
+            /*
+             * The indices walk a counter layout (see id_int::Counter): what they do is stay put and
+             * step by one when the value changes, and coding that as a run is what keeps a segment
+             * that changes twice in a block down to a few dozen bytes. An adaptive model over the
+             * index values cannot do it - measured 1844 B for such a sequence against the textual
+             * layout's 419 B - because it has to learn a step function one symbol at a time.
+             */
+            std::vector<uint32_t> indexOf;
+            indexOf.reserve(segTexts.size());
+            int64_t prevIndex = 0;
+            uint64_t maxStep = 0;
+            for (size_t k = 0; k < segTexts.size(); ++k) {
+                uint32_t e = 0;
+                for (; e + 1 < dictEntries.size(); ++e) {
+                    if (dictEntries[(size_t)e] == segTexts[k]) {
+                        break;
+                    }
+                }
+                indexOf.push_back(e);
+                const uint64_t zz = id_int::zigzag32((int64_t)e - prevIndex);
+                if (zz > id_int::Counter::kSmallStep && zz > maxStep) {
+                    maxStep = zz;
+                }
+                prevIndex = (int64_t)e;
+            }
+            const uint32_t stepWidth = id_int::widthFor(maxStep);
+            const uint32_t stepLowBits = id_int::lowBitsFor(stepWidth);
+            std::vector<uint8_t> idx(segTexts.size() + 256);
+            RangeCoder rc;
+            rc.output((char*)idx.data(), (char*)idx.data() + idx.size());
+            rc.StartEncode();
+            id_int::Counter counter;
+            counter.reset(stepWidth, stepLowBits);
+            prevIndex = 0;
+            for (size_t k = 0; k < indexOf.size(); ++k) {
+                counter.encode(rc, (int64_t)indexOf[k] - prevIndex);
+                prevIndex = (int64_t)indexOf[k];
+            }
+            rc.FinishEncode();
+            if (rc.err != 0) {
+                dictMode = false;
+            } else {
+                dictBuf.insert(dictBuf.end(), idx.begin(), idx.begin() + rc.size_out());
+                dictLen = (uint32_t)dictBuf.size();
+                dictStepWidth = stepWidth;
+                dictStepLowBits = stepLowBits;
+                dictValues = (uint32_t)indexOf.size();
+            }
+        }
+
+        /*
+         * A segment whose characters come from a small alphabet - the hex chunks of a UUID, a base32
+         * barcode - has no structure to model. What it needs is the size of the alphabet: coding each
+         * character uniformly over it costs log2(alphabet) bits, which for random hex is exactly the
+         * four bits a character carries, and the trailing split symbol comes free because the
+         * decoder knows it from the layout.
+         *
+         * Measured on a 4000-read Nanopore slice, whose QNAME is a UUID plus run metadata: the five
+         * hex chunks of the UUID were 10,810 B of the block's ~13,300 B of QNAME bytes, all of it
+         * through the textual layout, which pays for the characters it models and then for the four
+         * separators as well. CRAM's token coder holds the same information and spends less on it.
+         *
+         * Like the dictionary layout this is built in a buffer of its own and has to win on size.
+         */
+        bool hexMode = false;
+        std::string hexAlphabet;
+        std::vector<uint8_t> hexBuf;
+        uint32_t hexLen = 0;
+        uint32_t hexMinLen = 0;
+        uint32_t hexMaxLen = 0;
+        if (!constMode && segPayloads.size() >= 2) {
+            uint32_t minLen = UINT32_MAX;
+            uint32_t maxLen = 0;
+            std::string alpha;
+            bool ok = true;
+            for (size_t k = 0; k < segPayloads.size() && ok; ++k) {
+                if (segPayloads[k].empty()) {
+                    ok = false;
+                    break;
+                }
+                const uint32_t len = (uint32_t)segPayloads[k].size();
+                if (len < minLen) {
+                    minLen = len;
+                }
+                if (len > maxLen) {
+                    maxLen = len;
+                }
+                for (size_t c = 0; c < segPayloads[k].size(); ++c) {
+                    const char ch = segPayloads[k][c];
+                    if (alpha.find(ch) == std::string::npos) {
+                        if (alpha.size() >= kMaxHexAlphabet) {
+                            ok = false;
+                            break;
+                        }
+                        alpha.push_back(ch);
+                    }
+                }
+            }
+            /*
+             * One character is the const layout's business, and past a small alphabet a uniform code
+             * costs more per character than the textual layout's model does.
+             *
+             * All-digit payloads are the value-domain layouts' business: they code a run of digits as
+             * one value rather than one character at a time and beat this by construction. Building
+             * the candidate for them only buys the scan: measured on a 100 MB Nanopore file whose
+             * QNAME is mostly numbers, that was 11 s of a 26 s run.
+             */
+            if (ok && alpha.size() >= 2 && maxLen <= kMaxHexLen &&
+                alpha.find_first_not_of("0123456789") != std::string::npos) {
+                const uint32_t lenRange = (maxLen > minLen) ? (maxLen - minLen + 1) : 1;
+                const uint32_t alphaSize = (uint32_t)alpha.size();
+                std::vector<uint8_t> hb(segPayloads.size() * (kMaxHexLen + 8) + 64);
+                RangeCoder hrc;
+                hrc.output((char*)hb.data(), (char*)hb.data() + hb.size());
+                hrc.StartEncode();
+                for (size_t k = 0; k < segPayloads.size(); ++k) {
+                    if (lenRange > 1) {
+                        hrc.Encode((uint32_t)segPayloads[k].size() - minLen, 1, lenRange);
+                    }
+                    for (size_t c = 0; c < segPayloads[k].size(); ++c) {
+                        hrc.Encode((uint32_t)alpha.find(segPayloads[k][c]), 1, alphaSize);
+                    }
+                }
+                hrc.FinishEncode();
+                if (hrc.err == 0 && hrc.size_out() > 0) {
+                    hexMode = true;
+                    hexAlphabet = alpha;
+                    hexMinLen = minLen;
+                    hexMaxLen = maxLen;
+                    hexBuf.assign(hb.begin(), hb.begin() + hrc.size_out());
+                    hexLen = (uint32_t)hexBuf.size();
+                }
+            }
+        }
+
+        /* An all-digit segment can travel three ways, and the strongest one wins:
+           zigzag delta varints (correlated ordinals), the value itself through id_int::Model
+           (spread over a range), and the decimal text through coder_affix_match (repeated digit
+           prefixes). */
+        const int64_t segBlockStart = (int64_t)outBlockPtr->getDataLen();
+        bool numericMode = false;      /* "mode":"numeric" - zigzag delta varints */
         uint32_t numericSrcLen = 0;
-        if (allNumeric && !segTexts.empty()) {
+        bool intMode = false;          /* "mode":"intd" - values, no outer coder */
+        bool cntMode = false;          /* "mode":"cnt" - the deltas of a counter, run-length coded */
+        bool textAlreadyEncoded = false;
+        uint32_t intWidth = 0;
+        uint32_t intLowBits = 0;
+        uint32_t intDstLen = 0;
+        bool intUniform = false;       /* "mode":"intu" - the values' exact range, no model at all */
+        uint32_t intUniBase = 0;
+        uint32_t intUniTotal = 0;
+        uint32_t cntWidth = 0;
+        uint32_t cntLowBits = 0;
+        uint32_t cntSrcLen = 0;        /* the varint layout's size, which is what the decoder expands to */
+        uint32_t cntValues = 0;
+        uint32_t cntDstLen = 0;
+        if (!constMode && allNumeric && !segTexts.empty()) {
             /*
              * Worst case 10 bytes per varint (64-bit value, 7 payload bits each).
              * The encoder falls back to the text path if it would not be shorter.
@@ -1472,6 +1727,14 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
                 uint64_t prevVal = 0;
                 uint32_t deltaOneCnt = 0;    /* how often the ordinal just increments */
                 uint32_t deltaTotal = 0;
+                uint64_t maxVal = 0;
+                /* UINT64_MAX until the first value arrives: this is the base of the uniform layout,
+                   and taking it as 0 would make that layout pay for the empty space below the range. */
+                uint64_t minVal = UINT64_MAX;
+                std::vector<uint64_t> values;   /* one per row that carries a payload */
+                std::vector<int64_t> deltas;    /* its step from the row before, signed */
+                values.reserve(segPayloads.size());
+                deltas.reserve(segPayloads.size());
                 bool ok = true;
                 for (size_t k = 0; k < segPayloads.size() && ok; ++k) {
                     if (segPayloads[k].empty()) {
@@ -1485,6 +1748,13 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
                         break;
                     }
                     const uint64_t cur = (uint64_t)v;
+                    values.push_back(cur);
+                    if (cur > maxVal) {
+                        maxVal = cur;
+                    }
+                    if (cur < minVal) {
+                        minVal = cur;
+                    }
                     const uint64_t delta = (cur >= prevVal) ? (cur - prevVal) : (prevVal - cur);
                     const uint64_t zz = (cur >= prevVal) ? (delta << 1) : ((delta << 1) | 1u);
                     if (zz > 0xFFFFFFFFull) {   /* keep it 32-bit decodable */
@@ -1496,6 +1766,7 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
                         break;
                     }
                     pos += tlenPutVarint(varBuf + pos, (uint32_t)zz);
+                    deltas.push_back((int64_t)cur - (int64_t)prevVal);
                     if (cur == prevVal + 1) {
                         deltaOneCnt++;
                     }
@@ -1512,51 +1783,290 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
                  * of pure +1 steps before switching away from the text path.
                  */
                 const bool correlated = (deltaTotal > 0) && (deltaOneCnt * 10 >= deltaTotal);
+                const uint32_t valueWidth = id_int::widthFor(maxVal);
+                const uint32_t valueLowBits = id_int::lowBitsFor(valueWidth);
+                const bool valueLayoutFits = ok && !values.empty() && maxVal > 0 && id_int::widthFits(valueWidth);
                 if (ok && pos > 0 && correlated) {
+                    /*
+                     * Two layouts cover a correlated ordinal: the delta varints through
+                     * coder_bwt_cm, and the deltas themselves through id_int::Counter, which codes
+                     * the runs rather than the bytes. Both are encoded here - the counter one after
+                     * the varint one, so the winner keeps the bytes it already has - and the
+                     * smaller of the two is kept.
+                     */
                     std::shared_ptr<coder_bwt_cm> numCoder = std::make_shared<coder_bwt_cm>(idIo.get());
                     numCoder->encode_line(varBuf, pos);
                     numCoder->encode_flush();
-                    if (idIo->err == coder_io::IO_OK && idIo->data_len > 0) {
+                    const uint32_t varLen = (idIo->err == coder_io::IO_OK) ? (uint32_t)idIo->data_len : 0u;
+
+                    uint32_t counterLen = 0;
+                    uint32_t counterWidth = 0;
+                    uint32_t counterLowBits = 0;
+                    if (varLen > 0 && !deltas.empty() && (uint32_t)idIo->data_capacity > varLen) {
+                        /* The tree carries only the steps past the small ones (see id_int::Counter):
+                           its width must come from those, not from the largest step overall. */
+                        uint64_t maxStep = 0;
+                        for (size_t k = 0; k < deltas.size(); ++k) {
+                            const uint64_t zz = id_int::zigzag32(deltas[k]);
+                            if (zz > id_int::Counter::kSmallStep && zz > maxStep) {
+                                maxStep = zz;
+                            }
+                        }
+                        counterWidth = id_int::widthFor(maxStep);
+                        counterLowBits = id_int::lowBitsFor(counterWidth);
+                        if (id_int::widthFits(counterWidth)) {
+                            RangeCoder counterRc;
+                            counterRc.output((char*)(idIo->data + varLen),
+                                             (char*)(idIo->data + idIo->data_capacity));
+                            counterRc.StartEncode();
+                            id_int::Counter counter;
+                            counter.reset(counterWidth, counterLowBits);
+                            for (size_t k = 0; k < deltas.size(); ++k) {
+                                counter.encode(counterRc, deltas[k]);
+                            }
+                            counterRc.FinishEncode();
+                            if (counterRc.err == 0) {
+                                counterLen = (uint32_t)counterRc.size_out();
+                            }
+                        }
+                    }
+                    if (counterLen > 0 && counterLen < varLen) {
+                        memmove(idIo->data, idIo->data + varLen, counterLen);
+                        idIo->data_len = counterLen;
+                        idIo->meta["magic"] = "int_field";
+                        cntMode = true;
+                        cntSrcLen = pos;
+                        cntValues = (uint32_t)deltas.size();
+                        cntWidth = counterWidth;
+                        cntLowBits = counterLowBits;
+                        cntDstLen = counterLen;
+                    } else if (varLen > 0) {
                         numericMode = true;
                         numericSrcLen = pos;
+                    }
+                } else if (valueLayoutFits) {
+                    /*
+                     * The values are scattered, so neither the deltas nor the decimal digits can
+                     * reach their entropy. Code the values themselves: id_int::Model puts the high
+                     * bits through an adaptive tree over the value domain and leaves the low bits
+                     * raw, which costs about log2(number of values in use) per row.
+                     *
+                     * The text layout is encoded right after the value layout, so the two can be
+                     * compared on the whole segment without encoding either twice: if the text
+                     * wins, its bytes are moved down over the value payload and the data length is
+                     * set to its size; if the value layout wins, only the data length is fixed up.
+                     */
+                    id_int::Model model;
+                    model.reset(valueWidth, valueLowBits);
+                    RangeCoder rc;
+                    rc.output((char*)idIo->data, (char*)idIo->data + idIo->data_capacity);
+                    rc.StartEncode();
+                    for (size_t k = 0; k < values.size(); ++k) {
+                        model.encode(rc, values[k]);
+                    }
+                    rc.FinishEncode();
+                    uint32_t valueLen = (uint32_t)rc.size_out();
+                    if (rc.err != 0) {
+                        valueLen = 0;
+                    }
+
+                    /*
+                     * Second candidate: the exact range the values actually occupy (see
+                     * Model::resetUniform). It is written behind the tree, in space the text layout
+                     * has not been given yet, so all three candidates are encoded once and the
+                     * smallest of the three is kept.
+                     */
+                    uint32_t uniLen = 0;
+                    uint32_t uniBase = 0;
+                    uint32_t uniTotal = 0;
+                    if (valueLen > 0 && valueLen < (uint32_t)idIo->data_capacity) {
+                        const uint64_t total = (maxVal >= minVal) ? (maxVal - minVal + 1) : 0;
+                        if (total > 0 && total <= id_int::kMaxUniformTotal) {
+                            RangeCoder urc;
+                            urc.output((char*)(idIo->data + valueLen),
+                                       (char*)(idIo->data + idIo->data_capacity));
+                            urc.StartEncode();
+                            for (size_t k = 0; k < values.size(); ++k) {
+                                urc.Encode((uint32_t)(values[k] - minVal), 1, (uint32_t)total);
+                            }
+                            urc.FinishEncode();
+                            if (urc.err == 0 && urc.size_out() > 0) {
+                                uniLen = (uint32_t)urc.size_out();
+                                uniBase = (uint32_t)minVal;
+                                uniTotal = (uint32_t)total;
+                            }
+                        }
+                    }
+
+                    if (valueLen == 0) {
+                        /* No room for the value layouts: fall through to the text layout below. */
+                    } else if (valueLen + uniLen >= (uint32_t)idIo->data_capacity) {
+                        /* No room left for the text layout: the value layouts stand. */
+                        idIo->data_len = valueLen;
+                        intMode = true;
+                        intWidth = valueWidth;
+                        intLowBits = valueLowBits;
+                        intDstLen = valueLen;
+                    } else {
+                        const uint32_t textOff = valueLen + uniLen;
+                        std::shared_ptr<coder_io> textIo = makeCoderIo(idIo->data + textOff,
+                                                                       idIo->data_capacity - (int32_t)textOff,
+                                                                       "QNAME sub-stream");
+                        std::shared_ptr<coder_affix_match> textCoder = std::make_shared<coder_affix_match>(textIo.get());
+                        for (size_t k = 0; k < segTexts.size(); ++k) {
+                            if (segTexts[k].empty()) {
+                                continue;
+                            }
+                            textCoder->encode_line((uint8_t*)segTexts[k].data(), (uint32_t)segTexts[k].size());
+                        }
+                        textCoder->encode_flush();
+                        const uint32_t textLen = (textIo->err == coder_io::IO_OK)
+                                                 ? (uint32_t)textIo->data_len : UINT32_MAX;
+
+                        if (uniLen > 0 && uniLen < valueLen && uniLen <= textLen) {
+                            memmove(idIo->data, idIo->data + valueLen, uniLen);
+                            idIo->data_len = uniLen;
+                            intMode = true;
+                            intUniform = true;
+                            intUniBase = uniBase;
+                            intUniTotal = uniTotal;
+                            intDstLen = uniLen;
+                        } else if (textLen < valueLen) {
+                            memmove(idIo->data, textIo->data, textLen);
+                            idIo->data_len = textLen;
+                            idIo->meta = textIo->meta;
+                            outBlockPtr->setDataLen(segBlockStart + textLen);
+                            textAlreadyEncoded = true;
+                        } else {
+                            idIo->data_len = valueLen;
+                            intMode = true;
+                            intWidth = valueWidth;
+                            intLowBits = valueLowBits;
+                            intDstLen = valueLen;
+                        }
                     }
                 }
                 MemoryUtil::safeFree(varBuf);
             }
         }
 
-        if (!numericMode) {
-            std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
-            for (size_t k = 0; k < segTexts.size(); ++k) {
-                if (segTexts[k].empty()) {
-                    continue;
-                }
-                idCoder->encode_line((uint8_t*)segTexts[k].data(), (uint32_t)segTexts[k].size());
+        uint32_t segDstLen = 0;
+        if (constMode) {
+            /* Stored once, raw: no coder, and nothing per line. */
+            if (outBlockPtr->getRemain() < constText.size()) {
+                LOG_ERROR("Encode id constant segment overflow: output buffer too small");
+                return -1;
             }
-            idCoder->encode_flush();
-        }
-        if (idIo->err != coder_io::IO_OK) {
-            LOG_ERROR("Encode id segment overflow: output buffer too small");
-            return -1;
+            memcpy(outBlockPtr->getCurrent(), constText.data(), constText.size());
+            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + constText.size());
+            segDstLen = (uint32_t)constText.size();
+        } else if (cntMode) {
+            /* The counter layout wrote its payload itself and dropped the varint one it beat. */
+            outBlockPtr->setDataLen(segBlockStart + cntDstLen);
+            segDstLen = cntDstLen;
+        } else if (intMode) {
+            /* The value layout wrote its payload itself and settled the data length already. */
+            outBlockPtr->setDataLen(segBlockStart + intDstLen);
+            segDstLen = intDstLen;
+        } else {
+            if (!textAlreadyEncoded) {
+                if (!numericMode) {
+                    std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
+                    for (size_t k = 0; k < segTexts.size(); ++k) {
+                        if (segTexts[k].empty()) {
+                            continue;
+                        }
+                        idCoder->encode_line((uint8_t*)segTexts[k].data(), (uint32_t)segTexts[k].size());
+                    }
+                    idCoder->encode_flush();
+                }
+                if (idIo->err != coder_io::IO_OK) {
+                    LOG_ERROR("Encode id segment overflow: output buffer too small");
+                    return -1;
+                }
+                /* The block's data length advances by whatever this segment produced, whichever
+                   layout wrote it: the value layout writes its payload itself, and the textual
+                   layout that lost the comparison has already settled the length. */
+                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idIo->data_len);
+            }
+            segDstLen = idIo->data_len;
         }
 
-        // Update output block data length
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idIo->data_len);
+        /*
+         * The dictionary layout was built in a buffer of its own, so it can still win here: if it is
+         * the smallest of everything tried, its bytes replace them at the segment's own offset. The
+         * room is there by construction - it is no larger than what the layouts already wrote.
+         */
+        bool dictWon = false;
+        if (dictMode && dictLen > 0 && dictLen <= segDstLen) {
+            memcpy(outBlockPtr->getBuffer() + segBlockStart, dictBuf.data(), dictLen);
+            outBlockPtr->setDataLen(segBlockStart + dictLen);
+            segDstLen = dictLen;
+            dictWon = true;
+        }
+
+        /*
+         * The fixed-alphabet layout was built in its own buffer too: if it is the smallest of
+         * everything tried, its bytes replace them at the segment's own offset.
+         */
+        bool hexWon = false;
+        if (hexMode && hexLen > 0 && hexLen <= segDstLen) {
+            memcpy(outBlockPtr->getBuffer() + segBlockStart, hexBuf.data(), hexLen);
+            outBlockPtr->setDataLen(segBlockStart + hexLen);
+            segDstLen = hexLen;
+            hexWon = true;
+        }
 
         // Create metadata for this stream (similar to FastqActuator)
         Json::Value tmpMeta;
         tmpMeta["srclen"] = numericMode ? numericSrcLen : srcLength;
-        tmpMeta["dstlen"] = idIo->data_len;
+        tmpMeta["dstlen"] = segDstLen;
         tmpMeta["coder"] = idIo->meta;
         tmpMeta["splitidx"] = i; // Index of split symbol
-        /* Absent (or "text") = legacy textual layout; "numeric" = zigzag delta varints. */
-        if (numericMode) {
+        /* Absent (or "text") = legacy textual layout; "numeric" = zigzag delta varints;
+           "intd" = the values themselves through id_int::Model; "dict" = one index per line into
+           the few texts the block carries for this segment. */
+        if (hexWon) {
+            tmpMeta["mode"] = "hexd";
+            tmpMeta["hexa"] = hexAlphabet;
+            tmpMeta["hexn"] = (Json::Value::UInt)hexMinLen;
+            tmpMeta["hexm"] = (Json::Value::UInt)hexMaxLen;
+            tmpMeta["coder"]["magic"] = "int_field";
+        } else if (dictWon) {
+            tmpMeta["mode"] = "dict";
+            tmpMeta["intw"] = (Json::Value::UInt)dictStepWidth;
+            tmpMeta["intk"] = (Json::Value::UInt)dictStepLowBits;
+            tmpMeta["numv"] = (Json::Value::UInt)dictValues;
+            tmpMeta["coder"]["magic"] = "int_field";
+        } else if (numericMode) {
             tmpMeta["mode"] = "numeric";
+        } else if (constMode) {
+            tmpMeta["mode"] = "const";
+            tmpMeta["coder"]["magic"] = "const";
+        } else if (cntMode) {
+            tmpMeta["mode"] = "cnt";
+            /* srclen is the size the varint layout would have had: the decoder expands the coded
+               deltas back into exactly that form, so everything downstream of it is unchanged. */
+            tmpMeta["srclen"] = cntSrcLen;
+            tmpMeta["intw"] = (Json::Value::UInt)cntWidth;
+            tmpMeta["intk"] = (Json::Value::UInt)cntLowBits;
+            tmpMeta["numv"] = (Json::Value::UInt)cntValues;
+            tmpMeta["coder"]["magic"] = "int_field";
+        } else if (intMode && intUniform) {
+            tmpMeta["mode"] = "intu";
+            tmpMeta["intb"] = (Json::Value::UInt)intUniBase;
+            tmpMeta["intn"] = (Json::Value::UInt)intUniTotal;
+            tmpMeta["coder"]["magic"] = "int_field";
+        } else if (intMode) {
+            tmpMeta["mode"] = "intd";
+            tmpMeta["intw"] = (Json::Value::UInt)intWidth;
+            tmpMeta["intk"] = (Json::Value::UInt)intLowBits;
+            tmpMeta["coder"]["magic"] = "int_field";
         }
 
         streamMeta.append(tmpMeta);
         totalSrcLength += srcLength;
-        totalDstLength += idIo->data_len;
+        totalDstLength += segDstLen;
     }
 
     // Set field metadata with streams (similar to FastqActuator)
@@ -2451,7 +2961,6 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
 
-    uint64_t nOffset = 0;
     /*
      * SEQ characters the 2-bit path cannot carry, one accumulator per character (see
      * SeqExceptionClass), with excPresent listing the ones that occurred. The positions
@@ -2545,29 +3054,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         // Extract FLAG field to determine strand
         uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
 
-        /*
-         * Process sequence: record the characters the 2-bit path cannot carry, one list per
-         * character (see SeqExceptionClass). A/C/G/T need no entry: that path carries them,
-         * and it is case-insensitive, which is exactly why every other spelling - lower
-         * case, IUPAC codes - has to be recorded instead of being silently folded.
-         */
         uint32_t outLen = 0;
-        for (uint32_t n = 0; n < seqLength; n++) {
-            const uint8_t ch = seqStart[n];
-            if (ch != 'A' && ch != 'C' && ch != 'G' && ch != 'T') {
-                SeqExceptionClass& exc = excClasses[ch];
-                if (exc.count == 0) {
-                    excPresent.push_back(ch);
-                    if (ch != (uint8_t)'N') {
-                        exc.varint.reserve(64);
-                    }
-                }
-                exc.add(totalBaseLength + n);
-            }
-            nOffset++;
-        }
-
-        totalBaseLength += seqLength;
+        /* Set when this record's bases go into the payload as themselves rather than as 2-bit
+           codes; see the fallback below and the exception loop after it. */
+        bool rawBases = false;
 
         /*
          * CIGAR-segment-based reference rebuild.
@@ -2650,10 +3140,60 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
                     (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
             }
         } else {
-            // No valid mapping or no CIGAR ops, encode directly
-            actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
+            /*
+             * No valid mapping (or no CIGAR ops to walk): this record cannot consult the
+             * reference, so its bases go into the payload as the characters they are, not as the
+             * 2-bit codes a reference-coded record uses. The two do not overlap - a 2-bit code is
+             * 0..3 and a SEQ character is at least '=' (SAMv1: [A-Za-z=.]+) - so one 8-bit slot
+             * carries either, and the decoder tells them apart by asking the same question the
+             * encoder asked: does this record take its bases from the reference (see
+             * decompressBase).
+             *
+             * This is what lets a record that cannot match anything carry N, lower case and IUPAC
+             * codes in the payload itself. The 2-bit path has to fold every non-ACGT character to
+             * one of four values and then describe the positions it got wrong in a stream of its
+             * own: on ERR14949932 (every record unmapped, 6.2% N) those streams cost 810,367 B out
+             * of the archive's 46,483,788, for a payload that is itself 215,438 B larger than the
+             * same bases written whole by the no-reference path.
+             */
+            std::memcpy(baseMappedBuffer.get(), seqStart, seqLength);
             outLen = seqLength;
+            rawBases = true;
         }
+        /*
+         * Record the characters the payload cannot carry, one list per character (see
+         * SeqExceptionClass).
+         *
+         * A record coded against the reference has 2-bit codes in the payload, so A/C/G/T ride
+         * there and every other spelling - N, lower case, IUPAC codes - is recorded instead of
+         * being silently folded, the case-insensitivity of that code being exactly the problem.
+         *
+         * A record that writes its own characters carries the plain bases and N itself, which is
+         * what makes a block of unmapped reads write no stream at all for them. The payload is
+         * still a stream of a DNA-oriented coder, though, and it does not hand back every byte it
+         * is given (lower case letters come back folded, and not all of the IUPAC codes survive),
+         * so anything outside A/C/G/T/N is recorded here as well: a file that uses those keeps the
+         * bytes it had, at the price of the stream it paid before this path existed, while the N
+         * that dominates the unmapped case - ERR14949932 is 6.2% N and nothing else - now costs
+         * nothing.
+         */
+        for (uint32_t n = 0; n < seqLength; n++) {
+            const uint8_t ch = seqStart[n];
+            const bool carried = (ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T') ||
+                                 (rawBases && ch == 'N');
+            if (!carried) {
+                SeqExceptionClass& exc = excClasses[ch];
+                if (exc.count == 0) {
+                    excPresent.push_back(ch);
+                    if (ch != (uint8_t)'N') {
+                        exc.varint.reserve(64);
+                    }
+                }
+                exc.add(totalBaseLength + n);
+            }
+        }
+        totalBaseLength += seqLength;
+
         // Encode the mapped data
         if (outLen > 0) {
             /* Accumulate instead of encoding line-by-line: the coder is picked by
@@ -2669,28 +3209,69 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         }
     }
     /*
-     * RLE preprocessing (on by default).
-     * The match stream is a sparse 0..3 byte stream in which ~99.28% of the symbols
-     * are 0 (reference-matching bases). Split it into two independent sub-streams:
+     * RLE preprocessing, applied only when the zero runs are long enough to pay for it.
+     *
+     * The match stream is a sparse 0..3 byte stream in which a block whose reads all take their
+     * bases from the reference is ~99.28% zeros. Splitting it into two independent sub-streams
      *   "m"    - varint-encoded run lengths of the zero runs
      *   "mval" - the surviving non-zero values (1 byte each)
-     * Encoding them separately lets each stream be modelled on its own instead of
-     * forcing one context model to cope with two very different distributions.
-     * Backward compatibility: old archives carry no "rle" member and keep taking the
-     * original single-stream, line-by-line path, so a new binary still reads them.
+     * lets each be modelled on its own instead of forcing one context model to cope with two very
+     * different distributions.
+     *
+     * That split is a loss whenever the zeros do not come in long runs, which is exactly the block
+     * where no read is aligned to the reference: every base is then coded from its own value, the
+     * zeros are just the 'A's (A codes as 0), and their runs are short. Measured on two all-unmapped
+     * datasets - an ONT block (3995 reads, 56,570,656 bases, 30.6% 'A', average zero run 0.44) and a
+     * short-read file (64 bp reads, 43.1% 'A', average run 0.76) - the split needs 3.4% and 19.2%
+     * more for the SEQ column than the same stream coded whole. The reason it is worse rather than
+     * merely useless is that the split destroys what the modeller exploits: each non-zero base
+     * becomes one byte of "mval" plus about one byte of "m" (so the input the coders see grows by
+     * 14%-39%), and the two streams are no longer adjacent, which costs most where the data has
+     * cross-read structure to begin with (the short-read file, whose reads repeat each other).
+     *
+     * So the split is conditional, on how much of the block actually came from the reference: it is
+     * written only when the match stream is at least 98% zeros. Where the crossover sits was
+     * measured on 90 bp blocks built from con_sorted with a known fraction of reads marked unmapped
+     * (same block, same coder, only the layout differing):
+     *
+     *   zeros  reads unmapped   SEQ split   SEQ whole
+     *   99.0%      0%             27,018      27,649    the split wins, by 2.3%
+     *   95.6%      5%             94,024      83,938    it loses, by 12%
+     *   92.1%     10%            134,213     111,138
+     *   85.2%     20%            198,046     150,558
+     *   78.3%     30%            252,684     184,408
+     *
+     * The crossover is sharp and sits between 99.0% and 95.6%; 98% is the middle of that window,
+     * with the two kinds of block production actually hands it well away from the line - a block
+     * whose reads all take their bases from the reference is 99.2% zeros, one where none do is
+     * 30-36%. The rule is a threshold rather than a trial (as the coder choice below is) because
+     * the regimes are three orders of magnitude apart in this statistic, so a trial per block would
+     * buy nothing for its cost.
+     *
+     * The decision is per block, which is what lets one file hold both kinds of block - a reference
+     * used for part of a file and not the rest - and each be written the better way.
+     *
+     * The decoding side needs no change and no new format version: it dispatches per sub-stream on
+     * whether the block's SEQ meta carries the "rle" member (see initDecoder / decompressBase), and
+     * a stream written without the split is byte-for-byte the form used before the split existed.
      */
     uint32_t rleRunLen = 0;
     uint32_t rleValLen = 0;
     std::unique_ptr<uint8_t[]> runBuffer;
     std::unique_ptr<uint8_t[]> valBuffer;
-    const bool useRle = (matchLen > 0);
-    if (useRle) {
-        uint32_t nNonZero = 0;
-        for (uint32_t i = 0; i < matchLen; i++) {
-            if (matchBuffer[i] != 0) {
-                nNonZero++;
-            }
+    uint32_t nNonZero = 0;
+    for (uint32_t i = 0; i < matchLen; i++) {
+        if (matchBuffer[i] != 0) {
+            nNonZero++;
         }
+    }
+    const uint32_t zeroCount = matchLen - nNonZero;
+    const bool useRle = (matchLen > 0) &&
+                        ((uint64_t)zeroCount * 100ull >= (uint64_t)matchLen * 98ull);
+    LOG_DEBUG("SEQ match: matchLen=%u zeros=%u (%.4f) nonZero=%u -> RLE split %s",
+              matchLen, zeroCount, (double)zeroCount / (double)(matchLen ? matchLen : 1),
+              nNonZero, useRle ? "on" : "off");
+    if (useRle) {
         runBuffer = std::make_unique<uint8_t[]>((nNonZero + 1) * 5 + 16);
         valBuffer = std::make_unique<uint8_t[]>(nNonZero + 16);
         uint32_t rp = 0;
@@ -2747,6 +3328,8 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         std::shared_ptr<coder> payCoder = CoderFactory::makeEncoder(payType, matchIo.get());
         payCoder->encode_line(payBuf, payLen);
         payCoder->encode_flush();
+        LOG_DEBUG("SEQ match stream: rle=%d src=%u dst=%u", (int)useRle, payLen,
+                  (uint32_t)matchIo->data_len);
     }
     if (matchIo->err != coder_io::IO_OK) {
         LOG_ERROR("Encode base match stream overflow: output buffer too small");
@@ -2791,6 +3374,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         metaSubs["dstlen"] = valIo->data_len;
         metaSubs["coder"] = valIo->meta;
         metaSubs["sname"] = "mval";
+        LOG_DEBUG("SEQ mval stream: src=%u dst=%u", rleValLen, (uint32_t)valIo->data_len);
         metaStreams.append(metaSubs);
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + valIo->data_len);
         totalDstLen += valIo->data_len;
@@ -2823,6 +3407,8 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         metaSubs["sname"] = sname;
         metaSubs["ch"] = (Json::Value::UInt)ch;
         metaSubs["count"] = exc.count;
+        LOG_DEBUG("SEQ exc ch=%u '%c' form=%s src=%u dst=%u count=%u runs=%u", (unsigned)ch,
+                  (char)ch, sname, srcLen, (uint32_t)excIo->data_len, exc.count, runCount);
         if (runCount > 0) {
             /* The run form: how many runs the two varint sections below hold. */
             metaSubs["runs"] = (Json::Value::UInt)runCount;
@@ -2942,6 +3528,8 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
            these carries the absolute pairs this replaced. */
         metaSubs["count"] = (Json::Value::UInt)unmapedReadLength.size();
         metaSubs["delta"] = (Json::Value::UInt)1;
+        LOG_DEBUG("SEQ baselen stream: entries=%u src=%u dst=%u", (uint32_t)unmapedReadLength.size(),
+                  (uint32_t)lenBuf.size(), (uint32_t)lenIo->data_len);
         metaStreams.append(metaSubs);
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + lenIo->data_len);
         totalSrcLen += (uint32_t)lenBuf.size();
@@ -2952,6 +3540,14 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     /* Count of the 'N' stream, which older archives read as their whole N list; every stream
        carries its own count in its stream meta. */
     fieldMeta["ncount"] = (Json::Value::UInt)excClasses[(uint8_t)'N'].count;
+    fieldMeta["litbases"] = (Json::Value::UInt)1;
+    /*
+     * How to read a payload byte that is above the 2-bit range: as one of the record's own
+     * characters, because the record does not use the reference (see the fallback in the record
+     * loop). Written unconditionally - it describes the layout this build writes, not whether this
+     * particular block held such a record - and a stream without it is read the old way, every byte
+     * a 2-bit code with the exception streams applied over it.
+     */
     fieldMeta["minlen"] = minBaseLength;
     fieldMeta["maxlen"] = maxBaseLength;
     fieldMeta["totalsrclen"] = totalSrcLen;
@@ -3673,6 +4269,39 @@ int32_t SamCodecActuator::decompressHeader(RoughIOBlock* outputBlock) {
     return 0;
 }
 
+/*
+ * A "cnt" sub-stream's deltas (see id_int::Counter) expanded into the zigzag varint form the numeric
+ * layout carries, so that everything downstream of the buffer sees one delta per line either way.
+ * Both initDecoder - which fills idNumericBufs - and preDecodeForTLEN, which rebuilds its own copy
+ * because it must not consume the buffer the main loop reads from, need exactly this.
+ */
+static int32_t expandCounterSubStream(const uint8_t* payload, uint32_t payloadLen,
+                                      const Json::Value& streamMeta, uint8_t* out, uint32_t outCap)
+{
+    RangeCoder rc;
+    rc.input((char*)payload, (char*)(payload + payloadLen));
+    rc.StartDecode();
+    if (rc.err != 0) {
+        return -1;
+    }
+    const uint32_t numValues = streamMeta["numv"].asUInt();
+    id_int::Counter counter;
+    counter.reset(streamMeta["intw"].asUInt(), streamMeta["intk"].asUInt());
+    uint32_t wp = 0;
+    for (uint32_t k = 0; k < numValues; ++k) {
+        const int64_t dv = counter.decode(rc);
+        /* The numeric layout's own convention, which is what the per-line accumulation expects:
+           the magnitude in the high bits, the sign in the low one. */
+        const uint64_t mag = (dv >= 0) ? (uint64_t)dv : (uint64_t)(-dv);
+        const uint32_t zz = (uint32_t)((dv >= 0) ? (mag << 1) : ((mag << 1) | 1u));
+        if (wp + 5 > outCap) {
+            return -1;
+        }
+        wp += tlenPutVarint(out + wp, zz);
+    }
+    return (int32_t)wp;
+}
+
 int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     if (outputBlock == nullptr) {
         return -1;
@@ -3712,7 +4341,36 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                 idStreamCoders.push_back(coderName);
                 std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "QNAME sub-stream");
                 ioVector.push_back(io);
-                if (coderName == "coder_affix_match") {
+                const bool isNumeric = idStreamMeta[i].isMember("mode") &&
+                                       idStreamMeta[i]["mode"].asString() == "numeric";
+                const bool isInt = idStreamMeta[i].isMember("mode") &&
+                                   idStreamMeta[i]["mode"].asString() == "intd";
+                const bool isConst = idStreamMeta[i].isMember("mode") &&
+                                     idStreamMeta[i]["mode"].asString() == "const";
+                const bool isCnt = idStreamMeta[i].isMember("mode") &&
+                                   idStreamMeta[i]["mode"].asString() == "cnt";
+                const bool isIntu = idStreamMeta[i].isMember("mode") &&
+                                    idStreamMeta[i]["mode"].asString() == "intu";
+                const bool isDict = idStreamMeta[i].isMember("mode") &&
+                                    idStreamMeta[i]["mode"].asString() == "dict";
+                const bool isHex = idStreamMeta[i].isMember("mode") &&
+                                   idStreamMeta[i]["mode"].asString() == "hexd";
+                if (isConst) {
+                    /* The payload is the segment's own text, stored once for the whole block. */
+                    idDecoders.push_back(nullptr);
+                } else if (isDict) {
+                    /* The payload is a dictionary plus an index per line: no coder of its own. */
+                    idDecoders.push_back(nullptr);
+                } else if (isHex) {
+                    /* The payload is uniform character codes: no coder of its own either. */
+                    idDecoders.push_back(nullptr);
+                } else if (isCnt) {
+                    /* The payload is a coded delta sequence: neither text nor a varint buffer. */
+                    idDecoders.push_back(nullptr);
+                } else if (isInt || isIntu) {
+                    /* The payload is the value-domain stream itself (no outer coder). */
+                    idDecoders.push_back(nullptr);
+                } else if (coderName == "coder_affix_match") {
                     idDecoders.push_back(std::make_shared<coder_affix_match>(io.get()));
                     idDecoders.back()->set_level(idStreamMeta[i]["coder"]["level"].asInt());
                 } else if (coderName == "coder_bwt_cm") {
@@ -3730,12 +4388,18 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                  * Numeric sub-streams carry no per-line terminator, so they cannot
                  * be decoded one segment per line the way the textual path does.
                  * Decode the whole varint stream once here and serve one value per
-                 * line from idNumericPos (see decompressIdField).
+                 * line from idNumericPos (see decompressIdField). The value-domain
+                 * layout ("intd") works the same way, except that its payload needs
+                 * no undoing: the range decoder walks it one value per line.
                  */
-                const bool isNumeric = idStreamMeta[i].isMember("mode") &&
-                                       idStreamMeta[i]["mode"].asString() == "numeric";
                 uint8_t* nbuf = nullptr;
                 uint32_t nlen = 0;
+                RangeCoder intRc;
+                id_int::Model intModel;
+                uint8_t intActive = 0;
+                std::vector<std::string> dictEntries;
+                IdHexAlphabet hexAlpha;
+                RangeCoder hexRc;
                 if (isNumeric) {
                     const uint32_t numSrcLen = idStreamMeta[i]["srclen"].asUInt();
                     nbuf = MemoryUtil::safeAlloc<uint8_t>(numSrcLen + 1);
@@ -3749,11 +4413,152 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                         return -1;
                     }
                     nlen = (uint32_t)dl;
+                } else if (isInt || isIntu) {
+                    nbuf = MemoryUtil::safeAlloc<uint8_t>(dstLength + 1);
+                    if (nbuf == nullptr) {
+                        return -1;
+                    }
+                    memcpy(nbuf, inBlockPtr->getBuffer() + readOffset, dstLength);
+                    nlen = dstLength;
+                    if (isIntu) {
+                        /* The values' exact range, with no model at all (see Model::resetUniform). */
+                        intModel.resetUniform(idStreamMeta[i]["intb"].asUInt(),
+                                              idStreamMeta[i]["intn"].asUInt());
+                    } else {
+                        intModel.reset(idStreamMeta[i]["intw"].asUInt(), idStreamMeta[i]["intk"].asUInt());
+                    }
+                    intRc.input((char*)nbuf, (char*)nbuf + nlen);
+                    intRc.StartDecode();
+                    if (intRc.err != 0) {
+                        MemoryUtil::safeFree(nbuf);
+                        LOG_ERROR("Decode id value-domain sub-stream(%u) failed", i);
+                        return -1;
+                    }
+                    intActive = 1;
+                } else if (isCnt) {
+                    /*
+                     * A counter's deltas, run-length coded (see id_int::Counter), expanded into the
+                     * very zigzag varint form the numeric layout carries - the layout this one
+                     * competes with - so nothing downstream has to know which of the two won: one
+                     * delta per line, same buffer, same per-line accumulation.
+                     */
+                    const uint32_t numSrcLen = idStreamMeta[i]["srclen"].asUInt();
+                    nbuf = MemoryUtil::safeAlloc<uint8_t>(numSrcLen + 8);
+                    if (nbuf == nullptr) {
+                        return -1;
+                    }
+                    const int32_t wp = expandCounterSubStream(inBlockPtr->getBuffer() + readOffset,
+                                                              dstLength, idStreamMeta[i], nbuf,
+                                                              numSrcLen + 8);
+                    if (wp < 0) {
+                        MemoryUtil::safeFree(nbuf);
+                        LOG_ERROR("Decode id counter sub-stream(%u) failed", i);
+                        return -1;
+                    }
+                    nlen = (uint32_t)wp;
+                } else if (isDict) {
+                    /*
+                     * A low-cardinality segment: the block's few distinct texts sit at the head of the
+                     * payload and every line is an index into them, coded through id_int::Model - the
+                     * same value layout the "intd" case uses, so the per-sub-stream state already
+                     * kept here serves both. What the index means differs, and the reconstruction
+                     * below knows that.
+                     */
+                    const uint8_t* p = inBlockPtr->getBuffer() + readOffset;
+                    uint32_t pos = 0;
+                    uint32_t num = 0;
+                    if (!readVarint(p, dstLength, pos, num) || num < 2 || num > kMaxDictEntries) {
+                        LOG_ERROR("Decode id dictionary sub-stream(%u): bad entry count", i);
+                        return -1;
+                    }
+                    for (uint32_t e = 0; e < num; ++e) {
+                        uint32_t len = 0;
+                        if (!readVarint(p, dstLength, pos, len) || len > dstLength - pos) {
+                            LOG_ERROR("Decode id dictionary sub-stream(%u): truncated entry", i);
+                            return -1;
+                        }
+                        dictEntries.push_back(std::string((const char*)p + pos, len));
+                        pos += len;
+                    }
+                    /*
+                     * The index stream is a counter layout (see id_int::Counter): its deltas are
+                     * expanded here into one absolute index per line, which is what the per-line
+                     * reconstruction reads.
+                     */
+                    const uint32_t numValues = idStreamMeta[i]["numv"].asUInt();
+                    const uint8_t* ip = p + pos;
+                    const uint32_t ilen = dstLength - pos;
+                    RangeCoder idxRc;
+                    idxRc.input((char*)ip, (char*)(ip + ilen));
+                    idxRc.StartDecode();
+                    if (idxRc.err != 0) {
+                        LOG_ERROR("Decode id dictionary sub-stream(%u) failed", i);
+                        return -1;
+                    }
+                    const uint32_t ibufLen = numValues * 5 + 8;
+                    nbuf = MemoryUtil::safeAlloc<uint8_t>(ibufLen);
+                    if (nbuf == nullptr) {
+                        return -1;
+                    }
+                    id_int::Counter idxCounter;
+                    idxCounter.reset(idStreamMeta[i]["intw"].asUInt(), idStreamMeta[i]["intk"].asUInt());
+                    uint32_t wp = 0;
+                    int64_t acc = 0;
+                    for (uint32_t k = 0; k < numValues; ++k) {
+                        acc += idxCounter.decode(idxRc);
+                        if (acc < 0 || (uint64_t)acc >= dictEntries.size() || wp + 5 > ibufLen) {
+                            MemoryUtil::safeFree(nbuf);
+                            LOG_ERROR("Decode id dictionary sub-stream(%u): index out of range", i);
+                            return -1;
+                        }
+                        wp += tlenPutVarint(nbuf + wp, (uint32_t)acc);
+                    }
+                    nlen = wp;
+                } else if (isHex) {
+                    /*
+                     * Fixed-alphabet characters (see the encoder): the payload holds one uniform
+                     * code per character over the block's alphabet, and a length per line when the
+                     * lengths vary. Nothing is decoded here; the reconstruction walks it per line.
+                     */
+                    hexAlpha.chars = idStreamMeta[i]["hexa"].asString();
+                    hexAlpha.minLen = idStreamMeta[i]["hexn"].asUInt();
+                    hexAlpha.maxLen = idStreamMeta[i]["hexm"].asUInt();
+                    if (hexAlpha.chars.size() < 2 || hexAlpha.maxLen < hexAlpha.minLen ||
+                        hexAlpha.maxLen > kMaxHexLen) {
+                        LOG_ERROR("Decode id fixed-alphabet sub-stream(%u): bad alphabet", i);
+                        return -1;
+                    }
+                    nbuf = MemoryUtil::safeAlloc<uint8_t>(dstLength + 1);
+                    if (nbuf == nullptr) {
+                        return -1;
+                    }
+                    memcpy(nbuf, inBlockPtr->getBuffer() + readOffset, dstLength);
+                    nlen = dstLength;
+                    hexRc.input((char*)nbuf, (char*)nbuf + nlen);
+                    hexRc.StartDecode();
+                    if (hexRc.err != 0) {
+                        MemoryUtil::safeFree(nbuf);
+                        LOG_ERROR("Decode id fixed-alphabet sub-stream(%u) failed", i);
+                        return -1;
+                    }
                 }
                 idNumericBufs.push_back(nbuf);
                 idNumericLens.push_back(nlen);
                 idNumericPos.push_back(0);
                 idNumericAcc.push_back(0);
+                idIntCoders.push_back(intRc);
+                idIntModes.push_back(intModel);
+                idIntActive.push_back(intActive);
+                if (isConst) {
+                    /* No coder and no per-line data: the segment text is the payload, verbatim. */
+                    idConstTexts.push_back(
+                        std::string((const char*)inBlockPtr->getBuffer() + readOffset, dstLength));
+                } else {
+                    idConstTexts.push_back(std::string());
+                }
+                idDictEntries.push_back(std::move(dictEntries));
+                idHexAlphabets.push_back(std::move(hexAlpha));
+                idHexCoders.push_back(hexRc);
 
                 readOffset += dstLength;
             }
@@ -4002,6 +4807,9 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
                     seqExc.push_back(SeqExcStream());
                     seqExc.back().byte = ch;
                     seqExc.back().pos = std::move(pos);
+                    LOG_DEBUG("SEQ exc read ch=%u '%c' positions=%u first=%u", (unsigned)ch, (char)ch,
+                              (uint32_t)seqExc.back().pos.size(),
+                              seqExc.back().pos.empty() ? 0u : seqExc.back().pos[0]);
                 }
 
                 if (minBaseLength != maxBaseLength) {
@@ -4706,16 +5514,43 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
         std::vector<uint32_t> numPos(idStreamOffsets.size(), 0);
         std::vector<uint64_t> numAcc(idStreamOffsets.size(), 0);
         for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
-            if (si >= preIdDec.size() || !preIdDec[si]) {
+            if (si >= preIdDec.size()) {
                 continue;
             }
             if (!(streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
-                  streams[0]["streams"][si].isMember("mode") &&
-                  streams[0]["streams"][si]["mode"].asString() == "numeric")) {
+                  streams[0]["streams"][si].isMember("mode"))) {
                 continue;
             }
+            const std::string preMode = streams[0]["streams"][si]["mode"].asString();
             const uint32_t srclen = streams[0]["streams"][si]["srclen"].asUInt();
-            uint8_t* b = MemoryUtil::safeAlloc<uint8_t>(srclen + 1);
+            if (preMode == "cnt") {
+                /*
+                 * The counter layout carries the same one-delta-per-line content as the numeric one
+                 * and rebuilds it from its own payload, so it can be read here without touching any
+                 * state the main loop decodes through.
+                 */
+                uint8_t* cb = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
+                if (cb == nullptr) {
+                    return -1;
+                }
+                const int32_t cl = expandCounterSubStream(buffer + idStreamOffsets[si],
+                                                          idStreamDstLens[si],
+                                                          streams[0]["streams"][si], cb, srclen + 8);
+                if (cl < 0) {
+                    MemoryUtil::safeFree(cb);
+                    LOG_ERROR("Predecode id counter sub-stream(%u) failed", si);
+                    return -1;
+                }
+                numBufs[si] = cb;
+                numLens[si] = (uint32_t)cl;
+                continue;
+            }
+            if (!preIdDec[si] || preMode != "numeric") {
+                /* Value-domain and constant layouts decode through state the main loop owns; they
+                   were never part of this pre-decode and still are not. */
+                continue;
+            }
+            uint8_t* b = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
             if (b == nullptr) {
                 return -1;
             }
@@ -4746,7 +5581,7 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
                 // split symbol is part of the segment bytes), mirroring
                 // decompressIdField; so we simply append each decoded segment.
                 for (uint32_t si = 0; si < preIdDec.size(); ++si) {
-                    if (!preIdDec[si]) continue;
+                    if (!preIdDec[si] && numBufs[si] == nullptr) continue;
                     if (numBufs[si] != nullptr) {
                         /* Numeric sub-stream: one varint per line, no separator byte
                            (the textual path strips a trailing '\t' here anyway). */
@@ -4767,6 +5602,29 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
                             qname.append(ntmp, (size_t)nn);
                         }
                         continue;
+                    }
+                    if (!idConstTexts.empty() && !idConstTexts[si].empty()) {
+                        /* Constant segment: the same text every line, stored once in the block. */
+                        qname.append(idConstTexts[si]);
+                        continue;
+                    }
+                    if (!idIntActive.empty() && idIntActive[si]) {
+                        /* Value-domain segment: the payload holds the values themselves, one per
+                           line, and carries no separator (the split symbol belongs to the segment
+                           that ends with it, exactly as in the numeric layout). */
+                        char ntmp[24];
+                        const uint64_t v = idIntModes[si].decode(idIntCoders[si]);
+                        const int nn = snprintf(ntmp, sizeof(ntmp), "%llu", (unsigned long long)v);
+                        if (nn > 0) {
+                            qname.append(ntmp, (size_t)nn);
+                        }
+                        continue;
+                    }
+                    if (!preIdDec[si]) {
+                        /* Every layout without a coder of its own is handled above; getting here
+                           means a mode this build does not know, which must not be dereferenced. */
+                        LOG_ERROR("Predecode id sub-stream(%u) has no decoder", si);
+                        return -1;
                     }
                     uint8_t sep = (si < idSplitSymbols.size()) ? idSplitSymbols[si] : UINT8_MAX;
                     // coder_affix_match keeps cross-line context in an internal
@@ -5250,8 +6108,11 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
         uint32_t splitDstLen = splitMeta["dstlen"].asUInt();
         std::string coderName = splitMeta["coder"]["magic"].asString();
 
-        const bool numericMode = splitMeta.isMember("mode") &&
-                                 splitMeta["mode"].asString() == "numeric";
+        /* "cnt" is the same layout from here on: initDecoder already expanded the counter's deltas
+           into the varint buffer that the numeric layout carries (see id_int::Counter). */
+        const std::string idMode = splitMeta.isMember("mode") ? splitMeta["mode"].asString()
+                                                             : std::string();
+        const bool numericMode = (idMode == "numeric" || idMode == "cnt");
         if (numericMode) {
             /*
              * Numeric layout: the whole varint stream was decoded once by
@@ -5286,6 +6147,99 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
             int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)nacc);
             if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
                 LOG_ERROR("Reconstruct id numeric segment(%u) overflow", splitIdx);
+                return -1;
+            }
+            memcpy(outputBlock->getCurrent(), tmp, (uint32_t)n);
+            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)n);
+            outputBlock->getCurrent()[0] = sep;
+            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+            continue;
+        }
+        if (!idDictEntries.empty() && !idDictEntries[splitIdx].empty()) {
+            /* Dictionary segment: one index per line, and the text those few index values stand for
+               came with the payload (the trailing split symbol included, like the textual layout).
+               initDecoder already turned the index stream into one absolute index per line. */
+            if (splitIdx >= idNumericBufs.size() || idNumericBufs[splitIdx] == nullptr ||
+                idNumericPos[splitIdx] >= idNumericLens[splitIdx]) {
+                LOG_ERROR("id dictionary segment(%u) exhausted", splitIdx);
+                return -1;
+            }
+            uint32_t idx = 0;
+            if (!readVarint(idNumericBufs[splitIdx], idNumericLens[splitIdx],
+                            idNumericPos[splitIdx], idx) ||
+                idx >= idDictEntries[splitIdx].size()) {
+                LOG_ERROR("Reconstruct id dictionary segment(%u): bad index", splitIdx);
+                return -1;
+            }
+            const std::string& text = idDictEntries[splitIdx][(size_t)idx];
+            if (outputBlock->getRemain() < text.size()) {
+                LOG_ERROR("Reconstruct id dictionary segment(%u) overflow", splitIdx);
+                return -1;
+            }
+            memcpy(outputBlock->getCurrent(), text.data(), text.size());
+            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)text.size());
+            continue;
+        }
+        if (!idHexAlphabets.empty() && !idHexAlphabets[splitIdx].chars.empty()) {
+            /* Fixed-alphabet segment: the length when they vary, then one uniform character code
+               each, then the split symbol this segment ends with (the encoder stored neither). */
+            const std::string& alpha = idHexAlphabets[splitIdx].chars;
+            RangeCoder& hrc = idHexCoders[splitIdx];
+            uint32_t len = idHexAlphabets[splitIdx].minLen;
+            if (idHexAlphabets[splitIdx].maxLen > len) {
+                const uint32_t range = idHexAlphabets[splitIdx].maxLen - len + 1;
+                const uint32_t v = hrc.GetFreq(range);
+                hrc.Decode(v, 1);
+                len += v;
+            }
+            const uint8_t sep = (splitIdx < idSplitSymbols.size())
+                                ? (uint8_t)idSplitSymbols[splitIdx] : (uint8_t)'\t';
+            if (hrc.err != 0 || len == 0 || len > 256) {
+                LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) failed", splitIdx);
+                return -1;
+            }
+            if (outputBlock->getRemain() < len + 1) {
+                LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) overflow", splitIdx);
+                return -1;
+            }
+            char tmp[257];
+            for (uint32_t c = 0; c < len; ++c) {
+                const uint32_t v = hrc.GetFreq((uint32_t)alpha.size());
+                hrc.Decode(v, 1);
+                if (hrc.err != 0 || v >= alpha.size()) {
+                    LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) failed", splitIdx);
+                    return -1;
+                }
+                tmp[c] = alpha[v];
+            }
+            memcpy(outputBlock->getCurrent(), tmp, len);
+            outputBlock->setDataLen(outputBlock->getDataLen() + len);
+            outputBlock->getCurrent()[0] = sep;
+            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+            continue;
+        }
+        if (!idConstTexts.empty() && !idConstTexts[splitIdx].empty()) {
+            /* Constant segment: stored once for the block, so nothing per line was coded for it.
+               The text carries its own trailing split symbol, exactly as the textual path emits it. */
+            const std::string& text = idConstTexts[splitIdx];
+            if (outputBlock->getRemain() < text.size()) {
+                LOG_ERROR("Reconstruct id constant segment(%u) overflow", splitIdx);
+                return -1;
+            }
+            memcpy(outputBlock->getCurrent(), text.data(), text.size());
+            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)text.size());
+            continue;
+        }
+        if (!idIntActive.empty() && idIntActive[splitIdx]) {
+            /* Value-domain segment: one value per line, then the split symbol this segment ends
+               with (the encoder stored neither as text). */
+            const uint8_t sep = (splitIdx < idSplitSymbols.size())
+                                ? (uint8_t)idSplitSymbols[splitIdx] : (uint8_t)'\t';
+            const uint64_t v = idIntModes[splitIdx].decode(idIntCoders[splitIdx]);
+            char tmp[24];
+            int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)v);
+            if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
+                LOG_ERROR("Reconstruct id value-domain segment(%u) overflow", splitIdx);
                 return -1;
             }
             memcpy(outputBlock->getCurrent(), tmp, (uint32_t)n);
@@ -5477,6 +6431,25 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             }
         }
         Json::Value& baseStream = fieldMeta["streams"];
+        /*
+         * A payload byte above the 2-bit range is one of the record's own characters, put there
+         * because the record does not use the reference (see the encoder). The two encodings do
+         * not overlap and the decoder knows which record is which by the same test the encoder
+         * applied, so no per-byte tag is needed. Without this member every byte is a 2-bit code,
+         * which is what an archive written before it carries.
+         */
+        const bool litBases = fieldMeta.isMember("litbases");
+        /* `src` is the buffer this record's payload was read into: the two entry points below use
+           different staging buffers, and both call here. */
+        const auto writeDirectBases = [&](const uint8_t* src, int32_t len) {
+            if (litBases) {
+                memcpy(outputBlock->getCurrent(), src, (size_t)len);
+            } else {
+                for (int32_t o = 0; o < len; ++o) {
+                    outputBlock->getCurrent()[o] = atcg4[src[o]];
+                }
+            }
+        };
         /* The layout is identified by its sub-stream names, not by which coder
            produced them: the run stream's coder follows the field selection
            (BWT_CM or FC), and initDecoder has already expanded both halves into
@@ -5491,9 +6464,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                     LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                     return -1;
                 }
-                for (int32_t o = 0; o < decoderLen; ++o) {
-                    outputBlock->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
-                }
+                writeDirectBases(baseSquashBuffer, decoderLen);
             } else {
                 /*
                  * CIGAR-segment-based reference rebuild, mirroring the
@@ -5530,9 +6501,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                         LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                         return -1;
                     }
-                    for (int32_t o = 0; o < decoderLen; ++o) {
-                        outputBlock->getCurrent()[o] = atcg4[baseSquashBuffer[o]];
-                    }
+                    writeDirectBases(baseSquashBuffer, decoderLen);
                 } else {
                     decoderLen = readMatchLine(fieldIdx, baseDiffSquashBuffer, actualBaseLen, lineNo);
                     if ((uint32_t)decoderLen != actualBaseLen) {
@@ -5540,11 +6509,18 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                         return -1;
                     }
                     uint8_t* out = outputBlock->getCurrent();
-                    if (lineNo >= cigarOpList.size()) {
-                        // No CIGAR op list available: treat as direct 2-bit codes.
-                        for (uint32_t o = 0; o < actualBaseLen; ++o) {
-                            out[o] = atcg4[baseDiffSquashBuffer[o]];
-                        }
+                    /*
+                     * No op list, or an empty one: there is nothing to walk, so this record took the
+                     * encoder's fallback and its bases are not reference-coded - the payload holds
+                     * either its characters (this build, see "litbases") or their 2-bit codes (an
+                     * older one), which is what writeDirectBases resolves. An empty list is
+                     * reachable with a valid mapping: a CIGAR of "*" on a record whose FLAG does not
+                     * say unmapped, so the empty case has to be spelled out rather than left to the
+                     * walk below, which would read the payload as XOR values.
+                     */
+                    const bool hasOps = (lineNo < cigarOpList.size()) && !cigarOpList[lineNo].empty();
+                    if (!hasOps) {
+                        writeDirectBases(baseDiffSquashBuffer, (int32_t)actualBaseLen);
                     } else {
                         const std::vector<CigarOp>& ops = cigarOpList[lineNo];
                         uint32_t readPos = 0;

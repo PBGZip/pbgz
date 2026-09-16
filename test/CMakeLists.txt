@@ -102,6 +102,17 @@ target_link_libraries(qual_tier_scan PRIVATE
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
+# Which fcv2 context parameters and mixing-model count are best for a given read-length range.
+# The product currently decides both by rule (one threshold at 500 bytes: 4 models above it, 6
+# below; five hand-picked presets trialled as they are), and this tool measures the real encoded
+# size per length bucket and descends to the configuration that wins inside each one. See its
+# file header for the search and for how to paste the result back as the per-length rule.
+add_executable(fcv2_len_train fcv2_len_train.cpp)
+target_link_libraries(fcv2_len_train PRIVATE
+    pbgz_coder
+    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
+)
+
 
 add_subdirectory(googletest)
 

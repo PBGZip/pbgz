@@ -89,6 +89,18 @@ int32_t BinaryCodecActuator::decompress() {
         LOG_ERROR("Dst length not match.");
         return -1;
     }
+    /*
+     * The decoded block is decSrcLen bytes, but the block handed in comes from the output pool,
+     * which starts at the pool's block size and only grows when something asks it to. Nothing on
+     * this path did, so a payload that expands past it - 7.5 MB of fc stream decoding to 44 MB -
+     * was written past the end, and fc_unpreprocess, which copies LZ matches without an output
+     * bound, turned that into a heap-buffer-overflow instead of a decode error. Sizing the block
+     * here is exactly what RoughIOBlock::ensureCapacity documents the block entry should do.
+     */
+    if (0 != outBlockPtr->ensureCapacity(((size_t)decSrcLen) * 2)) {
+        LOG_ERROR("Binary decompress: cannot size output block for %u bytes", decSrcLen);
+        return -1;
+    }
     coder_io io(inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
     if (meta["streams"]["coder"]["magic"] == "coder_bwt_cm") {
         coder_bwt_cm coder(&io);
