@@ -1,10 +1,18 @@
 /*
- * coder_factory.h - create encoders/decoders by type or magic
+ * coder_factory.h - coder registry and encoder/decoder factory
  *
- * The factory centralizes the "type -> instance" mapping, so actuators create
- * encoders from the preprocessing result - the coder CodecSelector chose per field
- * and stored in PreprocessInfo - instead of new'ing a hard-coded concrete class,
- * while still guaranteeing a usable fallback under any abnormal condition.
+ * This header is the single source of truth for "which coders exist and what
+ * are they good at". Every coder is described by one CoderDescriptor row:
+ * its bitstream magic, the compression profiles (-m) it may be selected in,
+ * whether it supports line-by-line accumulation, how it takes part in trial
+ * compression, and how the engine level maps onto it.
+ *
+ * Adding a coder therefore means implementing a coder subclass and adding one
+ * row to the descriptor table in coder_factory.cpp plus, where relevant, its
+ * name to a field's candidate list in field_coder_config.h. No actuator change
+ * is required: generic fields obtain their encoder through makeEncoder() driven
+ * by the preprocessing result, and the preprocessing trial walks the configured
+ * candidate list through the same table.
  *
  * Note that this header deliberately includes no concrete encoder headers; all
  * implementations live in coder_factory.cpp. The reason is that coder_fc.h
@@ -20,11 +28,69 @@
 #include <memory>
 #include <string>
 
+#include "pbgz_types.h"
 #include "preprocess_info.h"
 #include "coder/coder.h"
 
+/*
+ * Compression profile bitmask: a coder declares which -m modes may select it.
+ * fast holds the speed-oriented coders, archive the ratio-oriented ones; a coder
+ * may belong to both.
+ */
+enum CoderProfile : uint32_t {
+    CODER_PROFILE_NONE    = 0u,
+    CODER_PROFILE_FAST    = 1u << 0,
+    CODER_PROFILE_ARCHIVE = 1u << 1,
+};
+
+/* How the engine compression level maps onto a coder. */
+enum class CoderLevelPolicy : uint8_t {
+    NONE = 0,      /* the coder does not consume the level */
+    SET_LEVEL,     /* forward the level through coder_io::set_level */
+};
+
+/*
+ * One coder's metadata. The create/supports pointers live in the .cpp so that
+ * concrete coder headers do not leak to this header (see the file comment).
+ *
+ *   profiles        bitmask of CoderProfile; the -m gate
+ *   trialLineBased  must be fed line by line during trial compression to be
+ *                   measured faithfully (its gain comes from adjacent lines;
+ *                   only coder_affix_match sets this)
+ *   trialCandidate  may take part in trial-compression selection
+ *   trialUsesLevel  trial-compression should pick the coder's own block level
+ *   minLevel        lowest engine level at which it may be trialled (0/1 = always)
+ *   trialPriority   order inside a trial; smaller is tried first and wins ties
+ *   levelPolicy     how applyLevel() treats the coder at real encoding time
+ */
+struct CoderDescriptor {
+    CoderType        type;
+    uint32_t         profiles;
+    bool             trialLineBased;
+    bool             trialCandidate;
+    bool             trialUsesLevel;
+    uint8_t          minLevel;
+    uint8_t          trialPriority;
+    CoderLevelPolicy levelPolicy;
+    std::shared_ptr<coder> (*create)(coder_io* io);
+    bool             (*supports)(uint32_t fileType, uint32_t fieldIdx);
+};
+
 class CoderFactory {
 public:
+    /* Metadata row for a coder type; nullptr when the type has no implementation
+     * (e.g. the removed coder_simple_rc). */
+    static const CoderDescriptor* descriptor(CoderType type);
+
+    /* Metadata row for a bitstream magic; nullptr when unknown. */
+    static const CoderDescriptor* descriptorByMagic(const std::string& magic);
+
+    /* Whether this run's profile (-m mode) may select the coder. */
+    static bool eligibleProfile(CoderType type, uint8_t mode);
+
+    /* Profile and level gate: the coder may be trialled at this engine level. */
+    static bool eligible(CoderType type, uint8_t mode, uint8_t compressLevel);
+
     /*
      * Compression side: create an encoder by the type picked during
      * preprocessing.
@@ -71,25 +137,16 @@ public:
      * writes it into the block meta (the decoding side replays it from
      * meta["coder"]["level"]).
      *
-     * Currently only coder_bwt_cm truly consumes the level (internal BWT block
-     * size, 0-9), to which compressLevel 1-9 maps directly; the parameter only
-     * takes effect on the encoding side, since on the decoding side the block
-     * size is read from the bitstream, so changing it does not affect
-     * compatibility. coder_affix_match also has a level (1-2), but its decoding
-     * side calls set_level only after construction (ineffective, always the
-     * default 2), and once the encoding side sets it to 1 it would disagree
-     * with the decoding side and corrupt data, so it stays at the default 2 and
-     * does not follow compressLevel. The remaining encoders (fc/fcv2/qual) do
-     * not consume the level, so setting it is a no-op.
+     * Which coders consume the level is declared by their descriptor
+     * (levelPolicy); the rest ignore it, so setting it is a no-op for them.
      */
     static void applyLevel(coder_io* io, CoderType type, uint8_t compressLevel);
 
     /*
-     * Whether this factory can create the given type.
-     *
-     * Preprocessing uses it to filter trial candidates: if the factory cannot
-     * build a type, even a trial win cannot be actually used at compression
-     * time, so it is better not to include it in the comparison at all.
+     * Whether this factory can create the given type (i.e. it has an
+     * implementation row with a create function). Preprocessing uses it to
+     * filter trial candidates: an uncreatable type could never be used even if
+     * it won a trial.
      */
     static bool canMake(CoderType type);
 

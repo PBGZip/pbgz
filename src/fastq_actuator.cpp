@@ -998,16 +998,10 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     if (baseNCount > 0) {
         std::shared_ptr<coder_io> nposIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
         srcLen = (baseNCount << 2);
-        if (false) {
-            std::shared_ptr<coder_fc> subCoder = std::make_shared<coder_fc>(nposIo.get());
-            subCoder->encode_line((uint8_t *)baseNPosBuffer, srcLen);
-            subCoder->encode_flush();
-        } else {
-            std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(nposIo.get());
-            CoderFactory::applyLevel(nposIo.get(), CoderType::BWT_CM, engineCompressLevel());
-            subCoder->encode_line((uint8_t *)baseNPosBuffer, srcLen);
-            subCoder->encode_flush();
-        }
+        std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(nposIo.get());
+        CoderFactory::applyLevel(nposIo.get(), CoderType::BWT_CM, engineCompressLevel());
+        subCoder->encode_line((uint8_t *)baseNPosBuffer, srcLen);
+        subCoder->encode_flush();
         metaSubs.clear();
         metaSubs["srclen"] = (Json::Value::UInt)srcLen;
         metaSubs["dstlen"] = (Json::Value::Int)nposIo->data_len;

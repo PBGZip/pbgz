@@ -30,6 +30,7 @@
 #include "pbgz_types.h"
 #include "pbgz_engine.h"
 #include "coder_factory.h"
+#include "field_coder_config.h"
 
 class CodecActuator {
 
@@ -80,29 +81,39 @@ protected:
     std::shared_ptr<coder> makeFieldEncoder(uint32_t fieldIdx, CoderType fallback,
                                             coder_io* io, bool lineMode)
     {
-        /*
-         * fast preset: every field is coded by the fixed static order-0 entropy
-         * coder (coder_rans). No preselection result is consulted, so the reader
-         * thread's trial work is irrelevant here - this is what makes the fast
-         * path deterministic and quick (per-symbol O(1), no BWT/context model).
-         * The block format is self-describing (the magic travels in meta), so
-         * the decoding side needs no preset information.
-         */
         const uint8_t mode = (pbgzEngine != nullptr) ? pbgzEngine->getParameter().mode
                                                     : (uint8_t)PBGZ_MODE_ARCHIVE;
-        if (mode == PBGZ_MODE_FAST) {
-            (void)fieldIdx;
-            CoderFactory::applyLevel(io, CoderType::RANS, engineCompressLevel());
-            return CoderFactory::makeEncoder(CoderType::RANS, io);
-        }
+        const uint8_t level = engineCompressLevel();
 
-        CoderType picked = fallback;
+        /*
+         * The -m mode picks the field's default coder from the config table:
+         * archive uses the ratio-oriented fallback, fast the speed-oriented one.
+         * The caller's fallback only applies to fields the table does not cover.
+         *
+         * For fast, the fast fallback is coder_rans for every field, which is
+         * what the fast path has always used for generic fields - deterministic
+         * and quick (per-symbol O(1), no BWT/context model). The block format is
+         * self-describing (the magic travels in meta), so the decoding side
+         * needs no preset information.
+         */
+        const CoderType modeFallback = samFieldDefaultCoder(fieldIdx, mode, fallback);
+
+        CoderType picked = modeFallback;
         const PreprocessInfo* preInfo = (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
         if (preInfo != nullptr) {
-            picked = preInfo->coderFor(fieldIdx, fallback);
+            picked = preInfo->coderFor(fieldIdx, modeFallback);
         }
 
-        const uint8_t level = engineCompressLevel();
+        /*
+         * Guard against a selection result from another profile - e.g. a stale
+         * archive verdict in a fast run. A coder this mode may not select is
+         * replaced by the mode's own default. The default itself is always
+         * allowed: it is the field's registered coder for this mode.
+         */
+        if (picked != modeFallback && !CoderFactory::eligibleProfile(picked, mode)) {
+            picked = modeFallback;
+        }
+
         CoderFactory::applyLevel(io, picked, level);
         std::shared_ptr<coder> enc = CoderFactory::makeEncoder(picked, io);
 
@@ -116,8 +127,8 @@ protected:
          * (the two encoder types accept different level ranges).
          */
         if (lineMode && !enc->supportsLineMode()) {
-            CoderFactory::applyLevel(io, fallback, level);
-            enc = CoderFactory::makeEncoder(fallback, io);
+            CoderFactory::applyLevel(io, modeFallback, level);
+            enc = CoderFactory::makeEncoder(modeFallback, io);
         }
         return enc;
     }

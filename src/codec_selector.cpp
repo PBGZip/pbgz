@@ -34,10 +34,9 @@
 #include "log/logger.h"
 #include "safe_line_reader.h"
 #include "coder/coder_bwt_cm.h"
-#include "coder/coder_fc.h"
 #include "coder/coder_fcv2.h"
-#include "coder/coder_affix_match.h"
 #include "coder/coder_arith.h"
+#include "coder_factory.h"
 #include "field_coder_config.h"
 
 #include <atomic>
@@ -166,12 +165,47 @@ bool trialEncode(const uint8_t* data, uint32_t len, int bwtLevel, uint32_t& outL
 }
 
 /*
- * Trial-compress coder_affix_match line by line. affix's prefix/suffix matching
- * happens between adjacent lines, so it must be fed line by line; feeding the
- * whole column in one encode_line call degrades it to an ordinary context model
- * and fails to measure its real performance.
+ * Trial-compress a byte stream with a coder chosen at runtime through the
+ * registry. This is what makes the generic trial data-driven: the selector
+ * names no concrete coder, so any coder added to a field's candidate list is
+ * measured here without touching this file.
+ *
+ * The output buffer is sized generously (2x input + margin); the trial is only
+ * a measurement, so the caller has already filtered out coder types the factory
+ * cannot build.
  */
-bool trialAffixLines(const std::vector<LineSample>& lines, uint32_t& outLen, uint32_t& usec)
+bool trialStream(CoderType type, const uint8_t* data, uint32_t len, int level,
+                 uint32_t& outLen, uint32_t& usec)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    uint32_t cap = (len << 1) + 65536;
+    std::vector<uint8_t> outBuf(cap, 0);
+    coder_io io(outBuf.data(), (int32_t)cap);
+    if (level > 0) {
+        io.set_level(level);
+    }
+    {
+        std::shared_ptr<coder> c = CoderFactory::makeEncoder(type, &io);
+        if (c == nullptr) {
+            return false;
+        }
+        c->encode_line(data, len);
+        c->encode_flush();
+    }
+    outLen = (uint32_t)io.data_len;
+    usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    return (outLen > 0 && outLen < cap);
+}
+
+/*
+ * Line-by-line trial for coders whose gain comes from adjacent lines (the
+ * descriptor's lineMode). Feeding such a coder the whole column in one
+ * encode_line call degrades it to an ordinary context model and fails to
+ * measure its real performance, so line boundaries must be preserved.
+ */
+bool trialLines(CoderType type, const std::vector<LineSample>& lines,
+                uint32_t& outLen, uint32_t& usec)
 {
     if (lines.empty()) {
         return false;
@@ -185,16 +219,34 @@ bool trialAffixLines(const std::vector<LineSample>& lines, uint32_t& outLen, uin
     std::vector<uint8_t> outBuf(cap, 0);
     coder_io io(outBuf.data(), (int32_t)cap);
     {
-        coder_affix_match coder(&io);
-        for (size_t i = 0; i < lines.size(); ++i) {
-            coder.encode_line(lines[i].data, lines[i].len);
+        std::shared_ptr<coder> c = CoderFactory::makeEncoder(type, &io);
+        if (c == nullptr) {
+            return false;
         }
-        coder.encode_flush();
+        for (size_t i = 0; i < lines.size(); ++i) {
+            c->encode_line(lines[i].data, lines[i].len);
+        }
+        c->encode_flush();
     }
     outLen = (uint32_t)io.data_len;
     usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::steady_clock::now() - t0).count();
     return (outLen > 0 && outLen < cap);
+}
+
+/* Whether a field needs per-line views recorded for its trial (a coder in the
+ * candidate list whose gain comes from adjacent lines). POS/RNAME views are
+ * recorded for the separate POS delta trial and are handled by the caller. */
+bool fieldNeedsLineSample(uint32_t fieldIdx, uint8_t mode)
+{
+    const std::vector<CoderType>& candidates = samFieldCandidates(fieldIdx, mode);
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const CoderDescriptor* d = CoderFactory::descriptor(candidates[i]);
+        if (d != nullptr && d->trialLineBased) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -214,8 +266,32 @@ int CodecSelector::pickBwtLevel(uint32_t sampleLen)
  * by local data, so it matches the minimum trustworthy sample size. */
 const uint32_t PROBE_START = MIN_SELECT_SAMPLE;
 
-FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len, bool trialAffix,
-                                               const std::vector<LineSample>* lines, bool allowBwtCm)
+/*
+ * Sort candidates into the registry's trialPriority order, so the verdict does
+ * not depend on the order a list happens to be written in. The sort is a plain
+ * insertion sort: candidate lists hold a handful of entries at most.
+ */
+static void orderCandidates(std::vector<CoderType>& candidates)
+{
+    for (size_t i = 1; i < candidates.size(); ++i) {
+        for (size_t j = i; j > 0; --j) {
+            const CoderDescriptor* a = CoderFactory::descriptor(candidates[j - 1]);
+            const CoderDescriptor* b = CoderFactory::descriptor(candidates[j]);
+            const uint8_t pa = (a != nullptr) ? a->trialPriority : 0xFF;
+            const uint8_t pb = (b != nullptr) ? b->trialPriority : 0xFF;
+            if (pa <= pb) {
+                break;
+            }
+            CoderType tmp = candidates[j - 1];
+            candidates[j - 1] = candidates[j];
+            candidates[j] = tmp;
+        }
+    }
+}
+
+FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len,
+                                               const std::vector<LineSample>* lines,
+                                               const std::vector<CoderType>& candidates)
 {
     FieldCodecSelection sel;
     sel.sampleLen = len;
@@ -225,90 +301,63 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     }
 
     /*
-     * Start from a small sample and double it each round, stopping once the
-     * leader opens up enough of a gap.
+     * Trial-compress the same sample with every candidate and keep the smallest.
+     * Each candidate is measured with a fresh instance on the range [0, probe):
+     * coder_fc only supports whole-block compression (a second encode_line call
+     * fails outright), and re-compressing mimics how a block is actually
+     * compressed in production ("one data block from start to finish"), so the
+     * measured numbers are closer to real behavior.
      *
-     * Each round trial-compresses the fresh range [0, probe) with a new
-     * instance, rather than incrementally feeding on top of the previous round.
-     * There are two reasons: coder_fc only supports whole-block compression, so
-     * a second encode_line call fails outright; and re-compressing mimics how a
-     * block is actually compressed in production ("one data block from start to
-     * finish"), so the measured numbers are closer to real behavior.
-     *
-     * The extra cost of re-compression is bounded: the sample doubles each
-     * round, so all rounds together cost no more than twice the last round.
-     * And most fields settle in the first round or two, so in practice this
-     * costs less than compressing the entire sample in one shot.
+     * The candidate set itself - which coders compete, and which profile they
+     * belong to - is decided by field_coder_config.h and CoderFactory's
+     * registry; this function names no concrete coder.
      */
-    /*
-     * coder_bwt_cm stays out of the candidate set by default. It usually wins on
-     * size by ~1-2%, but it is by far the slowest coder available and the field
-     * this selector mostly serves (SEQ) dominates the CPU of an archive run, so
-     * carrying that cost everywhere would trade a small size win for a large
-     * slowdown. When the caller has opted in (allowBwtCm, see
-     * CodecSelector::fieldTrialAllowsBwtCm) it joins the comparison below and wins
-     * only where it is actually smaller on the sample. The always-present
-     * candidates are coder_fc and, when line samples are supplied,
-     * coder_affix_match.
-     */
-    uint32_t fcLen = 0, affixLen = 0;
-    uint32_t bwtLen = 0, bwtUs = 0;
-    uint32_t fcUs = 0, affixUs = 0, outUs = 0, outLen = 0;
+    std::vector<CoderType> ordered = candidates;
+    orderCandidates(ordered);
+
+    const uint32_t probe = (PROBE_START < len) ? PROBE_START : len;
+    sel.rounds = 1;
+    sel.decidedLen = probe;
+
     uint32_t bestLen = UINT32_MAX;
     CoderType bestCoder = CoderType::FC;
-    bool anyOk = false;
-    uint32_t probe = (PROBE_START < len) ? PROBE_START : len;
-    sel.rounds = 1;
+    bool haveBest = false;
 
-    if (trialEncode<coder_fc>(data, probe, 0, outLen, outUs)) {
-        fcLen = outLen; fcUs = outUs;
-        bestLen = outLen; bestCoder = CoderType::FC;
-        anyOk = true;
-    }
+    for (size_t i = 0; i < ordered.size(); ++i) {
+        const CoderType type = ordered[i];
+        const CoderDescriptor* d = CoderFactory::descriptor(type);
+        /* Skip types this build cannot create, and the special-path coders
+         * (QUAL/FCV2) that are not generic trial candidates. */
+        if (d == nullptr || !d->trialCandidate || !CoderFactory::canMake(type)) {
+            continue;
+        }
 
-    /*
-     * affix's trial compression is done separately: it is a line-based encoder
-     * that needs line boundaries, so it cannot be merged into the whole-stream
-     * trial above. If lines is empty, the caller supplied no line samples, so
-     * affix simply abstains.
-     */
-    if (trialAffix && lines != nullptr && !lines->empty() &&
-        trialAffixLines(*lines, outLen, outUs)) {
-        affixLen = outLen; affixUs = outUs;
-        if (affixLen < bestLen) {
-            bestLen = affixLen;
-            bestCoder = CoderType::AFFIX_MATCH;
+        bool ok = false;
+        uint32_t outLen = 0;
+        uint32_t outUs = 0;
+        if (d->trialLineBased) {
+            /* Line-based coders need line boundaries; without samples the
+             * measurement would not be trustworthy, so the coder abstains. */
+            if (lines == nullptr || lines->empty()) {
+                continue;
+            }
+            ok = trialLines(type, *lines, outLen, outUs);
+        } else {
+            /* trialUsesLevel: the coder's internal block level is chosen to hold
+             * this round's sample (currently coder_bwt_cm; see pickBwtLevel). */
+            const int level = d->trialUsesLevel ? pickBwtLevel(probe) : 0;
+            ok = trialStream(type, data, probe, level, outLen, outUs);
+        }
+
+        sel.addTrial(type, ok ? outLen : 0u, outUs);
+        if (ok && (!haveBest || outLen < bestLen)) {
+            bestLen = outLen;
+            bestCoder = type;
+            haveBest = true;
         }
     }
 
-    /*
-     * coder_bwt_cm, when the caller has opted in, is trialled on the same sample
-     * as coder_fc and with the smallest of its internal block levels that holds
-     * the sample in one block (pickBwtLevel) - the same way the POS selector
-     * trials it, so the two measurements mean the same thing. It only takes the
-     * lead on a strictly smaller size; a tie keeps coder_fc, whose encoding is
-     * far cheaper.
-     */
-    if (allowBwtCm && trialEncode<coder_bwt_cm>(data, probe, pickBwtLevel(probe), outLen, outUs)) {
-        bwtLen = outLen; bwtUs = outUs;
-        anyOk = true;
-        if (bwtLen < bestLen) {
-            bestLen = bwtLen;
-            bestCoder = CoderType::BWT_CM;
-        }
-    }
-
-    sel.decidedLen = probe;
-    sel.trialCount = 0;
-    sel.addTrial(CoderType::FC, fcLen, fcUs);
-    if (trialAffix && affixLen > 0) {
-        sel.addTrial(CoderType::AFFIX_MATCH, affixLen, affixUs);
-    }
-    if (allowBwtCm && bwtLen > 0) {
-        sel.addTrial(CoderType::BWT_CM, bwtLen, bwtUs);
-    }
-
-    if (!anyOk && bestCoder != CoderType::AFFIX_MATCH) {
+    if (!haveBest) {
         sel.status = FieldStatus::FAILED;
         return sel;
     }
@@ -317,6 +366,22 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     sel.selectedCoder = bestCoder;
     sel.bestCompLen = bestLen;
     return sel;
+}
+
+FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len, bool trialAffix,
+                                               const std::vector<LineSample>* lines, bool allowBwtCm)
+{
+    /* Historical candidate set: coder_fc always; coder_affix_match when line
+     * samples may be used; coder_bwt_cm when the caller opted in. */
+    std::vector<CoderType> candidates;
+    candidates.push_back(CoderType::FC);
+    if (trialAffix) {
+        candidates.push_back(CoderType::AFFIX_MATCH);
+    }
+    if (allowBwtCm) {
+        candidates.push_back(CoderType::BWT_CM);
+    }
+    return selectCoder(data, len, lines, candidates);
 }
 
 /*
@@ -623,7 +688,8 @@ std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& ac
 uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
                                            std::vector<std::string>& fieldBufs,
                                            std::vector<std::vector<LineSample>>& fieldLines,
-                                           uint32_t sampleBudget)
+                                           uint32_t sampleBudget,
+                                           uint8_t mode)
 {
     fieldBufs.assign(SAM_FIELD_COUNT_SELECT, std::string());
     fieldLines.assign(SAM_FIELD_COUNT_SELECT, std::vector<LineSample>());
@@ -648,16 +714,17 @@ uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
             }
             fieldBufs[fieldIdx].append((const char*)(line + pos), (size_t)(tabPos - pos));
             /*
-             * Line views are needed by two consumers: affix's line-by-line
-             * trial compression (fields that list AFFIX_MATCH as a candidate),
-             * and the POS delta-varint trial (POS + RNAME, to rebuild the
-             * delta chain with its chromosome-switch reset). Only the pointers
-             * are recorded, no copy: SafeLineReader returns views into the
-             * block buffer, and the block contents stay unchanged during
-             * analyze. Including the trailing tab matches how compression feeds
-             * the data (see compressRegularField).
+             * Line views are needed by two consumers: the line-based trial
+             * compression (fields whose candidate list holds a coder whose
+             * descriptor says lineMode, e.g. coder_affix_match), and the POS
+             * delta-varint trial (POS + RNAME, to rebuild the delta chain with
+             * its chromosome-switch reset). Only the pointers are recorded, no
+             * copy: SafeLineReader returns views into the block buffer, and the
+             * block contents stay unchanged during analyze. Including the
+             * trailing tab matches how compression feeds the data (see
+             * compressRegularField).
              */
-            if (samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH) ||
+            if (fieldNeedsLineSample(fieldIdx, mode) ||
                 fieldIdx == (uint32_t)SAM_POS || fieldIdx == (uint32_t)SAM_RNAME) {
                 LineSample ls;
                 ls.data = line + pos;
@@ -877,11 +944,11 @@ void runTrialsInParallel(const std::vector<std::function<void()>>& tasks)
 }
 
 int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                                  uint8_t compressLevel, bool allowBwtCm)
+                                  uint8_t compressLevel, uint8_t mode)
 {
     std::vector<std::string> fieldBufs;
     std::vector<std::vector<LineSample>> fieldLines;
-    info.scannedBytes = extractSamFieldSamples(block, fieldBufs, fieldLines, SAMPLE_TARGET);
+    info.scannedBytes = extractSamFieldSamples(block, fieldBufs, fieldLines, SAMPLE_TARGET, mode);
 
     info.fields.resize(SAM_FIELD_COUNT_SELECT);
     uint64_t totalSample = 0;
@@ -949,18 +1016,11 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
         }
 
         /*
-         * Which candidate coders are tried for a field is decided by the config
-         * table (field_coder_config.h). An empty candidate list means the field
-         * uses a fixed strategy (PNEXT/TLEN differencing/inference) and does not
-         * take part in the generic selection.
+         * POS keeps its own trial: it compares the coders on the rebuilt
+         * delta-varint stream (selectPosDeltaCoder), not on the raw text, and is
+         * therefore handled before the generic candidate filtering below. Its
+         * config rows only document which coders that dedicated trial may pick.
          */
-        const FieldCoderConfig* cfg = samFieldCoderConfig(f);
-        if (cfg == nullptr || cfg->candidates.empty()) {
-            info.fields[f].status = FieldStatus::SKIPPED;
-            info.fields[f].sampleLen = (uint32_t)buf.size();
-            continue;
-        }
-
         if (f == (uint32_t)SAM_POS) {
             trials.push_back([block, compressLevel, &info, &fieldLines, &posCounts, &posSampleBytes]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + SAM_POS);
@@ -984,21 +1044,41 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             continue;
         }
 
-        const bool trialAffix = samFieldCandidate(f, CoderType::AFFIX_MATCH);
         /*
-         * Both extra candidates come from the field's row in kSamFieldCoderConfig: the run-level
-         * gate (allowBwtCm, see fieldTrialAllowsBwtCm) says whether coder_bwt_cm may compete at all
-         * this run, and the row says for which fields. Fields whose row does not list it - and the
-         * inferred ones, whose row is empty - are unaffected. Captured by value: the trials are
-         * collected here and run after this loop, in parallel.
+         * Which candidate coders are tried for a field is the intersection of
+         * two tables: the field's list for this compression mode
+         * (field_coder_config.h) and the registry's profile/level gate
+         * (CoderFactory). An empty result means the field uses a fixed strategy
+         * (PNEXT/TLEN differencing/inference) or has no coder available at this
+         * profile/level, and does not take part in the generic selection.
+         *
+         * The list is captured by value: the trials are collected here and run
+         * after this loop, in parallel.
          */
-        const bool trialBwtCm = allowBwtCm && samFieldCandidate(f, CoderType::BWT_CM);
+        const std::vector<CoderType>& configured = samFieldCandidates(f, mode);
+        std::vector<CoderType> trialCandidates;
+        for (size_t c = 0; c < configured.size(); ++c) {
+            const CoderType type = configured[c];
+            const CoderDescriptor* desc = CoderFactory::descriptor(type);
+            if (desc == nullptr || !desc->trialCandidate || !CoderFactory::canMake(type) ||
+                !CoderFactory::eligible(type, mode, compressLevel)) {
+                continue;
+            }
+            trialCandidates.push_back(type);
+        }
+
+        if (trialCandidates.empty()) {
+            info.fields[f].status = FieldStatus::SKIPPED;
+            info.fields[f].sampleLen = (uint32_t)buf.size();
+            continue;
+        }
+
         const uint8_t* sampleData = (const uint8_t*)buf.data();
         const uint32_t sampleLen = (uint32_t)buf.size();
-        const std::vector<LineSample>* sampleLines = trialAffix ? &fieldLines[f] : nullptr;
-        trials.push_back([&info, f, sampleData, sampleLen, trialAffix, sampleLines, trialBwtCm]() {
+        const std::vector<LineSample>* sampleLines = &fieldLines[f];
+        trials.push_back([&info, f, sampleData, sampleLen, sampleLines, trialCandidates]() {
             PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
-            info.fields[f] = selectCoder(sampleData, sampleLen, trialAffix, sampleLines, trialBwtCm);
+            info.fields[f] = selectCoder(sampleData, sampleLen, sampleLines, trialCandidates);
         });
     }
 
@@ -1072,7 +1152,7 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, PreprocessInfo& info)
 }
 
 int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                               uint8_t compressLevel, bool allowBwtCm)
+                               uint8_t compressLevel, uint8_t mode)
 {
     if (block == nullptr) {
         return -1;
@@ -1081,7 +1161,7 @@ int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, Pr
     info.reset(type);
 
     if (BlockUtil::isSAMBlock(type)) {
-        return analyzeSam(block, inputTotalBytes, info, compressLevel, allowBwtCm);
+        return analyzeSam(block, inputTotalBytes, info, compressLevel, mode);
     }
     if (BlockUtil::isFastqBlock(type)) {
         return analyzeFastq(block, info);

@@ -795,9 +795,6 @@ int32_t SamCodecActuator::compressSamByFields() {
         
         recordFieldStats(pbgzEngine, fieldIdx, fieldSrcLen, fieldDstLen);
 
-        // LOG_INFO("Compress Rate for block(%d fieldId=%d): src = %d, dst = %d, ratio = %.2f%%.",
-        //     outBlockPtr->getBlockId(), fieldIdx, fieldSrcLen, fieldDstLen, ((fieldDstLen * 1.0) * 100) / fieldSrcLen);
-
         streamMeta.append(fieldMeta);
         totalSrcLen += fieldSrcLen;
         totalDstLen += fieldDstLen;

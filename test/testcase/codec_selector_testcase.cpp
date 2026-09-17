@@ -23,6 +23,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <random>
@@ -32,6 +33,7 @@
 #include "codec_selector.h"
 #include "preprocess_info.h"
 #include "field_coder_config.h"
+#include "coder_factory.h"
 #include "io_block.h"
 #include "coder.h"
 #include "coder/coder_affix_match.h"
@@ -457,4 +459,74 @@ TEST_F(CodecSelectorTest, SamFieldCoderConfigTable)
     ASSERT_TRUE(samFieldCandidate(11u, CoderType::AFFIX_MATCH));   /* OPTION */
     ASSERT_EQ(samFieldDefaultCoder(SAM_CIGAR, CoderType::BWT_CM), CoderType::BWT_CM);
     ASSERT_EQ(samFieldDefaultCoder(999, CoderType::FC), CoderType::FC);   /* out-of-range falls through to the fallback */
+}
+
+/*
+ * The candidate list is split by compression profile (-m): archive offers the
+ * ratio coders, fast only the speed coders. This is what makes the selection
+ * architecture configurable per mode.
+ */
+TEST_F(CodecSelectorTest, CandidateListsAreProfileSpecific)
+{
+    const std::vector<CoderType>& archive = samFieldCandidates(SAM_SEQ, PBGZ_MODE_ARCHIVE);
+    EXPECT_NE(std::find(archive.begin(), archive.end(), CoderType::BWT_CM), archive.end());
+    EXPECT_NE(std::find(archive.begin(), archive.end(), CoderType::FC), archive.end());
+
+    const std::vector<CoderType>& fast = samFieldCandidates(SAM_SEQ, PBGZ_MODE_FAST);
+    ASSERT_EQ(fast.size(), (size_t)1);
+    EXPECT_EQ(fast[0], CoderType::RANS);
+
+    EXPECT_EQ(samFieldDefaultCoder(SAM_SEQ, PBGZ_MODE_ARCHIVE, CoderType::FC), CoderType::FC);
+    EXPECT_EQ(samFieldDefaultCoder(SAM_SEQ, PBGZ_MODE_FAST, CoderType::FC), CoderType::RANS);
+
+    /* A field without generic candidates (PNEXT/TLEN) stays out in both modes. */
+    EXPECT_TRUE(samFieldCandidates(SAM_PNEXT, PBGZ_MODE_ARCHIVE).empty());
+    EXPECT_TRUE(samFieldCandidates(SAM_PNEXT, PBGZ_MODE_FAST).empty());
+}
+
+/*
+ * The registry is the -m gate: a coder declares the profiles it belongs to, and
+ * coder_bwt_cm additionally only competes from -l 8 up (it is the slowest of
+ * the ratio coders).
+ */
+TEST_F(CodecSelectorTest, CoderRegistryGatesByProfileAndLevel)
+{
+    EXPECT_TRUE(CoderFactory::eligibleProfile(CoderType::BWT_CM, PBGZ_MODE_ARCHIVE));
+    EXPECT_FALSE(CoderFactory::eligibleProfile(CoderType::BWT_CM, PBGZ_MODE_FAST));
+    EXPECT_TRUE(CoderFactory::eligibleProfile(CoderType::RANS, PBGZ_MODE_FAST));
+    EXPECT_FALSE(CoderFactory::eligibleProfile(CoderType::RANS, PBGZ_MODE_ARCHIVE));
+
+    EXPECT_FALSE(CoderFactory::eligible(CoderType::BWT_CM, PBGZ_MODE_ARCHIVE, 7));
+    EXPECT_TRUE(CoderFactory::eligible(CoderType::BWT_CM, PBGZ_MODE_ARCHIVE, 8));
+    EXPECT_TRUE(CoderFactory::eligible(CoderType::FC, PBGZ_MODE_ARCHIVE, 1));
+
+    /* Every creatable coder has a descriptor, and its magic round-trips through
+     * the decode-side lookup. */
+    const CoderType creatable[] = {CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH,
+                                   CoderType::ARITH, CoderType::RANS};
+    for (CoderType t : creatable) {
+        ASSERT_TRUE(CoderFactory::canMake(t));
+        const CoderDescriptor* d = CoderFactory::descriptor(t);
+        ASSERT_NE(d, nullptr);
+        EXPECT_NE(CoderFactory::descriptorByMagic(coderTypeToMagic(t)), nullptr);
+    }
+    /* QUAL/FCV2 have dedicated paths and are not creatable through the factory. */
+    EXPECT_FALSE(CoderFactory::canMake(CoderType::QUAL));
+    EXPECT_FALSE(CoderFactory::canMake(CoderType::FCV2));
+}
+
+/*
+ * The generic trial walks an explicit candidate list, so a coder added to the
+ * config competes without touching any actuator. Restricting the list to a
+ * single coder makes that one the verdict.
+ */
+TEST_F(CodecSelectorTest, ExplicitCandidateListDrivesSelection)
+{
+    std::vector<uint8_t> data = makeQualityData(256 << 10, 7);
+    std::vector<CoderType> onlyRans{CoderType::RANS};
+    FieldCodecSelection sel = CodecSelector::selectCoder(data.data(), (uint32_t)data.size(),
+                                                         nullptr, onlyRans);
+    ASSERT_EQ(sel.status, FieldStatus::SELECTED);
+    EXPECT_EQ(sel.selectedCoder, CoderType::RANS);
+    EXPECT_GT(sel.bestCompLen, 0u);
 }

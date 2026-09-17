@@ -80,50 +80,40 @@ public:
      * over the whole file — currently whether the QUAL prior should be trained
      * and written. It is a parameter rather than part of PreprocessInfo: the
      * latter is the product of the decision and should not double as an input.
+     *
+     * mode selects the candidate list per field (see field_coder_config.h) and
+     * is intersected with the coder registry's profile/level gate, so a fast run
+     * only ever trials fast coders and an archive run only ratio coders.
      */
     static int32_t analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                           uint8_t compressLevel = 5, bool allowBwtCm = false);
-
-    /*
-     * The lowest -l at which a field's trial may include coder_bwt_cm (see
-     * fieldTrialAllowsBwtCm for why it is not always a candidate).
-     */
-    static constexpr uint8_t kBwtCmMinLevel = 8;
-
-    /*
-     * Whether the generic per-field trial may compare against coder_bwt_cm for this run.
-     *
-     * coder_bwt_cm is the stronger coder for SAM regular columns on size - it typically wins by 1-2%
-     * on SEQ, and more on base-heavy data - but it is the slowest of them, and the columns that list
-     * it dominate the CPU of an archive run. So it competes only where the caller asked for size over
-     * speed: the two highest levels, archive mode. Below that, and in fast mode (where every field is
-     * coded by coder_rans regardless of the verdict), the trials run with the always-present
-     * candidates only, exactly as before.
-     *
-     * Which fields actually compare against it is decided by their row in kSamFieldCoderConfig, the
-     * same way the affix candidate is, so this is only the run-level gate.
-     */
-    inline static bool fieldTrialAllowsBwtCm(uint8_t mode, uint8_t level)
-    {
-        return mode == PBGZ_MODE_ARCHIVE && level >= kBwtCmMinLevel;
-    }
+                           uint8_t compressLevel = 5, uint8_t mode = PBGZ_MODE_ARCHIVE);
 
     /*
      * Trial-compress one byte stream with every candidate coder and return the
-     * selection result. Exposed for unit testing.
+     * selection result. This is the generic, fully data-driven path: it holds no
+     * knowledge of any concrete coder, only walks the candidate list through
+     * CoderFactory. Adding a coder to a field's list is therefore enough for it
+     * to compete here.
      *
-     * trialAffix controls whether coder_affix_match is included as a candidate.
-     * affix is a column-wise prefix/suffix matching encoder that only helps
-     * certain SAM regular fields (FLAG/POS/MAPQ/CIGAR/PNEXT/TLEN); for other
-     * fields (e.g. SEQ, QNAME) it would only waste time in the comparison and
-     * might even be wrongly selected.
+     * Candidates are tried in the registry's trialPriority order (coder_fc
+     * first, then affix, then bwt_cm), and a later coder only takes the lead on
+     * a strictly smaller result - that keeps the tie-breaking behavior stable
+     * regardless of how a list happens to be written.
      *
-     * affix must be fed line by line (see LineSample); lines supplies the
-     * per-line sample. When it is empty the trial degrades to one whole-stream
-     * encode_line call, whose result is not trustworthy, so affix is excluded
-     * from the comparison in that case.
-     *
-     * allowBwtCm adds coder_bwt_cm to the comparison (see fieldTrialAllowsBwtCm).
+     * lines supplies the per-line sample for line-based coders (see LineSample).
+     * A coder whose descriptor says it is line-based is fed line by line when
+     * lines is available; otherwise it is fed the whole stream in one
+     * encode_line call. When lines is empty a line-based coder is skipped.
+     */
+    static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len,
+                                           const std::vector<LineSample>* lines,
+                                           const std::vector<CoderType>& candidates);
+
+    /*
+     * Convenience overload kept for the historical call sites and unit tests:
+     * rebuilds the historical candidate set (coder_fc always; coder_affix_match
+     * when trialAffix; coder_bwt_cm when allowBwtCm) and delegates to the
+     * candidate-list form above.
      */
     static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len,
                                            bool trialAffix = false,
@@ -184,7 +174,7 @@ public:
 
 private:
     static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                              uint8_t compressLevel, bool allowBwtCm);
+                              uint8_t compressLevel, uint8_t mode);
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
@@ -207,7 +197,8 @@ private:
     static uint32_t extractSamFieldSamples(RoughIOBlock* block,
                                        std::vector<std::string>& fieldBufs,
                                        std::vector<std::vector<LineSample>>& fieldLines,
-                                       uint32_t sampleBudget);
+                                       uint32_t sampleBudget,
+                                       uint8_t mode);
 
     /*
      * RNAME+POS line views collected by line count instead of the shared byte

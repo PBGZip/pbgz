@@ -243,15 +243,14 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
                                      ? (uint64_t)fileReader->getFileSize() : 0;
 
     /*
-     * coder_bwt_cm is the strongest coder for the SEQ column on size (it typically wins by 1-2%) and
-     * by far the slowest, so it is offered to that trial only where size is what the caller asked
-     * for: the two highest levels, archive mode. Below that - and in fast mode, where every field is
-     * coded by coder_rans regardless of the verdict - the trial runs as before.
+     * The -m mode picks which candidate list each field trials (see
+     * field_coder_config.h); the coder registry additionally gates each
+     * candidate by profile and by the engine level (coder_bwt_cm, for one, only
+     * competes at -l 8/9 in archive mode). Pass the mode through and let
+     * CodecSelector::analyze apply the intersection.
      */
-    const bool allowBwtCm = CodecSelector::fieldTrialAllowsBwtCm(parameter.mode,
-                                                                  parameter.compressLevel);
     if (0 != CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo,
-                                    parameter.compressLevel, allowBwtCm)) {
+                                    parameter.compressLevel, parameter.mode)) {
         LOG_INFO("File preprocessing (codec selection) failed, using default coders");
     } else if (parameter.verbose) {
         static const char* samFieldNames[] = {

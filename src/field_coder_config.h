@@ -27,56 +27,89 @@
 #include <cstdint>
 #include <vector>
 
+#include "pbgz_types.h"
 #include "preprocess_info.h"
 
 /*
- * Per-field encoder configuration table for SAM: candidate coders (trial-compressed
- * and compared per field during preprocessing) and the default coder (the actuator's
- * fallback when nothing is selected / selection failed / selection was not wired up).
- * Changing a field's candidates or default touches only this table; both the
- * preprocessing trial scope and the actuator defaults are read from here, so there is
- * no need to edit two places.
+ * Per-field encoder configuration table for SAM, split by compression profile:
+ *
+ *   archive (candidates / fallback)
+ *       ratio-oriented coders; used by -m archive (the default). These are the
+ *       candidates trial-compressed during preprocessing and the actuator's
+ *       fallback when nothing is selected / selection failed / selection was
+ *       not wired up.
+ *
+ *   fast (fastCandidates / fastFallback)
+ *       speed-oriented coders; used by -m fast. The fast path is meant to stay
+ *       quick, so its list holds cheap coders only. With a single entry the
+ *       trial is a formality (and the encoder is deterministic); adding a
+ *       second fast coder to the list makes the selector compare them without
+ *       any actuator change.
+ *
+ * Changing a field's candidates or default touches only this table. Both the
+ * preprocessing trial scope and the actuator defaults read from here.
+ *
+ * Which coders may actually be selected in a run is the intersection of this
+ * table and CoderFactory's descriptor table (the profile and level gate). A
+ * coder with no row in the registry, or one whose profile does not match the
+ * current -m mode, is filtered out before the trial.
  *
  * Special cases:
  *  - QUAL(10): goes through the QualSelector-specific path, which reads its
- *    candidates from here rather than from the generic trial below (the quality
- *    column needs record boundaries and a per-record cycle index, so it cannot be
- *    trialled as a plain byte stream). This list is the only place that decides
- *    which quality coders are in play - dropping one here is how a coder is taken
- *    out of the QUAL decision.
+ *    candidates from the QUAL row's archive list rather than from the generic
+ *    trial (the quality column needs record boundaries and a per-record cycle
+ *    index, so it cannot be trialled as a plain byte stream). Dropping a coder
+ *    from the QUAL row is how it is taken out of the QUAL decision.
  *  - POS(3) / PNEXT(7) / TLEN(8): always use delta / inferred compression (see
- *    compressPosFieldDelta / compressPNextFieldDelta / compressTLen); no generic
- *    candidates, the default is the underlying bwt_cm.
+ *    compressPosFieldDelta / compressPNextFieldDelta / compressTLen). POS still
+ *    selects its underlying entropy coder, but on the rebuilt varint stream
+ *    rather than on raw text, so it keeps its own candidate list in both
+ *    profiles; PNEXT/TLEN have no generic candidates at all.
  */
 
 struct FieldCoderConfig {
-    /*
-     * Which coders may compete for this field. Only the membership is read - the order they end up
-     * being trialled in is fixed by the selector (coder_fc, then affix where line samples are
-     * available, then coder_bwt_cm where the run allows it). An empty list means the field does not
-     * take part in the generic selection at all (PNEXT/TLEN are differenced/inferred instead).
-     */
+    /* Archive profile (default -m archive). */
     std::vector<CoderType> candidates;
-    CoderType fallback;                /* default coder */
+    CoderType fallback;
+
+    /* Fast profile (-m fast). */
+    std::vector<CoderType> fastCandidates;
+    CoderType fastFallback;
 };
 
 /* Number of SAM fields participating in coder selection: 11 mandatory fields + the 12th OPTION column. */
 static const uint32_t SAM_FIELD_COUNT_SELECT = SAM_FIELD_COUNT + 1;
 
+/*
+ * The fast list is speed-oriented: coder_rans is a static order-0 entropy coder
+ * with per-symbol O(1) cost and no BWT/context model, which is exactly what the
+ * fast preset wants. Every field's fast fallback is coder_rans because that is
+ * what the fast structured path has always used for generic fields; POS and the
+ * inferred fields (PNEXT/TLEN) have no generic fast candidate list because they
+ * are not fed to the generic trial (POS is evaluated on its varint delta stream,
+ * see selectPosDeltaCoder; PNEXT/TLEN are differenced/inferred). QUAL's fast
+ * list is empty because its dedicated selector keeps using the archive row.
+ */
+#define PBGZ_FQ_RANS   std::vector<CoderType>{CoderType::RANS}
+#define PBGZ_FQ_NONE   std::vector<CoderType>{}
+
 inline const FieldCoderConfig kSamFieldCoderConfig[SAM_FIELD_COUNT_SELECT] = {
-    /* QNAME */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM},
-    /* FLAG  */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM},
-    /* RNAME */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM},
-    /* POS   */ {{CoderType::BWT_CM, CoderType::ARITH}, CoderType::BWT_CM},
-    /* MAPQ  */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM},
-    /* CIGAR */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM},
-    /* RNEXT */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM},
-    /* PNEXT */ {{}, CoderType::BWT_CM},
-    /* TLEN  */ {{}, CoderType::BWT_CM},
-    /* SEQ   */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::FC},
-    /* QUAL  */ {{CoderType::QUAL, CoderType::FCV2, CoderType::BWT_CM}, CoderType::QUAL},
-    /* OPTION */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM},
+    /* QNAME */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* FLAG  */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* RNAME */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* POS   */ {{CoderType::BWT_CM, CoderType::ARITH}, CoderType::BWT_CM, PBGZ_FQ_NONE, CoderType::RANS},
+    /* MAPQ  */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* CIGAR */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* RNEXT */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* PNEXT */ {{}, CoderType::BWT_CM, PBGZ_FQ_NONE, CoderType::RANS},
+    /* TLEN  */ {{}, CoderType::BWT_CM, PBGZ_FQ_NONE, CoderType::RANS},
+    /* SEQ   */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::FC, PBGZ_FQ_RANS, CoderType::RANS},
+    /* QUAL  */ {{CoderType::QUAL, CoderType::FCV2, CoderType::BWT_CM}, CoderType::QUAL, PBGZ_FQ_NONE, CoderType::RANS},
+    /* OPTION */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
 };
+
+#undef PBGZ_FQ_RANS
+#undef PBGZ_FQ_NONE
 
 inline const FieldCoderConfig* samFieldCoderConfig(uint32_t fieldIdx)
 {
@@ -86,14 +119,34 @@ inline const FieldCoderConfig* samFieldCoderConfig(uint32_t fieldIdx)
     return &kSamFieldCoderConfig[fieldIdx];
 }
 
-/* Whether a field lists the given coder as a candidate. */
-inline bool samFieldCandidate(uint32_t fieldIdx, CoderType type)
+/* Empty list returned for out-of-range fields, so callers can always iterate. */
+inline const std::vector<CoderType>& emptyCoderList()
+{
+    static const std::vector<CoderType> kEmpty;
+    return kEmpty;
+}
+
+/* Candidate list for a field under the given compression mode. */
+inline const std::vector<CoderType>& samFieldCandidates(uint32_t fieldIdx, uint8_t mode)
 {
     const FieldCoderConfig* cfg = samFieldCoderConfig(fieldIdx);
     if (cfg == nullptr) {
-        return false;
+        return emptyCoderList();
     }
-    return std::find(cfg->candidates.begin(), cfg->candidates.end(), type) != cfg->candidates.end();
+    return (mode == PBGZ_MODE_FAST) ? cfg->fastCandidates : cfg->candidates;
+}
+
+/* Whether a field lists the given coder as a candidate in the given mode. */
+inline bool samFieldCandidate(uint32_t fieldIdx, CoderType type, uint8_t mode)
+{
+    const std::vector<CoderType>& list = samFieldCandidates(fieldIdx, mode);
+    return std::find(list.begin(), list.end(), type) != list.end();
+}
+
+/* Archive-profile membership (historical accessor; the QUAL path uses it). */
+inline bool samFieldCandidate(uint32_t fieldIdx, CoderType type)
+{
+    return samFieldCandidate(fieldIdx, type, PBGZ_MODE_ARCHIVE);
 }
 
 /*
@@ -117,9 +170,19 @@ inline bool qualCoderCandidate(CoderType type)
     return samFieldCandidate(SAM_QUAL, type);
 }
 
-/* Default coder; returns the caller-supplied fallback when nothing is registered. */
+/* Archive-profile default coder; returns the caller-supplied fallback when nothing is registered. */
 inline CoderType samFieldDefaultCoder(uint32_t fieldIdx, CoderType fallback)
 {
     const FieldCoderConfig* cfg = samFieldCoderConfig(fieldIdx);
     return (cfg != nullptr) ? cfg->fallback : fallback;
+}
+
+/* Default coder for the given compression mode. */
+inline CoderType samFieldDefaultCoder(uint32_t fieldIdx, uint8_t mode, CoderType fallback)
+{
+    const FieldCoderConfig* cfg = samFieldCoderConfig(fieldIdx);
+    if (cfg == nullptr) {
+        return fallback;
+    }
+    return (mode == PBGZ_MODE_FAST) ? cfg->fastFallback : cfg->fallback;
 }
