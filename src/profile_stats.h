@@ -42,6 +42,7 @@ enum Cat {
     READ_MD5,
     READ_INFLATE,
     READ_PARSE,
+    READ_HEADER,      /* SAM/BAM header block: pre-parse into the chromosome table */
 
     /* SEQ / QUAL internals: preparation vs coder construction vs encoding */
     SEQ_PREP = 20,
@@ -68,7 +69,6 @@ enum Cat {
     FIELD_HDR = 90,
     FIELD_META = 91,
     FIELD_INDEX = 92,
-    FIELD_QNAME_TRIAL = 93,
 
     /* codec pre-selection: one slot per field trial, READ_TRIAL_BASE + fieldIdx */
     READ_TRIAL_BASE = 100,
@@ -183,6 +183,7 @@ inline const char* catName(int cat)
         case READ_MD5:            return "READ_md5(reader side)";
         case READ_INFLATE:        return "READ_bgzf(inflate+io)";
         case READ_PARSE:          return "READ_parseRec2Cols";
+        case READ_HEADER:         return "READ_header(chromosome table)";
         case SEQ_PREP:            return "SEQ_prep(buf+collect)";
         case SEQ_CTOR:            return "SEQ_ctor";
         case SEQ_CODEC:           return "SEQ_encode+flush";
@@ -205,7 +206,6 @@ inline const char* catName(int cat)
         case FIELD_HDR:           return "F_samHeader";
         case FIELD_META:          return "F_meta(md5+json)";
         case FIELD_INDEX:         return "F_buildIndex";
-        case FIELD_QNAME_TRIAL:     return "F0_QNAME_trial";
         default:
             if (cat >= FIELD_BASE && cat < FIELD_BASE + kFieldNameCount) {
                 return fieldNames()[cat - FIELD_BASE];

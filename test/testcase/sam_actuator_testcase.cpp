@@ -37,6 +37,7 @@
 #define private public
 #include "sam_actuator.h"
 #include "coder/coder_json.h"
+#include "codec_selector.h"
 #include "sam_info.h"
 #include <io_wrapper.h>
 #include <block_wrapper.h>
@@ -322,7 +323,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     int32_t result = actuator.preAnalysis();
     std::remove("idinvlid_pre_analysis.sam");
     EXPECT_EQ(result, 0);
-    EXPECT_EQ(actuator.idPosLength, UINT32_MAX);
+    EXPECT_EQ(actuator.idAnalysis.posLength, UINT32_MAX);
 }
 
 TEST_F(SamActuatorTest, testCompressQuality) {
@@ -934,6 +935,16 @@ TEST_F(SamActuatorTest, testSeqExceptionRunFormStream) {
     Reference refGene = createTestReference();
     PbgzParameter para;
     CompressEngine engine(para);
+    /*
+     * The form is a file-level verdict the codec pre-selection takes before any block is written,
+     * so take it here the way the engine does (CompressEngine::fileDecisionProc) - the actuator
+     * only reads it, and writing a block is not where coders get compared.
+     */
+    ASSERT_NE(engine.getPreprocessInfoMut(), nullptr);
+    ASSERT_EQ(CodecSelector::analyze(pInBlock, 0, *engine.getPreprocessInfoMut(),
+                                     para.compressLevel, PBGZ_MODE_ARCHIVE, &refGene), 0);
+    ASSERT_EQ(engine.getPreprocessInfoMut()->nposForm.load(), 2);
+
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine, &refGene);
     ASSERT_EQ(actuator.preAnalysis(), 0);
 

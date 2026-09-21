@@ -95,4 +95,31 @@ private:
 
 namespace SamUtil {
     int32_t parseChromosomeInfo(const std::string& sqLine);
+
+    /*
+     * Pre-parse the header at the head of a block into the chromosome table.
+     *
+     * The header is the one part of a SAM file that has to be understood before any block can be
+     * classified by its RNAME, since the names come from it (SamInfo::getChrNameIndex, used by
+     * SamCodecActuator::scanDataLine); a block whose RNAME cannot be resolved is downgraded to
+     * BINARY. Until now the table was only ever built by the first block's pre-analysis, on a
+     * coder thread, which is why the pipeline has to serialise that block against all the others
+     * (see the first-block serialization in PbgzEngine::startWorkTask).
+     *
+     * The reader keeps the header lines in a block of their own (SamBlockReader::readBlock with
+     * splitSamHeader; BamBlockReader emits the BAM header the same way) and the reader thread sees
+     * that block before anything is queued, so the table can be built there, ahead of every coder
+     * thread - and no data block then races an unbuilt table. Blocks that carry their header merged
+     * into the first data block go through here too.
+     *
+     * Only @SQ is consumed: it is the part every later stage reads. The other header kinds have no
+     * engine-level effect - the UR: / CL: reference checks live in the actuator, which is the side
+     * that holds the loaded reference. The pass is idempotent against the actuator's own one
+     * (SamInfo keys by name), so whichever runs first fills the table and the other only confirms.
+     *
+     * `npos` holds the newline positions of the block, as the reader recorded them. Returns the
+     * number of header lines read, 0 when the block does not open with one.
+     */
+    int32_t prefetchHeaderChromosomes(const uint8_t* buffer, int64_t dataLen,
+                                      const std::vector<size_t>& npos);
 }

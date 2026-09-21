@@ -175,3 +175,36 @@ int32_t SamUtil::parseChromosomeInfo(const std::string& sqLine) {
     SamInfo::getInstance().addChromosomeInfo(chrName, chrLength);
     return 0;
 }
+
+int32_t SamUtil::prefetchHeaderChromosomes(const uint8_t* buffer, int64_t dataLen,
+                                           const std::vector<size_t>& npos) {
+    if (buffer == nullptr || dataLen <= 0 || buffer[0] != '@') {
+        return 0;
+    }
+
+    /*
+     * The header is the block's leading lines: walk them until the first one that does not start
+     * with '@'. A data line can never start with '@' (SAMv1 QNAME is [!-?A-~], a range that
+     * excludes it), which is the same property the reader splits blocks on.
+     */
+    int32_t headerLines = 0;
+    for (size_t i = 0; i < npos.size(); ++i) {
+        const size_t lineStart = (i == 0) ? 0 : npos[i - 1] + 1;
+        const size_t lineEnd = npos[i];
+        if (lineEnd <= lineStart || lineEnd >= (size_t)dataLen) {
+            break;
+        }
+        if (buffer[lineStart] != '@') {
+            break;
+        }
+        ++headerLines;
+        if (lineEnd > lineStart + 2 && buffer[lineStart + 1] == 'S' &&
+            buffer[lineStart + 2] == 'Q') {
+            /* Best effort: a line that does not parse is reported by the actuator's own header
+               pass, which sees the same line (SamCodecActuator::parseHeaderLine) and turns it
+               into the archive-level error. */
+            parseChromosomeInfo(std::string((const char*)buffer + lineStart, lineEnd - lineStart));
+        }
+    }
+    return headerLines;
+}

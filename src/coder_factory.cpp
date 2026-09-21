@@ -38,6 +38,8 @@
 #include "coder/coder_affix_match.h"
 #include "coder/coder_arith.h"
 #include "coder/coder_rans.h"
+#include "coder/coder_qcm.h"
+#include "coder/coder_qname.h"
 #include "field_coder_config.h"
 
 namespace {
@@ -51,6 +53,8 @@ std::shared_ptr<coder> createFc(coder_io* io)        { return std::make_shared<c
 std::shared_ptr<coder> createAffix(coder_io* io)     { return std::make_shared<coder_affix_match>(io); }
 std::shared_ptr<coder> createArith(coder_io* io)     { return std::make_shared<coder_arith>(io); }
 std::shared_ptr<coder> createRans(coder_io* io)      { return std::make_shared<coder_rans>(io); }
+std::shared_ptr<coder> createQcm(coder_io* io)       { return std::make_shared<coder_qcm>(io); }
+std::shared_ptr<coder> createQname(coder_io* io)     { return std::make_shared<coder_qname>(io); }
 
 /*---------------------------------------------------------------------------
  * Applicability checks
@@ -91,21 +95,61 @@ bool supportsAffix(uint32_t fileType, uint32_t fieldIdx)
  */
 const CoderDescriptor kCoderDescriptors[] = {
     /* type,                  profiles,               trialLineBased, trialCandidate, trialUsesLevel, minLevel, priority, levelPolicy,                 create,       supports */
-    {CoderType::BWT_CM,       CODER_PROFILE_ARCHIVE,  false,          true,           true,           8,        30,       CoderLevelPolicy::SET_LEVEL, createBwtCm,  supportsAny},
-    {CoderType::FC,           CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        10,       CoderLevelPolicy::NONE,      createFc,     supportsAny},
-    {CoderType::AFFIX_MATCH,  CODER_PROFILE_ARCHIVE,  true,           true,           false,          1,        20,       CoderLevelPolicy::NONE,      createAffix,  supportsAffix},
-    {CoderType::ARITH,        CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        40,       CoderLevelPolicy::SET_LEVEL, createArith,  supportsAny},
-    {CoderType::RANS,         CODER_PROFILE_FAST,     false,          true,           false,          1,        50,       CoderLevelPolicy::NONE,      createRans,   supportsAny},
+    {CoderType::BWT_CM,       CODER_PROFILE_ARCHIVE,  false,          true,           true,           8,        30,       CoderLevelPolicy::SET_LEVEL, createBwtCm,  supportsAny,  false, false},
+    {CoderType::FC,           CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        10,       CoderLevelPolicy::NONE,      createFc,     supportsAny,  false, true},
+    {CoderType::AFFIX_MATCH,  CODER_PROFILE_ARCHIVE,  true,           true,           false,          1,        20,       CoderLevelPolicy::NONE,      createAffix,  supportsAffix, true, false},
+    {CoderType::ARITH,        CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        40,       CoderLevelPolicy::SET_LEVEL, createArith,  supportsAny,  false, false},
+    {CoderType::RANS,         CODER_PROFILE_FAST,     false,          true,           false,          1,        50,       CoderLevelPolicy::NONE,      createRans,   supportsAny,  false, false},
+
+    /*
+     * coder_lzma lived here. It mirrored CRAM 3.1's LZMA method, the one CRAM picks for its
+     * base (SEQ) series on long-read data, where an LZ77 coder with a large window follows
+     * the inter-read repetition a per-block BWT has to rediscover. It won on size - 1.7519
+     * bits/base against coder_bwt_cm's 1.7590 on ERR11436629 SEQ - but at 0.82 MB/s against
+     * coder_bwt_cm's ~14 MB/s, and a sweep over its own settings found no way out (hc4 buys
+     * 6.4x for +7.4% of size, mode=FAST +5.3% for +18%, nice_len and depth each trade a
+     * fraction of a percent for nothing). At -l9 that made it 6.3x the run time of -l8 for
+     * 0.056% of the file, so it was dropped outright - coder and all, not just as a
+     * candidate: the format it wrote is not something this build has to read back.
+     */
+
+    /*
+     * coder_qcm is an order-2 context model written for the quality column (see
+     * coder_qcm.h for the model and where the numbers come from). It is an
+     * ordinary byte-stream coder - no position context, no strand - so unlike
+     * the record-level quality coders it goes through the generic interface and
+     * is applicable to any field; only the QUAL candidate list offers it.
+     *
+     * Measured on ERR11436629 (ONT, one 28.09 MB block of quality values):
+     * 13,597,325 bytes against coder_bwt_cm's 13,656,746, i.e. 0.43% smaller,
+     * and it is also the faster of the two (15.4 MB/s encoding, 12.5 MB/s
+     * decoding, against 9.4 and 4.5). The reason coder_bwt_cm can be beaten
+     * here at all is in the header note: on this column the BWT performs exactly
+     * like an ideal order-1 model, so the space that is left is in order 2.
+     *
+     * It sits last in the trial order (priority 60) so a tie keeps the
+     * incumbent, and the trial decides: a loss costs only trial time.
+     */
+    {CoderType::QCM,          CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        60,       CoderLevelPolicy::NONE,      createQcm,    supportsAny,  false, false},
+
+    /*
+     * coder_qname is the QNAME column's own coder: it codes a whole name per line, which is
+     * why that field has a dedicated path (see compressIdFieldQname). It is never a trial
+     * candidate - the field's layout decides when it is used - so its row exists for the
+     * same reason the QUAL and FCV2 rows do: a stream carrying its magic can be built by
+     * magic alone, with no actuator naming the class (see makeFieldDecoder).
+     */
+    {CoderType::QNAME,        CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      createQname,  supportsAny,  false, false},
 
     /* QUAL (coder_qual) and FCV2 (coder_fcv2) do not inherit coder and need
      * record-level input, so they have no create function here: the QUAL column
      * has its own dedicated compression/evaluation path. Their rows still exist
      * so that profile/candidate bookkeeping can tell they are archive coders. */
-    {CoderType::FCV2,         CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      nullptr,      supportsFcv2},
-    {CoderType::QUAL,         CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      nullptr,      supportsAny},
+    {CoderType::FCV2,         CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      nullptr,      supportsFcv2, false, false},
+    {CoderType::QUAL,         CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      nullptr,      supportsAny,  false, false},
 
     /* coder_simple_rc was removed (lossy); kept only as an enum placeholder. */
-    {CoderType::SIMPLE_RC,    CODER_PROFILE_NONE,     false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      nullptr,      supportsAny},
+    {CoderType::SIMPLE_RC,    CODER_PROFILE_NONE,     false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      nullptr,      supportsAny,  false, false},
 };
 
 const CoderDescriptor* findDescriptor(CoderType type)
@@ -174,6 +218,40 @@ std::shared_ptr<coder> CoderFactory::makeDecoder(const std::string& magic, coder
         return nullptr;
     }
     return d->create(io);
+}
+
+bool CoderFactory::decoderHoldsCallerBuffer(const std::string& magic)
+{
+    const CoderDescriptor* d = descriptorByMagic(magic);
+    return (d != nullptr) && d->holdsCallerBuffer;
+}
+
+bool CoderFactory::decoderIsWholeBlock(const std::string& magic)
+{
+    const CoderDescriptor* d = descriptorByMagic(magic);
+    return (d != nullptr) && d->wholeBlockOnly;
+}
+
+std::shared_ptr<coder> CoderFactory::makeFieldDecoder(const std::string& magic, coder_io* io,
+                                                      const FieldDecoderArgs& args)
+{
+    std::shared_ptr<coder> decoder = makeDecoder(magic, io);
+    if (decoder == nullptr) {
+        return nullptr;
+    }
+    if (args.level >= 0) {
+        decoder->set_level((uint8_t)args.level);
+    }
+    /*
+     * A coder_arith decoder must use the same file-level prior the encoder did, or the
+     * arithmetic decode diverges on the first symbol. The magic was checked by makeDecoder
+     * above, so the cast is safe.
+     */
+    if (magic == "coder_arith" && args.posPrior != nullptr && !args.posPrior->empty()) {
+        static_cast<coder_arith*>(decoder.get())
+            ->set_prior(args.posPrior->data(), (uint32_t)args.posPrior->size());
+    }
+    return decoder;
 }
 
 void CoderFactory::applyLevel(coder_io* io, CoderType type, uint8_t compressLevel)

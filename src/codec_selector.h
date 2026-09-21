@@ -32,6 +32,7 @@
 #include "qual_selector.h"
 
 class RoughIOBlock;
+class Reference;
 
 /*
  * A per-field sample split into lines. coder_affix_match is a line-based
@@ -84,9 +85,19 @@ public:
      * mode selects the candidate list per field (see field_coder_config.h) and
      * is intersected with the coder registry's profile/level gate, so a fast run
      * only ever trials fast coders and an archive run only ratio coders.
+     *
+     * reference is the loaded reference genome, or nullptr when the run has none. With one, the
+     * SEQ column is trialled on the payload it will really be written as - the per-base 2-bit
+     * codes XORed against the reference - instead of on its raw text, and the verdict is the
+     * match-stream coder and the form the N positions travel in (see
+     * selectSeqReferenceCoder). The chromosome names that resolve the reference come from the
+     * file's @SQ lines, which the reader thread puts into SamInfo before the first data block is
+     * dispatched (see CompressEngine::preDispatchBlock); a block that carries its own header is
+     * parsed here as well, so the trial does not depend on that ordering.
      */
     static int32_t analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                           uint8_t compressLevel = 5, uint8_t mode = PBGZ_MODE_ARCHIVE);
+                           uint8_t compressLevel = 5, uint8_t mode = PBGZ_MODE_ARCHIVE,
+                           Reference* reference = nullptr);
 
     /*
      * Trial-compress one byte stream with every candidate coder and return the
@@ -174,8 +185,64 @@ public:
 
 private:
     static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                              uint8_t compressLevel, uint8_t mode);
+                              uint8_t compressLevel, uint8_t mode, Reference* reference);
     static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
+
+    /*
+     * One record of the SEQ reference trial: its SEQ inside the sample's concatenated bases, and
+     * the columns the reference walk reads (FLAG, RNAME, POS, CIGAR). The views point into the
+     * block, so the trial re-reads them without copying the line.
+     */
+    struct SeqRefRecord {
+        uint32_t seqBeg = 0;
+        uint32_t seqEnd = 0;
+        LineSample flag;
+        LineSample rname;
+        LineSample pos;
+        LineSample cigar;
+    };
+
+    /*
+     * The SEQ reference trial: build the match payload the block pass will write - per record the
+     * 2-bit codes XORed against the reference over the CIGAR segments that consume it, or the
+     * record's own characters when it cannot use the reference at all - then apply the same RLE
+     * split the block pass applies and trial the candidates on the "m" segment the verdict is for.
+     *
+     * Answers false when the sample holds no reference-coded record, leaving `info` untouched: no
+     * payload exists then (the base path, compressBaseWithoutRef, writes the bytes as they are), so
+     * the column's coder has to be decided on the raw text after all, and no form verdict is
+     * needed. On success it fills info.fields[SAM_SEQ] with the trial that decided it and pins
+     * PreprocessInfo::seqMatchCoder / nposForm for every later block.
+     */
+    static bool selectSeqReferenceCoder(RoughIOBlock* block, Reference* reference, uint8_t level,
+                                        PreprocessInfo& info);
+
+    /*
+     * Collect SeqRefRecord's records from a block, stopping once `sampleBudget` bases of SEQ have
+     * been taken (a record that would overshoot is truncated, so the sample is one whole record
+     * short of the budget at most), and the N offsets over that same sample - counted from SEQ
+     * alone, so a record that cannot use the reference contributes its N too, and the positions
+     * are the record's offsets inside the concatenated sample.
+     */
+    static uint32_t extractSeqReferenceSamples(RoughIOBlock* block,
+                                               std::vector<SeqRefRecord>& records,
+                                               std::vector<uint8_t>& seq,
+                                               std::vector<uint32_t>& nPositions,
+                                               uint32_t sampleBudget);
+
+    /*
+     * The QNAME column's layout: the affix segmentation against coder_qname's cross-line
+     * deduplication. Both are encoders, so the only faithful way to choose between them is to run
+     * them - on the first QNAME_TRIAL_LINES of the deciding block, exactly as the block pass
+     * would, through the same module (sam_qname_column.h) - and the choice belongs here, before
+     * any block is written.
+     *
+     * Answers false when there is nothing to choose: a column with no separators, or one whose
+     * split turns out to be unavailable, is written whole (SamCodecActuator::compressIdFieldInAll)
+     * and no layout is involved. On success it fills info.fields[SAM_QNAME] with the trial and
+     * pins PreprocessInfo::qnameUseAffix.
+     */
+    static bool selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
     /*

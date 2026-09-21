@@ -31,6 +31,7 @@
 #include "codec_actuator_adapter.h"
 #include "codec_selector.h"
 #include "field_coder_config.h"
+#include "sam_info.h"
 
 #include <bzlib.h>
 
@@ -194,13 +195,19 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
  * "different data blocks on different worker threads".
  */
 /*
- * Checksum of the raw block text.
+ * Per-block work that depends only on the input, done before the block is queued.
  *
- * The actuators used to hash the block at the end of compression, i.e. on the
- * worker threads, which are the pipeline's bottleneck (measured: 24.5 s of CPU
- * over 636 blocks, ~3 s of wall time at 8 threads). The checksum depends only on
- * the input, and the reader thread has spare capacity (it was idle ~32% of the
- * time waiting for a free block), so it is computed here instead.
+ * Checksum of the raw block text: the actuators used to hash the block at the end of
+ * compression, i.e. on the worker threads, which are the pipeline's bottleneck
+ * (measured: 24.5 s of CPU over 636 blocks, ~3 s of wall time at 8 threads). The
+ * checksum depends only on the input, and the reader thread has spare capacity (it was
+ * idle ~32% of the time waiting for a free block), so it is computed here instead.
+ *
+ * Header pre-parse: a SAM/BAM header block puts its @SQ lines into the process-wide
+ * chromosome table (see SamUtil::prefetchHeaderChromosomes), which is the table every
+ * later block resolves its RNAME against. This is the only stage that sees the header
+ * before any coder thread has started, so doing it here is what keeps the table from
+ * being built concurrently with the blocks that read it.
  */
 void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
     if (blockPtr == nullptr) {
@@ -209,6 +216,19 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
     const BlockType type = blockPtr->getBlockType();
     if (!BlockUtil::isSAMBlock(type) && !BlockUtil::isFastqBlock(type) && type != BINARY) {
         return;
+    }
+    if (BlockUtil::isSAMBlock(type)) {
+        /*
+         * Header block: this is the block the chromosome table has to come from, and it is here,
+         * on the reader thread and before the block is queued, that the table is built - so every
+         * coder thread finds it ready instead of racing the first block's pre-analysis, which is
+         * what the first-block serialization exists to prevent. See
+         * SamUtil::prefetchHeaderChromosomes; a block that does not open with header lines (an
+         * ordinary data block, or a header merged into one) simply answers 0 here.
+         */
+        PBGZ_PROF_SCOPE(pbgzprof::READ_HEADER);
+        SamUtil::prefetchHeaderChromosomes(blockPtr->getBuffer(), blockPtr->getDataLen(),
+                                           blockPtr->getNpos());
     }
     if (blockPtr->getBamColumns() != nullptr) {
         /* Structured BAM block: hashing is deferred to the worker that parses
@@ -249,8 +269,20 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
      * competes at -l 8/9 in archive mode). Pass the mode through and let
      * CodecSelector::analyze apply the intersection.
      */
-    if (0 != CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo,
-                                    parameter.compressLevel, parameter.mode)) {
+    const int32_t analyzeRet = CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo,
+                                                      parameter.compressLevel, parameter.mode,
+                                                      getReference());
+
+    /*
+     * The reference is passed down so the SEQ column can be trialled on the payload it will really
+     * be written as. It works from here because the block's @SQ names are already in the process
+     * table by the time this runs - the reader thread put them there before dispatching the header
+     * block (see preDispatchBlock) - so the reference walk can resolve RNAME at this stage. The
+     * verdicts are pinned in preprocessInfo, so every later block only reads them. See
+     * CodecSelector::selectSeqReferenceCoder.
+     */
+
+    if (0 != analyzeRet) {
         LOG_INFO("File preprocessing (codec selection) failed, using default coders");
     } else if (parameter.verbose) {
         static const char* samFieldNames[] = {

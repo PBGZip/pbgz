@@ -47,6 +47,8 @@ enum class CoderType : uint8_t {
     AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder, for regular SAM fields */
     ARITH,        /* coder_arith:  order-0 adaptive arithmetic byte-stream coder */
     RANS,         /* coder_rans:   static order-0 entropy coder, fast preset only (never a trial candidate) */
+    QCM,          /* coder_qcm:    order-2 context model for the quality column (see coder_qcm.h) */
+    QNAME,        /* coder_qname:  the QNAME column's own coder (single-stream layout); never a trial candidate */
     COUNT
 };
 
@@ -62,6 +64,8 @@ static inline const char* coderTypeToMagic(CoderType type)
     case CoderType::AFFIX_MATCH: return "coder_affix_match";
     case CoderType::ARITH:     return "coder_arith";
     case CoderType::RANS:      return "coder_rans";
+    case CoderType::QCM:       return "coder_qcm";
+    case CoderType::QNAME:     return "coder_qname";
     default:                   return "unknown";
     }
 }
@@ -270,26 +274,28 @@ struct PreprocessInfo {
     std::vector<uint8_t> posPriorSnapshot;
 
     /*
-     * Which coder codes the SEQ match stream ("m"). This is the transformed stream,
-     * not the SEQ field's ASCII sample, so the decision cannot be taken with the rest
-     * of the field trials during preprocessing: building the stream needs the
-     * reference.
+     * Pins which coder codes the SEQ match stream ("m").
      *
-     * BWT_CM and FC both code the stream and the smaller wins, decided on the first
-     * block that carries it and reused by every later block. On ERR14949932 FC loses
-     * on the aggregated stream by 6.40% (-l5) / 4.61% (-l8) and wins none of the
-     * 335 / 34 blocks, while deciding per block instead cost 10.8% / 3.3% of the
-     * compression time and changed no byte of the output.
+     * The codec pre-selection sets it once per file, before any block is dispatched, from
+     * CodecSelector::selectSeqReferenceCoder - which builds the block's real match payload (the
+     * 2-bit codes XORed against the reference, the record's own characters where it cannot use
+     * it, then the same RLE split) and measures the candidates on that stream. No other stage
+     * writes it, because no other stage runs while it is still alone.
      *
-     * Holds one of CoderType's values, or -1 while undecided.
+     * A value >= 0 is honored as-is, which is how a caller - and the unit tests - forces one
+     * candidate instead of letting the trial decide. -1 means no verdict was taken, and the
+     * coder side then writes the stream with coder_bwt_cm, the coder it used before the trial
+     * existed.
+     *
+     * Holds one of CoderType's values, or -1 while unset.
      */
     std::atomic<int32_t> seqMatchCoder;
 
     /*
      * Which form the block's N positions travel in: 0 = absolute 4-byte offsets
-     * ("npos"), 1 = deltas in varints ("nposd"), -1 while undecided.
+     * ("npos"), 1 = deltas in varints ("nposd"), 2 = runs ("nposr"), -1 while undecided.
      *
-     * Both forms are measured and the smaller wins. The absolute offsets are monotone
+     * All three forms are measured and the smallest wins. The absolute offsets are monotone
      * and smooth, which compresses better when Ns are sparse; the deltas are small and
      * nearly constant, which wins when they are dense (ERR14949932, 11.3% N: the stream
      * went from two thirds of the archive to a few MB; con_sorted, 0.002% N: the
@@ -297,17 +303,26 @@ struct PreprocessInfo {
      * layout is set by the sequencing data and the masking, not by the block - so it is
      * measured on the first block that has positions and reused, which keeps the cost at
      * one trial per file rather than one per block.
+     *
+     * The pre-selection takes it along with the coder above (one pass builds the sample both
+     * need), before any block is written. A file whose first block carries no N takes no verdict,
+     * and the write side then keeps the absolute form for every block rather than measuring a
+     * coder mid-write.
      */
     std::atomic<int32_t> nposForm;
 
     /*
-     * Serialises the per-file verdicts above. They are written by the lowest block that
-     * can measure them, and the blocks running alongside it wait on decideCond instead
-     * of each repeating the same trial; see SamCodecActuator::decideOncePerFile for why
-     * the deciding block is pinned rather than left to whoever gets there first.
+     * Which layout writes the QNAME column: 1 = the affix segmentation, 0 = coder_qname's
+     * cross-line deduplication, -1 while undecided.
+     *
+     * Like the two above it is a property of the file's naming scheme rather than of a block - a
+     * single FASTQ's constant prefix and locally ordered fragment numbers suit the segmentation,
+     * a concatenated file's alternating prefixes and globally random numbers suit coder_qname -
+     * so the pre-selection runs both encoders on a sample of the first block and every block is
+     * written the way it says (see CodecSelector::selectQnameLayout). -1 means no verdict was
+     * taken, and the coder side keeps the affix layout.
      */
-    std::mutex decideMutex;
-    std::condition_variable decideCond;
+    std::atomic<int32_t> qnameUseAffix;
 
     /*
      * analyze decides this file is worth training and publishing a QUAL prior for.
@@ -321,7 +336,8 @@ struct PreprocessInfo {
     /* The initializers follow the declaration order of the members, as the language requires them
        to be applied in it. */
     PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
-                       qualPriorTrainingBytes(0), seqMatchCoder(-1), nposForm(-1), qualPriorRequested(false) {}
+                       qualPriorTrainingBytes(0), seqMatchCoder(-1), nposForm(-1), qnameUseAffix(-1),
+                       qualPriorRequested(false) {}
 
     void reset(BlockType type)
     {
@@ -336,6 +352,7 @@ struct PreprocessInfo {
         posPriorSnapshot.clear();
         seqMatchCoder.store(-1, std::memory_order_relaxed);
         nposForm.store(-1, std::memory_order_relaxed);
+        qnameUseAffix.store(-1, std::memory_order_relaxed);
     }
 
     bool isDone() const
@@ -411,5 +428,26 @@ struct PreprocessInfo {
     void setPosPrior(std::vector<uint8_t>&& snapshot)
     {
         posPriorSnapshot = std::move(snapshot);
+    }
+
+    /* The two SEQ verdicts, published by the codec pre-selection while it is still the only
+       thing running: the coder the match stream is written with, and the form the N positions
+       travel in (see CodecSelector::selectSeqReferenceCoder). Both are read by every block
+       afterwards, so they go out with the release/acquire pair the rest of PreprocessInfo uses.
+       A caller may also write them before analyze, to force one candidate - see the fields. */
+    void setSeqMatchCoder(int32_t coder)
+    {
+        seqMatchCoder.store(coder, std::memory_order_release);
+    }
+
+    void setNposForm(int32_t form)
+    {
+        nposForm.store(form, std::memory_order_release);
+    }
+
+    /* Which QNAME layout the file's names suit; see the field. */
+    void setQnameUseAffix(int32_t useAffix)
+    {
+        qnameUseAffix.store(useAffix, std::memory_order_release);
     }
 };

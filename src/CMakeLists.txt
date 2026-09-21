@@ -62,7 +62,6 @@ target_link_libraries(pbgz PRIVATE
     ${THIRDPARTY_DIR}/release/zlib/lib/libz.a
     pthread
     curl
-    lzma
 )
 
 if(APPLE) 

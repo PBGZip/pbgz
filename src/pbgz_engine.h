@@ -251,7 +251,6 @@ public:
      * reaches the QNAME field runs the trial and publishes the verdict; the
      * others reuse it (see SamCodecActuator::compressSamByFields).
      */
-    std::atomic<int> samQnameUseAffix{-1};
     IOReader* ioReader;
     IOWriter* ioWriter;
     std::list<RoughIOBlock*> outputSortedCache;

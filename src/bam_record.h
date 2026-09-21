@@ -132,6 +132,9 @@ inline int baseNibble(char c) {
     }
 }
 
+/* The bin htslib stores for a read that has no coordinate: reg2bin of an empty span at -1. */
+const uint16_t kUnmappedBin = 4680;
+
 /* Classic reg2bin: beg is the 0-based start, end is the 0-based exclusive end */
 inline uint16_t samReg2Bin(int64_t beg, int64_t end) {
     const int64_t e = end - 1;
@@ -191,24 +194,41 @@ inline int appendSamAuxToBam(const char* opt, size_t n, std::vector<uint8_t>& ou
         } catch (...) {
             return -1;
         }
-        if (v >= INT8_MIN && v <= INT8_MAX) {
-            putU8(out, (uint8_t)'c');
-            putU8(out, (uint8_t)(int8_t)v);
-        } else if (v >= 0 && v <= UINT8_MAX) {
-            putU8(out, (uint8_t)'C');
-            putU8(out, (uint8_t)v);
-        } else if (v >= INT16_MIN && v <= INT16_MAX) {
-            putU8(out, (uint8_t)'s');
-            putU16(out, (uint16_t)(int16_t)v);
-        } else if (v >= 0 && v <= UINT16_MAX) {
-            putU8(out, (uint8_t)'S');
-            putU16(out, (uint16_t)v);
-        } else if (v >= INT32_MIN && v <= INT32_MAX) {
-            putU8(out, (uint8_t)'i');
-            putI32(out, (int32_t)v);
+        /*
+         * The narrowest width that holds the value, in the signedness order htslib uses in
+         * sam_parse1: a non-negative value goes to the unsigned letter ('C', 'S', 'I') and a
+         * negative one to the signed ('c', 's', 'i'). Taking the signed letter first for small
+         * non-negative values (which is what this did) is not what samtools writes for the same
+         * SAM line: NM:i:1 becomes NM:c:1 instead of NM:C:1. The value is identical either way -
+         * a SAM integer always prints as 'i' - so only a byte-for-byte comparison of the BAM
+         * shows it, which is exactly what comparing a round-tripped file against its original
+         * does.
+         *
+         * A value outside the SAM integer range cannot come from a well-formed line; it keeps
+         * the previous behaviour and is truncated to the low 32 bits.
+         */
+        if (v >= 0) {
+            if (v <= UINT8_MAX) {
+                putU8(out, (uint8_t)'C');
+                putU8(out, (uint8_t)v);
+            } else if (v <= UINT16_MAX) {
+                putU8(out, (uint8_t)'S');
+                putU16(out, (uint16_t)v);
+            } else {
+                putU8(out, (uint8_t)'I');
+                putU32(out, (uint32_t)v);
+            }
         } else {
-            putU8(out, (uint8_t)'I');
-            putU32(out, (uint32_t)v);
+            if (v >= INT8_MIN) {
+                putU8(out, (uint8_t)'c');
+                putU8(out, (uint8_t)(int8_t)v);
+            } else if (v >= INT16_MIN) {
+                putU8(out, (uint8_t)'s');
+                putU16(out, (uint16_t)(int16_t)v);
+            } else {
+                putU8(out, (uint8_t)'i');
+                putI32(out, (int32_t)v);
+            }
         }
         break;
     }
@@ -408,9 +428,15 @@ inline int buildBamRecordFromSamLine(const uint8_t* line, size_t len,
     }
     const uint16_t nCigar = (uint16_t)cigarOps.size();
 
-    /* bin */
-    uint16_t bin = 0;
-    if (refId >= 0 && bpos >= 0) {
+    /*
+     * bin: the classic reg2bin of the read's reference span. A read with no coordinate - RNAME
+     * '*'/'=' that resolved to nothing, or a zero POS - lands in the region-0 leaf instead of
+     * the 0 this used to leave behind. 0 is not a bin any lookup can return, so an indexed file
+     * built from this output would disagree with one built from the same reads by samtools, which
+     * is what htslib writes there (bam_reg2bin(-1, 0) == 4680; see kUnmappedBin).
+     */
+    uint16_t bin = kUnmappedBin;
+    if (bpos >= 0) {
         const int64_t end = (int64_t)bpos + (refSpan > 0 ? refSpan : 1);
         bin = samReg2Bin(bpos, end);
     }

@@ -153,6 +153,33 @@ void buildSamBlock(RoughIOBlock* block, uint32_t numLines, uint32_t readLen)
     block->setBlockType(SAM);
 }
 
+/*
+ * Build a block of synthetic SAM lines whose QNAME column is `name(i)`; the other columns are the
+ * minimum a SAM record needs, since the QNAME column is what the caller is looking at.
+ */
+template <typename NameFn>
+void buildQnameBlock(RoughIOBlock* block, uint32_t numLines, NameFn name)
+{
+    std::vector<size_t>& npos = block->getNpos();
+    uint8_t* buffer = block->getBuffer();
+    uint32_t offset = 0;
+
+    for (uint32_t i = 0; i < numLines; ++i) {
+        std::string line = name(i);
+        line += "\t99\tchrI\t";
+        line += std::to_string(i * 100 + 1);
+        line += "\t60\t10M\t=\t";
+        line += std::to_string(i * 100 + 100);
+        line += "\t200\tACGTACGTAC\t!!!!!!!!!!\n";
+
+        memcpy(buffer + offset, line.data(), line.size());
+        offset += (uint32_t)line.size();
+        npos.push_back(offset - 1);
+    }
+    block->setDataLen(offset);
+    block->setBlockType(SAM);
+}
+
 /* Build a block of synthetic FASTQ records (4 lines each). */
 void buildFastqBlock(RoughIOBlock* block, uint32_t numRecords, uint32_t readLen)
 {
@@ -356,6 +383,76 @@ TEST_F(CodecSelectorTest, AnalyzeSamBlockSelectsLargeFields)
 
     EXPECT_EQ(info.fields[SAM_FLAG].status, FieldStatus::SKIPPED);
     EXPECT_EQ(info.fields[SAM_MAPQ].status, FieldStatus::SKIPPED);
+}
+
+/*
+ * The QNAME column's layout is a file-level verdict, and it is this stage that takes it: the two
+ * layouts are encoders, so the pre-selection runs both on a sample of the block and the block pass
+ * only reads the answer. These pin the analysis reaching the encoders and the verdict matching the
+ * trial the per-field table reports.
+ *
+ * A single FASTQ's names - one constant prefix, locally ordered numbers - are what the affix
+ * segmentation exists for: the prefix is shared by every line and the number column is a counter
+ * (measured: 0.17% against coder_qname's 14.69% on 1000 such names).
+ */
+TEST_F(CodecSelectorTest, QnameLayoutPrefersAffixForSequentialNames)
+{
+    RoughIOBlock block(1 << 20);
+    buildQnameBlock(&block, 1000, [](uint32_t i) { return "SRR001." + std::to_string(i); });
+
+    PreprocessInfo info;
+    ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
+    info.markDone();
+
+    EXPECT_EQ(info.fields[SAM_QNAME].status, FieldStatus::SELECTED);
+    EXPECT_EQ(info.fields[SAM_QNAME].selectedCoder, CoderType::AFFIX_MATCH);
+    EXPECT_EQ(info.qnameUseAffix.load(), 1);
+    /* The verdict is the trial's own outcome, and both layouts were measured. */
+    ASSERT_GE(info.fields[SAM_QNAME].trialCount, 2u);
+    EXPECT_LT(info.fields[SAM_QNAME].bestCompLen, info.fields[SAM_QNAME].decidedLen);
+}
+
+/*
+ * The other way round: a concatenated file alternates prefixes and its numbers are globally
+ * random, so there is no adjacent prefix for the segmentation to hold on to and the per-line
+ * dictionary wins (measured: 35.02% against 35.91%).
+ */
+TEST_F(CodecSelectorTest, QnameLayoutPrefersQnameForConcatenatedNames)
+{
+    RoughIOBlock block(1 << 20);
+    std::mt19937 rng(4321);
+    buildQnameBlock(&block, 1000, [&rng](uint32_t i) {
+        return std::string(i % 2 ? "B" : "A") + ".R" + std::to_string(rng() % 1000000000000ull);
+    });
+
+    PreprocessInfo info;
+    ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
+    info.markDone();
+
+    EXPECT_EQ(info.fields[SAM_QNAME].status, FieldStatus::SELECTED);
+    EXPECT_EQ(info.fields[SAM_QNAME].selectedCoder, CoderType::QNAME);
+    EXPECT_EQ(info.qnameUseAffix.load(), 0);
+}
+
+/*
+ * The field's own tab is a separator too - it is what ends the column - so names built from no
+ * punctuation at all still yield one segment, the whole field, and a layout is still chosen. That
+ * is what makes the verdict available for every valid SAM block rather than only for names built
+ * from punctuation, and it is the degenerate end of the analysis: one shared prefix, and nothing
+ * for the dictionary to hold on to.
+ */
+TEST_F(CodecSelectorTest, QnameLayoutDecidesEvenWithoutAnInnerSeparator)
+{
+    RoughIOBlock block(1 << 20);
+    buildQnameBlock(&block, 1000, [](uint32_t i) { return "read" + std::to_string(i); });
+
+    PreprocessInfo info;
+    ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
+    info.markDone();
+
+    EXPECT_EQ(info.qnameUseAffix.load(), 1);
+    EXPECT_EQ(info.fields[SAM_QNAME].status, FieldStatus::SELECTED);
+    EXPECT_EQ(info.fields[SAM_QNAME].selectedCoder, CoderType::AFFIX_MATCH);
 }
 
 TEST_F(CodecSelectorTest, AnalyzeFastqBlockSelectsSeqAndQual)

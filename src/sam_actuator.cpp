@@ -32,8 +32,6 @@
 #include "coder/coder_fc.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_arith.h"
-#include "coder/coder_affix_match.h"
-#include "coder/coder_qname.h"
 #include "coder/coder_qual.h"
 #include "coder/coder_fcv2.h"
 #include "utils/md5_util.h"
@@ -52,21 +50,6 @@
 #include "field_coder_config.h"
 
 namespace {
-    /*
-     * A QNAME segment that takes only a handful of distinct values inside a block - a tile number, a
-     * lane - is a dictionary that block can carry once. The "dict" layout in compressIdFieldSplit is
-     * built on this cap.
-     */
-    const uint32_t kMaxDictEntries = 16;
-
-    /*
-     * Caps for the fixed-alphabet layout ("hexd", see compressIdFieldSplit). A UUID chunk draws from
-     * 16 characters, a base32 barcode from 32; past that a uniform character code costs more than the
-     * textual layout's model, and the layout is measured against it anyway.
-     */
-    const uint32_t kMaxHexAlphabet = 32;
-    const uint32_t kMaxHexLen = 64;
-
     uint16_t mapFieldIdxToStatUnitId(uint16_t fieldIdx) {
         switch (fieldIdx) {
             case 0: return StatObjectId::SAM_QNAME;
@@ -105,12 +88,12 @@ namespace {
 SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pReferene): CodecActuator(inPtr, outPtr, engine) {
     pRefeGene = pReferene;
     headEndLine = 0;
-    idPosLength = 0;
+    idAnalysis.posLength = 0;
     headerSrcLen = 0;
     headerDstLen = 0;
     readOffset = 0;
     baseNCount = 0;
-    qualCoder = nullptr;
+    qualDecoder = nullptr;
     baseLengthBuffer = nullptr;
     baseSquashBuffer = nullptr;
     baseDiffSquashBuffer = nullptr;
@@ -137,87 +120,270 @@ SamCodecActuator::~SamCodecActuator() {
     // Release fieldDecoders
     fieldDecoders.clear();
 
-    // Release qualCoder
-    qualCoder.reset();
-    qualFcv2Decoder.reset();
-    qualCmDecoder.reset();
+    // Release the QUAL decoder
+    qualDecoder.reset();
 
     ioVector.clear();
 }
 
 int32_t SamCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
-    if (pBuffer == nullptr || bufLen == 0) {
-        return -1;
-    }
-
-    std::vector<int32_t> currentLinePos;
-    for (uint32_t i = 0; i < bufLen; ++i) {
-        char ch = pBuffer[i];
-        if (idSplitDefault.find(ch) != std::string::npos) {
-            idSplitSymbols.push_back(ch);
-            currentLinePos.push_back(static_cast<int32_t>(i));
-        }
-    }
-
-    // Initialize max and min length for each separator
-    for (size_t i = 0; i < idSplitSymbols.size(); ++i) {
-        idSplitMinLen.push_back(UINT32_MAX);
-        idSplitMaxLen.push_back(0);
-    }
-
-    // Store first line ID analysis information to idSplitPos
-    uint32_t lastPos = 0;
-    for (size_t idx = 0; idx < currentLinePos.size(); ++idx) {
-        uint32_t pos = currentLinePos[idx];
-        uint32_t curLen = pos - lastPos + (0 == idx ? 1 : 0);   // First line no needs offset
-        if (curLen < idSplitMinLen[idx]) {
-            idSplitMinLen[idx] = curLen;
-        }
-        if (curLen > idSplitMaxLen[idx]) {
-            idSplitMaxLen[idx] = curLen;
-        }
-        idPosLength++;
-        lastPos = pos;
-    }
-
-    // Add the current line positions to idSplitPos
-    idSplitPos.push_back(currentLinePos);
-    return 0;
+    return analyzeQnameFirstLine(pBuffer, bufLen, idAnalysis);
 }
 
 int32_t SamCodecActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen) {
-    std::vector<int32_t> currentLinePos;
-    uint32_t lastPos = 0;
-    uint32_t lastFindPos = 0;
-    for (uint32_t idx = 0; idx < idSplitSymbols.size(); ++idx) {
-        uint8_t symbol = idSplitSymbols[idx];
-        uint32_t pos = lastPos;
-        for (; pos < bufferLen; ++pos) {
-            if (*(pBuffer + pos) == symbol) {
-                uint32_t curLen = pos - lastFindPos + (0 == idx ? 1 : 0);
-                if (curLen < idSplitMinLen[idx]) {
-                    idSplitMinLen[idx] = curLen;
+    return analyzeQnameLine(pBuffer, bufferLen, idAnalysis);
+}
+
+/*
+ * Where the QNAME column's lines are, as the layout encoders want them (see sam_qname_column.h):
+ * the block being compressed, the tab positions the parse recorded, and how many leading lines
+ * are header.
+ */
+QnameColumnInput SamCodecActuator::qnameColumnInput() const
+{
+    QnameColumnInput in;
+    in.buffer = inBlockPtr->getBuffer();
+    in.npos = &inBlockPtr->getNpos();
+    in.headEndLine = headEndLine;
+    in.fieldTabs = &contentPos;
+    return in;
+}
+
+int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    /* 0 = the whole block: the line bound the module's encoders take is the trial's, and this is
+       not the trial (see the declaration). */
+    return encodeQnameSplit(qnameColumnInput(), idAnalysis, outBlockPtr, &ioErrSink, 0, fieldMeta,
+                            fieldSrcLen);
+}
+
+int32_t SamCodecActuator::compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    return encodeQnameByQname(qnameColumnInput(), outBlockPtr, &ioErrSink, 0, fieldMeta,
+                              fieldSrcLen);
+}
+
+
+/*
+ * Analyse one SAM header line (it starts with '@'): capture the chromosome table from @SQ,
+ * check the reference path it names against the one in use, and read the bwa command line out
+ * of @PG for the same check.
+ *
+ * Answers 0 when the line has been dealt with, which is what the loop's `continue` used to
+ * mean; an unknown header type, an unparsable @SQ line or a chromosome missing from the index
+ * is an error.
+ */
+int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
+{
+    if (line.length() < 3) {
+        return -1;
+    }
+    headEndLine++;
+    if (line.substr(0, 3) == "@HD" || line.substr(0, 3) == "@RG" || line.substr(0, 3) == "@CO") {
+        return 0;
+    } else if (line.substr(0, 3) == "@SQ") {
+        // Parse chromosome information from @SQ line
+        if (SamUtil::parseChromosomeInfo(line) != 0) {
+            LOG_ERROR("Failed to parse chromosome info from line: %s", line.c_str());
+            return -1;
+        }
+
+        // Extract reference file path from @SQ line
+        // Format: @SQ SN:ref_name LN:length UR:file_path
+        static bool isCheckUR = false;
+        if (!isCheckUR) {
+            size_t pos = line.find("UR:");
+            if (pos != std::string::npos) {
+                pos += 3;
+                size_t endPos = line.find("\t", pos);
+                if (endPos == std::string::npos) {
+                    endPos = line.length();
                 }
-                if (curLen > idSplitMaxLen[idx]) {
-                    idSplitMaxLen[idx] = curLen;
+                std::string refFilePath = line.substr(pos, endPos - pos);
+                // Parse filename from refFilePath, compatible with local and network paths
+                std::string refFileName;
+                size_t lastSlash = refFilePath.find_last_of("/\\");
+                if (lastSlash != std::string::npos) {
+                    refFileName = refFilePath.substr(lastSlash + 1);
+                } else {
+                    refFileName = refFilePath;
                 }
-                currentLinePos.push_back(static_cast<int32_t>(pos));
-                idPosLength++;
-                lastPos = pos + 1;
-                lastFindPos = pos;
+
+                LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
+                if (pRefeGene != nullptr) {
+                    std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
+                    if (refFileName != inputFastq) {
+                        fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s. \n", refFileName.c_str(), inputFastq.c_str());
+                        isCheckUR = true;
+                    }
+                }
+            }
+        }
+        return 0;
+    } else if (line.substr(0, 3) == "@PG") {
+        static bool isCheckPG = false;
+        if (!isCheckPG) {
+            size_t pos = line.find("CL:");
+            if (pos != std::string::npos) {
+                pos += 3;
+                size_t endPos = line.find("\t", pos);
+                if (endPos == std::string::npos) {
+                    endPos = line.length();
+                }
+
+                std::string command = line.substr(pos, endPos - pos);
+                // Split command by spaces and take the third as reference gene name
+                std::stringstream ss(command);
+                std::string item;
+                std::vector<std::string> tokens;
+                while (std::getline(ss, item, ' ')) {
+                    if (!item.empty()) {
+                        tokens.push_back(item);
+                    }
+                }
+                if (tokens.size() >= 3) {
+                    std::string refGeneName;
+                    if (tokens.size() >= 2 && tokens[0] == "bwa" && tokens[1] == "mem") {
+                        int nonOptionCount = 0;
+                        for (size_t i = 2; i < tokens.size(); i++) {
+                            if (tokens[i].substr(0, 1) != "-") {
+                                nonOptionCount++;
+                                if (nonOptionCount == 1) {
+                                    refGeneName = tokens[i];
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!refGeneName.empty()) {
+                        LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
+                        if (pRefeGene != nullptr) {
+                            std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
+                            if (PathUtil::isGzFile(pRefeGene->getFastaFileName())) {
+                                inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
+                            }
+                            if (refGeneName != inputFastq) {
+                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s \n", refGeneName.c_str(), inputFastq.c_str());
+                                isCheckPG = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        LOG_ERROR("Unexpected header %s", line.c_str());
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Analyse one record line (it does not start with '@'): hand the ID column to the ID analysis,
+ * check RNAME against the chromosome index, and measure the CIGAR-derived length against the
+ * SEQ column, the SEQ length against QUAL, the base count and the quality histogram. The
+ * field offset table it builds is kept in contentPos.
+ *
+ * `qualityFrequnce` is the caller's 256-entry histogram, indexed by the quality byte.
+ */
+int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
+                                      std::pair<uint8_t, uint32_t>* qualityFrequnce)
+{
+    std::vector<int64_t> linePos;
+    uint32_t baseLen = 0;
+    bool lineCigarMatchFlag = false;
+    uint32_t baseFieldLen = 0;
+    for (uint32_t i = 0; i < line.length(); ++i) {
+        if (line.at(i) == '\t' || line.at(i) == '\n') {
+            // First tab before is ID column, need to split and analyze ID column
+            if (linePos.empty()) {
+                if (contentPos.empty()) {
+                    // Pass ID column content (from line start to first tab position)
+                    preAnalysisIdFirstLine((uint8_t*)line.data(), i + 1);
+                } else {
+                    // Pass ID column content (from line start to first tab position)
+                    preAnalysisIdLine((uint8_t*)line.data(), i + 1);
+                }
+            } else if (linePos.size() == 2) {  // RNAME is the 3th field
+                uint32_t chrLen = i - linePos.at(1) - 1;
+                std::string chrName = line.substr(linePos.at(1) + 1, chrLen);
+                if (chrName != "*" && chrName != "=") {
+                    if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
+                        if (headEndLine >= 0) {
+                            SamInfo::getInstance().clearChromosomeInfo();
+                        }
+                        return -1;
+                    }
+                }
+            } else if (linePos.size() == 5) {  // CIGAR is the 6th field
+                uint32_t cigarLen = i - linePos.at(4) - 1;
+                if (cigarLen > 1) {
+                    lineCigarMatchFlag = true;
+                    uint8_t* cigarBegin  = (uint8_t*)line.c_str() + linePos.at(4) + 1;
+                    baseFieldLen = parseCigar(cigarBegin, cigarLen);
+                } else {
+                    lineCigarMatchFlag = false;
+                }
+            } else if (linePos.size() == 9) {   // Base is the 10th field
+                baseLen = i - linePos.at(8) - 1;
+                if (baseLen > maxBaseLength) {
+                    maxBaseLength = baseLen;
+                }
+                if (!lineCigarMatchFlag) {
+                    if (baseLen < minBaseLength) {
+                        minBaseLength =  baseLen;
+                    }
+                } else {
+                    if (baseFieldLen != baseLen) {
+                        if (headEndLine >= 0) {
+                            SamInfo::getInstance().clearChromosomeInfo();
+                        }
+                        return -1;
+                    }
+                }
+            } else if (linePos.size() == 10) {  // Quality value is the 11th field
+                uint32_t qualityLen = i - linePos.at(9) - 1;
+                if (baseLen != qualityLen) {
+                    /* A QUAL of a single '*' denotes missing quality; its length need not equal the SEQ length */
+                    const bool missingQual = (qualityLen == 1 &&
+                                              line.at(linePos.at(9) + 1) == '*');
+                    if (!missingQual) {
+                        LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
+                        return -1;
+                    }
+                }
+            }
+            linePos.push_back(i);
+            // Optional fields compressed as whole block
+            if (linePos.size() == 11) {
                 break;
             }
-            lastPos = pos + 1;
-        }
-
-        if (pos >= bufferLen) {
-            idPosLength = UINT32_MAX; // Mark as unavailable
-            break;
+        } else {
+            if (linePos.size() == 9) {
+                char ch = line[i];
+                if (ch == 'N' || ch == 'n') {
+                    baseNCount++;
+                }
+            } else if (linePos.size() == 10) {
+                char ch = line[i];
+                if (ch >= 0) {
+                    qualityFrequnce[(uint8_t)ch].second++;
+                }
+            }
         }
     }
-
-    // Add the current line positions to idSplitPos
-    idSplitPos.push_back(currentLinePos);
+    // Each line must have at least 10 tabs, less than 10 means not a SAM file
+    if (linePos.size() < 10) {
+        LOG_ERROR("Sam field line invalid, size = %d", linePos.size());
+        if (headEndLine >= 0) {
+            SamInfo::getInstance().clearChromosomeInfo();
+        }
+        return -1;
+    }
+    if (linePos.size() > maxFieldSize) {
+        maxFieldSize = linePos.size();
+    }
+    lineFiledCount.push_back(std::make_pair(idx, linePos.size()));
+    contentPos.push_back(linePos);
     return 0;
 }
 
@@ -227,6 +393,13 @@ int32_t SamCodecActuator::preAnalysis() {
         return -1;
     }
 
+    /*
+     * The SEQ column's file-level decisions (its match coder, and the form the N positions travel
+     * in) are not taken here: they are the codec pre-selection's, which measures them on the first
+     * block before any actuator exists (see CodecSelector::selectSeqReferenceCoder). This pass only
+     * fills the column stats below, and the consumption side reads the pinned verdicts
+     * (seqMatchCoderFor, and the N-form choice inside writeSeqExceptionStreams).
+     */
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -247,204 +420,13 @@ int32_t SamCodecActuator::preAnalysis() {
         }
         std::string line((char*)buffer + begin, end - begin);
         if (buffer[begin] == '@') {
-            if (line.length() < 3) {
-                return -1;
-            }
-            headEndLine++;
-            if (line.substr(0, 3) == "@HD" || line.substr(0, 3) == "@RG" || line.substr(0, 3) == "@CO") {
-                continue;
-            } else if (line.substr(0, 3) == "@SQ") {
-                // Parse chromosome information from @SQ line
-                if (SamUtil::parseChromosomeInfo(line) != 0) {
-                    LOG_ERROR("Failed to parse chromosome info from line: %s", line.c_str());
-                    return -1;
-                }
-
-                // Extract reference file path from @SQ line
-                // Format: @SQ SN:ref_name LN:length UR:file_path
-                static bool isCheckUR = false;
-                if (!isCheckUR) {
-                    size_t pos = line.find("UR:");
-                    if (pos != std::string::npos) {
-                        pos += 3;
-                        size_t endPos = line.find("\t", pos);
-                        if (endPos == std::string::npos) {
-                            endPos = line.length();
-                        }
-                        std::string refFilePath = line.substr(pos, endPos - pos);
-                        // Parse filename from refFilePath, compatible with local and network paths
-                        std::string refFileName;
-                        size_t lastSlash = refFilePath.find_last_of("/\\");
-                        if (lastSlash != std::string::npos) {
-                            refFileName = refFilePath.substr(lastSlash + 1);
-                        } else {
-                            refFileName = refFilePath;
-                        }
-
-                        LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
-                        if (pRefeGene != nullptr) {
-                            std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
-                            if (refFileName != inputFastq) {
-                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s. \n", refFileName.c_str(), inputFastq.c_str());
-                                isCheckUR = true;
-                            }
-                        }
-                    }
-                }
-                continue;
-            } else if (line.substr(0, 3) == "@PG") {
-                static bool isCheckPG = false;
-                if (!isCheckPG) {
-                    size_t pos = line.find("CL:");
-                    if (pos != std::string::npos) {
-                        pos += 3;
-                        size_t endPos = line.find("\t", pos);
-                        if (endPos == std::string::npos) {
-                            endPos = line.length();
-                        }
-
-                        std::string command = line.substr(pos, endPos - pos);
-                        // Split command by spaces and take the third as reference gene name
-                        std::stringstream ss(command);
-                        std::string item;
-                        std::vector<std::string> tokens;
-                        while (std::getline(ss, item, ' ')) {
-                            if (!item.empty()) {
-                                tokens.push_back(item);
-                            }
-                        }
-                        if (tokens.size() >= 3) {
-                            std::string refGeneName;
-                            if (tokens.size() >= 2 && tokens[0] == "bwa" && tokens[1] == "mem") {
-                                int nonOptionCount = 0;
-                                for (size_t i = 2; i < tokens.size(); i++) {
-                                    if (tokens[i].substr(0, 1) != "-") {
-                                        nonOptionCount++;
-                                        if (nonOptionCount == 1) {
-                                            refGeneName = tokens[i];
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (!refGeneName.empty()) {
-                                LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
-                                if (pRefeGene != nullptr) {
-                                    std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
-                                    if (PathUtil::isGzFile(pRefeGene->getFastaFileName())) {
-                                        inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
-                                    }
-                                    if (refGeneName != inputFastq) {
-                                        fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s \n", refGeneName.c_str(), inputFastq.c_str());
-                                        isCheckPG = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                LOG_ERROR("Unexpected header %s", line.c_str());
+            if (parseHeaderLine(line) != 0) {
                 return -1;
             }
         } else {
-            std::vector<int64_t> linePos;
-            uint32_t baseLen = 0;
-            bool lineCigarMatchFlag = false;
-            uint32_t baseFieldLen = 0;
-            for (uint32_t i = 0; i < line.length(); ++i) {
-                if (line.at(i) == '\t' || line.at(i) == '\n') {
-                    // First tab before is ID column, need to split and analyze ID column
-                    if (linePos.empty()) {
-                        if (contentPos.empty()) {
-                            // Pass ID column content (from line start to first tab position)
-                            preAnalysisIdFirstLine((uint8_t*)line.data(), i + 1);
-                        } else {
-                            // Pass ID column content (from line start to first tab position)
-                            preAnalysisIdLine((uint8_t*)line.data(), i + 1);
-                        }
-                    } else if (linePos.size() == 2) {  // RNAME is the 3th field
-                        uint32_t chrLen = i - linePos.at(1) - 1;
-                        std::string chrName = line.substr(linePos.at(1) + 1, chrLen);
-                        if (chrName != "*" && chrName != "=") {
-                            if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
-                                if (headEndLine >= 0) {
-                                    SamInfo::getInstance().clearChromosomeInfo();
-                                }
-                                return -1;
-                            }
-                        }
-                    } else if (linePos.size() == 5) {  // CIGAR is the 6th field
-                        uint32_t cigarLen = i - linePos.at(4) - 1;
-                        if (cigarLen > 1) {
-                            lineCigarMatchFlag = true;
-                            uint8_t* cigarBegin  = (uint8_t*)line.c_str() + linePos.at(4) + 1;
-                            baseFieldLen = parseCigar(cigarBegin, cigarLen);
-                        } else {
-                            lineCigarMatchFlag = false;
-                        }
-                    } else if (linePos.size() == 9) {   // Base is the 10th field
-                        baseLen = i - linePos.at(8) - 1;
-                        if (baseLen > maxBaseLength) {
-                            maxBaseLength = baseLen;
-                        }
-                        if (!lineCigarMatchFlag) {
-                            if (baseLen < minBaseLength) {
-                                minBaseLength =  baseLen;
-                            }
-                        } else {
-                            if (baseFieldLen != baseLen) {
-                                if (headEndLine >= 0) {
-                                    SamInfo::getInstance().clearChromosomeInfo();
-                                }
-                                return -1;
-                            }
-                        }
-                    } else if (linePos.size() == 10) {  // Quality value is the 11th field
-                        uint32_t qualityLen = i - linePos.at(9) - 1;
-                        if (baseLen != qualityLen) {
-                            /* A QUAL of a single '*' denotes missing quality; its length need not equal the SEQ length */
-                            const bool missingQual = (qualityLen == 1 &&
-                                                      line.at(linePos.at(9) + 1) == '*');
-                            if (!missingQual) {
-                                LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
-                                return -1;
-                            }
-                        }
-                    }
-                    linePos.push_back(i);
-                    // Optional fields compressed as whole block
-                    if (linePos.size() == 11) {
-                        break;
-                    }
-                } else {
-                    if (linePos.size() == 9) {
-                        char ch = line[i];
-                        if (ch == 'N' || ch == 'n') {
-                            baseNCount++;
-                        }
-                    } else if (linePos.size() == 10) {
-                        char ch = line[i];
-                        if (ch >= 0) {
-                            qualityFrequnce[(uint8_t)ch].second++;
-                        }
-                    }
-                }
-            }
-            // Each line must have at least 10 tabs, less than 10 means not a SAM file
-            if (linePos.size() < 10) {
-                LOG_ERROR("Sam field line invalid, size = %d", linePos.size());
-                if (headEndLine >= 0) {
-                    SamInfo::getInstance().clearChromosomeInfo();
-                }
+            if (scanDataLine(line, idx, qualityFrequnce) != 0) {
                 return -1;
             }
-            if (linePos.size() > maxFieldSize) {
-                maxFieldSize = linePos.size();
-            }
-            lineFiledCount.push_back(std::make_pair(idx, linePos.size()));
-            contentPos.push_back(linePos);
         }
     }
 
@@ -467,10 +449,10 @@ int32_t SamCodecActuator::preAnalysis() {
     }
 
     // Compression strategy judgment logic - refer to FastqActuator implementation
-    if (idPosLength != UINT32_MAX) {
-        for (uint32_t idx = 0; idx < idSplitSymbols.size(); ++idx) {
-            if (idSplitMinLen[idx] == 0) {
-                idPosLength = UINT32_MAX;
+    if (idAnalysis.posLength != UINT32_MAX) {
+        for (uint32_t idx = 0; idx < idAnalysis.symbols.size(); ++idx) {
+            if (idAnalysis.minLen[idx] == 0) {
+                idAnalysis.posLength = UINT32_MAX;
                 break;
             }
         }
@@ -624,6 +606,95 @@ int32_t SamCodecActuator::compressSamHeader() {
     return 0;
 }
 
+/*
+ * The QNAME column (field 0), written in whichever of its two layouts the codec pre-selection
+ * picked for this file: affix segmentation, or coder_qname's cross-line deduplication. Both are
+ * encoders, so the choice is made by running them (see CodecSelector::selectQnameLayout), and it
+ * is a property of the file's naming scheme rather than of a block - which is why it is taken
+ * before any block is written and not here. This reads that verdict (PreprocessInfo::qnameUseAffix)
+ * and encodes with it; a column with no split to work from is written whole instead.
+ *
+ * Returns the column's encoded size, negative on failure.
+ */
+int32_t SamCodecActuator::encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& fieldMeta)
+{
+    // ID field: compress based on analysis result
+    if (idAnalysis.posLength == UINT32_MAX) {
+        LOG_DEBUG("Id will compress in all.");
+        return compressIdFieldInAll(fieldSrcLen, fieldMeta);
+    }
+
+    /*
+     * Which of the two layouts writes this column is a file-level verdict, and it arrives from the
+     * codec pre-selection, which ran both encoders on a sample of the first block before any block
+     * was dispatched (see CodecSelector::selectQnameLayout). Nothing is measured here: writing a
+     * block is not a place to be comparing encoders.
+     *
+     * A file the pre-selection could not judge - the ID analysis above failed on the deciding
+     * block, or the actuator is driven without an engine - keeps the affix layout, which is the
+     * segmentation this column has always been written with.
+     */
+    const PreprocessInfo* preInfo = preprocessInfoMut();
+    const int32_t verdict =
+        (preInfo != nullptr) ? preInfo->qnameUseAffix.load(std::memory_order_relaxed) : -1;
+    const bool useAffix = (verdict != 0);
+    LOG_DEBUG("QNAME: file verdict %d -> %s", verdict, useAffix ? "affix" : "qname");
+    return useAffix ? compressIdFieldSplit(fieldSrcLen, fieldMeta)
+                    : compressIdFieldQname(fieldSrcLen, fieldMeta);
+}
+
+/*
+ * Close the block: write the SAM meta (line and field counts, the two length totals, the exact
+ * decoded text size the decompressor sizes its buffer from, then the per-field stream metas), hash
+ * the block and encode the whole meta into the meta buffer.
+ *
+ * Returns 0 on success; the caller has already set the block id and type.
+ */
+int32_t SamCodecActuator::finalizeSamBlockMeta(Json::Value& samMeta,
+                                               const Json::Value& streamMeta, uint32_t lineNumber,
+                                               uint32_t fieldCount, uint32_t totalSrcLen,
+                                               uint32_t totalDstLen)
+{
+    // Set SAM metadata
+    samMeta["lines"] = lineNumber;
+    samMeta["fieldcount"] = fieldCount;
+    samMeta["totalsrclen"] = totalSrcLen;
+    samMeta["totaldstlen"] = totalDstLen;
+    /* Exact decoded-text size of this block, so the decompressor can size its
+       output buffer from the real block length instead of guessing from -l or
+       from the compressed payload length (which under-allocates for large
+       long-read blocks and caused out-of-bounds writes on decode). */
+    samMeta["textlen"] = (Json::Value::UInt64)inBlockPtr->getDataLen();
+    samMeta["streams"] = streamMeta;
+    meta["sam"] = samMeta;
+
+    PBGZ_PROF_SCOPE(pbgzprof::FIELD_META);
+
+    // Calculate MD5 of original data
+    std::string md5;
+    if (inBlockPtr->hasMd5()) {
+        /* Already hashed by the reader thread (CompressEngine::preDispatchBlock). */
+        md5 = inBlockPtr->getMd5();
+    } else {
+        calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
+    }
+    meta["md5"] = md5;
+
+    // Compress metadata
+    coder_json metaCoder;
+    int32_t metaLen = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
+    if (metaLen <= 0) {
+        LOG_ERROR("Failed to encode meta information for SAM compression");
+        return -1;
+    }
+    outBlockPtr->setMetaLen(metaLen);
+
+    // Set block information
+    outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+    outBlockPtr->setBlockType(inBlockPtr->getBlockType());
+    return 0;
+}
+
 int32_t SamCodecActuator::compressSamByFields() {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size() - headEndLine;
@@ -648,65 +719,7 @@ int32_t SamCodecActuator::compressSamByFields() {
                                 : std::chrono::steady_clock::time_point();
         switch (fieldIdx) {
             case 0: // QNAME as FQ:ID
-                // ID field: compress based on analysis result
-                if (idPosLength == UINT32_MAX) {
-                    LOG_DEBUG("Id will compress in all.");
-                    fieldDstLen = compressIdFieldInAll(fieldSrcLen, fieldMeta);
-                } else {
-                    /*
-                     * QNAME trial-based selection: affix segmentation vs
-                     * coder_qname (cross-line deduplication). For concatenated
-                     * FASTQs (alternating prefixes, globally random numbers)
-                     * qname wins; for a single FASTQ (constant prefix, locally
-                     * ordered fragment numbers) affix's shared adjacent prefixes
-                     * win. Both coders run a trial on the first QNAME_TRIAL_LINES
-                     * lines and are rolled back; the one with the smaller
-                     * measured output is used for the full encoding.
-                     */
-                    const uint32_t QNAME_TRIAL_LINES = 20000;
-                    int32_t lenAffix = 0;
-                    int32_t lenQname = 0;
-                    const int64_t startLen = outBlockPtr->getDataLen();
-                    Json::Value metaAffix, metaQname;
-                    uint32_t srcAffix = 0, srcQname = 0;
-                    /*
-                     * The trial (affix split vs coder_qname, each over the first
-                     * QNAME_TRIAL_LINES lines) measures a property of the file's naming
-                     * scheme, not of one block: a single FASTQ's constant prefix versus a
-                     * concatenated file's alternating prefixes does not change from block to
-                     * block, and for long reads the "first 20000 lines" usually *is* the whole
-                     * block, so the trial was re-encoding every line twice per block
-                     * (measured: over half of the QNAME cost). The verdict is therefore
-                     * published on the engine once and reused by every later block.
-                     */
-                    bool useAffix = false;
-                    const int qnameDecision = (pbgzEngine != nullptr)
-                        ? pbgzEngine->samQnameUseAffix.load(std::memory_order_relaxed) : -1;
-                    if (qnameDecision >= 0) {
-                        useAffix = (qnameDecision == 1);
-                    } else {
-                        {
-                            PBGZ_PROF_SCOPE(pbgzprof::FIELD_QNAME_TRIAL);
-                            int32_t lAffix = compressIdFieldSplit(srcAffix, metaAffix, QNAME_TRIAL_LINES);
-                            outBlockPtr->setDataLen(startLen);
-                            int32_t lQname = compressIdFieldQname(srcQname, metaQname, QNAME_TRIAL_LINES);
-                            outBlockPtr->setDataLen(startLen);
-                            lenAffix = lAffix;
-                            lenQname = lQname;
-                        }
-                        useAffix = (lenQname < 0) || (lenAffix >= 0 && lenAffix <= lenQname);
-                        if (pbgzEngine != nullptr) {
-                            pbgzEngine->samQnameUseAffix.store(useAffix ? 1 : 0, std::memory_order_relaxed);
-                        }
-                    }
-                    if (useAffix) {
-                        LOG_DEBUG("QNAME: affix=%d qname=%d -> affix", lenAffix, lenQname);
-                        fieldDstLen = compressIdFieldSplit(fieldSrcLen, fieldMeta);
-                    } else {
-                        LOG_DEBUG("QNAME: affix=%d qname=%d -> qname", lenAffix, lenQname);
-                        fieldDstLen = compressIdFieldQname(fieldSrcLen, fieldMeta);
-                    }
-                }
+                fieldDstLen = encodeQnameColumn(fieldSrcLen, fieldMeta);
                 break;
             case 1: // FLAG
                 if (pickedCoderFor(fieldIdx, CoderType::BWT_CM) == CoderType::AFFIX_MATCH) {
@@ -800,39 +813,9 @@ int32_t SamCodecActuator::compressSamByFields() {
         totalDstLen += fieldDstLen;
     }
 
-    // Set SAM metadata
-    samMeta["lines"] = lineNum;
-    samMeta["fieldcount"] = fieldCount;
-    samMeta["totalsrclen"] = totalSrcLen;
-    samMeta["totaldstlen"] = totalDstLen;
-    /* Exact decoded-text size of this block, so the decompressor can size its
-       output buffer from the real block length instead of guessing from -l or
-       from the compressed payload length (which under-allocates for large
-       long-read blocks and caused out-of-bounds writes on decode). */
-    samMeta["textlen"] = (Json::Value::UInt64)inBlockPtr->getDataLen();
-    samMeta["streams"] = streamMeta;
-    meta["sam"] = samMeta;
-
-    PBGZ_PROF_SCOPE(pbgzprof::FIELD_META);
-    
-    // Calculate MD5 of original data
-    std::string md5;
-    if (inBlockPtr->hasMd5()) {
-        /* Already hashed by the reader thread (CompressEngine::preDispatchBlock). */
-        md5 = inBlockPtr->getMd5();
-    } else {
-        calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
-    }
-    meta["md5"] = md5;
-
-    // Compress metadata
-    coder_json metaCoder;
-    int32_t metaLen = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());
-    if (metaLen <= 0) {
-        LOG_ERROR("Failed to encode meta information for SAM compression");
+    if (finalizeSamBlockMeta(samMeta, streamMeta, lineNum, fieldCount, totalSrcLen, totalDstLen) != 0) {
         return -1;
     }
-    outBlockPtr->setMetaLen(metaLen);
 
     // Set block information
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
@@ -852,237 +835,148 @@ CoderType SamCodecActuator::pickedCoderFor(uint32_t fieldIdx, CoderType fallback
 }
 
 /*
- * The lowest block allowed to make a per-file choice. Block 0 carries the SAM header
- * and no records, so it never reaches the code that could measure anything - block 1 is
- * the decider in practice, and a file small enough to fit in one block decides on
- * block 0.
- */
-const int64_t kFileChoiceDeciderBlockId = 1;
-
-/*
- * Compressed size of one form of the N positions, or 0 when it cannot be coded at all.
- * Only the size is wanted, so the bytes land in a scratch buffer and are discarded; the
- * caller writes the chosen form into the block afterwards.
- */
-static uint32_t nposFormSize(const uint8_t* data, uint32_t len, uint8_t level)
-{
-    if (len == 0) {
-        return 0;
-    }
-    std::vector<uint8_t> scratch((size_t)len * 2 + 65536);
-    coder_io trialIo(scratch.data(), (int32_t)scratch.size());
-    CoderFactory::applyLevel(&trialIo, CoderType::BWT_CM, level);
-    std::shared_ptr<coder> trialCoder = CoderFactory::makeEncoder(CoderType::BWT_CM, &trialIo);
-    trialCoder->encode_line(data, len);
-    trialCoder->encode_flush();
-    return (trialIo.err == coder_io::IO_OK && trialIo.data_len > 0) ? (uint32_t)trialIo.data_len : 0;
-}
-
-/*
- * The SEQ characters the 2-bit path cannot carry, one sub-stream per character that is
- * actually present in the block.
+ * Where one field of one content line sits.
  *
- * One stream per character keeps their statistics apart - a run of N and a run of n are
- * different distributions - and it scales to any alphabet: SAMv1 defines SEQ as [A-Za-z=.]+
- * and says "No assumptions can be made on the letter cases", while the 2-bit tables are
- * deliberately case-insensitive (they index on bits 1-2 of the byte, so the case bit is
- * dropped). Lower-case a/c/g/t, IUPAC codes and the like would be folded or mangled by that
- * path, and single-cell and consensus data do contain them.
+ * `line` is the start of the line, `tabs` the tab positions of that line (contentPos for this
+ * record) and `fieldIdx` the 1-based SAM column; `lineEnd` is the line's length, used for the
+ * last field, which no tab follows.
  *
- * A character that does not occur writes nothing - no stream and no meta - and the character
- * is not in the payload either: the stream's own meta carries it ("ch"), so the payload is
- * only the positions.
- *
- * A record that cannot use the reference at all - unmapped, an unknown RNAME, a position outside
- * the reference, no CIGAR to walk - does not go through any of this: its bases are written into
- * the payload as the characters they are (the field meta says so with "litbases", see the
- * fallback in the record loop), so N, lower case and IUPAC codes survive there without a stream
- * per character and without the 2-bit path's fold. These streams describe the characters the
- * 2-bit path had to fold, which is a property of the records that do consult the reference.
- *
- * The positions are written in one of three forms, and the stream name says which one:
- *   "nposd" - forward deltas, varint (every character; the default)
- *   "npos"  - absolute 4-byte block offsets
- *   "nposr" - runs: one gap and one length per run of consecutive positions
- * Only the 'N' class keeps more than one of them as a candidate, and the file-level trial in
- * PreprocessInfo::nposForm picks between them (see the emit loop). A lone "npos" with no "ch"
- * is the first layout's single list, which held 'N' and 'n' together and is still read; see
- * the decoder. The names themselves live in sam_field_layout.h, next to the readers.
+ * The two lengths are the point of this struct. The column walks in this file disagree on
+ * whether a field includes its trailing tab - the bytes handed to a coder usually do, since
+ * the tab is what the decoder splits on, while a length or a hash usually does not - and
+ * hiding that behind one `length` is exactly how the two conventions drifted apart at the
+ * dozen sites that used to compute this inline.
  */
+struct SamFieldRange {
+    uint8_t* start = nullptr;
+    /* The delimiter that ends the field: the next tab, or the end of the line for the last. */
+    uint8_t* tab = nullptr;
 
-/*
- * Encoder-side accumulator for one exception character: a strictly increasing list of its
- * positions in the variable-length delta form above, plus (for the class the trial measures)
- * the absolute form and the runs of consecutive positions.
- */
-struct SeqExceptionClass {
-    /* Set on the character whose alternative forms the trial compares; positions and runs are
-       kept for it and nothing else. */
-    bool keepForms = false;
-    std::vector<uint32_t> abs;
-    std::vector<uint8_t> varint;
-    /* Runs of consecutive positions: one gap (from the end of the previous run) and one length
-       each. The N positions of ERR14949932 arrive in runs of 34.3 on average, 98% of them
-       exactly 35 long, so describing them as runs makes the source ~1% of the size of the
-       one-varint-per-position form before the coder sees either. */
-    std::vector<uint32_t> runGaps;
-    std::vector<uint32_t> runLens;
-    uint32_t runStart = 0;
-    uint32_t runLen = 0;
-    uint32_t prevRunEnd = 0;
-    uint32_t count = 0;
-    uint32_t last = 0;
-
-    void add(uint32_t pos)
-    {
-        if (keepForms) {
-            abs.push_back(pos);
-        }
-        uint32_t delta = pos - last;   /* strictly increasing within the block */
-        if (keepForms) {
-            if (delta == 1 && runLen != 0) {
-                runLen++;
-            } else {
-                closeRun();
-                runStart = pos;
-                runLen = 1;
-            }
-        }
-        last = pos;
-        while (delta >= 0x80) {
-            varint.push_back((uint8_t)(delta | 0x80));
-            delta >>= 7;
-        }
-        varint.push_back((uint8_t)delta);
-        count++;
-    }
-
-    /* Ends the run in progress, if any, so runGaps/runLens describe every position added. */
-    void closeRun()
-    {
-        if (runLen != 0) {
-            runGaps.push_back(runStart - prevRunEnd);
-            runLens.push_back(runLen);
-            prevRunEnd = last + 1;
-            runLen = 0;
-        }
-    }
+    uint32_t lengthWithoutTab() const { return (uint32_t)(tab - start); }
+    uint32_t lengthWithTab() const { return (uint32_t)(tab - start) + 1; }
 };
 
-/* The run form's payload: every gap, then every length, each as a varint (see above). */
-static void buildRunForm(const SeqExceptionClass& exc, std::vector<uint8_t>& out)
+static SamFieldRange samFieldRange(uint8_t* line, const std::vector<int64_t>& tabs,
+                                   uint32_t fieldIdx, uint32_t lineEnd)
 {
-    for (uint32_t gap : exc.runGaps) {
-        appendVarint(out, gap);
-    }
-    for (uint32_t len : exc.runLens) {
-        appendVarint(out, len);
-    }
+    SamFieldRange range;
+    const uint32_t prevTabPos = (uint32_t)tabs[fieldIdx - 1];
+    const uint32_t currTabPos = (fieldIdx < tabs.size()) ? (uint32_t)tabs[fieldIdx] : lineEnd;
+    range.start = line + prevTabPos + 1;
+    range.tab = line + currTabPos;
+    return range;
 }
-
-/*
- * Run measure() once for the whole file and cache the answer in slot.
- *
- * The verdict belongs to the lowest block that can measure it, not to whichever block
- * reaches this code first: after block 0 completes, the other coder threads are released
- * together, so "first to get here" is a property of the scheduler while the measurement
- * is a property of the file, and letting the former decide would cost the reproducibility
- * of the output. The blocks released alongside the decider wait on decideCond for its
- * verdict instead of repeating the same trial; a wait that times out means the deciding
- * block had nothing to measure, in which case the first waiter to wake decides.
- */
-int32_t SamCodecActuator::decideOncePerFile(std::atomic<int32_t>* slot, int32_t fallback,
-                                           const std::function<int32_t()>& measure)
-{
-    PreprocessInfo* preInfo = preprocessInfoMut();
-    if (preInfo == nullptr) {
-        /* Nowhere to keep a per-file verdict (decompression, or a caller driving the
-           actuator without an engine), so the caller's fixed choice is used. */
-        return fallback;
-    }
-
-    const int32_t cached = slot->load(std::memory_order_relaxed);
-    if (cached >= 0) {
-        return cached;
-    }
-
-    std::unique_lock<std::mutex> lock(preInfo->decideMutex);
-    const int32_t decided = slot->load(std::memory_order_relaxed);
-    if (decided >= 0) {
-        return decided;   /* decided while this block waited for the lock */
-    }
-
-    if (inBlockPtr->getBlockId() > kFileChoiceDeciderBlockId) {
-        const bool arrived = preInfo->decideCond.wait_for(lock, std::chrono::seconds(1),
-                                                         [slot]() {
-                                                             return slot->load(
-                                                                        std::memory_order_relaxed) >= 0;
-                                                         });
-        if (arrived) {
-            return slot->load(std::memory_order_relaxed);
-        }
-        /* The deciding block never measured anything; waiting longer cannot help. */
-    }
-
-    const int32_t verdict = measure();
-    slot->store(verdict, std::memory_order_relaxed);
-    preInfo->decideCond.notify_all();
-    return verdict;
-}
-
 PreprocessInfo* SamCodecActuator::preprocessInfoMut() const
 {
     return (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfoMut() : nullptr;
 }
 
 /*
- * The coder for the SEQ match stream: BWT_CM and FC are each tried on one block's
- * segment and the smaller wins, after which every later block reuses that verdict.
+ * Which coder codes the SEQ match stream: BWT_CM or FC, and the smallest encoded sample wins
+ * (see CodecSelector::trialSeqMatchCoder).
  *
- * Deciding per block instead, measured on ERR14949932 (1M reads): 10.8% of the
- * compression time at -l5 and 3.3% at -l8 for a byte-identical output, because FC never
- * won a block, 0 of 335 at -l5 and 0 of 34 at -l8.
+ * The question is a file-level one, asked once by the codec pre-selection before any block is
+ * dispatched and only read here. There is no per-block trial: that existed for coder_lzma, whose
+ * per-block variation was worth bytes, and it cost a sample encode of every block - measured at -l8
+ * on ERR11436629 it was 43% of the run time for a byte-identical archive. With coder_lzma gone from
+ * the candidates (it wins on size but costs ~17x the time, see its registry row) there is nothing
+ * left that varies enough per block to pay for that.
+ *
+ * A caller driving the actuator without an engine has no verdict to read, and a run without a
+ * reference never got one (the column is not written as the match stream then): both fall back to
+ * coder_bwt_cm, which is what this stream was coded with before the trial existed.
  */
-CoderType SamCodecActuator::seqMatchCoderFor(const uint8_t* payBuf, uint32_t payLen)
+CoderType SamCodecActuator::seqMatchCoderFor()
 {
-    if (payLen == 0) {
-        /* No such stream in this block, so it is not a basis for the decision. */
-        return CoderType::BWT_CM;
-    }
     PreprocessInfo* preInfo = preprocessInfoMut();
-    if (preInfo == nullptr) {
-        return CoderType::BWT_CM;
+    if (preInfo != nullptr) {
+        const int32_t pinned = preInfo->seqMatchCoder.load(std::memory_order_relaxed);
+        if (pinned >= 0) {
+            return (CoderType)pinned;
+        }
     }
 
-    const int32_t verdict = decideOncePerFile(&preInfo->seqMatchCoder, (int32_t)CoderType::BWT_CM,
-                                             [&]() -> int32_t {
-        const CoderType kCandidates[2] = {CoderType::BWT_CM, CoderType::FC};
-        CoderType best = CoderType::BWT_CM;
-        uint32_t bestLen = UINT32_MAX;
-        std::vector<uint8_t> scratch((payLen << 1) + 65536);
-        for (int i = 0; i < 2; ++i) {
-            const CoderType type = kCandidates[i];
-            /* coder_fc refuses inputs of FC_MIN_LEN bytes or less. */
-            if (type == CoderType::FC &&
-                (payLen <= FC_MIN_LEN || payLen >= (uint32_t)FC_MAX_LEN)) {
-                continue;
-            }
-            coder_io trialIo(scratch.data(), (int32_t)scratch.size());
-            CoderFactory::applyLevel(&trialIo, type, engineCompressLevel());
-            std::shared_ptr<coder> trialCoder = CoderFactory::makeEncoder(type, &trialIo);
-            trialCoder->encode_line(payBuf, payLen);
-            trialCoder->encode_flush();
-            if (trialIo.err != coder_io::IO_OK || trialIo.data_len <= 0) {
-                continue;   /* this coder cannot carry the segment at all */
-            }
-            if ((uint32_t)trialIo.data_len < bestLen) {
-                best = type;
-                bestLen = (uint32_t)trialIo.data_len;
+    /*
+     * No verdict covers this file: the pre-selection found no SEQ payload to measure, or a caller
+     * is driving the actuator without an engine. coder_bwt_cm is the coder this stream used before
+     * the trial existed.
+     */
+    return CoderType::BWT_CM;
+}
+
+/*
+ * Encode PNEXT's exception stream: the (contentIdx, delta) pairs of the records that cannot be
+ * rebuilt from their mate.
+ *
+ * The contentIdx column goes out as forward deltas and the delta column as zigzag varints, and
+ * where every delta is the same value that value moves into the meta and the column is dropped
+ * outright: a block whose records are all unpaired - or all unmapped, like ERR14949932 - has
+ * every line here with the same delta, and there the absolute layout this replaced spent
+ * 937,737 B of stream on 3,343,586 entries whose delta is uniformly 0.
+ *
+ * contentIdx is the block-internal data-line index (small, increasing); delta = pnext - pos is
+ * signed (the mate offset, negative when the record had no real PNEXT), so it goes through
+ * zigzag. Records in fieldMeta how the stream was written, and returns its encoded size.
+ */
+template<typename CoderType>
+uint32_t SamCodecActuator::writePnextExceptions(const std::vector<std::pair<uint32_t, int64_t>>& exc,
+                                                  Json::Value& fieldMeta, Json::Value& metaStreams,
+                                                  uint32_t& totalDstLen)
+{
+    Json::Value metaSubs;
+    if (!exc.empty()) {
+        std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "PNEXT exceptions");
+        std::shared_ptr<CoderType> excCoder = std::make_shared<CoderType>(excIo.get());
+
+        /*
+         * Exception stream encoding: the contentIdx column as forward deltas and the delta
+         * column as zigzag varints, and where every delta is the same value that value moves
+         * into the meta and the column is dropped outright. A block whose records are all
+         * unpaired - or all unmapped, like ERR14949932 - has every line in this stream with
+         * the same delta, and there the old layout (absolute contentIdx then delta, 1-3 B + 1 B
+         * per entry) spent 937,737 B of stream on 3,343,586 entries whose delta is uniformly 0.
+         *
+         * contentIdx is the block-internal data-line index (small, increasing); delta =
+         * pnext - pos is signed (mate offset, negative when the record had no real PNEXT), so
+         * it goes through zigzag.
+         */
+        std::vector<uint8_t> excStream;
+        excStream.reserve(exc.size() * 2 + 16);
+        uint32_t prevOrdinal = 0;
+        bool sameDelta = true;
+        const int64_t firstDelta = exc[0].second;
+        for (const auto& e : exc) {
+            appendVarint(excStream, e.first - prevOrdinal);
+            prevOrdinal = e.first;
+            if (e.second != firstDelta) {
+                sameDelta = false;
             }
         }
-        return (int32_t)best;
-    });
-    return (CoderType)verdict;
+        if (sameDelta) {
+            fieldMeta["exc_delta"] = (Json::Value::UInt64)zigzag64(firstDelta);
+        } else {
+            for (const auto& e : exc) {
+                appendVarint64(excStream, zigzag64(e.second));
+            }
+        }
+        excCoder->encode_line(excStream.data(), (uint32_t)excStream.size());
+        excCoder->encode_flush();
+        if (excIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode PNEXT exceptions overflow: output buffer too small");
+            return -1;
+        }
+        metaSubs["srclen"] = (Json::Value::UInt)excStream.size();
+        metaSubs["dstlen"] = excIo->data_len;
+        metaSubs["coder"] = excIo->meta;
+        metaSubs["sname"] = "pnextexc";
+        metaStreams.append(metaSubs);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + excIo->data_len);
+        totalDstLen += excIo->data_len;
+        fieldMeta["exc_enc"] = "varint2";
+    } else {
+        fieldMeta["exc_enc"] = "none";
+    }
+    return totalDstLen;
 }
 
 template<typename CoderType>
@@ -1145,10 +1039,9 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
             ri.pos = posIt->second;
         }
         // PNEXT (field 7): fieldLength includes trailing tab.
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t fieldLength = currTabPos - prevTabPos;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithTab();
         totalSrcLen += fieldLength;
 
         ri.valid = (ri.flag & 0x1) && !(ri.flag & 0x8);
@@ -1204,62 +1097,11 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
     }
 
     // Encode the exception stream: (contentIdx, delta) pairs, like TLEN.
-    Json::Value metaSubs;
     Json::Value metaStreams;
     uint32_t totalDstLen = 0;
 
-    if (!pnextExceptions.empty()) {
-        std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "PNEXT exceptions");
-        std::shared_ptr<CoderType> excCoder = std::make_shared<CoderType>(excIo.get());
-
-        /*
-         * Exception stream encoding: the contentIdx column as forward deltas and the delta
-         * column as zigzag varints, and where every delta is the same value that value moves
-         * into the meta and the column is dropped outright. A block whose records are all
-         * unpaired - or all unmapped, like ERR14949932 - has every line in this stream with
-         * the same delta, and there the old layout (absolute contentIdx then delta, 1-3 B + 1 B
-         * per entry) spent 937,737 B of stream on 3,343,586 entries whose delta is uniformly 0.
-         *
-         * contentIdx is the block-internal data-line index (small, increasing); delta =
-         * pnext - pos is signed (mate offset, negative when the record had no real PNEXT), so
-         * it goes through zigzag.
-         */
-        std::vector<uint8_t> excStream;
-        excStream.reserve(pnextExceptions.size() * 2 + 16);
-        uint32_t prevOrdinal = 0;
-        bool sameDelta = true;
-        const int64_t firstDelta = pnextExceptions[0].second;
-        for (const auto& e : pnextExceptions) {
-            appendVarint(excStream, e.first - prevOrdinal);
-            prevOrdinal = e.first;
-            if (e.second != firstDelta) {
-                sameDelta = false;
-            }
-        }
-        if (sameDelta) {
-            fieldMeta["exc_delta"] = (Json::Value::UInt64)zigzag64(firstDelta);
-        } else {
-            for (const auto& e : pnextExceptions) {
-                appendVarint64(excStream, zigzag64(e.second));
-            }
-        }
-        excCoder->encode_line(excStream.data(), (uint32_t)excStream.size());
-        excCoder->encode_flush();
-        if (excIo->err != coder_io::IO_OK) {
-            LOG_ERROR("Encode PNEXT exceptions overflow: output buffer too small");
-            return -1;
-        }
-        metaSubs["srclen"] = (Json::Value::UInt)excStream.size();
-        metaSubs["dstlen"] = excIo->data_len;
-        metaSubs["coder"] = excIo->meta;
-        metaSubs["sname"] = "pnextexc";
-        metaStreams.append(metaSubs);
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + excIo->data_len);
-        totalDstLen += excIo->data_len;
-        fieldMeta["exc_enc"] = "varint2";
-    } else {
-        fieldMeta["exc_enc"] = "none";
-    }
+    /* (see writePnextExceptions) */
+    totalDstLen = writePnextExceptions<CoderType>(pnextExceptions, fieldMeta, metaStreams, totalDstLen);
 
     // fieldSrcLen (output) must be the original PNEXT field byte length (with
     // trailing tab) summed over all lines, so the -s statistics and
@@ -1334,10 +1176,9 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
             }
         }
 
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t fieldLength = currTabPos - prevTabPos;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithTab();
 
         int64_t delta = 0;
         if (fieldLength > 1) {
@@ -1404,735 +1245,6 @@ void SamCodecActuator::clearIdNumericState() {
     idDictEntries.clear();
 }
 
-int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
-                                               uint32_t trialLines) {
-    // Similar to FastqActuator::compressIdInSplit, create multiple streams for each split symbol
-    Json::Value streamMeta;
-    uint32_t totalSrcLength = 0;
-    uint32_t totalDstLength = 0;
-
-    // Process each split symbol (similar to FastqActuator)
-    for (uint32_t i = 0; i < idSplitSymbols.size(); ++i) {
-        std::vector<size_t>& npos = inBlockPtr->getNpos();
-        uint32_t lineNum = npos.size();
-        uint8_t* buffer = inBlockPtr->getBuffer();
-
-        std::shared_ptr<coder_io> idIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME sub-stream");
-        uint32_t srcLength = 0;
-
-        /*
-         * Numeric sub-stream mode: when every occurrence of a segment is a plain
-         * decimal integer (typical for FASTQ/SEQ read ordinals such as
-         * "SRR2769247.<n>"), the segment is stored as a binary stream of
-         * zigzag(delta) LEB128 varints instead of decimal text. Adjacent ordinals
-         * are strongly correlated (delta == 1 dominates), and the decimal text
-         * wastes that structure across digit boundaries. Non-numeric segments keep
-         * the original textual coder_affix_match path unchanged.
-         */
-        std::vector<std::string> segTexts;      /* full segment, trailing split symbol included */
-        std::vector<std::string> segPayloads;   /* segment without the trailing split symbol */
-        bool allNumeric = true;
-        for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
-            if (trialLines != 0 && lineIdx - headEndLine >= trialLines) {
-                break;
-            }
-            uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
-            uint8_t* line = buffer + lineStart;
-
-            if (*line == '@') {
-                continue;
-            }
-
-            uint8_t* segmentStart = nullptr;
-            uint32_t segmentLength = 0;
-            uint32_t contentId = lineIdx - headEndLine;
-
-            if (i == 0) {
-                segmentStart = line;
-                segmentLength = idSplitPos[contentId][0] + 1;
-            } else {
-                uint32_t prevPos = idSplitPos[contentId][i-1];
-                uint32_t currPos = idSplitPos[contentId][i];
-                segmentStart = line + prevPos + 1;
-                segmentLength = currPos - prevPos;
-            }
-
-            /*
-             * Keep the full segment (trailing split symbol included) for the text
-             * path, and the bare payload for the numeric path / the all-digits test.
-             */
-            const bool hasSep = (segmentLength > 0 && segmentStart[segmentLength - 1] == idSplitSymbols[i]);
-            const uint32_t payloadLen = hasSep ? segmentLength - 1 : segmentLength;
-            std::string seg((char*)segmentStart, segmentLength);
-            std::string payload((char*)segmentStart, payloadLen);
-            if (!payload.empty()) {
-                if (payload.find_first_not_of("0123456789") != std::string::npos) {
-                    allNumeric = false;
-                } else if (payload.size() > 1 && payload[0] == '0') {
-                    /* A numeric segment with a leading zero (e.g. a zero-padded
-                       date/month "01" inside a Nanopore QNAME) cannot round-trip
-                       through the zigzag-delta varint stream: the decoder re-emits
-                       plain decimal text and would silently drop the "0". Force the
-                       lossless textual path for such segments. */
-                    allNumeric = false;
-                }
-            }
-            segTexts.push_back(seg);
-            segPayloads.push_back(payload);
-            srcLength += segmentLength;
-        }
-
-        /*
-         * A segment holding the same text in every line of the block is stored once and costs
-         * nothing per line. That is what the constant parts of a naming scheme are - instrument,
-         * run, flowcell, lane - and every layout below still spends a fraction of a bit per line
-         * repeating them.
-         */
-        bool constMode = false;
-        std::string constText;
-        if (!segTexts.empty() && !segTexts[0].empty()) {
-            constText = segTexts[0];
-            constMode = true;
-            for (size_t k = 1; k < segTexts.size(); ++k) {
-                /* A segment that some line does not carry at all is not constant: the other lines
-                   would be given text they never had. */
-                if (segTexts[k].empty() || segTexts[k] != constText) {
-                    constMode = false;
-                    break;
-                }
-            }
-        }
-
-        /*
-         * A segment with a handful of distinct texts in the block - a tile number, a lane - travels
-         * as a dictionary plus one index per line: the texts are written once and each line then
-         * costs the entropy of its index, which for a value that changes once or twice in a block is
-         * a few hundredths of a bit. Measured on a coordinate-sorted BAM whose tile takes two or
-         * three values per block, this was the largest single item left in the field: the textual
-         * layout spent 420 B per block on a segment that changes twice.
-         *
-         * The payload is built in a buffer of its own so that the layouts below can still be tried
-         * and compared against it; the smallest of them wins at the end of this loop body.
-         */
-        bool dictMode = false;
-        std::vector<std::string> dictEntries;
-        std::vector<uint8_t> dictBuf;
-        uint32_t dictLen = 0;
-        uint32_t dictStepWidth = 1;
-        uint32_t dictStepLowBits = 0;
-        uint32_t dictValues = 0;
-        if (!constMode) {
-            for (size_t k = 0; k < segTexts.size(); ++k) {
-                if (segTexts[k].empty()) {
-                    /* A row that does not carry this segment is not a dictionary entry. */
-                    dictEntries.clear();
-                    break;
-                }
-                bool known = false;
-                for (size_t e = 0; e < dictEntries.size(); ++e) {
-                    if (dictEntries[e] == segTexts[k]) {
-                        known = true;
-                        break;
-                    }
-                }
-                if (known) {
-                    continue;
-                }
-                if (dictEntries.size() >= kMaxDictEntries) {
-                    dictEntries.clear();
-                    break;
-                }
-                dictEntries.push_back(segTexts[k]);
-            }
-            dictMode = (dictEntries.size() >= 2);
-        }
-        if (dictMode) {
-            uint8_t head[16];
-            const uint32_t hn = tlenPutVarint(head, (uint32_t)dictEntries.size());
-            dictBuf.assign(head, head + hn);
-            for (size_t e = 0; e < dictEntries.size(); ++e) {
-                uint8_t lb[8];
-                const uint32_t ln = tlenPutVarint(lb, (uint32_t)dictEntries[e].size());
-                dictBuf.insert(dictBuf.end(), lb, lb + ln);
-                dictBuf.insert(dictBuf.end(), dictEntries[e].begin(), dictEntries[e].end());
-            }
-            /*
-             * The indices walk a counter layout (see id_int::Counter): what they do is stay put and
-             * step by one when the value changes, and coding that as a run is what keeps a segment
-             * that changes twice in a block down to a few dozen bytes. An adaptive model over the
-             * index values cannot do it - measured 1844 B for such a sequence against the textual
-             * layout's 419 B - because it has to learn a step function one symbol at a time.
-             */
-            std::vector<uint32_t> indexOf;
-            indexOf.reserve(segTexts.size());
-            int64_t prevIndex = 0;
-            uint64_t maxStep = 0;
-            for (size_t k = 0; k < segTexts.size(); ++k) {
-                uint32_t e = 0;
-                for (; e + 1 < dictEntries.size(); ++e) {
-                    if (dictEntries[(size_t)e] == segTexts[k]) {
-                        break;
-                    }
-                }
-                indexOf.push_back(e);
-                const uint64_t zz = id_int::zigzag32((int64_t)e - prevIndex);
-                if (zz > id_int::Counter::kSmallStep && zz > maxStep) {
-                    maxStep = zz;
-                }
-                prevIndex = (int64_t)e;
-            }
-            const uint32_t stepWidth = id_int::widthFor(maxStep);
-            const uint32_t stepLowBits = id_int::lowBitsFor(stepWidth);
-            std::vector<uint8_t> idx(segTexts.size() + 256);
-            RangeCoder rc;
-            rc.output((char*)idx.data(), (char*)idx.data() + idx.size());
-            rc.StartEncode();
-            id_int::Counter counter;
-            counter.reset(stepWidth, stepLowBits);
-            prevIndex = 0;
-            for (size_t k = 0; k < indexOf.size(); ++k) {
-                counter.encode(rc, (int64_t)indexOf[k] - prevIndex);
-                prevIndex = (int64_t)indexOf[k];
-            }
-            rc.FinishEncode();
-            if (rc.err != 0) {
-                dictMode = false;
-            } else {
-                dictBuf.insert(dictBuf.end(), idx.begin(), idx.begin() + rc.size_out());
-                dictLen = (uint32_t)dictBuf.size();
-                dictStepWidth = stepWidth;
-                dictStepLowBits = stepLowBits;
-                dictValues = (uint32_t)indexOf.size();
-            }
-        }
-
-        /*
-         * A segment whose characters come from a small alphabet - the hex chunks of a UUID, a base32
-         * barcode - has no structure to model. What it needs is the size of the alphabet: coding each
-         * character uniformly over it costs log2(alphabet) bits, which for random hex is exactly the
-         * four bits a character carries, and the trailing split symbol comes free because the
-         * decoder knows it from the layout.
-         *
-         * Measured on a 4000-read Nanopore slice, whose QNAME is a UUID plus run metadata: the five
-         * hex chunks of the UUID were 10,810 B of the block's ~13,300 B of QNAME bytes, all of it
-         * through the textual layout, which pays for the characters it models and then for the four
-         * separators as well. CRAM's token coder holds the same information and spends less on it.
-         *
-         * Like the dictionary layout this is built in a buffer of its own and has to win on size.
-         */
-        bool hexMode = false;
-        std::string hexAlphabet;
-        std::vector<uint8_t> hexBuf;
-        uint32_t hexLen = 0;
-        uint32_t hexMinLen = 0;
-        uint32_t hexMaxLen = 0;
-        if (!constMode && segPayloads.size() >= 2) {
-            uint32_t minLen = UINT32_MAX;
-            uint32_t maxLen = 0;
-            std::string alpha;
-            bool ok = true;
-            for (size_t k = 0; k < segPayloads.size() && ok; ++k) {
-                if (segPayloads[k].empty()) {
-                    ok = false;
-                    break;
-                }
-                const uint32_t len = (uint32_t)segPayloads[k].size();
-                if (len < minLen) {
-                    minLen = len;
-                }
-                if (len > maxLen) {
-                    maxLen = len;
-                }
-                for (size_t c = 0; c < segPayloads[k].size(); ++c) {
-                    const char ch = segPayloads[k][c];
-                    if (alpha.find(ch) == std::string::npos) {
-                        if (alpha.size() >= kMaxHexAlphabet) {
-                            ok = false;
-                            break;
-                        }
-                        alpha.push_back(ch);
-                    }
-                }
-            }
-            /*
-             * One character is the const layout's business, and past a small alphabet a uniform code
-             * costs more per character than the textual layout's model does.
-             *
-             * All-digit payloads are the value-domain layouts' business: they code a run of digits as
-             * one value rather than one character at a time and beat this by construction. Building
-             * the candidate for them only buys the scan: measured on a 100 MB Nanopore file whose
-             * QNAME is mostly numbers, that was 11 s of a 26 s run.
-             */
-            if (ok && alpha.size() >= 2 && maxLen <= kMaxHexLen &&
-                alpha.find_first_not_of("0123456789") != std::string::npos) {
-                const uint32_t lenRange = (maxLen > minLen) ? (maxLen - minLen + 1) : 1;
-                const uint32_t alphaSize = (uint32_t)alpha.size();
-                std::vector<uint8_t> hb(segPayloads.size() * (kMaxHexLen + 8) + 64);
-                RangeCoder hrc;
-                hrc.output((char*)hb.data(), (char*)hb.data() + hb.size());
-                hrc.StartEncode();
-                for (size_t k = 0; k < segPayloads.size(); ++k) {
-                    if (lenRange > 1) {
-                        hrc.Encode((uint32_t)segPayloads[k].size() - minLen, 1, lenRange);
-                    }
-                    for (size_t c = 0; c < segPayloads[k].size(); ++c) {
-                        hrc.Encode((uint32_t)alpha.find(segPayloads[k][c]), 1, alphaSize);
-                    }
-                }
-                hrc.FinishEncode();
-                if (hrc.err == 0 && hrc.size_out() > 0) {
-                    hexMode = true;
-                    hexAlphabet = alpha;
-                    hexMinLen = minLen;
-                    hexMaxLen = maxLen;
-                    hexBuf.assign(hb.begin(), hb.begin() + hrc.size_out());
-                    hexLen = (uint32_t)hexBuf.size();
-                }
-            }
-        }
-
-        /* An all-digit segment can travel three ways, and the strongest one wins:
-           zigzag delta varints (correlated ordinals), the value itself through id_int::Model
-           (spread over a range), and the decimal text through coder_affix_match (repeated digit
-           prefixes). */
-        const int64_t segBlockStart = (int64_t)outBlockPtr->getDataLen();
-        bool numericMode = false;      /* "mode":"numeric" - zigzag delta varints */
-        uint32_t numericSrcLen = 0;
-        bool intMode = false;          /* "mode":"intd" - values, no outer coder */
-        bool cntMode = false;          /* "mode":"cnt" - the deltas of a counter, run-length coded */
-        bool textAlreadyEncoded = false;
-        uint32_t intWidth = 0;
-        uint32_t intLowBits = 0;
-        uint32_t intDstLen = 0;
-        bool intUniform = false;       /* "mode":"intu" - the values' exact range, no model at all */
-        uint32_t intUniBase = 0;
-        uint32_t intUniTotal = 0;
-        uint32_t cntWidth = 0;
-        uint32_t cntLowBits = 0;
-        uint32_t cntSrcLen = 0;        /* the varint layout's size, which is what the decoder expands to */
-        uint32_t cntValues = 0;
-        uint32_t cntDstLen = 0;
-        if (!constMode && allNumeric && !segTexts.empty()) {
-            /*
-             * Worst case 10 bytes per varint (64-bit value, 7 payload bits each).
-             * The encoder falls back to the text path if it would not be shorter.
-             */
-            const uint32_t cap = (uint32_t)(segTexts.size() * 10);
-            uint8_t* varBuf = MemoryUtil::safeAlloc<uint8_t>(cap);
-            if (varBuf != nullptr) {
-                uint32_t pos = 0;
-                uint64_t prevVal = 0;
-                uint32_t deltaOneCnt = 0;    /* how often the ordinal just increments */
-                uint32_t deltaTotal = 0;
-                uint64_t maxVal = 0;
-                /* UINT64_MAX until the first value arrives: this is the base of the uniform layout,
-                   and taking it as 0 would make that layout pay for the empty space below the range. */
-                uint64_t minVal = UINT64_MAX;
-                std::vector<uint64_t> values;   /* one per row that carries a payload */
-                std::vector<int64_t> deltas;    /* its step from the row before, signed */
-                values.reserve(segPayloads.size());
-                deltas.reserve(segPayloads.size());
-                bool ok = true;
-                for (size_t k = 0; k < segPayloads.size() && ok; ++k) {
-                    if (segPayloads[k].empty()) {
-                        continue;               /* keep the row count aligned */
-                    }
-                    errno = 0;
-                    char* endPtr = nullptr;
-                    unsigned long long v = std::strtoull(segPayloads[k].c_str(), &endPtr, 10);
-                    if (errno == ERANGE || endPtr != segPayloads[k].c_str() + segPayloads[k].size()) {
-                        ok = false;
-                        break;
-                    }
-                    const uint64_t cur = (uint64_t)v;
-                    values.push_back(cur);
-                    if (cur > maxVal) {
-                        maxVal = cur;
-                    }
-                    if (cur < minVal) {
-                        minVal = cur;
-                    }
-                    const uint64_t delta = (cur >= prevVal) ? (cur - prevVal) : (prevVal - cur);
-                    const uint64_t zz = (cur >= prevVal) ? (delta << 1) : ((delta << 1) | 1u);
-                    if (zz > 0xFFFFFFFFull) {   /* keep it 32-bit decodable */
-                        ok = false;
-                        break;
-                    }
-                    if (pos + 10 > cap) {
-                        ok = false;
-                        break;
-                    }
-                    pos += tlenPutVarint(varBuf + pos, (uint32_t)zz);
-                    deltas.push_back((int64_t)cur - (int64_t)prevVal);
-                    if (cur == prevVal + 1) {
-                        deltaOneCnt++;
-                    }
-                    deltaTotal++;
-                    prevVal = cur;
-                }
-                /*
-                 * Varints only pay off when consecutive ordinals are correlated
-                 * (successive reads, or mate pairs stored adjacently). When the
-                 * file is ordered by alignment position and the ordinals scatter
-                 * (e.g. "ERR031968.<random id>"), the deltas are large and nearly
-                 * incompressible, and the decimal text wins because affix matching
-                 * still finds repeated digit prefixes. Require a meaningful share
-                 * of pure +1 steps before switching away from the text path.
-                 */
-                const bool correlated = (deltaTotal > 0) && (deltaOneCnt * 10 >= deltaTotal);
-                const uint32_t valueWidth = id_int::widthFor(maxVal);
-                const uint32_t valueLowBits = id_int::lowBitsFor(valueWidth);
-                const bool valueLayoutFits = ok && !values.empty() && maxVal > 0 && id_int::widthFits(valueWidth);
-                if (ok && pos > 0 && correlated) {
-                    /*
-                     * Two layouts cover a correlated ordinal: the delta varints through
-                     * coder_bwt_cm, and the deltas themselves through id_int::Counter, which codes
-                     * the runs rather than the bytes. Both are encoded here - the counter one after
-                     * the varint one, so the winner keeps the bytes it already has - and the
-                     * smaller of the two is kept.
-                     */
-                    std::shared_ptr<coder_bwt_cm> numCoder = std::make_shared<coder_bwt_cm>(idIo.get());
-                    numCoder->encode_line(varBuf, pos);
-                    numCoder->encode_flush();
-                    const uint32_t varLen = (idIo->err == coder_io::IO_OK) ? (uint32_t)idIo->data_len : 0u;
-
-                    uint32_t counterLen = 0;
-                    uint32_t counterWidth = 0;
-                    uint32_t counterLowBits = 0;
-                    if (varLen > 0 && !deltas.empty() && (uint32_t)idIo->data_capacity > varLen) {
-                        /* The tree carries only the steps past the small ones (see id_int::Counter):
-                           its width must come from those, not from the largest step overall. */
-                        uint64_t maxStep = 0;
-                        for (size_t k = 0; k < deltas.size(); ++k) {
-                            const uint64_t zz = id_int::zigzag32(deltas[k]);
-                            if (zz > id_int::Counter::kSmallStep && zz > maxStep) {
-                                maxStep = zz;
-                            }
-                        }
-                        counterWidth = id_int::widthFor(maxStep);
-                        counterLowBits = id_int::lowBitsFor(counterWidth);
-                        if (id_int::widthFits(counterWidth)) {
-                            RangeCoder counterRc;
-                            counterRc.output((char*)(idIo->data + varLen),
-                                             (char*)(idIo->data + idIo->data_capacity));
-                            counterRc.StartEncode();
-                            id_int::Counter counter;
-                            counter.reset(counterWidth, counterLowBits);
-                            for (size_t k = 0; k < deltas.size(); ++k) {
-                                counter.encode(counterRc, deltas[k]);
-                            }
-                            counterRc.FinishEncode();
-                            if (counterRc.err == 0) {
-                                counterLen = (uint32_t)counterRc.size_out();
-                            }
-                        }
-                    }
-                    if (counterLen > 0 && counterLen < varLen) {
-                        memmove(idIo->data, idIo->data + varLen, counterLen);
-                        idIo->data_len = counterLen;
-                        idIo->meta["magic"] = "int_field";
-                        cntMode = true;
-                        cntSrcLen = pos;
-                        cntValues = (uint32_t)deltas.size();
-                        cntWidth = counterWidth;
-                        cntLowBits = counterLowBits;
-                        cntDstLen = counterLen;
-                    } else if (varLen > 0) {
-                        numericMode = true;
-                        numericSrcLen = pos;
-                    }
-                } else if (valueLayoutFits) {
-                    /*
-                     * The values are scattered, so neither the deltas nor the decimal digits can
-                     * reach their entropy. Code the values themselves: id_int::Model puts the high
-                     * bits through an adaptive tree over the value domain and leaves the low bits
-                     * raw, which costs about log2(number of values in use) per row.
-                     *
-                     * The text layout is encoded right after the value layout, so the two can be
-                     * compared on the whole segment without encoding either twice: if the text
-                     * wins, its bytes are moved down over the value payload and the data length is
-                     * set to its size; if the value layout wins, only the data length is fixed up.
-                     */
-                    id_int::Model model;
-                    model.reset(valueWidth, valueLowBits);
-                    RangeCoder rc;
-                    rc.output((char*)idIo->data, (char*)idIo->data + idIo->data_capacity);
-                    rc.StartEncode();
-                    for (size_t k = 0; k < values.size(); ++k) {
-                        model.encode(rc, values[k]);
-                    }
-                    rc.FinishEncode();
-                    uint32_t valueLen = (uint32_t)rc.size_out();
-                    if (rc.err != 0) {
-                        valueLen = 0;
-                    }
-
-                    /*
-                     * Second candidate: the exact range the values actually occupy (see
-                     * Model::resetUniform). It is written behind the tree, in space the text layout
-                     * has not been given yet, so all three candidates are encoded once and the
-                     * smallest of the three is kept.
-                     */
-                    uint32_t uniLen = 0;
-                    uint32_t uniBase = 0;
-                    uint32_t uniTotal = 0;
-                    if (valueLen > 0 && valueLen < (uint32_t)idIo->data_capacity) {
-                        const uint64_t total = (maxVal >= minVal) ? (maxVal - minVal + 1) : 0;
-                        if (total > 0 && total <= id_int::kMaxUniformTotal) {
-                            RangeCoder urc;
-                            urc.output((char*)(idIo->data + valueLen),
-                                       (char*)(idIo->data + idIo->data_capacity));
-                            urc.StartEncode();
-                            for (size_t k = 0; k < values.size(); ++k) {
-                                urc.Encode((uint32_t)(values[k] - minVal), 1, (uint32_t)total);
-                            }
-                            urc.FinishEncode();
-                            if (urc.err == 0 && urc.size_out() > 0) {
-                                uniLen = (uint32_t)urc.size_out();
-                                uniBase = (uint32_t)minVal;
-                                uniTotal = (uint32_t)total;
-                            }
-                        }
-                    }
-
-                    if (valueLen == 0) {
-                        /* No room for the value layouts: fall through to the text layout below. */
-                    } else if (valueLen + uniLen >= (uint32_t)idIo->data_capacity) {
-                        /* No room left for the text layout: the value layouts stand. */
-                        idIo->data_len = valueLen;
-                        intMode = true;
-                        intWidth = valueWidth;
-                        intLowBits = valueLowBits;
-                        intDstLen = valueLen;
-                    } else {
-                        const uint32_t textOff = valueLen + uniLen;
-                        std::shared_ptr<coder_io> textIo = makeCoderIo(idIo->data + textOff,
-                                                                       idIo->data_capacity - (int32_t)textOff,
-                                                                       "QNAME sub-stream");
-                        std::shared_ptr<coder_affix_match> textCoder = std::make_shared<coder_affix_match>(textIo.get());
-                        for (size_t k = 0; k < segTexts.size(); ++k) {
-                            if (segTexts[k].empty()) {
-                                continue;
-                            }
-                            textCoder->encode_line((uint8_t*)segTexts[k].data(), (uint32_t)segTexts[k].size());
-                        }
-                        textCoder->encode_flush();
-                        const uint32_t textLen = (textIo->err == coder_io::IO_OK)
-                                                 ? (uint32_t)textIo->data_len : UINT32_MAX;
-
-                        if (uniLen > 0 && uniLen < valueLen && uniLen <= textLen) {
-                            memmove(idIo->data, idIo->data + valueLen, uniLen);
-                            idIo->data_len = uniLen;
-                            intMode = true;
-                            intUniform = true;
-                            intUniBase = uniBase;
-                            intUniTotal = uniTotal;
-                            intDstLen = uniLen;
-                        } else if (textLen < valueLen) {
-                            memmove(idIo->data, textIo->data, textLen);
-                            idIo->data_len = textLen;
-                            idIo->meta = textIo->meta;
-                            outBlockPtr->setDataLen(segBlockStart + textLen);
-                            textAlreadyEncoded = true;
-                        } else {
-                            idIo->data_len = valueLen;
-                            intMode = true;
-                            intWidth = valueWidth;
-                            intLowBits = valueLowBits;
-                            intDstLen = valueLen;
-                        }
-                    }
-                }
-                MemoryUtil::safeFree(varBuf);
-            }
-        }
-
-        uint32_t segDstLen = 0;
-        if (constMode) {
-            /* Stored once, raw: no coder, and nothing per line. */
-            if (outBlockPtr->getRemain() < constText.size()) {
-                LOG_ERROR("Encode id constant segment overflow: output buffer too small");
-                return -1;
-            }
-            memcpy(outBlockPtr->getCurrent(), constText.data(), constText.size());
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + constText.size());
-            segDstLen = (uint32_t)constText.size();
-        } else if (cntMode) {
-            /* The counter layout wrote its payload itself and dropped the varint one it beat. */
-            outBlockPtr->setDataLen(segBlockStart + cntDstLen);
-            segDstLen = cntDstLen;
-        } else if (intMode) {
-            /* The value layout wrote its payload itself and settled the data length already. */
-            outBlockPtr->setDataLen(segBlockStart + intDstLen);
-            segDstLen = intDstLen;
-        } else {
-            if (!textAlreadyEncoded) {
-                if (!numericMode) {
-                    std::shared_ptr<coder_affix_match> idCoder = std::make_shared<coder_affix_match>(idIo.get());
-                    for (size_t k = 0; k < segTexts.size(); ++k) {
-                        if (segTexts[k].empty()) {
-                            continue;
-                        }
-                        idCoder->encode_line((uint8_t*)segTexts[k].data(), (uint32_t)segTexts[k].size());
-                    }
-                    idCoder->encode_flush();
-                }
-                if (idIo->err != coder_io::IO_OK) {
-                    LOG_ERROR("Encode id segment overflow: output buffer too small");
-                    return -1;
-                }
-                /* The block's data length advances by whatever this segment produced, whichever
-                   layout wrote it: the value layout writes its payload itself, and the textual
-                   layout that lost the comparison has already settled the length. */
-                outBlockPtr->setDataLen(outBlockPtr->getDataLen() + idIo->data_len);
-            }
-            segDstLen = idIo->data_len;
-        }
-
-        /*
-         * The dictionary layout was built in a buffer of its own, so it can still win here: if it is
-         * the smallest of everything tried, its bytes replace them at the segment's own offset. The
-         * room is there by construction - it is no larger than what the layouts already wrote.
-         */
-        bool dictWon = false;
-        if (dictMode && dictLen > 0 && dictLen <= segDstLen) {
-            memcpy(outBlockPtr->getBuffer() + segBlockStart, dictBuf.data(), dictLen);
-            outBlockPtr->setDataLen(segBlockStart + dictLen);
-            segDstLen = dictLen;
-            dictWon = true;
-        }
-
-        /*
-         * The fixed-alphabet layout was built in its own buffer too: if it is the smallest of
-         * everything tried, its bytes replace them at the segment's own offset.
-         */
-        bool hexWon = false;
-        if (hexMode && hexLen > 0 && hexLen <= segDstLen) {
-            memcpy(outBlockPtr->getBuffer() + segBlockStart, hexBuf.data(), hexLen);
-            outBlockPtr->setDataLen(segBlockStart + hexLen);
-            segDstLen = hexLen;
-            hexWon = true;
-        }
-
-        // Create metadata for this stream (similar to FastqActuator)
-        Json::Value tmpMeta;
-        tmpMeta["srclen"] = numericMode ? numericSrcLen : srcLength;
-        tmpMeta["dstlen"] = segDstLen;
-        tmpMeta["coder"] = idIo->meta;
-        tmpMeta["splitidx"] = i; // Index of split symbol
-        /* Absent (or "text") = legacy textual layout; "numeric" = zigzag delta varints;
-           "intd" = the values themselves through id_int::Model; "dict" = one index per line into
-           the few texts the block carries for this segment. */
-        if (hexWon) {
-            tmpMeta["mode"] = "hexd";
-            tmpMeta["hexa"] = hexAlphabet;
-            tmpMeta["hexn"] = (Json::Value::UInt)hexMinLen;
-            tmpMeta["hexm"] = (Json::Value::UInt)hexMaxLen;
-            tmpMeta["coder"]["magic"] = "int_field";
-        } else if (dictWon) {
-            tmpMeta["mode"] = "dict";
-            tmpMeta["intw"] = (Json::Value::UInt)dictStepWidth;
-            tmpMeta["intk"] = (Json::Value::UInt)dictStepLowBits;
-            tmpMeta["numv"] = (Json::Value::UInt)dictValues;
-            tmpMeta["coder"]["magic"] = "int_field";
-        } else if (numericMode) {
-            tmpMeta["mode"] = "numeric";
-        } else if (constMode) {
-            tmpMeta["mode"] = "const";
-            tmpMeta["coder"]["magic"] = "const";
-        } else if (cntMode) {
-            tmpMeta["mode"] = "cnt";
-            /* srclen is the size the varint layout would have had: the decoder expands the coded
-               deltas back into exactly that form, so everything downstream of it is unchanged. */
-            tmpMeta["srclen"] = cntSrcLen;
-            tmpMeta["intw"] = (Json::Value::UInt)cntWidth;
-            tmpMeta["intk"] = (Json::Value::UInt)cntLowBits;
-            tmpMeta["numv"] = (Json::Value::UInt)cntValues;
-            tmpMeta["coder"]["magic"] = "int_field";
-        } else if (intMode && intUniform) {
-            tmpMeta["mode"] = "intu";
-            tmpMeta["intb"] = (Json::Value::UInt)intUniBase;
-            tmpMeta["intn"] = (Json::Value::UInt)intUniTotal;
-            tmpMeta["coder"]["magic"] = "int_field";
-        } else if (intMode) {
-            tmpMeta["mode"] = "intd";
-            tmpMeta["intw"] = (Json::Value::UInt)intWidth;
-            tmpMeta["intk"] = (Json::Value::UInt)intLowBits;
-            tmpMeta["coder"]["magic"] = "int_field";
-        }
-
-        streamMeta.append(tmpMeta);
-        totalSrcLength += srcLength;
-        totalDstLength += segDstLen;
-    }
-
-    // Set field metadata with streams (similar to FastqActuator)
-    fieldMeta["totalsrclen"] = totalSrcLength;
-    fieldMeta["totaldstlen"] = totalDstLength;
-    fieldMeta["splitsym"] = std::string((char*)idSplitSymbols.data(), idSplitSymbols.size());
-    fieldMeta["streams"] = streamMeta;
-    fieldMeta["field"] = 0;
-
-    fieldSrcLen = totalSrcLength;
-
-    LOG_DEBUG("SAM ID compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
-            totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
-
-    return totalDstLength;
-}
-
-int32_t SamCodecActuator::compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta,
-                                               uint32_t trialLines) {
-    std::vector<size_t>& npos = inBlockPtr->getNpos();
-    uint32_t lineNum = npos.size();
-    uint8_t* buffer = inBlockPtr->getBuffer();
-
-    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QNAME");
-    std::shared_ptr<coder_qname> qnameCoder = std::make_shared<coder_qname>(fieldIo.get());
-
-    fieldSrcLen = 0;
-    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
-        if (trialLines != 0 && lineIdx - headEndLine >= trialLines) {
-            break;
-        }
-        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
-        if (buffer[lineStart] == '@') {
-            continue;
-        }
-        uint32_t contentId = lineIdx - headEndLine;
-        uint8_t* idStart = buffer + lineStart;
-        /* The QNAME field runs up to the first tab (inclusive, consistent with compressIdFieldInAll). */
-        uint32_t idLength = contentPos[contentId][0] + 1;
-        qnameCoder->encode_line(idStart, idLength);
-        fieldSrcLen += idLength;
-    }
-
-    qnameCoder->encode_flush();
-    if (fieldIo->err != coder_io::IO_OK) {
-        LOG_ERROR("Encode QNAME (coder_qname) overflow: output buffer too small");
-        return -1;
-    }
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
-
-    Json::Value streamMeta;
-    Json::Value tmpMeta;
-    tmpMeta["srclen"] = fieldSrcLen;
-    tmpMeta["dstlen"] = fieldIo->data_len;
-    tmpMeta["coder"] = fieldIo->meta;
-    tmpMeta["splitidx"] = 0;
-    streamMeta.append(tmpMeta);
-
-    fieldMeta["totalsrclen"] = fieldSrcLen;
-    fieldMeta["totaldstlen"] = fieldIo->data_len;
-    fieldMeta["streams"] = streamMeta;
-    fieldMeta["splitsym"] = "\t";
-    fieldMeta["field"] = 0;
-
-    LOG_INFO("SAM QNAME (coder_qname) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
-            fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
-
-    return fieldIo->data_len;
-}
 
 int32_t SamCodecActuator::compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
@@ -2220,10 +1332,9 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
 
         // Middle fields: between tabs
         uint32_t contentId = lineIdx - headEndLine;
-        uint32_t prevTabPos = contentPos[contentId][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentId].size()) ? contentPos[contentId][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t fieldLength = currTabPos - prevTabPos - 1;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentId], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithoutTab();
 
         std::string str = std::string((char*)fieldStart, fieldLength);
         uint16_t chrIndex = 0xFFFF;
@@ -2335,10 +1446,9 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
             fieldSrcLen += 1;
             continue;
         }
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t  fieldLength = currTabPos - prevTabPos;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithTab();
 
         // Encode the field data
         if (fieldLength > 0) {
@@ -2403,18 +1513,19 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
  *      fixed-width binary, the rest as length-prefixed byte streams.
  *   4. Each column is compressed independently with bwt_cm.
  */
-int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+/*
+ * Parse the OPTION column line by line: build the tag dictionary (name and type, in first-seen
+ * order), each line's tag sequence, and each tag's own column of values. Tags are the
+ * "TAG:TYPE:VALUE" triples of a SAM line's trailing fields, and a line that carries none
+ * contributes an empty sequence.
+ *
+ * Returns 0, or -1 when a line has no OPTION field at all.
+ */
+int32_t SamCodecActuator::collectOptionTags(OptionParseState& st)
+{
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-
-    /* Parse OPTION line by line: build the tag dictionary, each line's id sequence, and each tag's value column. */
-    std::vector<std::pair<std::string, std::string>> tagDict;
-    std::map<std::string, int> tagId;
-    std::vector<std::vector<uint8_t>> recIds;
-    std::vector<std::vector<std::string>> tagVals;
-    fieldSrcLen = 0;
-
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
@@ -2426,10 +1537,10 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         uint32_t fieldStartPos = contentPos[contentIdx][10] + 1;
         uint32_t fieldLen = lineEnd - fieldStartPos;
         if (fieldLen == 0) {
-            recIds.push_back({});
+            st.recIds.push_back({});
             continue;
         }
-        fieldSrcLen += fieldLen;
+        st.srcLen += fieldLen;
 
         std::vector<uint8_t> ids;
         const uint8_t* p = line + fieldStartPos;
@@ -2450,26 +1561,37 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
                         std::string type((char*)(colon1 + 1), colon2 - colon1 - 1);
                         std::string value((char*)(colon2 + 1), ts + segLen - colon2 - 1);
                         int id;
-                        auto it = tagId.find(name);
-                        if (it == tagId.end()) {
-                            id = (int)tagDict.size();
-                            tagDict.push_back({name, type});
-                            tagId[name] = id;
-                            tagVals.push_back({});
+                        auto it = st.tagId.find(name);
+                        if (it == st.tagId.end()) {
+                            id = (int)st.tagDict.size();
+                            st.tagDict.push_back({name, type});
+                            st.tagId[name] = id;
+                            st.tagVals.push_back({});
                         } else {
                             id = it->second;
                         }
                         ids.push_back((uint8_t)id);
-                        tagVals[id].push_back(value);
+                        st.tagVals[id].push_back(value);
                     }
                 }
                 segStart = i + 1;
             }
         }
-        recIds.push_back(ids);
+        st.recIds.push_back(ids);
     }
+    return 0;
+}
 
-    const uint32_t nTag = (uint32_t)tagDict.size();
+int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+
+    /* Parse OPTION line by line: see collectOptionTags. */
+    OptionParseState opt;
+    if (collectOptionTags(opt) != 0) {
+        return -1;
+    }
+    fieldSrcLen = opt.srcLen;
+
+    const uint32_t nTag = (uint32_t)opt.tagDict.size();
     if (nTag == 0) {
         fieldMeta["mode"] = "tag_split";
         fieldMeta["srclen"] = 0;
@@ -2484,8 +1606,8 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
     Json::Value tags(Json::arrayValue);
     for (uint32_t t = 0; t < nTag; ++t) {
         Json::Value e(Json::arrayValue);
-        e.append(tagDict[t].first);
-        e.append(tagDict[t].second);
+        e.append(opt.tagDict[t].first);
+        e.append(opt.tagDict[t].second);
         tags.append(e);
     }
 
@@ -2500,10 +1622,10 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
     /* id column: one line per record, ids comma-separated, line terminated by '\n'. */
     {
         std::vector<uint8_t> idStream;
-        for (size_t r = 0; r < recIds.size(); ++r) {
-            for (size_t k = 0; k < recIds[r].size(); ++k) {
+        for (size_t r = 0; r < opt.recIds.size(); ++r) {
+            for (size_t k = 0; k < opt.recIds[r].size(); ++k) {
                 if (k) idStream.push_back(',');
-                uint32_t v = recIds[r][k];
+                uint32_t v = opt.recIds[r][k];
                 char buf[4];
                 int n = snprintf(buf, sizeof(buf), "%u", v);
                 for (int b = 0; b < n; ++b) idStream.push_back((uint8_t)buf[b]);
@@ -2513,7 +1635,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "OPTION ids");
         std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
         size_t pos = 0;
-        for (size_t r = 0; r < recIds.size(); ++r) {
+        for (size_t r = 0; r < opt.recIds.size(); ++r) {
             /* Feed line by line to preserve bwt_cm's line-mode semantics. */
             size_t start = pos;
             while (pos < idStream.size() && idStream[pos] != '\n') pos++;
@@ -2534,7 +1656,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
 
     /* Each tag value column: one value per line, terminated by '\n' (SAM values never contain '\n'). Integer columns are stored as text to avoid the bwt large-blob defect. */
     for (uint32_t t = 0; t < nTag; ++t) {
-        const std::vector<std::string>& vals = tagVals[t];
+        const std::vector<std::string>& vals = opt.tagVals[t];
         std::vector<uint8_t> col;
         for (size_t k = 0; k < vals.size(); ++k) {
             col.insert(col.end(), vals[k].begin(), vals[k].end());
@@ -2553,8 +1675,8 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         if (io->err != coder_io::IO_OK) return -1;
         Json::Value s;
         s["sname"] = "tag";
-        s["tag"] = tagDict[t].first;
-        s["type"] = tagDict[t].second;
+        s["tag"] = opt.tagDict[t].first;
+        s["type"] = opt.tagDict[t].second;
         s["srclen"] = (Json::Value::UInt)col.size();
         s["dstlen"] = (Json::Value::UInt)io->data_len;
         s["coder"] = io->meta;
@@ -2602,10 +1724,9 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
         }
 
         uint32_t contentIdx = lineIdx - headEndLine;
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t  fieldLength = currTabPos - prevTabPos;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithTab();
 
         // Parse CIGAR field, remove hard clipping sequence length
         if (fieldLength == 2 && *fieldStart == '*' ) {
@@ -2651,32 +1772,9 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
 }
 
 uint32_t SamCodecActuator::parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength) {
-    /* Counts only CIGAR operations that consume reference sequence: M/D/N/=/X (including lowercase). */
-    if (cigarString == nullptr || cigarLength == 0) {
-        return 0;
-    }
-
-    uint32_t refConsumed = 0;
-    uint32_t currentNumber = 0;
-    for (uint32_t i = 0; i < cigarLength; ++i) {
-        char ch = cigarString[i];
-        if (ch >= '0' && ch <= '9') {
-            currentNumber = currentNumber * 10 + (ch - '0');
-        } else {
-            if (currentNumber > 0) {
-                switch (ch) {
-                    case 'M': case 'D': case 'N': case '=': case 'X':
-                    case 'm': case 'd': case 'n':
-                        refConsumed += currentNumber;
-                        break;
-                    default:
-                        break;
-                }
-                currentNumber = 0;
-            }
-        }
-    }
-    return refConsumed;
+    /* The reference span the CIGAR consumes: only M/D/N/=/X count. The parse itself is the shared
+       one (see sam_seq_payload.h), so the span and the operation list cannot disagree. */
+    return cigarRefConsumed(cigarString, cigarLength);
 }
 
 /*
@@ -2780,10 +1878,9 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
             continue;
         }
         uint32_t contentIdx = lineIdx - headEndLine;
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t fieldLength = currTabPos - prevTabPos;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithTab();
         if (fieldLength > 1) {
             std::string tlenStr = std::string((char*)fieldStart, fieldLength - 1);
             int32_t currentTLEN = (int32_t)std::stoll(tlenStr);
@@ -2807,10 +1904,9 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         }
 
         uint32_t contentIdx = lineIdx - headEndLine;
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t fieldLength = currTabPos - prevTabPos;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithTab();
         fieldSrcLen += fieldLength;
 
         if (fieldLength > 1) {
@@ -2898,10 +1994,9 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
 
         uint32_t contentIdx = lineIdx - headEndLine;
         // Middle fields: between tabs
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* fieldStart = line + prevTabPos + 1;
-        uint32_t fieldLength = currTabPos - prevTabPos;
+        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* fieldStart = field.start;
+        uint32_t fieldLength = field.lengthWithTab();
 
         if (minBaseLength == maxBaseLength) {
             // Remove trailing \t
@@ -2946,6 +2041,204 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
         fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
+}
+
+/*
+ * The SEQ match stream split into (run lengths, surviving values), or left whole when the
+ * split would not pay for itself: a split with useRle false carries no buffers at all, and
+ * the caller codes the match stream as it is.
+ */
+/*
+ * Where one field of one content line sits.
+ *
+ * `line` is the start of the line, `tabs` the tab positions of that line (contentPos for this
+ * record) and `fieldIdx` the 1-based SAM column; `lineEnd` is the line's length, used for the
+ * last field, which no tab follows. The range excludes both surrounding tabs.
+ *
+ * Every column walk in this file asks this question - SEQ, QUAL, Nodifier, the fields
+ * compressed as a whole - and it used to be spelled out inline at each of them.
+ */
+/* SamFieldRange and samFieldRange are defined near the top of this file, before their first
+   user: every column walk below needs them. */
+
+/*
+ * Record that `ch` occurred at block position `pos`: the first occurrence registers the
+ * character (and reserves its list, unless it is the 'N' class the constructor sized), every
+ * occurrence appends the position. The other half of the SEQ column's exception handling is
+ * the emitter, writeSeqExceptionStreams.
+ */
+static void addSeqException(std::vector<SeqExceptionClass>& classes,
+                            std::vector<uint8_t>& present, uint8_t ch, uint32_t pos)
+{
+    SeqExceptionClass& exc = classes[ch];
+    if (exc.count == 0) {
+        present.push_back(ch);
+        if (ch != (uint8_t)'N') {
+            exc.varint.reserve(64);
+        }
+    }
+    exc.add(pos);
+}
+
+/*
+ * Append one record's payload to the block's match stream, refusing to run past `capacity`
+ * (the caller reports that as a block error, with the lengths it already knows). What the
+ * stream is then coded as - whole, or split into runs and values - is splitSeqMatchStream's
+ * business.
+ */
+static bool appendSeqMatch(uint8_t* matchBuffer, uint32_t& matchLen, uint32_t capacity,
+                           const uint8_t* bytes, uint32_t length)
+{
+    if (matchLen + length > capacity) {
+        return false;
+    }
+    std::memcpy(matchBuffer + matchLen, bytes, length);
+    matchLen += length;
+    return true;
+}
+
+/*
+ * Write the base-length auxiliary stream, for the layout where base lengths vary: the reads whose
+ * length is not already implied by their CIGAR, as (ordinal, length) pairs.
+ *
+ * Both columns go out as forward deltas in varint, with the ordinals written as one run before the
+ * lengths rather than interleaved with them: a file that is entirely unmapped - or entirely mapped
+ * - collapses its whole ordinal column into the same repeated delta, and the lengths keep
+ * statistics of their own. The absolute 4-byte pairs this replaced cost 8 B per read; on
+ * ERR14949932 (all 3,343,586 reads unmapped) 26,748,688 B of source became 6,171,912 B, where
+ * CRAM's read-length series needs 1,302,132 B for the same reads.
+ *
+ * Does nothing when every read has the same length.
+ */
+int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::Value& metaStreams,
+                                                  uint32_t& totalSrcLen, uint32_t& totalDstLen)
+{
+    if (minBaseLength != maxBaseLength) {
+        std::shared_ptr<coder_io> lenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ length");
+        /*
+         * The reads whose length is not already implied by their CIGAR, as (ordinal, length)
+         * pairs. Both columns go out as forward deltas in varint, with the ordinals written as
+         * one run before the lengths rather than interleaved with them.
+         */
+        std::vector<uint8_t> lenBuf;
+        lenBuf.reserve((unmapedReadLength.size() << 1) + 16);
+        uint32_t prevOrdinal = 0;
+        for (const auto& entry : unmapedReadLength) {
+            appendVarint(lenBuf, entry.first - prevOrdinal);
+            prevOrdinal = entry.first;
+        }
+        for (const auto& entry : unmapedReadLength) {
+            appendVarint(lenBuf, entry.second);
+        }
+
+        CoderFactory::applyLevel(lenIo.get(), CoderType::BWT_CM, engineCompressLevel());
+        std::shared_ptr<coder_bwt_cm> lenCoder = std::make_shared<coder_bwt_cm>(lenIo.get());
+        lenCoder->encode_line(lenBuf.data(), (uint32_t)lenBuf.size());
+        lenCoder->encode_flush();
+        if (lenIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode base length stream overflow: output buffer too small");
+            return -1;
+        }
+
+        metaSubs.clear();
+        metaSubs["srclen"] = (Json::Value::UInt)lenBuf.size();
+        metaSubs["dstlen"] = lenIo->data_len;
+        metaSubs["coder"] = lenIo->meta;
+        metaSubs["sname"] = "baselen";
+        /* The delta layout, and how many entries each of the two runs holds; a stream without
+           these carries the absolute pairs this replaced. */
+        metaSubs["count"] = (Json::Value::UInt)unmapedReadLength.size();
+        metaSubs["delta"] = (Json::Value::UInt)1;
+        LOG_DEBUG("SEQ baselen stream: entries=%u src=%u dst=%u", (uint32_t)unmapedReadLength.size(),
+                  (uint32_t)lenBuf.size(), (uint32_t)lenIo->data_len);
+        metaStreams.append(metaSubs);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + lenIo->data_len);
+        totalSrcLen += (uint32_t)lenBuf.size();
+        totalDstLen += lenIo->data_len;
+    }
+    return 0;
+}
+
+/*
+ * Write the SEQ match stream: sub-stream "m" (the run-length segment under RLE, the whole match
+ * stream otherwise) and, under RLE, sub-stream "mval" (the surviving non-zero values).
+ *
+ * A pinned verdict, or one measured on a sample coder_fc could carry, can still name a segment too
+ * short for it, so an FC verdict on such a segment falls back to BWT_CM. "mval" stays pinned to
+ * BWT_CM either way; the decoder dispatches on the magic each sub-stream records.
+ */
+int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uint8_t* matchBuffer,
+                                               uint32_t matchLen, uint32_t srcLen, coder_io* matchIo,
+                                               Json::Value& metaSubs, Json::Value& metaStreams,
+                                               uint32_t& totalDstLen)
+{
+    {
+        const uint32_t payLen = rle.useRle ? rle.runLength : matchLen;
+        const uint8_t* payBuf = rle.useRle ? rle.run.get() : matchBuffer;
+
+        CoderType payType = seqMatchCoderFor();
+        /* A pinned verdict, or one measured on a sample coder_fc could carry, can still
+           name a segment too short for it (FC_MIN_LEN bytes or less). */
+        if (payType == CoderType::FC &&
+            (payLen <= FC_MIN_LEN || payLen >= (uint32_t)FC_MAX_LEN)) {
+            payType = CoderType::BWT_CM;
+        }
+        CoderFactory::applyLevel(matchIo, payType, engineCompressLevel());
+        std::shared_ptr<coder> payCoder = CoderFactory::makeEncoder(payType, matchIo);
+        payCoder->encode_line(const_cast<uint8_t*>(payBuf), payLen);
+        payCoder->encode_flush();
+        LOG_DEBUG("SEQ match stream: rle=%d coder=%s src=%u dst=%u", (int)rle.useRle,
+                  coderTypeToMagic(payType), payLen, (uint32_t)matchIo->data_len);
+    }
+    if (matchIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode base match stream overflow: output buffer too small");
+        return -1;
+    }
+    // First sub-stream: run lengths (RLE) / whole match stream (legacy layout)
+    metaSubs.clear();
+    metaSubs["srclen"] = rle.useRle ? (Json::Value::UInt)rle.runLength : (Json::Value::UInt)srcLen;
+    metaSubs["dstlen"] = matchIo->data_len;
+    metaSubs["coder"] = matchIo->meta;
+    metaSubs["sname"] = "m";
+    if (rle.useRle) {
+        /*
+         * orgrawlen = 展开后的原始长度（= 总碱基数），解压端据此分配并还原；
+         * rlelen    = 本子流（游程段）的解码输出长度，等于上面写入的 srclen。
+         */
+        metaSubs["rle"] = (Json::Value::UInt)1;
+        metaSubs["orgrawlen"] = (Json::Value::UInt)srcLen;
+        metaSubs["rlelen"] = (Json::Value::UInt)rle.runLength;
+    }
+    metaStreams.append(metaSubs);
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + matchIo->data_len);
+    totalDstLen += matchIo->data_len;
+
+    /* Second sub-stream: the surviving non-zero values (RLE only). */
+    if (rle.useRle && rle.valLength > 0) {
+        std::shared_ptr<coder_io> valIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match val");
+        /* This half stays pinned to BWT_CM: only the run-length stream above follows
+           the field selection. Decoding dispatches on the recorded magic either way. */
+        {
+            CoderFactory::applyLevel(valIo.get(), CoderType::BWT_CM, engineCompressLevel());
+            std::shared_ptr<coder_bwt_cm> bwt = std::make_shared<coder_bwt_cm>(valIo.get());
+            bwt->encode_line(rle.val.get(), rle.valLength);
+            bwt->encode_flush();
+        }
+        if (valIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode SEQ match value stream overflow: output buffer too small");
+            return -1;
+        }
+        metaSubs.clear();
+        metaSubs["srclen"] = (Json::Value::UInt)rle.valLength;
+        metaSubs["dstlen"] = valIo->data_len;
+        metaSubs["coder"] = valIo->meta;
+        metaSubs["sname"] = "mval";
+        LOG_DEBUG("SEQ mval stream: src=%u dst=%u", rle.valLength, (uint32_t)valIo->data_len);
+        metaStreams.append(metaSubs);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + valIo->data_len);
+        totalDstLen += valIo->data_len;
+    }
+    return 0;
 }
 
 int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
@@ -3026,10 +2319,9 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         }
 
         uint32_t contentIdx = lineIdx - headEndLine;
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* seqStart = line + prevTabPos + 1;
-        uint32_t seqLength = currTabPos - prevTabPos - 1;
+        const SamFieldRange seq = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* seqStart = seq.start;
+        uint32_t seqLength = seq.lengthWithoutTab();
 
         if (seqLength == 0)  {
             continue;
@@ -3051,111 +2343,35 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         // Extract FLAG field to determine strand
         uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
 
-        uint32_t outLen = 0;
-        /* Set when this record's bases go into the payload as themselves rather than as 2-bit
-           codes; see the fallback below and the exception loop after it. */
-        bool rawBases = false;
-
         /*
-         * CIGAR-segment-based reference rebuild.
+         * CIGAR-segment-based reference rebuild: for a mapped read the SEQ is encoded per-base as a
+         * 2-bit XOR against the reference, but only on the operations that consume reference
+         * (M/=/X); operations that consume SEQ but not reference (I/S) are stored directly, and
+         * reference-only operations (D/N) only advance the reference position without producing
+         * any SEQ bytes. This is required so that indels do not cause the read to be compared
+         * against a contiguous reference window it does not actually align to, and the
+         * decompression side mirrors the same walk (see buildSeqReferenceCodedBases).
          *
-         * For a mapped read the SEQ is encoded per-base as a 2-bit XOR against
-         * the reference, but only on the operations that consume reference
-         * (M/=/X). Operations that consume SEQ but not reference (I/S) are
-         * stored directly, and reference-only operations (D/N) only advance the
-         * reference position without producing any SEQ bytes. This is required
-         * so that indels do not cause the read to be compared against a
-         * contiguous reference window it does not actually align to.
-         *
-         * The decompression side mirrors this exact CIGAR walk (same refPos
-         * progression and same per-segment encoding), guaranteeing a lossless
-         * round-trip.
+         * The branch itself is the shared one (buildSeqRecordPayload), because the codec
+         * pre-selection builds the same payload to trial the match coder on it; what stays here is
+         * what only the block pass does with it - the reference's own match statistics and the
+         * exception characters.
          */
-        bool useReference = (chrId != 0xFFFF && chrId != 0xFFFE && !(flag & 0x04));
-        int64_t refPos = 0;
-        if (useReference) {
-            int64_t chrStartPos = SamInfo::getInstance().getPositionByIndex(chrId);
-            if (chrStartPos == -1) {
-                useReference = false;
-            } else {
-                refPos = chrStartPos + startPos - 1; // SAM is 1-based
-                /* Reference-consumed span (M/D/N/=/X); guard against reads whose
-                   alignment runs past the reference end. */
-                auto crlIt = cigarReadLen.find(lineIdx);
-                uint32_t refConsumed = (crlIt != cigarReadLen.end()) ? crlIt->second : 0;
-                uint64_t needSquash = (uint64_t)(refConsumed >> 2) + !!(refConsumed & 0x3) + 1;
-                if (refPos < 0 || ((uint64_t)(refPos >> 2)) + needSquash > (uint64_t)pRefeGene->getSquashLength()) {
-                    useReference = false;
-                }
-            }
-        }
+        static const std::vector<CigarOp> emptyCigarOps;
+        /* The reference span this record's CIGAR consumes, from the parse the caller did. */
+        const auto crlIt = cigarReadLen.find(lineIdx);
+        const uint32_t refConsumed = (crlIt != cigarReadLen.end()) ? crlIt->second : 0;
+        const std::vector<CigarOp>& ops =
+            (contentIdx < cigarOpList.size()) ? cigarOpList[contentIdx] : emptyCigarOps;
 
-        const std::vector<CigarOp>& ops = (contentIdx < cigarOpList.size()) ? cigarOpList[contentIdx] : emptyCigarOps;
-        if (useReference && !ops.empty()) {
-            // Build the per-base 2-bit stream: XOR with reference for M/=/X,
-            // direct 2-bit for I/S.
-            uint32_t readPos = 0;
-            int64_t refPosLocal = refPos;
-            bool consistent = true;
-            for (size_t oi = 0; oi < ops.size(); ++oi) {
-                const CigarOp& op = ops[oi];
-                switch (op.op) {
-                    case 'M': case '=': case 'X':
-                        if (readPos + op.len > seqLength) { consistent = false; break; }
-                        pRefeGene->getStretch2Bits1Char(ref2bitBuf.get(), op.len, refPosLocal);
-                        for (uint32_t i = 0; i < op.len; ++i) {
-                            uint8_t read2 = (seqStart[readPos + i] >> 1) & 0x3;
-                            baseMappedBuffer[readPos + i] = read2 ^ ref2bitBuf[i];
-                        }
-                        readPos += op.len;
-                        refPosLocal += op.len;
-                        break;
-                    case 'I': case 'S':
-                        if (readPos + op.len > seqLength) { consistent = false; break; }
-                        for (uint32_t i = 0; i < op.len; ++i) {
-                            baseMappedBuffer[readPos + i] = (seqStart[readPos + i] >> 1) & 0x3;
-                        }
-                        readPos += op.len;
-                        break;
-                    case 'D': case 'N':
-                        refPosLocal += op.len;
-                        break;
-                    case 'H': case 'P':
-                    default:
-                        break; // consume neither SEQ nor reference
-                }
-                if (!consistent) break;
-            }
-            if (!consistent || readPos != seqLength) {
-                // CIGAR/SEQ length mismatch: fall back to direct encoding.
-                actgEncode(seqStart, baseMappedBuffer.get(), seqLength);
-                outLen = seqLength;
-            } else {
-                outLen = seqLength;
-                auto crlIt = cigarReadLen.find(lineIdx);
-                pRefeGene->updateMatchedGene((uint64_t)refPos,
-                    (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
-            }
-        } else {
-            /*
-             * No valid mapping (or no CIGAR ops to walk): this record cannot consult the
-             * reference, so its bases go into the payload as the characters they are, not as the
-             * 2-bit codes a reference-coded record uses. The two do not overlap - a 2-bit code is
-             * 0..3 and a SEQ character is at least '=' (SAMv1: [A-Za-z=.]+) - so one 8-bit slot
-             * carries either, and the decoder tells them apart by asking the same question the
-             * encoder asked: does this record take its bases from the reference (see
-             * decompressBase).
-             *
-             * This is what lets a record that cannot match anything carry N, lower case and IUPAC
-             * codes in the payload itself. The 2-bit path has to fold every non-ACGT character to
-             * one of four values and then describe the positions it got wrong in a stream of its
-             * own: on ERR14949932 (every record unmapped, 6.2% N) those streams cost 810,367 B out
-             * of the archive's 46,483,788, for a payload that is itself 215,438 B larger than the
-             * same bases written whole by the no-reference path.
-             */
-            std::memcpy(baseMappedBuffer.get(), seqStart, seqLength);
-            outLen = seqLength;
-            rawBases = true;
+        const SeqRecordPayload payload =
+            buildSeqRecordPayload(chrId, flag, startPos, refConsumed, ops, seqStart, seqLength,
+                                  pRefeGene, baseMappedBuffer.get(), ref2bitBuf.get());
+        const uint32_t outLen = payload.length;
+        const bool rawBases = payload.rawBases;
+        if (payload.usedReference) {
+            pRefeGene->updateMatchedGene((uint64_t)payload.refPos,
+                (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
         }
         /*
          * Record the characters the payload cannot carry, one list per character (see
@@ -3164,29 +2380,16 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
          * A record coded against the reference has 2-bit codes in the payload, so A/C/G/T ride
          * there and every other spelling - N, lower case, IUPAC codes - is recorded instead of
          * being silently folded, the case-insensitivity of that code being exactly the problem.
-         *
-         * A record that writes its own characters carries the plain bases and N itself, which is
-         * what makes a block of unmapped reads write no stream at all for them. The payload is
-         * still a stream of a DNA-oriented coder, though, and it does not hand back every byte it
-         * is given (lower case letters come back folded, and not all of the IUPAC codes survive),
-         * so anything outside A/C/G/T/N is recorded here as well: a file that uses those keeps the
-         * bytes it had, at the price of the stream it paid before this path existed, while the N
-         * that dominates the unmapped case - ERR14949932 is 6.2% N and nothing else - now costs
-         * nothing.
+         * A record that writes its own characters carries the plain bases and N itself; the
+         * payload is still a stream of a DNA-oriented coder, though, and it does not hand back
+         * every byte it is given, so anything outside A/C/G/T/N is recorded here as well.
          */
         for (uint32_t n = 0; n < seqLength; n++) {
             const uint8_t ch = seqStart[n];
             const bool carried = (ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T') ||
                                  (rawBases && ch == 'N');
             if (!carried) {
-                SeqExceptionClass& exc = excClasses[ch];
-                if (exc.count == 0) {
-                    excPresent.push_back(ch);
-                    if (ch != (uint8_t)'N') {
-                        exc.varint.reserve(64);
-                    }
-                }
-                exc.add(totalBaseLength + n);
+                addSeqException(excClasses, excPresent, ch, totalBaseLength + n);
             }
         }
         totalBaseLength += seqLength;
@@ -3195,13 +2398,12 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         if (outLen > 0) {
             /* Accumulate instead of encoding line-by-line: the coder is picked by
                the total length after the loop (coder_fc is block-only). */
-            if (matchLen + seqLength > inBlockPtr->getDataLen()) {
+            if (!appendSeqMatch(matchBuffer.get(), matchLen, inBlockPtr->getDataLen(),
+                                payload.bytes, payload.length)) {
                 LOG_ERROR("SEQ match buffer overflow in block %llu: %u + %u > %u",
                           inBlockPtr->getBlockId(), matchLen, seqLength, inBlockPtr->getDataLen());
                 return -1;
             }
-            std::memcpy(matchBuffer.get() + matchLen, baseMappedBuffer.get(), seqLength);
-            matchLen += seqLength;
             srcLen += seqLength;
         }
     }
@@ -3241,9 +2443,8 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
      * The crossover is sharp and sits between 99.0% and 95.6%; 98% is the middle of that window,
      * with the two kinds of block production actually hands it well away from the line - a block
      * whose reads all take their bases from the reference is 99.2% zeros, one where none do is
-     * 30-36%. The rule is a threshold rather than a trial (as the coder choice below is) because
-     * the regimes are three orders of magnitude apart in this statistic, so a trial per block would
-     * buy nothing for its cost.
+     * 30-36%. So the rule is a threshold rather than a measurement: the two regimes are three
+     * orders of magnitude apart in this statistic, and there is nothing in between to compare.
      *
      * The decision is per block, which is what lets one file hold both kinds of block - a reference
      * used for part of a file and not the rest - and each be written the better way.
@@ -3252,54 +2453,15 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
      * whether the block's SEQ meta carries the "rle" member (see initDecoder / decompressBase), and
      * a stream written without the split is byte-for-byte the form used before the split existed.
      */
-    uint32_t rleRunLen = 0;
-    uint32_t rleValLen = 0;
-    std::unique_ptr<uint8_t[]> runBuffer;
-    std::unique_ptr<uint8_t[]> valBuffer;
-    uint32_t nNonZero = 0;
-    for (uint32_t i = 0; i < matchLen; i++) {
-        if (matchBuffer[i] != 0) {
-            nNonZero++;
-        }
-    }
-    const uint32_t zeroCount = matchLen - nNonZero;
-    const bool useRle = (matchLen > 0) &&
-                        ((uint64_t)zeroCount * 100ull >= (uint64_t)matchLen * 98ull);
-    LOG_DEBUG("SEQ match: matchLen=%u zeros=%u (%.4f) nonZero=%u -> RLE split %s",
-              matchLen, zeroCount, (double)zeroCount / (double)(matchLen ? matchLen : 1),
-              nNonZero, useRle ? "on" : "off");
-    if (useRle) {
-        runBuffer = std::make_unique<uint8_t[]>((nNonZero + 1) * 5 + 16);
-        valBuffer = std::make_unique<uint8_t[]>(nNonZero + 16);
-        uint32_t rp = 0;
-        uint32_t vp = 0;
-        uint32_t run = 0;
-        for (uint32_t i = 0; i < matchLen; i++) {
-            if (matchBuffer[i] == 0) {
-                run++;
-            } else {
-                uint32_t v = run;
-                while (v >= 0x80) { runBuffer[rp++] = (uint8_t)(v | 0x80); v >>= 7; }
-                runBuffer[rp++] = (uint8_t)v;
-                valBuffer[vp++] = matchBuffer[i];
-                run = 0;
-            }
-        }
-        uint32_t tail = run;                /* trailing run of zeros */
-        while (tail >= 0x80) { runBuffer[rp++] = (uint8_t)(tail | 0x80); tail >>= 7; }
-        runBuffer[rp++] = (uint8_t)tail;
-
-        rleRunLen = rp;                     /* length of the run-length segment */
-        rleValLen = vp;                     /* length of the value segment */
-    }
+    SeqRleSplit rle = splitSeqMatchStream(matchBuffer.get(), matchLen);
 
     /*
      * Sub-stream "m": the run-length segment under RLE, otherwise the whole match
-     * stream. BWT_CM and FC both code it and the smaller wins - which of the two is
-     * smaller is a property of the data rather than something a rule predicts - and
-     * the decoder dispatches on the magic the winner recorded, so the choice needs no
-     * other bookkeeping. The trial runs once per file, not per block; see
-     * PreprocessInfo::seqMatchCoder.
+     * stream. Which coder writes it was decided once per file, before any block ran, by
+     * the codec pre-selection (see CodecSelector::selectSeqReferenceCoder / seqMatchCoderFor);
+     * here that verdict is applied, with the FC length guard above. The decoder dispatches on
+     * the magic the sub-stream's own meta records, so an archive written under a different
+     * verdict still decodes.
      *
      * What each coder is worth on this transformed layout, measured on
      * con_sorted.sam (1M reads, -l8, dual-stream RLE):
@@ -3311,72 +2473,14 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
      */
     /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
     {
-        const uint32_t payLen = useRle ? rleRunLen : matchLen;
-        uint8_t* payBuf = useRle ? runBuffer.get() : matchBuffer.get();
-
-        CoderType payType = seqMatchCoderFor(payBuf, payLen);
-        /* The verdict came from another block's segment, so a segment too short for
-           coder_fc (it refuses FC_MIN_LEN bytes or less) still falls back. */
-        if (payType == CoderType::FC &&
-            (payLen <= FC_MIN_LEN || payLen >= (uint32_t)FC_MAX_LEN)) {
-            payType = CoderType::BWT_CM;
-        }
-        CoderFactory::applyLevel(matchIo.get(), payType, engineCompressLevel());
-        std::shared_ptr<coder> payCoder = CoderFactory::makeEncoder(payType, matchIo.get());
-        payCoder->encode_line(payBuf, payLen);
-        payCoder->encode_flush();
-        LOG_DEBUG("SEQ match stream: rle=%d src=%u dst=%u", (int)useRle, payLen,
-                  (uint32_t)matchIo->data_len);
-    }
-    if (matchIo->err != coder_io::IO_OK) {
-        LOG_ERROR("Encode base match stream overflow: output buffer too small");
+    /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
+    if (writeSeqMatchStreams(rle, matchBuffer.get(), matchLen, srcLen, matchIo.get(), metaSubs,
+                             metaStreams, totalDstLen) != 0) {
         return -1;
     }
-    // First sub-stream: run lengths (RLE) / whole match stream (legacy layout)
-    metaSubs.clear();
-    metaSubs["srclen"] = useRle ? (Json::Value::UInt)rleRunLen : (Json::Value::UInt)srcLen;
-    metaSubs["dstlen"] = matchIo->data_len;
-    metaSubs["coder"] = matchIo->meta;
-    metaSubs["sname"] = "m";
-    if (useRle) {
-        /*
-         * orgrawlen = 展开后的原始长度（= 总碱基数），解压端据此分配并还原；
-         * rlelen    = 本子流（游程段）的解码输出长度，等于上面写入的 srclen。
-         */
-        metaSubs["rle"] = (Json::Value::UInt)1;
-        metaSubs["orgrawlen"] = (Json::Value::UInt)srcLen;
-        metaSubs["rlelen"] = (Json::Value::UInt)rleRunLen;
-    }
-    metaStreams.append(metaSubs);
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + matchIo->data_len);
-    totalDstLen += matchIo->data_len;
-
-    /* Second sub-stream: the surviving non-zero values (RLE only). */
-    if (useRle && rleValLen > 0) {
-        std::shared_ptr<coder_io> valIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match val");
-        /* This half stays pinned to BWT_CM: only the run-length stream above follows
-           the field selection. Decoding dispatches on the recorded magic either way. */
-        {
-            CoderFactory::applyLevel(valIo.get(), CoderType::BWT_CM, engineCompressLevel());
-            std::shared_ptr<coder_bwt_cm> bwt = std::make_shared<coder_bwt_cm>(valIo.get());
-            bwt->encode_line(valBuffer.get(), rleValLen);
-            bwt->encode_flush();
-        }
-        if (valIo->err != coder_io::IO_OK) {
-            LOG_ERROR("Encode SEQ match value stream overflow: output buffer too small");
-            return -1;
-        }
-        metaSubs.clear();
-        metaSubs["srclen"] = (Json::Value::UInt)rleValLen;
-        metaSubs["dstlen"] = valIo->data_len;
-        metaSubs["coder"] = valIo->meta;
-        metaSubs["sname"] = "mval";
-        LOG_DEBUG("SEQ mval stream: src=%u dst=%u", rleValLen, (uint32_t)valIo->data_len);
-        metaStreams.append(metaSubs);
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + valIo->data_len);
-        totalDstLen += valIo->data_len;
-    }
     totalSrcLen += srcLen;
+    }
+
 
     /*
      * SEQ exception sub-streams: one per character that is actually present, each carrying
@@ -3384,153 +2488,15 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
      * none of them, and only the 'N' character has two forms to be measured against each
      * other. They are emitted in ascending character order, so the block layout follows the
      * set of characters rather than the order in which they happened to appear.
+     *
+     * Both halves live in writeSeqExceptionStreams / writeSeqExceptionStream.
      */
-    std::sort(excPresent.begin(), excPresent.end());
-    auto emitExceptions = [&](SeqExceptionClass& exc, uint8_t ch, const char* sname,
-                              uint32_t srcLen, const uint8_t* src, uint32_t runCount) -> int32_t {
-        std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
-        CoderFactory::applyLevel(excIo.get(), CoderType::BWT_CM, engineCompressLevel());
-        std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(excIo.get());
-        subCoder->encode_line(src, srcLen);
-        subCoder->encode_flush();
-        if (excIo->err != coder_io::IO_OK) {
-            LOG_ERROR("Encode SEQ exception positions overflow: output buffer too small");
-            return -1;
-        }
-        metaSubs.clear();
-        metaSubs["srclen"] = srcLen;
-        metaSubs["dstlen"] = excIo->data_len;
-        metaSubs["coder"] = excIo->meta;
-        metaSubs["sname"] = sname;
-        metaSubs["ch"] = (Json::Value::UInt)ch;
-        metaSubs["count"] = exc.count;
-        LOG_DEBUG("SEQ exc ch=%u '%c' form=%s src=%u dst=%u count=%u runs=%u", (unsigned)ch,
-                  (char)ch, sname, srcLen, (uint32_t)excIo->data_len, exc.count, runCount);
-        if (runCount > 0) {
-            /* The run form: how many runs the two varint sections below hold. */
-            metaSubs["runs"] = (Json::Value::UInt)runCount;
-        }
-        metaStreams.append(metaSubs);
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + excIo->data_len);
-        totalSrcLen += srcLen;
-        totalDstLen += excIo->data_len;
-        return 0;
-    };
-
-    for (size_t ei = 0; ei < excPresent.size(); ++ei) {
-        const uint8_t ch = excPresent[ei];
-        SeqExceptionClass& exc = excClasses[ch];
-
-        /* Only the 'N' class keeps more than one form; the file-level trial (see
-           PreprocessInfo::nposForm) measures the candidates on the deciding block and every
-           block is written the way it says. Other characters are always in the delta form. */
-        int32_t form = 1;
-        if (ch == (uint8_t)'N') {
-            PreprocessInfo* preInfo = preprocessInfoMut();
-            form = (preInfo != nullptr)
-                ? decideOncePerFile(&preInfo->nposForm, 0, [&]() -> int32_t {
-                      const uint32_t absSize =
-                          nposFormSize((const uint8_t*)exc.abs.data(),
-                                       (uint32_t)(exc.abs.size() * sizeof(uint32_t)),
-                                       engineCompressLevel());
-                      const uint32_t varSize = nposFormSize(exc.varint.data(),
-                                                            (uint32_t)exc.varint.size(),
-                                                            engineCompressLevel());
-                      exc.closeRun();
-                      std::vector<uint8_t> runBuf;
-                      runBuf.reserve((exc.runGaps.size() << 1) + 16);
-                      buildRunForm(exc, runBuf);
-                      const uint32_t runSize = nposFormSize(runBuf.data(),
-                                                            (uint32_t)runBuf.size(),
-                                                            engineCompressLevel());
-                      /* 0 = absolute ("npos"), 1 = deltas ("nposd"), 2 = runs ("nposr"). The
-                         smallest wins; a tie keeps the earlier form, which is what an archive
-                         written before that form existed carries. */
-                      int32_t best = 0;
-                      uint32_t bestSize = absSize;
-                      if (varSize > 0 && (bestSize == 0 || varSize < bestSize)) {
-                          best = 1;
-                          bestSize = varSize;
-                      }
-                      if (runSize > 0 && (bestSize == 0 || runSize < bestSize)) {
-                          best = 2;
-                      }
-                      return best;
-                  })
-                : 0;   /* nowhere to keep a per-file verdict: the absolute form, as before */
-        }
-
-        std::vector<uint8_t> runBuf;
-        uint32_t runCount = 0;
-        const char* sname = kSeqExcDeltaName;
-        const uint8_t* src = exc.varint.data();
-        uint32_t srcLen = (uint32_t)exc.varint.size();
-        if (form == 0) {
-            sname = kSeqExcAbsName;
-            src = (const uint8_t*)exc.abs.data();
-            srcLen = (uint32_t)(exc.abs.size() * sizeof(uint32_t));
-        } else if (form == 2) {
-            exc.closeRun();
-            runBuf.reserve((exc.runGaps.size() << 1) + 16);
-            buildRunForm(exc, runBuf);
-            runCount = (uint32_t)exc.runLens.size();
-            sname = kSeqExcRunName;
-            src = runBuf.data();
-            srcLen = (uint32_t)runBuf.size();
-        }
-        if (emitExceptions(exc, ch, sname, srcLen, src, runCount) != 0) {
-            return -1;
-        }
+    if (writeSeqExceptionStreams(excClasses, excPresent, metaStreams, totalSrcLen, totalDstLen) != 0) {
+        return -1;
     }
 
-    if (minBaseLength != maxBaseLength) {
-        std::shared_ptr<coder_io> lenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ length");
-        /*
-         * The reads whose length is not already implied by their CIGAR, as (ordinal, length)
-         * pairs. Both columns go out as forward deltas in varint, with the ordinals written as
-         * one run before the lengths rather than interleaved with them: a file that is entirely
-         * unmapped - or entirely mapped - collapses its whole ordinal column into the same
-         * repeated delta, and the lengths keep statistics of their own.
-         *
-         * The absolute 4-byte pairs this replaces cost 8 B per read: on ERR14949932, whose
-         * 3,343,586 reads are all unmapped, 26,748,688 B of source compressed to 6,171,912 B,
-         * where CRAM's read-length series needs 1,302,132 B for the same reads.
-         */
-        std::vector<uint8_t> lenBuf;
-        lenBuf.reserve((unmapedReadLength.size() << 1) + 16);
-        uint32_t prevOrdinal = 0;
-        for (const auto& entry : unmapedReadLength) {
-            appendVarint(lenBuf, entry.first - prevOrdinal);
-            prevOrdinal = entry.first;
-        }
-        for (const auto& entry : unmapedReadLength) {
-            appendVarint(lenBuf, entry.second);
-        }
-
-        CoderFactory::applyLevel(lenIo.get(), CoderType::BWT_CM, engineCompressLevel());
-        std::shared_ptr<coder_bwt_cm> lenCoder = std::make_shared<coder_bwt_cm>(lenIo.get());
-        lenCoder->encode_line(lenBuf.data(), (uint32_t)lenBuf.size());
-        lenCoder->encode_flush();
-        if (lenIo->err != coder_io::IO_OK) {
-            LOG_ERROR("Encode base length stream overflow: output buffer too small");
-            return -1;
-        }
-
-        metaSubs.clear();
-        metaSubs["srclen"] = (Json::Value::UInt)lenBuf.size();
-        metaSubs["dstlen"] = lenIo->data_len;
-        metaSubs["coder"] = lenIo->meta;
-        metaSubs["sname"] = "baselen";
-        /* The delta layout, and how many entries each of the two runs holds; a stream without
-           these carries the absolute pairs this replaced. */
-        metaSubs["count"] = (Json::Value::UInt)unmapedReadLength.size();
-        metaSubs["delta"] = (Json::Value::UInt)1;
-        LOG_DEBUG("SEQ baselen stream: entries=%u src=%u dst=%u", (uint32_t)unmapedReadLength.size(),
-                  (uint32_t)lenBuf.size(), (uint32_t)lenIo->data_len);
-        metaStreams.append(metaSubs);
-        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + lenIo->data_len);
-        totalSrcLen += (uint32_t)lenBuf.size();
-        totalDstLen += lenIo->data_len;
+    if (writeSeqBaseLengthStream(metaSubs, metaStreams, totalSrcLen, totalDstLen) != 0) {
+        return -1;
     }
 
     // Set metadata
@@ -3566,127 +2532,111 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     return totalDstLen;
 }
 
-int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::chrono::steady_clock::time_point qualT0, qualT1, qualT2;
-    qualT0 = pbgzprof::nowOrZero();
+int32_t SamCodecActuator::writeSeqExceptionStream(SeqExceptionClass& exc, uint8_t ch,
+                                                   const char* sname, uint32_t srcLen,
+                                                   const uint8_t* src, uint32_t runCount,
+                                                   Json::Value& streamMeta, uint32_t& totalSrcLen,
+                                                   uint32_t& totalDstLen)
+{
+    std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
+    CoderFactory::applyLevel(excIo.get(), CoderType::BWT_CM, engineCompressLevel());
+    std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(excIo.get());
+    subCoder->encode_line(src, srcLen);
+    subCoder->encode_flush();
+    if (excIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode SEQ exception positions overflow: output buffer too small");
+        return -1;
+    }
+    Json::Value metaSubs;
+    metaSubs["srclen"] = srcLen;
+    metaSubs["dstlen"] = excIo->data_len;
+    metaSubs["coder"] = excIo->meta;
+    metaSubs["sname"] = sname;
+    metaSubs["ch"] = (Json::Value::UInt)ch;
+    metaSubs["count"] = exc.count;
+    LOG_DEBUG("SEQ exc ch=%u '%c' form=%s src=%u dst=%u count=%u runs=%u", (unsigned)ch,
+              (char)ch, sname, srcLen, (uint32_t)excIo->data_len, exc.count, runCount);
+    if (runCount > 0) {
+        /* The run form: how many runs the two varint sections below hold. */
+        metaSubs["runs"] = (Json::Value::UInt)runCount;
+    }
+    streamMeta.append(metaSubs);
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + excIo->data_len);
+    totalSrcLen += srcLen;
+    totalDstLen += excIo->data_len;
+    return 0;
+}
+
+int32_t SamCodecActuator::writeSeqExceptionStreams(std::vector<SeqExceptionClass>& excClasses,
+                                                   std::vector<uint8_t>& excPresent,
+                                                   Json::Value& streamMeta, uint32_t& totalSrcLen,
+                                                   uint32_t& totalDstLen)
+{
+    std::sort(excPresent.begin(), excPresent.end());
+    for (size_t ei = 0; ei < excPresent.size(); ++ei) {
+        const uint8_t ch = excPresent[ei];
+        SeqExceptionClass& exc = excClasses[ch];
+
+        /*
+         * Only the 'N' class keeps more than one form, and the form arrives as a verdict from the
+         * codec pre-selection, which measured the three candidates on the first block before any
+         * block was dispatched (see CodecSelector::selectSeqReferenceCoder). Nothing is measured
+         * here: writing a block is not a place to be comparing coders, and every block of the file
+         * writes the one form the file's first block settled. A file the pre-selection could not
+         * judge - its first block carried no N at all - keeps the absolute form, which is what this
+         * stream held before the trial existed. The other characters are always in the delta form.
+         */
+        int32_t form = 1;
+        if (ch == (uint8_t)'N') {
+            PreprocessInfo* preInfo = preprocessInfoMut();
+            const int32_t decided =
+                (preInfo != nullptr) ? preInfo->nposForm.load(std::memory_order_relaxed) : -1;
+            form = (decided >= 0) ? decided : 0;
+        }
+
+        std::vector<uint8_t> runBuf;
+        uint32_t runCount = 0;
+        const char* sname = kSeqExcDeltaName;
+        const uint8_t* src = exc.varint.data();
+        uint32_t srcLen = (uint32_t)exc.varint.size();
+        if (form == 0) {
+            sname = kSeqExcAbsName;
+            src = (const uint8_t*)exc.abs.data();
+            srcLen = (uint32_t)(exc.abs.size() * sizeof(uint32_t));
+        } else if (form == 2) {
+            exc.closeRun();
+            runBuf.reserve((exc.runGaps.size() << 1) + 16);
+            buildRunForm(exc, runBuf);
+            runCount = (uint32_t)exc.runLens.size();
+            sname = kSeqExcRunName;
+            src = runBuf.data();
+            srcLen = (uint32_t)runBuf.size();
+        }
+        if (writeSeqExceptionStream(exc, ch, sname, srcLen, src, runCount, streamMeta,
+                                    totalSrcLen, totalDstLen) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Encode the QUAL column record by record, through whichever coder the pre-selection's trial
+ * picked (see qual_record_encoder) - all this step knows is how to hand one record over.
+ *
+ * Three details it does carry: a record whose quality is the single '*' for "missing" is expanded
+ * into seqLen '*' first, or the length the decoder fetches by SEQ/CIGAR would not match the one
+ * byte written here and the whole column would shift out of alignment (the decoder folds it back,
+ * see decompressQuality); the SEQ column is passed along as context; and the strand direction is
+ * read out of FLAG by hand (bit 0x10), since only coder_fcv2 wants it.
+ *
+ * Returns the column's source length - the quality text itself, without the auxiliary stream.
+ */
+uint32_t SamCodecActuator::encodeQualRecords(qual_record_encoder* encoder, uint32_t lineNum,
+                                                   uint32_t fieldIdx, bool needStrand)
+{
     std::vector<size_t>& npos = inBlockPtr->getNpos();
-    uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
-
-    // Create quality encoder similar to FastqActuator
-    std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
-
-    /*
-     * Quality values can use two coders. coder_qual is the original one and uses
-     * SEQ as context; fcv2 is a context-mixing coder that uses the previous and
-     * second-previous quality values, the in-record sequencing-cycle number, and
-     * the strand direction as context.
-     *
-     * Which one is used is decided by the preprocessing trial results. The
-     * quality column goes through a dedicated evaluation path (QualSelector),
-     * whose two candidates are these coders; samples are collected per record
-     * and therefore preserve record boundaries and strand direction.
-     *
-     * When preprocessing did not run, was skipped because the sample was too
-     * small, or the current engine provides no preprocessing information,
-     * coderFor returns the passed-in fallback QUAL, i.e. the original
-     * coder_qual, behaving exactly as before selection was wired in.
-     */
-    int64_t qualPriorAddress = -1;
-    CoderType pickedQualCoder = CoderType::QUAL;
-    const PreprocessInfo* qualPreInfo =
-        (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
-    if (qualPreInfo != nullptr) {
-        pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, samFieldDefaultCoder(SAM_QUAL, CoderType::QUAL));
-    }
-    const bool useFcv2 = (pickedQualCoder == CoderType::FCV2);
-    const bool useBwtCm = (pickedQualCoder == CoderType::BWT_CM);
-    std::shared_ptr<coder_qual> qualityCoder;
-    std::shared_ptr<coder_fcv2> fcv2Coder;
-    std::shared_ptr<coder_bwt_cm> qualCmCoder;
-    if (useFcv2) {
-        /*
-         * If preprocessing picks fcv2, it also hands over the context parameter
-         * tier; the encoding side creates the coder with the same tier used for
-         * prior training, and the tier is written into the stream header for the
-         * decoding side to read back. Without preprocessing, it falls back to
-         * the default tier, consistent with cold-start behavior.
-         */
-        Fcv2Cfg fcv2Cfg;
-        const FieldCodecSelection* qualSel =
-            (qualPreInfo != nullptr) ? qualPreInfo->getField(SAM_QUAL) : nullptr;
-        if (qualSel != nullptr && qualSel->selectedCoder == CoderType::FCV2) {
-            fcv2Cfg.cycleMax = qualSel->fcv2Params.cycleMax;
-            fcv2Cfg.cycleBucket = qualSel->fcv2Params.cycleBucket;
-            fcv2Cfg.deltaMax = qualSel->fcv2Params.deltaMax;
-            fcv2Cfg.deltaBucket = qualSel->fcv2Params.deltaBucket;
-            fcv2Cfg.prevShift = qualSel->fcv2Params.prevShift;
-            fcv2Cfg.useDelta = qualSel->fcv2Params.useDelta;
-            fcv2Cfg.useDedup = qualSel->fcv2Params.useDedup;
-            fcv2Cfg.useQa = qualSel->fcv2Params.useQa;
-            fcv2Cfg.modelCount = qualSel->fcv2Params.modelCount;
-        }
-        std::vector<uint32_t> freqByByte(256, 0);
-        for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
-            uint32_t b = (uint32_t)qualFreqTable[i].first + (uint32_t)'!';
-            if (b < 256) {
-                /* qualFreqTable keeps only the alphabet in frequency-descending
-                   order; the actual counts were not retained. A monotonically
-                   decreasing weight is derived from the rank here, used only to
-                   shape the Huffman tree. */
-                freqByByte[b] = (uint32_t)(qualFreqTable.size() - i);
-            }
-        }
-        /*
-         * When a prior exists, start from it: the model need not relearn from
-         * fixed initial values, and the gain is larger for smaller blocks. The
-         * prior's absolute address must be written into the block meta—the
-         * decoding side can only match up if it obtains the same snapshot, and
-         * in random-access scenarios it cannot infer this address by walking the
-         * sequential stream.
-         *
-         * A load failure on the compression side is a benign fallback (the
-         * fixed-initial model is kept, only the ratio suffers), so the address
-         * is registered only when loaded is true, avoiding a promise the
-         * decoding side cannot honor.
-         */
-        qualPriorAddress = (pbgzEngine != nullptr) ? pbgzEngine->getQualPriorAddress() : -1;
-        AuxPayloadPtr priorBlob =
-            (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(0) : AuxPayloadPtr();
-        bool priorLoaded = false;
-        pbgzprof::addSince(pbgzprof::QUAL_PREP, qualT0);
-        qualT1 = pbgzprof::nowOrZero();
-        if (priorBlob && !priorBlob->empty()) {
-            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte, fcv2Cfg,
-                                                     *priorBlob, &priorLoaded);
-        } else {
-            fcv2Coder = std::make_shared<coder_fcv2>(qualityIo.get(), freqByByte, fcv2Cfg);
-        }
-        if (!priorLoaded) {
-            qualPriorAddress = -1;
-        }
-    } else if (useBwtCm) {
-        /*
-         * bwt_cm needs no alphabet and no SEQ or strand direction; feed quality
-         * values record by record. It is the second choice when fcv2 does not
-         * apply: empirically 7.4 percentage points better than coder_qual.
-         */
-        qualT1 = pbgzprof::nowOrZero();   /* nothing to prepare on this path */
-        qualCmCoder = std::make_shared<coder_bwt_cm>(qualityIo.get());
-        CoderFactory::applyLevel(qualityIo.get(), CoderType::BWT_CM, engineCompressLevel());
-    } else {
-        qualT1 = pbgzprof::nowOrZero();
-        qualityCoder = std::make_shared<coder_qual>(qualityIo.get(), true, qualFreqTable);
-    }
-    /* Every path above starts its measurement, so this is the constructor's cost on all of them. */
-    pbgzprof::addSince(pbgzprof::QUAL_CTOR, qualT1);
-    qualT2 = pbgzprof::nowOrZero();
-
-    uint32_t totalSrcLength = 0;
-    uint32_t totalDstLength = 0;
-    Json::Value streamMeta;
-
-    // Encode quality data
     uint32_t streamSrcLen = 0;
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -3705,10 +2655,9 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
             continue;
         }
 
-        uint32_t prevTabPos = contentPos[contentIdx][fieldIdx - 1];
-        uint32_t currTabPos = (fieldIdx < contentPos[contentIdx].size()) ? contentPos[contentIdx][fieldIdx] : lineEnd;
-        uint8_t* qualStart = line + prevTabPos + 1;
-        uint32_t qualLength = currTabPos - prevTabPos - 1;
+        const SamFieldRange qual = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        uint8_t* qualStart = qual.start;
+        uint32_t qualLength = qual.lengthWithoutTab();
 
         if (qualLength == 0) {
             continue;
@@ -3736,66 +2685,43 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
             qualLength = seqLen;
         }
 
-        if (useFcv2) {
-            /*
-             * Take the strand direction from the FLAG field. Per the SAM spec,
-             * bit 0x10 being set means SEQ and QUAL are stored relative to the
-             * reference's forward strand, i.e. reversed relative to the order
-             * read out by the sequencer, and the coder must use this to restore
-             * the real cycle number. The field is parsed by hand rather than
-             * with strtol because it is not NUL-terminated and this is a hot
-             * path taken for every record.
-             */
-            bool rev = false;
-            if (contentPos[contentIdx].size() > 1) {
-                uint32_t flagBeg = contentPos[contentIdx][0] + 1;
-                uint32_t flagEnd = contentPos[contentIdx][1];
-                long flagVal = 0;
-                for (uint32_t fp = flagBeg; fp < flagEnd; ++fp) {
-                    uint8_t ch = line[fp];
-                    if (ch < '0' || ch > '9') break;
-                    flagVal = flagVal * 10 + (ch - '0');
-                }
-                rev = (flagVal & 16) != 0;
+        /*
+         * Take the strand direction from the FLAG field. Per the SAM spec, bit 0x10 being
+         * set means SEQ and QUAL are stored relative to the reference's forward strand, i.e.
+         * reversed relative to the order read out by the sequencer, and a coder that models
+         * sequencing cycles must use this to restore the real cycle number. The field is
+         * parsed by hand rather than with strtol because it is not NUL-terminated and this
+         * is a hot path taken for every record.
+         */
+        bool rev = false;
+        if (needStrand && contentPos[contentIdx].size() > 1) {
+            uint32_t flagBeg = contentPos[contentIdx][0] + 1;
+            uint32_t flagEnd = contentPos[contentIdx][1];
+            long flagVal = 0;
+            for (uint32_t fp = flagBeg; fp < flagEnd; ++fp) {
+                uint8_t ch = line[fp];
+                if (ch < '0' || ch > '9') break;
+                flagVal = flagVal * 10 + (ch - '0');
             }
-            fcv2Coder->encode_record(qualStart, qualLength, rev, seqStart, seqLen);
-        } else if (useBwtCm) {
-            qualCmCoder->encode_line(qualStart, qualLength);
-        } else {
-            // Encode quality with sequence context
-            qualityCoder->encode_qual_gen2(seqStart, qualStart, qualLength);
+            rev = (flagVal & 16) != 0;
         }
+        encoder->encode_record(qualStart, qualLength, seqStart, seqLen, rev);
         streamSrcLen += qualLength;
     }
+    return streamSrcLen;
+}
 
-    if (useFcv2) {
-        fcv2Coder->encode_flush();
-    } else if (useBwtCm) {
-        qualCmCoder->encode_flush();
-    } else {
-        qualityCoder->encode_flush();
-    }
-    pbgzprof::addSince(pbgzprof::QUAL_CODEC, qualT2);
-    if (qualityIo->err != coder_io::IO_OK) {
-        LOG_ERROR("Encode quality overflow: output buffer too small");
-        return -1;
-    }
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + qualityIo->data_len);
-
-    Json::Value subMeta;
-    subMeta["srclen"] = streamSrcLen;
-    subMeta["dstlen"] = qualityIo->data_len;
-    subMeta["coder"] = qualityIo->meta;
-    if (qualPriorAddress >= 0) {
-        /* Absolute file offset of the prior block container header; the decoding side uses it to retrieve the same snapshot. */
-        subMeta["prior"] = (Json::Value::Int64)qualPriorAddress;
-    }
-    streamMeta.append(subMeta);
-
-    totalSrcLength += streamSrcLen;
-    totalDstLength += qualityIo->data_len;
-
-    // Encode quality frequency table
+/*
+ * Write the quality column's frequency table as an auxiliary stream: the alphabet in
+ * frequency-descending order, two uint16 per entry (byte and weight), coded with BWT_CM.
+ *
+ * The decoder needs it to rebuild the coder's alphabet before the first record, and the stream
+ * counts toward the field's totalsrclen (the original accounting) although the column's own source
+ * length excludes it.
+ */
+int32_t SamCodecActuator::writeQualFreqStream(Json::Value& subMeta, Json::Value& streamMeta,
+                                               uint32_t& totalSrcLength, uint32_t& totalDstLength)
+{
     std::shared_ptr<coder_io> qualityFreqIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL freq table");
     std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
     CoderFactory::applyLevel(qualityFreqIo.get(), CoderType::BWT_CM, engineCompressLevel());
@@ -3825,6 +2751,114 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     /* The frequency-table auxiliary stream still counts toward meta's totalsrclen (original accounting preserved). */
     totalSrcLength += freqSrcLen;
     totalDstLength += qualityFreqIo->data_len;
+    return 0;
+}
+
+int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    std::chrono::steady_clock::time_point qualT0, qualT1, qualT2;
+    qualT0 = pbgzprof::nowOrZero();
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    uint32_t lineNum = npos.size();
+
+    // Create quality encoder similar to FastqActuator
+    std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
+
+    /*
+     * Quality values can use two coders. coder_qual is the original one and uses
+     * SEQ as context; fcv2 is a context-mixing coder that uses the previous and
+     * second-previous quality values, the in-record sequencing-cycle number, and
+     * the strand direction as context.
+     *
+     * Which one is used is decided by the preprocessing trial results. The
+     * quality column goes through a dedicated evaluation path (QualSelector),
+     * whose two candidates are these coders; samples are collected per record
+     * and therefore preserve record boundaries and strand direction.
+     *
+     * When preprocessing did not run, was skipped because the sample was too
+     * small, or the current engine provides no preprocessing information,
+     * coderFor returns the passed-in fallback QUAL, i.e. the original
+     * coder_qual, behaving exactly as before selection was wired in.
+     */
+    int64_t qualPriorAddress = -1;
+    CoderType pickedQualCoder = CoderType::QUAL;
+    const PreprocessInfo* qualPreInfo =
+        (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
+    if (qualPreInfo != nullptr) {
+        pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, samFieldDefaultCoder(SAM_QUAL, CoderType::QUAL));
+    }
+    /*
+     * Turning that verdict into an encoder - the quality alphabet, the fcv2 context tier
+     * the trial settled on, the trained prior - is the factory's business, not this
+     * actuator's (see CoderFactory::makeQualEncoder). All this side has to know is how to
+     * feed a record, which is what qual_record_encoder offers whichever coder won.
+     *
+     * The prior's absolute address must be written into the block meta: the decoding side
+     * can only match up if it obtains the same snapshot, and in random-access scenarios it
+     * cannot infer the address by walking the sequential stream. It is registered only when
+     * the snapshot was actually loaded, so the decoder is never promised one it cannot get.
+     */
+    AuxPayloadPtr qualPriorBlob =
+        (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(0) : AuxPayloadPtr();
+    bool qualPriorLoaded = false;
+    QualCoderArgs qualCoderArgs;
+    qualCoderArgs.freqTable = qualFreqTable.empty() ? nullptr : &qualFreqTable;
+    const FieldCodecSelection* qualSel =
+        (qualPreInfo != nullptr) ? qualPreInfo->getField(SAM_QUAL) : nullptr;
+    qualCoderArgs.fcv2Params =
+        (qualSel != nullptr && qualSel->selectedCoder == CoderType::FCV2) ? &qualSel->fcv2Params
+                                                                         : nullptr;
+    qualCoderArgs.priorBlob = qualPriorBlob.get();
+    qualCoderArgs.priorLoaded = &qualPriorLoaded;
+    qualPriorAddress = (pbgzEngine != nullptr) ? pbgzEngine->getQualPriorAddress() : -1;
+
+    qualT1 = pbgzprof::nowOrZero();
+    std::shared_ptr<qual_record_encoder> qualEncoder =
+        CoderFactory::makeQualEncoder(pickedQualCoder, qualityIo.get(), qualCoderArgs,
+                                      engineCompressLevel());
+    pbgzprof::addSince(pbgzprof::QUAL_PREP, qualT0);
+    if (!qualPriorLoaded) {
+        qualPriorAddress = -1;
+    }
+    /* The measurement above covers the constructor's cost on every path. */
+    pbgzprof::addSince(pbgzprof::QUAL_CTOR, qualT1);
+    qualT2 = pbgzprof::nowOrZero();
+
+    /* Only coder_fcv2 restores the sequencing cycle from the strand direction. */
+    const bool needStrand = (pickedQualCoder == CoderType::FCV2);
+
+    uint32_t totalSrcLength = 0;
+    uint32_t totalDstLength = 0;
+    Json::Value streamMeta;
+
+    // Encode quality data (see encodeQualRecords); the encoder is committed below.
+    const uint32_t streamSrcLen = encodeQualRecords(qualEncoder.get(), lineNum, fieldIdx, needStrand);
+
+    qualEncoder->flush();
+    pbgzprof::addSince(pbgzprof::QUAL_CODEC, qualT2);
+    if (qualityIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode quality overflow: output buffer too small");
+        return -1;
+    }
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + qualityIo->data_len);
+
+    Json::Value subMeta;
+    subMeta["srclen"] = streamSrcLen;
+    subMeta["dstlen"] = qualityIo->data_len;
+    subMeta["coder"] = qualityIo->meta;
+    if (qualPriorAddress >= 0) {
+        /* Absolute file offset of the prior block container header; the decoding side uses it to retrieve the same snapshot. */
+        subMeta["prior"] = (Json::Value::Int64)qualPriorAddress;
+    }
+    streamMeta.append(subMeta);
+
+    totalSrcLength += streamSrcLen;
+    totalDstLength += qualityIo->data_len;
+
+    // Encode quality frequency table
+    /* The quality frequency table travels as an auxiliary stream: see writeQualFreqStream. */
+    if (writeQualFreqStream(subMeta, streamMeta, totalSrcLength, totalDstLength) != 0) {
+        return -1;
+    }
 
     // Set field metadata
     fieldMeta["totalsrclen"] = totalSrcLength;
@@ -4018,6 +3052,18 @@ int32_t SamCodecActuator::decompress() {
     return 0;
 }
 
+/*
+ * Decode one line's fields, in order, appending each to the output block.
+ *
+ * The dispatch is per field, because the layout of a column is the stream's own business: ID has
+ * its own split/coder machinery, SEQ and QUAL need the coder that wrote them, POS/PNEXT/CIGAR/TLEN
+ * come from the pre-decode cache when preDecodeForTLEN filled it (see copyPreDecodedField below)
+ * and fall back to their own decoders otherwise, and the trailing optional fields are ordinary
+ * text with the block's final tab turned into a newline.
+ *
+ * SEQ's landing spot and length travel back in `st`, because QUAL is decoded against them.
+ */
+
 int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr || outputBlock == nullptr) {
         LOG_ERROR("Invalid parameter, inBlockPtr or outputBlock is nullptr for SAM field-by-field decompression");
@@ -4089,6 +3135,11 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
     }
 
     /* Copy the pre-decoded field bytes to avoid decoding again; returns -1 when not cached. */
+
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        // Decode each field for this line
+        uint8_t* basePtr = nullptr;
+        uint32_t actualBaseLen = 0;
     auto copyPreDecodedField = [&](uint32_t fieldIdx, uint32_t lineNo) -> int32_t {
         auto preIt = tlenPreDecodedFields.find(fieldIdx);
         if (preIt != tlenPreDecodedFields.end() && lineNo < preIt->second.size() && !preIt->second[lineNo].empty()) {
@@ -4099,11 +3150,6 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         }
         return -1;
     };
-
-    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-        uint8_t* basePtr = nullptr;
-        uint32_t actualBaseLen = 0;
-        // Decode each field for this line
         for (uint32_t fieldIdx = 0; fieldIdx < fieldCount; ++fieldIdx) {
             int32_t decoderLen = 0;
             if (fieldIdx == 0) {    /// ID
@@ -4299,6 +3345,383 @@ static int32_t expandCounterSubStream(const uint8_t* payload, uint32_t payloadLe
     return (int32_t)wp;
 }
 
+/*
+ * Build the ID/QNAME column: one decoder per split sub-stream, plus the payload state each
+ * segment layout needs (the reading side of collectIdSplitSegments, buildIdDictLayout,
+ * buildIdHexLayout and buildIdValueLayouts).
+ *
+ * A decoder is only built for the layouts whose stream carries a coder of its own. A constant,
+ * a dictionary, a fixed alphabet, a counter and the value-domain layouts all put their bytes
+ * in the block raw and are walked per line by decompressIdField, so their slot holds no
+ * decoder - which is what the nulls in idDecoders mean.
+ */
+int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
+{
+    std::string idSplit = idMeta["splitsym"].asString();
+    for (uint32_t i = 0; i < idSplit.length(); ++i) {
+        idAnalysis.symbols.push_back(idSplit.c_str()[i]);
+    }
+    Json::Value& idStreamMeta = idMeta["streams"];
+    if (idStreamMeta.size() != idAnalysis.symbols.size()) {
+        LOG_ERROR("id streams not match id split, expect:%u, actual:%u", idAnalysis.symbols.size(), idStreamMeta.size());
+        return -1;
+    }
+
+    // ID decoders
+    idStreamOffsets.clear();
+    idStreamDstLens.clear();
+    idStreamCoders.clear();
+    clearIdNumericState();
+    for (uint32_t i = 0; i < idStreamMeta.size(); ++i) {
+        std::string coderName = idStreamMeta[i]["coder"]["magic"].asString();
+        uint32_t dstLength = idStreamMeta[i]["dstlen"].asUInt();
+        idStreamOffsets.push_back(readOffset);
+        idStreamDstLens.push_back(dstLength);
+        idStreamCoders.push_back(coderName);
+        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "QNAME sub-stream");
+        ioVector.push_back(io);
+        const bool isNumeric = idStreamMeta[i].isMember("mode") &&
+                               idStreamMeta[i]["mode"].asString() == "numeric";
+        const bool isInt = idStreamMeta[i].isMember("mode") &&
+                           idStreamMeta[i]["mode"].asString() == "intd";
+        const bool isConst = idStreamMeta[i].isMember("mode") &&
+                             idStreamMeta[i]["mode"].asString() == "const";
+        const bool isCnt = idStreamMeta[i].isMember("mode") &&
+                           idStreamMeta[i]["mode"].asString() == "cnt";
+        const bool isIntu = idStreamMeta[i].isMember("mode") &&
+                            idStreamMeta[i]["mode"].asString() == "intu";
+        const bool isDict = idStreamMeta[i].isMember("mode") &&
+                            idStreamMeta[i]["mode"].asString() == "dict";
+        const bool isHex = idStreamMeta[i].isMember("mode") &&
+                           idStreamMeta[i]["mode"].asString() == "hexd";
+        if (isConst) {
+            /* The payload is the segment's own text, stored once for the whole block. */
+            idDecoders.push_back(nullptr);
+        } else if (isDict) {
+            /* The payload is a dictionary plus an index per line: no coder of its own. */
+            idDecoders.push_back(nullptr);
+        } else if (isHex) {
+            /* The payload is uniform character codes: no coder of its own either. */
+            idDecoders.push_back(nullptr);
+        } else if (isCnt) {
+            /* The payload is a coded delta sequence: neither text nor a varint buffer. */
+            idDecoders.push_back(nullptr);
+        } else if (isInt || isIntu) {
+            /* The payload is the value-domain stream itself (no outer coder). */
+            idDecoders.push_back(nullptr);
+        } else if (coderName == "coder_affix_match" || coderName == "coder_bwt_cm") {
+            /*
+             * Which decoder the sub-stream needs is the stream's own business (see
+             * CoderFactory::makeFieldDecoder), and the level it was written with
+             * travels in its own meta.
+             */
+            FieldDecoderArgs idArgs;
+            idArgs.level = idStreamMeta[i]["coder"]["level"].asInt();
+            std::shared_ptr<coder> idDec =
+                CoderFactory::makeFieldDecoder(coderName, io.get(), idArgs);
+            if (idDec == nullptr) {
+                LOG_ERROR("Unsupport coder name:%s", coderName.c_str());
+                return -1;
+            }
+            idDecoders.push_back(idDec);
+        } else if (coderName == "coder_qname") {
+            idUsesQnameCoder = true;
+            idDecoders.push_back(CoderFactory::makeFieldDecoder(coderName, io.get(),
+                                                                FieldDecoderArgs()));
+        } else {
+            LOG_ERROR("Unsupport coder name:%s", coderName.c_str());
+            return -1;
+        }
+
+        /*
+         * Numeric sub-streams carry no per-line terminator, so they cannot
+         * be decoded one segment per line the way the textual path does.
+         * Decode the whole varint stream once here and serve one value per
+         * line from idNumericPos (see decompressIdField). The value-domain
+         * layout ("intd") works the same way, except that its payload needs
+         * no undoing: the range decoder walks it one value per line.
+         */
+        uint8_t* nbuf = nullptr;
+        uint32_t nlen = 0;
+        RangeCoder intRc;
+        id_int::Model intModel;
+        uint8_t intActive = 0;
+        std::vector<std::string> dictEntries;
+        IdHexAlphabet hexAlpha;
+        RangeCoder hexRc;
+        if (isNumeric) {
+            const uint32_t numSrcLen = idStreamMeta[i]["srclen"].asUInt();
+            nbuf = MemoryUtil::safeAlloc<uint8_t>(numSrcLen + 1);
+            if (nbuf == nullptr) {
+                return -1;
+            }
+            int32_t dl = idDecoders[i]->decode_line(nbuf, numSrcLen, UINT8_MAX, false);
+            if (dl < 0) {
+                MemoryUtil::safeFree(nbuf);
+                LOG_ERROR("Decode id numeric sub-stream(%u) failed: %d", i, dl);
+                return -1;
+            }
+            nlen = (uint32_t)dl;
+        } else if (isInt || isIntu) {
+            nbuf = MemoryUtil::safeAlloc<uint8_t>(dstLength + 1);
+            if (nbuf == nullptr) {
+                return -1;
+            }
+            memcpy(nbuf, inBlockPtr->getBuffer() + readOffset, dstLength);
+            nlen = dstLength;
+            if (isIntu) {
+                /* The values' exact range, with no model at all (see Model::resetUniform). */
+                intModel.resetUniform(idStreamMeta[i]["intb"].asUInt(),
+                                      idStreamMeta[i]["intn"].asUInt());
+            } else {
+                intModel.reset(idStreamMeta[i]["intw"].asUInt(), idStreamMeta[i]["intk"].asUInt());
+            }
+            intRc.input((char*)nbuf, (char*)nbuf + nlen);
+            intRc.StartDecode();
+            if (intRc.err != 0) {
+                MemoryUtil::safeFree(nbuf);
+                LOG_ERROR("Decode id value-domain sub-stream(%u) failed", i);
+                return -1;
+            }
+            intActive = 1;
+        } else if (isCnt) {
+            /*
+             * A counter's deltas, run-length coded (see id_int::Counter), expanded into the
+             * very zigzag varint form the numeric layout carries - the layout this one
+             * competes with - so nothing downstream has to know which of the two won: one
+             * delta per line, same buffer, same per-line accumulation.
+             */
+            const uint32_t numSrcLen = idStreamMeta[i]["srclen"].asUInt();
+            nbuf = MemoryUtil::safeAlloc<uint8_t>(numSrcLen + 8);
+            if (nbuf == nullptr) {
+                return -1;
+            }
+            const int32_t wp = expandCounterSubStream(inBlockPtr->getBuffer() + readOffset,
+                                                      dstLength, idStreamMeta[i], nbuf,
+                                                      numSrcLen + 8);
+            if (wp < 0) {
+                MemoryUtil::safeFree(nbuf);
+                LOG_ERROR("Decode id counter sub-stream(%u) failed", i);
+                return -1;
+            }
+            nlen = (uint32_t)wp;
+        } else if (isDict) {
+            /*
+             * A low-cardinality segment: the block's few distinct texts sit at the head of the
+             * payload and every line is an index into them, coded through id_int::Model - the
+             * same value layout the "intd" case uses, so the per-sub-stream state already
+             * kept here serves both. What the index means differs, and the reconstruction
+             * below knows that.
+             */
+            const uint8_t* p = inBlockPtr->getBuffer() + readOffset;
+            uint32_t pos = 0;
+            uint32_t num = 0;
+            if (!readVarint(p, dstLength, pos, num) || num < 2 || num > kMaxDictEntries) {
+                LOG_ERROR("Decode id dictionary sub-stream(%u): bad entry count", i);
+                return -1;
+            }
+            for (uint32_t e = 0; e < num; ++e) {
+                uint32_t len = 0;
+                if (!readVarint(p, dstLength, pos, len) || len > dstLength - pos) {
+                    LOG_ERROR("Decode id dictionary sub-stream(%u): truncated entry", i);
+                    return -1;
+                }
+                dictEntries.push_back(std::string((const char*)p + pos, len));
+                pos += len;
+            }
+            /*
+             * The index stream is a counter layout (see id_int::Counter): its deltas are
+             * expanded here into one absolute index per line, which is what the per-line
+             * reconstruction reads.
+             */
+            const uint32_t numValues = idStreamMeta[i]["numv"].asUInt();
+            const uint8_t* ip = p + pos;
+            const uint32_t ilen = dstLength - pos;
+            RangeCoder idxRc;
+            idxRc.input((char*)ip, (char*)(ip + ilen));
+            idxRc.StartDecode();
+            if (idxRc.err != 0) {
+                LOG_ERROR("Decode id dictionary sub-stream(%u) failed", i);
+                return -1;
+            }
+            const uint32_t ibufLen = numValues * 5 + 8;
+            nbuf = MemoryUtil::safeAlloc<uint8_t>(ibufLen);
+            if (nbuf == nullptr) {
+                return -1;
+            }
+            id_int::Counter idxCounter;
+            idxCounter.reset(idStreamMeta[i]["intw"].asUInt(), idStreamMeta[i]["intk"].asUInt());
+            uint32_t wp = 0;
+            int64_t acc = 0;
+            for (uint32_t k = 0; k < numValues; ++k) {
+                acc += idxCounter.decode(idxRc);
+                if (acc < 0 || (uint64_t)acc >= dictEntries.size() || wp + 5 > ibufLen) {
+                    MemoryUtil::safeFree(nbuf);
+                    LOG_ERROR("Decode id dictionary sub-stream(%u): index out of range", i);
+                    return -1;
+                }
+                wp += tlenPutVarint(nbuf + wp, (uint32_t)acc);
+            }
+            nlen = wp;
+        } else if (isHex) {
+            /*
+             * Fixed-alphabet characters (see the encoder): the payload holds one uniform
+             * code per character over the block's alphabet, and a length per line when the
+             * lengths vary. Nothing is decoded here; the reconstruction walks it per line.
+             */
+            hexAlpha.chars = idStreamMeta[i]["hexa"].asString();
+            hexAlpha.minLen = idStreamMeta[i]["hexn"].asUInt();
+            hexAlpha.maxLen = idStreamMeta[i]["hexm"].asUInt();
+            if (hexAlpha.chars.size() < 2 || hexAlpha.maxLen < hexAlpha.minLen ||
+                hexAlpha.maxLen > kMaxHexLen) {
+                LOG_ERROR("Decode id fixed-alphabet sub-stream(%u): bad alphabet", i);
+                return -1;
+            }
+            nbuf = MemoryUtil::safeAlloc<uint8_t>(dstLength + 1);
+            if (nbuf == nullptr) {
+                return -1;
+            }
+            memcpy(nbuf, inBlockPtr->getBuffer() + readOffset, dstLength);
+            nlen = dstLength;
+            hexRc.input((char*)nbuf, (char*)nbuf + nlen);
+            hexRc.StartDecode();
+            if (hexRc.err != 0) {
+                MemoryUtil::safeFree(nbuf);
+                LOG_ERROR("Decode id fixed-alphabet sub-stream(%u) failed", i);
+                return -1;
+            }
+        }
+        idNumericBufs.push_back(nbuf);
+        idNumericLens.push_back(nlen);
+        idNumericPos.push_back(0);
+        idNumericAcc.push_back(0);
+        idIntCoders.push_back(intRc);
+        idIntModes.push_back(intModel);
+        idIntActive.push_back(intActive);
+        if (isConst) {
+            /* No coder and no per-line data: the segment text is the payload, verbatim. */
+            idConstTexts.push_back(
+                std::string((const char*)inBlockPtr->getBuffer() + readOffset, dstLength));
+        } else {
+            idConstTexts.push_back(std::string());
+        }
+        idDictEntries.push_back(std::move(dictEntries));
+        idHexAlphabets.push_back(std::move(hexAlpha));
+        idHexCoders.push_back(hexRc);
+
+        readOffset += dstLength;
+    }
+    return 0;
+}
+
+/*
+ * Build the SEQ column: with a reference, the match / whole-match sub-stream, the exception
+ * streams and (when base lengths vary) the base-length stream; without one, the single stream
+ * for the whole column, which initSeqWholeBlockDecoder either prepares or decodes outright.
+ * readOffset walks the block in both cases.
+ */
+int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t idx,
+                                              RoughIOBlock* outputBlock)
+{
+    maxBaseLength = baseMeta["maxlen"].asUInt();
+    minBaseLength = baseMeta["minlen"].asUInt();
+    LOG_DEBUG("maxBaseLen = %d, minBaseLen = %d", maxBaseLength, minBaseLength);
+    bool isUseReference = pRefeGene != nullptr && baseMeta.isMember("streams");
+    if (!isUseReference) {
+        /*
+         * One stream for the whole column: initSeqWholeBlockDecoder builds its decoder
+         * (or decodes it outright, for the whole-block coder) and answers what it
+         * consumed.
+         */
+        const int32_t consumed = initSeqWholeBlockDecoder(baseMeta, idx, outputBlock);
+        if (consumed < 0) {
+            return -1;
+        }
+        readOffset += (uint32_t)consumed;
+    } else {
+        uint32_t id = 0;
+        // Scenario using reference genome
+        Json::Value& baseMetaStreams = baseMeta["streams"];
+        if (baseMetaStreams[id]["sname"] != "m") {
+            LOG_ERROR("check sub stream failed:%s", baseMetaStreams[id]["sname"].asString().c_str());
+            return -1;
+        }
+
+        uint32_t dstLength = baseMetaStreams[id]["dstlen"].asUInt();
+        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ match");
+        /* The sub-stream's meta travels with the view: a whole-block coder
+           needs it to decode (coder_fc reads bi/bn/lv and its trailing index
+           offset from there, while coder_bwt_cm carries the block size in
+           the stream itself and ignores it). */
+        io->meta = baseMetaStreams[id];
+        ioVector.push_back(io);
+        const bool rleEnabled = baseMetaStreams[id].isMember("rle") &&
+                                baseMetaStreams[id]["rle"].asUInt() != 0;
+        if (rleEnabled) {
+            if (predecodeSeqMatchStream(baseMetaStreams, id, dstLength, io.get(), idx,
+                                        matchExtraOffset) != 0) {
+                return -1;
+            }
+        } else {
+            if (predecodeSeqWholeMatchStream(baseMetaStreams, id, io.get(), idx) != 0) {
+                return -1;
+            }
+        }
+
+        readOffset += dstLength + matchExtraOffset;   /* +mval sub-stream under RLE */
+        matchExtraOffset = 0;
+        /*
+         * SEQ exception streams (see SeqExceptionClass): one per character present,
+         * each a strictly increasing list of block offsets naming its character in
+         * "ch" - read by predecodeSeqExceptionStreams, which is also where the older
+         * absolute "npos" layout is handled.
+         */
+        if (predecodeSeqExceptionStreams(baseMeta, baseMetaStreams, id) != 0) {
+            return -1;
+        }
+
+        if (minBaseLength != maxBaseLength) {
+            id++;
+            if (predecodeSeqBaseLengthStream(baseMetaStreams, id) != 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+ * Record the stream offset of a field whose column is decoded lazily, and answer whether this
+ * was such a field (in which case the caller moves on to the next one).
+ *
+ * OPTION tag-split builds no decoder here and does not advance readOffset: the start of the
+ * field's stream is recorded, and decompressOptionField decodes all of its columns from the
+ * streams array on the first OPTION line. readOffset cannot be used for that at the time -
+ * line-by-line decoders such as decompressIdField advance it, so by the time the OPTION line
+ * is reached it has already shifted (measured as off by the ID field's dstlen).
+ *
+ * PNEXT qname-rebuild keeps only an exception stream in streams[7]["streams"][0]: no
+ * line-by-line decoder either, just its offset, with readOffset advanced past it so the later
+ * fields stay aligned.
+ */
+bool SamCodecActuator::recordDeferredFieldOffset(uint32_t idx, Json::Value& fieldMeta)
+{
+    if (idx == 11 && fieldMeta.isMember("mode") && fieldMeta["mode"].asString() == "tag_split") {
+        fieldIoStart[idx] = readOffset;
+        return true;
+    }
+    if (idx == 7 && fieldMeta.isMember("mode") &&
+        fieldMeta["mode"].asString() == "pnext_qname_rebuild") {
+        fieldIoStart[idx] = readOffset;
+        if (fieldMeta.isMember("streams") && fieldMeta["streams"].size() > 0) {
+            const uint32_t excDstLen = fieldMeta["streams"][0]["dstlen"].asUInt();
+            readOffset += excDstLen;
+        }
+        return true;
+    }
+    return false;
+}
+
 int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     if (outputBlock == nullptr) {
         return -1;
@@ -4314,823 +3737,30 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
 
     for (uint32_t idx = 0; idx < streamMeta.size(); ++idx) {
         if (idx == 0) {
-            Json::Value& idMeta = streamMeta[idx];
-            std::string idSplit = idMeta["splitsym"].asString();
-            for (uint32_t i = 0; i < idSplit.length(); ++i) {
-                idSplitSymbols.push_back(idSplit.c_str()[i]);
-            }
-            Json::Value& idStreamMeta = idMeta["streams"];
-            if (idStreamMeta.size() != idSplitSymbols.size()) {
-                LOG_ERROR("id streams not match id split, expect:%u, actual:%u", idSplitSymbols.size(), idStreamMeta.size());
+            if (initIdFieldDecoders(streamMeta[idx]) != 0) {
                 return -1;
-            }
-
-            // ID decoders
-            idStreamOffsets.clear();
-            idStreamDstLens.clear();
-            idStreamCoders.clear();
-            clearIdNumericState();
-            for (uint32_t i = 0; i < idStreamMeta.size(); ++i) {
-                std::string coderName = idStreamMeta[i]["coder"]["magic"].asString();
-                uint32_t dstLength = idStreamMeta[i]["dstlen"].asUInt();
-                idStreamOffsets.push_back(readOffset);
-                idStreamDstLens.push_back(dstLength);
-                idStreamCoders.push_back(coderName);
-                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "QNAME sub-stream");
-                ioVector.push_back(io);
-                const bool isNumeric = idStreamMeta[i].isMember("mode") &&
-                                       idStreamMeta[i]["mode"].asString() == "numeric";
-                const bool isInt = idStreamMeta[i].isMember("mode") &&
-                                   idStreamMeta[i]["mode"].asString() == "intd";
-                const bool isConst = idStreamMeta[i].isMember("mode") &&
-                                     idStreamMeta[i]["mode"].asString() == "const";
-                const bool isCnt = idStreamMeta[i].isMember("mode") &&
-                                   idStreamMeta[i]["mode"].asString() == "cnt";
-                const bool isIntu = idStreamMeta[i].isMember("mode") &&
-                                    idStreamMeta[i]["mode"].asString() == "intu";
-                const bool isDict = idStreamMeta[i].isMember("mode") &&
-                                    idStreamMeta[i]["mode"].asString() == "dict";
-                const bool isHex = idStreamMeta[i].isMember("mode") &&
-                                   idStreamMeta[i]["mode"].asString() == "hexd";
-                if (isConst) {
-                    /* The payload is the segment's own text, stored once for the whole block. */
-                    idDecoders.push_back(nullptr);
-                } else if (isDict) {
-                    /* The payload is a dictionary plus an index per line: no coder of its own. */
-                    idDecoders.push_back(nullptr);
-                } else if (isHex) {
-                    /* The payload is uniform character codes: no coder of its own either. */
-                    idDecoders.push_back(nullptr);
-                } else if (isCnt) {
-                    /* The payload is a coded delta sequence: neither text nor a varint buffer. */
-                    idDecoders.push_back(nullptr);
-                } else if (isInt || isIntu) {
-                    /* The payload is the value-domain stream itself (no outer coder). */
-                    idDecoders.push_back(nullptr);
-                } else if (coderName == "coder_affix_match") {
-                    idDecoders.push_back(std::make_shared<coder_affix_match>(io.get()));
-                    idDecoders.back()->set_level(idStreamMeta[i]["coder"]["level"].asInt());
-                } else if (coderName == "coder_bwt_cm") {
-                    idDecoders.push_back(std::make_shared<coder_bwt_cm>(io.get()));
-                    idDecoders.back()->set_level(idStreamMeta[i]["coder"]["level"].asInt());
-                } else if (coderName == "coder_qname") {
-                    idUsesQnameCoder = true;
-                    idDecoders.push_back(std::make_shared<coder_qname>(io.get()));
-                } else {
-                    LOG_ERROR("Unsupport coder name:%s", coderName.c_str());
-                    return -1;
-                }
-
-                /*
-                 * Numeric sub-streams carry no per-line terminator, so they cannot
-                 * be decoded one segment per line the way the textual path does.
-                 * Decode the whole varint stream once here and serve one value per
-                 * line from idNumericPos (see decompressIdField). The value-domain
-                 * layout ("intd") works the same way, except that its payload needs
-                 * no undoing: the range decoder walks it one value per line.
-                 */
-                uint8_t* nbuf = nullptr;
-                uint32_t nlen = 0;
-                RangeCoder intRc;
-                id_int::Model intModel;
-                uint8_t intActive = 0;
-                std::vector<std::string> dictEntries;
-                IdHexAlphabet hexAlpha;
-                RangeCoder hexRc;
-                if (isNumeric) {
-                    const uint32_t numSrcLen = idStreamMeta[i]["srclen"].asUInt();
-                    nbuf = MemoryUtil::safeAlloc<uint8_t>(numSrcLen + 1);
-                    if (nbuf == nullptr) {
-                        return -1;
-                    }
-                    int32_t dl = idDecoders[i]->decode_line(nbuf, numSrcLen, UINT8_MAX, false);
-                    if (dl < 0) {
-                        MemoryUtil::safeFree(nbuf);
-                        LOG_ERROR("Decode id numeric sub-stream(%u) failed: %d", i, dl);
-                        return -1;
-                    }
-                    nlen = (uint32_t)dl;
-                } else if (isInt || isIntu) {
-                    nbuf = MemoryUtil::safeAlloc<uint8_t>(dstLength + 1);
-                    if (nbuf == nullptr) {
-                        return -1;
-                    }
-                    memcpy(nbuf, inBlockPtr->getBuffer() + readOffset, dstLength);
-                    nlen = dstLength;
-                    if (isIntu) {
-                        /* The values' exact range, with no model at all (see Model::resetUniform). */
-                        intModel.resetUniform(idStreamMeta[i]["intb"].asUInt(),
-                                              idStreamMeta[i]["intn"].asUInt());
-                    } else {
-                        intModel.reset(idStreamMeta[i]["intw"].asUInt(), idStreamMeta[i]["intk"].asUInt());
-                    }
-                    intRc.input((char*)nbuf, (char*)nbuf + nlen);
-                    intRc.StartDecode();
-                    if (intRc.err != 0) {
-                        MemoryUtil::safeFree(nbuf);
-                        LOG_ERROR("Decode id value-domain sub-stream(%u) failed", i);
-                        return -1;
-                    }
-                    intActive = 1;
-                } else if (isCnt) {
-                    /*
-                     * A counter's deltas, run-length coded (see id_int::Counter), expanded into the
-                     * very zigzag varint form the numeric layout carries - the layout this one
-                     * competes with - so nothing downstream has to know which of the two won: one
-                     * delta per line, same buffer, same per-line accumulation.
-                     */
-                    const uint32_t numSrcLen = idStreamMeta[i]["srclen"].asUInt();
-                    nbuf = MemoryUtil::safeAlloc<uint8_t>(numSrcLen + 8);
-                    if (nbuf == nullptr) {
-                        return -1;
-                    }
-                    const int32_t wp = expandCounterSubStream(inBlockPtr->getBuffer() + readOffset,
-                                                              dstLength, idStreamMeta[i], nbuf,
-                                                              numSrcLen + 8);
-                    if (wp < 0) {
-                        MemoryUtil::safeFree(nbuf);
-                        LOG_ERROR("Decode id counter sub-stream(%u) failed", i);
-                        return -1;
-                    }
-                    nlen = (uint32_t)wp;
-                } else if (isDict) {
-                    /*
-                     * A low-cardinality segment: the block's few distinct texts sit at the head of the
-                     * payload and every line is an index into them, coded through id_int::Model - the
-                     * same value layout the "intd" case uses, so the per-sub-stream state already
-                     * kept here serves both. What the index means differs, and the reconstruction
-                     * below knows that.
-                     */
-                    const uint8_t* p = inBlockPtr->getBuffer() + readOffset;
-                    uint32_t pos = 0;
-                    uint32_t num = 0;
-                    if (!readVarint(p, dstLength, pos, num) || num < 2 || num > kMaxDictEntries) {
-                        LOG_ERROR("Decode id dictionary sub-stream(%u): bad entry count", i);
-                        return -1;
-                    }
-                    for (uint32_t e = 0; e < num; ++e) {
-                        uint32_t len = 0;
-                        if (!readVarint(p, dstLength, pos, len) || len > dstLength - pos) {
-                            LOG_ERROR("Decode id dictionary sub-stream(%u): truncated entry", i);
-                            return -1;
-                        }
-                        dictEntries.push_back(std::string((const char*)p + pos, len));
-                        pos += len;
-                    }
-                    /*
-                     * The index stream is a counter layout (see id_int::Counter): its deltas are
-                     * expanded here into one absolute index per line, which is what the per-line
-                     * reconstruction reads.
-                     */
-                    const uint32_t numValues = idStreamMeta[i]["numv"].asUInt();
-                    const uint8_t* ip = p + pos;
-                    const uint32_t ilen = dstLength - pos;
-                    RangeCoder idxRc;
-                    idxRc.input((char*)ip, (char*)(ip + ilen));
-                    idxRc.StartDecode();
-                    if (idxRc.err != 0) {
-                        LOG_ERROR("Decode id dictionary sub-stream(%u) failed", i);
-                        return -1;
-                    }
-                    const uint32_t ibufLen = numValues * 5 + 8;
-                    nbuf = MemoryUtil::safeAlloc<uint8_t>(ibufLen);
-                    if (nbuf == nullptr) {
-                        return -1;
-                    }
-                    id_int::Counter idxCounter;
-                    idxCounter.reset(idStreamMeta[i]["intw"].asUInt(), idStreamMeta[i]["intk"].asUInt());
-                    uint32_t wp = 0;
-                    int64_t acc = 0;
-                    for (uint32_t k = 0; k < numValues; ++k) {
-                        acc += idxCounter.decode(idxRc);
-                        if (acc < 0 || (uint64_t)acc >= dictEntries.size() || wp + 5 > ibufLen) {
-                            MemoryUtil::safeFree(nbuf);
-                            LOG_ERROR("Decode id dictionary sub-stream(%u): index out of range", i);
-                            return -1;
-                        }
-                        wp += tlenPutVarint(nbuf + wp, (uint32_t)acc);
-                    }
-                    nlen = wp;
-                } else if (isHex) {
-                    /*
-                     * Fixed-alphabet characters (see the encoder): the payload holds one uniform
-                     * code per character over the block's alphabet, and a length per line when the
-                     * lengths vary. Nothing is decoded here; the reconstruction walks it per line.
-                     */
-                    hexAlpha.chars = idStreamMeta[i]["hexa"].asString();
-                    hexAlpha.minLen = idStreamMeta[i]["hexn"].asUInt();
-                    hexAlpha.maxLen = idStreamMeta[i]["hexm"].asUInt();
-                    if (hexAlpha.chars.size() < 2 || hexAlpha.maxLen < hexAlpha.minLen ||
-                        hexAlpha.maxLen > kMaxHexLen) {
-                        LOG_ERROR("Decode id fixed-alphabet sub-stream(%u): bad alphabet", i);
-                        return -1;
-                    }
-                    nbuf = MemoryUtil::safeAlloc<uint8_t>(dstLength + 1);
-                    if (nbuf == nullptr) {
-                        return -1;
-                    }
-                    memcpy(nbuf, inBlockPtr->getBuffer() + readOffset, dstLength);
-                    nlen = dstLength;
-                    hexRc.input((char*)nbuf, (char*)nbuf + nlen);
-                    hexRc.StartDecode();
-                    if (hexRc.err != 0) {
-                        MemoryUtil::safeFree(nbuf);
-                        LOG_ERROR("Decode id fixed-alphabet sub-stream(%u) failed", i);
-                        return -1;
-                    }
-                }
-                idNumericBufs.push_back(nbuf);
-                idNumericLens.push_back(nlen);
-                idNumericPos.push_back(0);
-                idNumericAcc.push_back(0);
-                idIntCoders.push_back(intRc);
-                idIntModes.push_back(intModel);
-                idIntActive.push_back(intActive);
-                if (isConst) {
-                    /* No coder and no per-line data: the segment text is the payload, verbatim. */
-                    idConstTexts.push_back(
-                        std::string((const char*)inBlockPtr->getBuffer() + readOffset, dstLength));
-                } else {
-                    idConstTexts.push_back(std::string());
-                }
-                idDictEntries.push_back(std::move(dictEntries));
-                idHexAlphabets.push_back(std::move(hexAlpha));
-                idHexCoders.push_back(hexRc);
-
-                readOffset += dstLength;
             }
         } else if (idx == 9) {
-            Json::Value& baseMeta = streamMeta[idx];
-            maxBaseLength = baseMeta["maxlen"].asUInt();
-            minBaseLength = baseMeta["minlen"].asUInt();
-            LOG_DEBUG("maxBaseLen = %d, minBaseLen = %d", maxBaseLength, minBaseLength);
-            bool isUseReference = pRefeGene != nullptr && baseMeta.isMember("streams");
-            if (!isUseReference) {
-                // Scenario without reference genome
-                std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
-                uint32_t dstLength = streamMeta[idx]["totaldstlen"].asUInt();
-                uint32_t srcLength = streamMeta[idx]["totalsrclen"].asUInt();
-                LOG_DEBUG("srclen = %d, dstlen = %d", srcLength, dstLength);
-                if (coderName == "coder_fc") {
-                    /*
-                     * The whole-block SEQ is decoded into the tail of the
-                     * outputBlock buffer as staging, then decompressBase moves
-                     * it to the head line by line. No separate buffer is
-                     * allocated: that would add one malloc/free of the whole SEQ
-                     * per block plus page faults on first touch, and raise peak
-                     * memory by threads x SEQ size, while the number of copies
-                     * stays the same.
-                     *
-                     * Invariant: never realloc outputBlock within a block, or
-                     * this tail pointer would dangle. Capacity is guaranteed by
-                     * the one-shot block_size*2 pre-allocation at the block
-                     * entry (see decompress())—head output <= block_size and
-                     * tail staging <= block_size, exactly 2x.
-                     */
-                    coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstLength, &ioErrSink, "SEQ");
-                    baseIo.meta = baseMeta;
-                    baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
-                    coder_fc baseDecoder = coder_fc(&baseIo);
-                    if (baseDecoder.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcLength, srcLength, UINT8_MAX, false) < 0) {
-                        LOG_ERROR("Decode SEQ by coder_fc failed, srclen = %u", srcLength);
-                        return -1;
-                    }
-                } else if(coderName == "coder_bwt_cm") {
-                    std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ");
-                    ioVector.push_back(io);
-                    fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
-                } else {
-                    LOG_ERROR("Unsupported coder name:%s", coderName.c_str());
-                    return -1;
-                }
-                readOffset += dstLength;
-            } else {
-                uint32_t id = 0;
-                // Scenario using reference genome
-                Json::Value& baseMetaStreams = baseMeta["streams"];
-                if (baseMetaStreams[id]["sname"] != "m") {
-                    LOG_ERROR("check sub stream failed:%s", baseMetaStreams[id]["sname"].asString().c_str());
-                    return -1;
-                }
-
-                uint32_t dstLength = baseMetaStreams[id]["dstlen"].asUInt();
-                const std::string matchCoderName = baseMetaStreams[id]["coder"]["magic"].asString();
-                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ match");
-                /* The sub-stream's meta travels with the view: a whole-block coder
-                   needs it to decode (coder_fc reads bi/bn/lv and its trailing index
-                   offset from there, while coder_bwt_cm carries the block size in
-                   the stream itself and ignores it). */
-                io->meta = baseMetaStreams[id];
-                ioVector.push_back(io);
-                const bool rleEnabled = baseMetaStreams[id].isMember("rle") &&
-                                        baseMetaStreams[id]["rle"].asUInt() != 0;
-                if (rleEnabled) {
-                    /*
-                     * RLE layout written by compressBaseWithRef (two sub-streams):
-                     *   "m"    -> varint run lengths of the zero runs
-                     *   "mval" -> the surviving non-zero values (1 byte each)
-                     * Expand them back into the original sparse byte stream
-                     * (orgrawlen bytes) and serve it per record via matchBlockDecode.
-                     */
-                    uint32_t runLen = baseMetaStreams[id]["srclen"].asUInt();
-                    uint32_t srcLen = baseMetaStreams[id]["orgrawlen"].asUInt();
-                    std::shared_ptr<coder> runDecoder;
-                    if (matchCoderName == "coder_bwt_cm") {
-                        runDecoder = std::make_shared<coder_bwt_cm>(io.get());
-                    } else if (matchCoderName == "coder_fc") {
-                        runDecoder = std::make_shared<coder_fc>(io.get());
-                    } else {
-                        LOG_ERROR("check sub stream failed, coder name not match: %s", matchCoderName.c_str());
-                        return -1;
-                    }
-                    std::unique_ptr<uint8_t[]> runBuf = std::make_unique<uint8_t[]>(runLen + 1);
-                    if (runDecoder->decode_line(runBuf.get(), runLen, UINT8_MAX, false) < 0) {
-                        LOG_ERROR("Decode SEQ match run stream failed");
-                        return -1;
-                    }
-
-                    /*
-                     * The value sub-stream (if any) sits immediately after the run
-                     * sub-stream. A fully reference-matching block has no surviving
-                     * non-zero values, so compressBaseWithRef writes no "mval"
-                     * sub-stream at all; id then stays on the run stream so the
-                     * npos / baselen sub-streams that follow are addressed as if the
-                     * value stream never existed.
-                     */
-                    uint32_t valDstLen = 0;
-                    uint32_t valLen = 0;
-                    std::unique_ptr<uint8_t[]> valBuf;
-                    if (id + 1 < baseMetaStreams.size() &&
-                        baseMetaStreams[id + 1]["sname"].asString() == "mval") {
-                        id++;                       /* step past "m" onto the "mval" sub-stream */
-                        const uint32_t valId = id;
-                        valDstLen = baseMetaStreams[valId]["dstlen"].asUInt();
-                        valLen = baseMetaStreams[valId]["srclen"].asUInt();
-                        std::shared_ptr<coder_io> valIo = makeCoderIo(
-                            inBlockPtr->getBuffer() + readOffset + dstLength, valDstLen, "SEQ match val");
-                        valIo->meta = baseMetaStreams[valId];
-                        ioVector.push_back(valIo);
-                        /* Each sub-stream carries its own coder name: the two halves of
-                           the RLE layout are written independently, so the value stream
-                           must not be decoded with the run stream's coder. */
-                        const std::string valCoderName = baseMetaStreams[valId]["coder"]["magic"].asString();
-                        std::shared_ptr<coder> valDecoder;
-                        if (valCoderName == "coder_bwt_cm") {
-                            valDecoder = std::make_shared<coder_bwt_cm>(valIo.get());
-                        } else if (valCoderName == "coder_fc") {
-                            valDecoder = std::make_shared<coder_fc>(valIo.get());
-                        } else {
-                            LOG_ERROR("check sub stream failed, coder name not match: %s", valCoderName.c_str());
-                            return -1;
-                        }
-                        valBuf = std::make_unique<uint8_t[]>(valLen + 1);
-                        if (valDecoder->decode_line(valBuf.get(), valLen, UINT8_MAX, false) < 0) {
-                            LOG_ERROR("Decode SEQ match value stream failed");
-                            return -1;
-                        }
-                        matchExtraOffset = valDstLen;   /* skipped past by the caller below */
-                    } else {
-                        /* No surviving values in this fully-matching block. */
-                        matchExtraOffset = 0;
-                    }
-
-                    /* Expand: each run is followed by one surviving value. calloc zero-fills,
-                       so the expanded zeros need no explicit write. */
-                    MemoryUtil::safeFree(matchBlockBuffer);
-                    matchBlockBuffer = MemoryUtil::safeAlloc<uint8_t>(srcLen + 1);
-                    if (matchBlockBuffer == nullptr) {
-                        LOG_ERROR("Alloc SEQ match block buffer failed");
-                        return -1;
-                    }
-                    uint32_t rp = 0, vp = 0, out = 0;
-                    for (uint32_t k = 0; k < valLen; k++) {
-                        uint32_t run = 0, shift = 0;
-                        while (rp < runLen) {
-                            uint8_t b = runBuf[rp++];
-                            run |= (uint32_t)(b & 0x7F) << shift;
-                            shift += 7;
-                            if ((b & 0x80) == 0) {
-                                break;
-                            }
-                        }
-                        out += run;
-                        if (out < srcLen) {
-                            matchBlockBuffer[out++] = valBuf[vp++];
-                        }
-                    }
-                    /* The trailing varint (trailing zeros) needs no action. */
-                    matchBlockLength = srcLen;
-                    matchBlockOffset = 0;
-                    matchBlockDecode = true;
-                    fieldDecoders[idx] = runDecoder;    /* kept for error reporting / reuse */
-                } else if (matchCoderName == "coder_bwt_cm") {
-                    /* Legacy layout (no rle member): decode line by line, as before. */
-                    fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
-                    matchBlockDecode = false;
-                } else if (matchCoderName == "coder_fc") {
-                    /* coder_fc only supports block decompression, so decode the whole
-                       match stream here and slice it per record in decompressBase. */
-                    fieldDecoders[idx] = std::make_shared<coder_fc>(io.get());
-                    matchBlockDecode = true;
-                    matchBlockLength = baseMetaStreams[id]["srclen"].asUInt();
-                    matchBlockOffset = 0;
-                    MemoryUtil::safeFree(matchBlockBuffer);
-                    matchBlockBuffer = MemoryUtil::safeAlloc<uint8_t>(matchBlockLength + 1);
-                    if (matchBlockBuffer == nullptr) {
-                        LOG_ERROR("Alloc SEQ match block buffer failed");
-                        return -1;
-                    }
-                    if (fieldDecoders[idx]->decode_line(matchBlockBuffer, matchBlockLength,
-                                                        UINT8_MAX, false) < 0) {
-                        LOG_ERROR("Decode SEQ match stream (coder_fc) failed");
-                        return -1;
-                    }
-                } else {
-                    LOG_ERROR("check sub stream failed, coder name not match: %s", matchCoderName.c_str());
-                    return -1;
-                }
-
-                readOffset += dstLength + matchExtraOffset;   /* +mval sub-stream under RLE */
-                matchExtraOffset = 0;
-                /*
-                 * SEQ exception streams (see SeqExceptionClass): one per character present,
-                 * each a strictly increasing list of block offsets, each naming its character
-                 * in "ch". A character that never occurs has no stream, so this reads streams
-                 * until one turns up that is not an exception stream; the per-record refill
-                 * then walks the lists it has collected.
-                 *
-                 * The one older archive still read is the first layout's lone "npos": a single
-                 * list of absolute offsets holding every position that layout knew of, 'N' and
-                 * 'n' alike, with no "ch" and with its count in the field-level "ncount". It
-                 * wrote an 'N' back at each of those positions, and so does this.
-                 */
-                seqExc.clear();
-                for (;;) {
-                    const std::string name = (baseMetaStreams.size() > (size_t)id + 1)
-                                                 ? baseMetaStreams[id + 1]["sname"].asString()
-                                                 : std::string();
-                    /* Every form name identifies an exception stream, so the block's exception
-                       streams are the ones that come next and this stops at the first other name.
-                       What the name and the rest of the meta say is read in one place (see
-                       seqExcLayoutOf), which is also where the older layouts are handled. */
-                    if (seqExcFormOf(name) == SeqExcForm::None) {
-                        break;   /* this block has no further exception stream */
-                    }
-                    id++;
-                    const SeqExcLayout layout = seqExcLayoutOf(baseMeta, baseMetaStreams[id]);
-                    const uint8_t ch = layout.ch;
-                    uint32_t dstlen = baseMetaStreams[id]["dstlen"].asUInt();
-                    uint32_t srclen = baseMetaStreams[id]["srclen"].asUInt();
-                    if (baseMetaStreams[id]["coder"]["magic"].asString() != "coder_bwt_cm") {
-                        LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
-                            baseMetaStreams[id]["coder"]["magic"].asString().c_str());
-                        return -1;
-                    }
-
-                    coder_io excIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ npos");
-                    auto excCoder = std::make_unique<coder_bwt_cm>(&excIo);
-                    /* The payload carries the positions alone - the character travels in the
-                       stream's meta ("ch") - and every form is expanded by the same reader. */
-                    std::vector<uint8_t> raw(srclen);
-                    std::vector<uint32_t> pos;
-                    if (excCoder->decode_line(raw.data(), srclen, UINT8_MAX, false) < 0 ||
-                        !seqExcDecodePositions(layout, raw.data(), srclen, pos)) {
-                        LOG_ERROR("Decode SEQ exception positions failed: %u bytes, %u positions, form %d",
-                                  srclen, layout.count, (int)layout.form);
-                        return -1;
-                    }
-                    readOffset += dstlen;
-
-                    seqExc.push_back(SeqExcStream());
-                    seqExc.back().byte = ch;
-                    seqExc.back().pos = std::move(pos);
-                    LOG_DEBUG("SEQ exc read ch=%u '%c' positions=%u first=%u", (unsigned)ch, (char)ch,
-                              (uint32_t)seqExc.back().pos.size(),
-                              seqExc.back().pos.empty() ? 0u : seqExc.back().pos[0]);
-                }
-
-                if (minBaseLength != maxBaseLength) {
-                    id++;
-                    if (baseMetaStreams[id]["sname"].asString() != "baselen") {
-                        LOG_ERROR("check sub stream failed. sname not match");
-                        return -1;
-                    }
-
-                    uint32_t dstlen = baseMetaStreams[id]["dstlen"].asUInt();
-                    uint32_t srclen = baseMetaStreams[id]["srclen"].asUInt();
-                    uint8_t* baseLenBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
-
-                    if (baseMetaStreams[id]["coder"]["magic"].asString() == "coder_bwt_cm") {
-                        coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ length");
-                        auto baseLenCoder = std::make_unique<coder_bwt_cm>(&baseLenIo);
-                        if (baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false) < 0) {
-                            MemoryUtil::safeFree(baseLenBuffer);
-                            LOG_ERROR("Decode base lengths failed");
-                            return -1;
-                        }
-                    } else {
-                        MemoryUtil::safeFree(baseLenBuffer);
-                        LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
-                            baseMetaStreams[id]["coder"]["magic"].asString().c_str());
-                        return -1;
-                    }
-                    /* The delta layout: the entry ordinals as one run of forward deltas, then
-                       the lengths (see the encoder). An archive written before it holds
-                       absolute 4-byte (ordinal, length) pairs instead. */
-                    if (baseMetaStreams[id]["delta"].isUInt()) {
-                        const uint32_t count = baseMetaStreams[id]["count"].asUInt();
-                        std::vector<uint32_t> ordinals(count, 0);
-                        uint32_t off = 0;
-                        uint32_t value = 0;
-                        uint32_t ordinal = 0;
-                        for (uint32_t i = 0; i < count; ++i) {
-                            if (!readVarint(baseLenBuffer, srclen, off, value)) {
-                                MemoryUtil::safeFree(baseLenBuffer);
-                                LOG_ERROR("Decode base lengths failed: malformed ordinal");
-                                return -1;
-                            }
-                            ordinal += value;
-                            ordinals[i] = ordinal;
-                        }
-                        for (uint32_t i = 0; i < count; ++i) {
-                            if (!readVarint(baseLenBuffer, srclen, off, value)) {
-                                MemoryUtil::safeFree(baseLenBuffer);
-                                LOG_ERROR("Decode base lengths failed: malformed length");
-                                return -1;
-                            }
-                            unmapedReadLength.push_back(std::make_pair(ordinals[i], value));
-                        }
-                    } else {
-                        const uint32_t* baseLenPtr = (const uint32_t*)baseLenBuffer;
-                        const uint32_t baseLenCount = srclen >> 2;
-                        for (uint32_t i = 0; i + 1 < baseLenCount; i += 2) {
-                            unmapedReadLength.push_back(std::make_pair(baseLenPtr[i], baseLenPtr[i + 1]));
-                        }
-                    }
-                    readOffset += dstlen;
-                    MemoryUtil::safeFree(baseLenBuffer);
-                }
-            }
-        } else if (idx == 10) {
-            Json::Value& qualMeta = streamMeta[idx];
-            Json::Value& qualStreamMeta = qualMeta["streams"];
-            if (qualStreamMeta.size() != 2) {
-                LOG_ERROR("quality streams check failded, size = %d", qualStreamMeta.size());
+            if (initSeqFieldDecoders(streamMeta[idx], idx, outputBlock) != 0) {
                 return -1;
             }
-            if (qualStreamMeta[1]["coder"]["magic"] == "coder_bwt_cm") {
-                uint32_t qualDstLength = qualStreamMeta[0]["dstlen"].asUInt();
-                uint32_t freqDstLength = qualStreamMeta[1]["dstlen"].asUInt();
-
-                coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength, &ioErrSink, "QUAL freq table");
-                auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
-                uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
-                /* Same as fastq_actuator: counting with uint8_t wraps when the alphabet exceeds 127 symbols, causing a heap out-of-bounds write. */
-                uint32_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
-                uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
-                int32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr,qualFreqSrcLength, UINT8_MAX, false);
-                if (qualFreq < 0 || (uint32_t)qualFreq != qualFreqSrcLength) {
-                    LOG_ERROR("Decode quality frequncy failed");
-                    delete [] qualFreqArr;
-                    return -1;
-                }
-                for (uint32_t i = 0; i < qualFreqArrLength; i += 2) {
-                    qualFreqTable.push_back(std::make_pair(qualFreqArr[i], qualFreqArr[i + 1]));
-                }
-                delete [] qualFreqArr;
-
-                if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_qual") {
-                    std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
-                    ioVector.push_back(qualIo);
-                    qualCoder = std::make_shared<coder_qual>(qualIo.get(), true, qualFreqTable);
-                } else if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_fcv2") {
-                    /*
-                     * fcv2's alphabet and per-symbol frequencies are written in
-                     * its own stream header; begin_decode reads them back to
-                     * rebuild the Huffman tree, so passing an empty frequency
-                     * table here at construction is enough.
-                     */
-                    std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
-                    ioVector.push_back(qualIo);
-                    std::vector<uint32_t> emptyFreq(256, 0);
-                    /*
-                     * If the encoding side started from a prior, the decoding
-                     * side must start from the same snapshot, or the model
-                     * diverges immediately. Unlike the benign fallback on the
-                     * compression side, a load failure here must be fatal:
-                     * silently falling back to fixed initial values would decode
-                     * a stream of seemingly valid wrong data, far more dangerous
-                     * than failing outright.
-                     *
-                     * The prior's address comes from the block meta rather than
-                     * sequential inference, so random access works as well.
-                     */
-                    if (qualStreamMeta[0].isMember("prior")) {
-                        /*
-                         * The offset in meta is only a seek handle and
-                         * validation value; the index key is the package index:
-                         * under piped input the absolute offset degenerates to
-                         * 0, and looking it up by offset would always miss.
-                         */
-                        const int64_t priorAddress = qualStreamMeta[0]["prior"].asInt64();
-                        AuxPayloadPtr priorBlob =
-                            (pbgzEngine != nullptr)
-                                ? pbgzEngine->getQualPrior(inBlockPtr->getPackageIndex())
-                                : AuxPayloadPtr();
-                        if (!priorBlob || priorBlob->empty()) {
-                            LOG_ERROR("Qual prior at offset %lld required but unavailable",
-                                      (long long)priorAddress);
-                            return -1;
-                        }
-                        bool priorLoaded = false;
-                        qualFcv2Decoder = std::make_shared<coder_fcv2>(qualIo.get(), emptyFreq,
-                                                                       *priorBlob, &priorLoaded);
-                        if (!priorLoaded) {
-                            LOG_ERROR("Qual prior at offset %lld failed to load",
-                                      (long long)priorAddress);
-                            return -1;
-                        }
-                    } else {
-                        qualFcv2Decoder = std::make_shared<coder_fcv2>(qualIo.get(), emptyFreq);
-                    }
-                    const int32_t fcv2Ret = qualFcv2Decoder->begin_decode();
-                    if (fcv2Ret == coder_ns::CODER_ERR_UNSUPPORTED_VERSION) {
-                        /* Neither the current header layout nor the one from before the version
-                           byte fits this stream, so its layout is unknown - naming that is more
-                           useful than reporting it as corruption (see FCV2_STREAM_VERSION). */
-                        LOG_ERROR("QUAL stream fits neither the current fcv2 header layout (v%u) nor "
-                                  "the layout from before it: the archive was written by an "
-                                  "incompatible version and cannot be decoded",
-                                  (unsigned)FCV2_STREAM_VERSION);
-                        return -1;
-                    }
-                    if (fcv2Ret != 0) {
-                        LOG_ERROR("fcv2 begin_decode failed");
-                        return -1;
-                    }
-                } else if (qualStreamMeta[0]["coder"]["magic"].asString() == "coder_bwt_cm") {
-                    std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
-                    ioVector.push_back(qualIo);
-                    qualCmDecoder = std::make_shared<coder_bwt_cm>(qualIo.get());
-                } else {
-                    LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
-                    return -1;
-                }
-                readOffset += (qualDstLength + freqDstLength);
-            } else {
-                LOG_ERROR("Unsupport coder type: %s", streamMeta[1]["coder"]["magic"].asString().c_str());
+        } else if (idx == 10) {
+            /* The whole column: its frequency table, then the decoder its magic names. */
+            if (initQualFieldDecoders(streamMeta[idx]) != 0) {
                 return -1;
             }
         } else if (idx == 8) {
-            /* TLEN field: prefer the reconstruction optimization; the exception stream is decoded separately. */
-            Json::Value& tlenMeta = streamMeta[idx];
-            bool isOptimized = tlenMeta.isMember("optimized") && tlenMeta["optimized"].asBool();
-
-            if (isOptimized) {
-                if (tlenMeta.isMember("streams") && tlenMeta["streams"].isArray()) {
-                    Json::Value& tlenStreams = tlenMeta["streams"];
-                    for (Json::Value::iterator it = tlenStreams.begin(); it != tlenStreams.end(); ++it) {
-                        Json::Value& stream = *it;
-                        if (stream["sname"].asString() != "tlenexc") {
-                            continue;
-                        }
-                        uint32_t srclen = stream["srclen"].asUInt();
-                        uint32_t dstlen = stream["dstlen"].asUInt();
-                        if (stream["coder"]["magic"].asString() != "coder_bwt_cm") {
-                            LOG_ERROR("Unsupported TLEN exception coder type: %s", stream["coder"]["magic"].asString().c_str());
-                            return -1;
-                        }
-                        uint8_t* excBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
-                        if (excBuffer == nullptr) {
-                            return -1;
-                        }
-                        coder_io tlenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "TLEN exceptions");
-                        if (stream["coder"].isMember("level")) {
-                            tlenIo.meta["level"] = stream["coder"]["level"].asInt();
-                        }
-                        coder_bwt_cm tlenDecoder(&tlenIo);
-                        if (tlenDecoder.decode_line(excBuffer, srclen, UINT8_MAX, false) < 0) {
-                            MemoryUtil::safeFree(excBuffer);
-                            LOG_ERROR("Decode TLEN exceptions failed");
-                            return -1;
-                        }
-                        /*
-                         * The layout the stream is in (see the marker note on tlenDecodeVarints).
-                         * The marker is authoritative where it is there. Without one the archive
-                         * is older than the marker, which means the fixed layout - unless the
-                         * stream's size rules that out, in which case the archive was written
-                         * between the change to varint and the marker and holds varints.
-                         */
-                        const uint32_t declared = tlenMeta["exceptions"].asUInt();
-                        const Json::Value& layout = tlenMeta["exc"];
-                        std::map<uint32_t, int32_t> decoded;
-                        bool decodedOk;
-                        if (layout.isUInt()) {
-                            decodedOk = (layout.asUInt() == (Json::Value::UInt)TLEN_EXC_LAYOUT_VARINT)
-                                            ? tlenDecodeVarints(excBuffer, srclen, declared, decoded)
-                                            : tlenDecodeFixedPairs(excBuffer, srclen, declared, decoded);
-                        } else {
-                            decodedOk = tlenDecodeFixedPairs(excBuffer, srclen, declared, decoded) ||
-                                        tlenDecodeVarints(excBuffer, srclen, declared, decoded);
-                        }
-                        if (decodedOk) {
-                            tlenCache.insert(decoded.begin(), decoded.end());
-                        } else {
-                            MemoryUtil::safeFree(excBuffer);
-                            LOG_ERROR("Corrupt TLEN exception stream: neither the varint layout nor the "
-                                      "fixed-pair layout fits (%u bytes, %u exceptions)", srclen, declared);
-                            return -1;
-                        }
-                        MemoryUtil::safeFree(excBuffer);
-                        readOffset += dstlen;
-                    }
-                }
-            } else {
-                std::string coderName = tlenMeta["coder"]["magic"].asString();
-                uint32_t dstLen = tlenMeta["dstlen"].asUInt();
-                if (coderName != "coder_bwt_cm") {
-                    LOG_ERROR("Unsupported TLEN coder type: %s", coderName.c_str());
-                    return -1;
-                }
-                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "TLEN");
-                ioVector.push_back(io);
-                fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
-                readOffset += dstLen;
-            }
-        } else if (idx == 11 && streamMeta[idx].isMember("mode") &&
-                   streamMeta[idx]["mode"].asString() == "tag_split") {
-            /*
-             * OPTION tag-split: no decoder is built in initDecoder and
-             * readOffset is not advanced—the start of this field's stream is
-             * recorded, and decompressOptionField lazily decodes all columns
-             * from the streams array when the first OPTION line is reached.
-             * readOffset cannot be used directly: line-by-line decoders such as
-             * decompressIdField advance readOffset, so it has already shifted by
-             * the time the OPTION line is reached (measured as off by the ID
-             * field's dstlen).
-             */
-            fieldIoStart[idx] = readOffset;
-            continue;
-        } else if (idx == 7 && streamMeta[idx].isMember("mode") &&
-                   streamMeta[idx]["mode"].asString() == "pnext_qname_rebuild") {
-            /*
-             * PNEXT qname-rebuild mode stores only an exception stream in
-             * streams[7]["streams"][0]. No line-by-line decoder is built; the
-             * exception stream offset is recorded so preDecodeForTLEN can decode
-             * it, and readOffset is advanced past it so later fields align.
-             */
-            fieldIoStart[idx] = readOffset;
-            if (streamMeta[idx].isMember("streams") && streamMeta[idx]["streams"].size() > 0) {
-                uint32_t excDstLen = streamMeta[idx]["streams"][0]["dstlen"].asUInt();
-                readOffset += excDstLen;
-            }
-            continue;
-        } else {
-            std::string coderName = streamMeta[idx]["coder"]["magic"].asString();
-            uint32_t dstLen = streamMeta[idx]["dstlen"].asUInt();
-            /*
-             * Record the compressed stream positions of POS(3)/CIGAR(5)/PNEXT(7)
-             * so that preDecodeForTLEN can rebuild decoders and pre-decode the
-             * whole block; only then can TLEN reconstruction obtain the full
-             * mate index.
-             */
-            fieldIoStart[idx] = readOffset;
-            fieldIoDstLen[idx] = dstLen;
-            if (streamMeta[idx]["coder"].isMember("level")) {
-                fieldIoLevel[idx] = streamMeta[idx]["coder"]["level"].asInt();
-            }
-            if (coderName == "coder_bwt_cm") {
-                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
-                ioVector.push_back(io);
-                fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
-            } else if (coderName == "coder_affix_match") {
-                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
-                ioVector.push_back(io);
-                fieldDecoders[idx] = std::make_shared<coder_affix_match>(io.get());
-                fieldDecoders[idx]->set_level(streamMeta[idx]["coder"]["level"].asInt());
-            } else if (coderName == "coder_arith") {
-                std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
-                ioVector.push_back(io);
-                fieldDecoders[idx] = std::make_shared<coder_arith>(io.get());
-                if (streamMeta[idx]["coder"].isMember("level")) {
-                    fieldDecoders[idx]->set_level(streamMeta[idx]["coder"]["level"].asInt());
-                }
-                /* Apply the file-level POS delta prior. The encoder writes a
-                 * prior only when arith won the POS trial and the file is
-                 * large enough to make it pay; on smaller files it cold-starts
-                 * from the uniform table, so a missing prior here must fall
-                 * back to uniform too, matching the encoder exactly. */
-                AuxPayloadPtr posPrior =
-                    (pbgzEngine != nullptr) ? pbgzEngine->getPosPrior() : AuxPayloadPtr();
-                if (posPrior && !posPrior->empty()) {
-                    static_cast<coder_arith*>(fieldDecoders[idx].get())
-                        ->set_prior(posPrior->data(), (uint32_t)posPrior->size());
-                }
-            } else {
-                LOG_ERROR("Unsupport coder type: %s", streamMeta[0]["coder"]["magic"].asString().c_str());
+            /* TLEN: the reconstruction layout keeps only an exception stream (see
+               initTlenFieldDecoders). */
+            if (initTlenFieldDecoders(streamMeta[idx], idx) != 0) {
                 return -1;
             }
-            readOffset += dstLen;
+        } else if (recordDeferredFieldOffset(idx, streamMeta[idx])) {
+            continue;   /* decoded lazily: only the stream's offset is kept */
+        } else {
+            if (initFieldDecoder(idx, streamMeta[idx]) != 0) {
+                return -1;
+            }
         }
     }
     return 0;
@@ -5458,614 +4088,1178 @@ int32_t SamCodecActuator::decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uin
  * be unavailable. Here all lines are decoded once up front; the main loop then
  * copies the cache directly without decoding again.
  */
-int32_t SamCodecActuator::preDecodeForTLEN() {
-    if (samLine == 0 || !meta.isMember("sam")) {
+/*
+ * The SEQ column with no reference: it is one stream, and this builds its decoder (or decodes
+ * it outright, for the whole-block coder). Answers the bytes it consumed, or -1 on an error
+ * already reported.
+ */
+int32_t SamCodecActuator::initSeqWholeBlockDecoder(const Json::Value& baseMeta, uint32_t idx,
+                                                   RoughIOBlock* outputBlock)
+{
+    const std::string coderName = baseMeta["coder"]["magic"].asString();
+    const uint32_t dstLength = baseMeta["totaldstlen"].asUInt();
+    const uint32_t srcLength = baseMeta["totalsrclen"].asUInt();
+    LOG_DEBUG("srclen = %d, dstlen = %d", srcLength, dstLength);
+
+    if (coderName == "coder_fc") {
+        /*
+         * The whole-block SEQ is decoded into the tail of the outputBlock buffer as staging,
+         * then decompressBase moves it to the head line by line. No separate buffer is
+         * allocated: that would add one malloc/free of the whole SEQ per block plus page
+         * faults on first touch, and raise peak memory by threads x SEQ size, while the number
+         * of copies stays the same.
+         *
+         * Invariant: never realloc outputBlock within a block, or this tail pointer would
+         * dangle. Capacity is guaranteed by the one-shot block_size*2 pre-allocation at the
+         * block entry (see decompress())-head output <= block_size and tail staging <=
+         * block_size, exactly 2x.
+         */
+        coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstLength, &ioErrSink, "SEQ");
+        baseIo.meta = baseMeta;
+        baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
+        coder_fc baseDecoder = coder_fc(&baseIo);
+        if (baseDecoder.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcLength,
+                                    srcLength, UINT8_MAX, false) < 0) {
+            LOG_ERROR("Decode SEQ by coder_fc failed, srclen = %u", srcLength);
+            return -1;
+        }
+    } else if (coderName == "coder_bwt_cm") {
+        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ");
+        ioVector.push_back(io);
+        fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
+    } else {
+        LOG_ERROR("Unsupported coder name:%s", coderName.c_str());
+        return -1;
+    }
+    return (int32_t)dstLength;
+}
+
+/*
+ * The reference layout's match stream. Under the RLE split (see compressBaseWithRef) the two
+ * sub-streams
+ *   "m"    -> varint run lengths of the zero runs
+ *   "mval" -> the surviving non-zero values (1 byte each)
+ * are decoded here and expanded back into the original sparse byte stream (orgrawlen bytes),
+ * which decompressBase then serves per record through matchBlockDecode. Without the split the
+ * stream is simply kept as the record's decoder.
+ *
+ * `streamId` points at "m" on entry and at the last sub-stream the layout used on return, so
+ * the caller can carry on from there; `extraOffset` reports the bytes it must skip past (the
+ * "mval" stream, when there is one).
+ */
+int32_t SamCodecActuator::predecodeSeqMatchStream(const Json::Value& streams, uint32_t& streamId,
+                                                  uint32_t firstDstLength, coder_io* matchIo,
+                                                  uint32_t idx, uint32_t& extraOffset)
+{
+    const std::string matchCoderName = streams[streamId]["coder"]["magic"].asString();
+    uint32_t runLen = streams[streamId]["srclen"].asUInt();
+    uint32_t srcLen = streams[streamId]["orgrawlen"].asUInt();
+    std::shared_ptr<coder> runDecoder =
+        CoderFactory::makeFieldDecoder(matchCoderName, matchIo, FieldDecoderArgs());
+    if (runDecoder == nullptr) {
+        LOG_ERROR("check sub stream failed, coder name not match: %s", matchCoderName.c_str());
+        return -1;
+    }
+    std::unique_ptr<uint8_t[]> runBuf = std::make_unique<uint8_t[]>(runLen + 1);
+    if (runDecoder->decode_line(runBuf.get(), runLen, UINT8_MAX, false) < 0) {
+        LOG_ERROR("Decode SEQ match run stream failed");
+        return -1;
+    }
+
+    /*
+     * The value sub-stream (if any) sits immediately after the run sub-stream. A fully
+     * reference-matching block has no surviving non-zero values, so compressBaseWithRef writes
+     * no "mval" sub-stream at all; the caller then carries on from the run stream, so the npos
+     * / baselen sub-streams that follow are addressed as if the value stream never existed.
+     */
+    uint32_t valDstLen = 0;
+    uint32_t valLen = 0;
+    std::unique_ptr<uint8_t[]> valBuf;
+    if (streamId + 1 < streams.size() && streams[streamId + 1]["sname"].asString() == "mval") {
+        streamId++;                       /* step past "m" onto the "mval" sub-stream */
+        valDstLen = streams[streamId]["dstlen"].asUInt();
+        valLen = streams[streamId]["srclen"].asUInt();
+        std::shared_ptr<coder_io> valIo = makeCoderIo(
+            inBlockPtr->getBuffer() + readOffset + firstDstLength, valDstLen, "SEQ match val");
+        valIo->meta = streams[streamId];
+        ioVector.push_back(valIo);
+        /* Each sub-stream carries its own coder name: the two halves of the RLE layout are
+           written independently, so the value stream must not be decoded with the run
+           stream's coder. */
+        const std::string valCoderName = streams[streamId]["coder"]["magic"].asString();
+        std::shared_ptr<coder> valDecoder =
+            CoderFactory::makeFieldDecoder(valCoderName, valIo.get(), FieldDecoderArgs());
+        if (valDecoder == nullptr) {
+            LOG_ERROR("check sub stream failed, coder name not match: %s", valCoderName.c_str());
+            return -1;
+        }
+        valBuf = std::make_unique<uint8_t[]>(valLen + 1);
+        if (valDecoder->decode_line(valBuf.get(), valLen, UINT8_MAX, false) < 0) {
+            LOG_ERROR("Decode SEQ match value stream failed");
+            return -1;
+        }
+        extraOffset = valDstLen;   /* skipped past by the caller */
+    } else {
+        /* No surviving values in this fully-matching block. */
+        extraOffset = 0;
+    }
+
+    /* Expand: each run is followed by one surviving value. calloc zero-fills, so the expanded
+       zeros need no explicit write. */
+    MemoryUtil::safeFree(matchBlockBuffer);
+    matchBlockBuffer = MemoryUtil::safeAlloc<uint8_t>(srcLen + 1);
+    if (matchBlockBuffer == nullptr) {
+        LOG_ERROR("Alloc SEQ match block buffer failed");
+        return -1;
+    }
+    uint32_t rp = 0, vp = 0, out = 0;
+    for (uint32_t k = 0; k < valLen; k++) {
+        uint32_t run = 0, shift = 0;
+        while (rp < runLen) {
+            uint8_t b = runBuf[rp++];
+            run |= (uint32_t)(b & 0x7F) << shift;
+            shift += 7;
+            if ((b & 0x80) == 0) {
+                break;
+            }
+        }
+        out += run;
+        if (out < srcLen) {
+            matchBlockBuffer[out++] = valBuf[vp++];
+        }
+    }
+    /* The trailing varint (trailing zeros) needs no action. */
+    matchBlockLength = srcLen;
+    matchBlockOffset = 0;
+    matchBlockDecode = true;
+    fieldDecoders[idx] = runDecoder;    /* kept for error reporting / reuse */
+    return 0;
+}
+
+/*
+ * The match stream of the reference layout when it was written whole - the legacy layout with
+ * no "rle" member. Mirrors predecodeSeqMatchStream, which is the split case.
+ */
+int32_t SamCodecActuator::predecodeSeqWholeMatchStream(const Json::Value& streams, uint32_t streamId,
+                                                       coder_io* matchIo, uint32_t idx)
+{
+    const std::string matchCoderName = streams[streamId]["coder"]["magic"].asString();
+    /*
+     * Which decoder the sub-stream needs is the stream's own business (see
+     * CoderFactory::makeFieldDecoder), and whether it hands back a whole block or one record at
+     * a time is the coder's own trait rather than a name this side knows (see
+     * decoderIsWholeBlock): a whole-block coder's stream is decoded here and decompressBase
+     * slices it per record, while every other coder - including the legacy layout with no "rle"
+     * member - is read line by line.
+     */
+    fieldDecoders[idx] = CoderFactory::makeFieldDecoder(matchCoderName, matchIo, FieldDecoderArgs());
+    if (fieldDecoders[idx] == nullptr) {
+        LOG_ERROR("check sub stream failed, coder name not match: %s", matchCoderName.c_str());
+        return -1;
+    }
+    matchBlockDecode = CoderFactory::decoderIsWholeBlock(matchCoderName);
+    if (matchBlockDecode) {
+        matchBlockLength = streams[streamId]["srclen"].asUInt();
+        matchBlockOffset = 0;
+        MemoryUtil::safeFree(matchBlockBuffer);
+        matchBlockBuffer = MemoryUtil::safeAlloc<uint8_t>(matchBlockLength + 1);
+        if (matchBlockBuffer == nullptr) {
+            LOG_ERROR("Alloc SEQ match block buffer failed");
+            return -1;
+        }
+        if (fieldDecoders[idx]->decode_line(matchBlockBuffer, matchBlockLength, UINT8_MAX, false) < 0) {
+            LOG_ERROR("Decode SEQ match stream (coder_fc) failed");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * The baselen sub-stream: the reads whose length is not already implied by their CIGAR, which
+ * the SEQ column needs before it can slice the payload per record (see decompressBase). The
+ * delta layout holds the entry ordinals as one run of forward deltas followed by the lengths;
+ * an archive written before it holds absolute 4-byte (ordinal, length) pairs instead.
+ */
+int32_t SamCodecActuator::predecodeSeqBaseLengthStream(const Json::Value& streams, uint32_t streamId)
+{
+    if (streams[streamId]["sname"].asString() != "baselen") {
+        LOG_ERROR("check sub stream failed. sname not match");
+        return -1;
+    }
+    const uint32_t dstlen = streams[streamId]["dstlen"].asUInt();
+    const uint32_t srclen = streams[streamId]["srclen"].asUInt();
+    uint8_t* baseLenBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
+
+    if (streams[streamId]["coder"]["magic"].asString() == "coder_bwt_cm") {
+        coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ length");
+        auto baseLenCoder = std::make_unique<coder_bwt_cm>(&baseLenIo);
+        if (baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false) < 0) {
+            MemoryUtil::safeFree(baseLenBuffer);
+            LOG_ERROR("Decode base lengths failed");
+            return -1;
+        }
+    } else {
+        MemoryUtil::safeFree(baseLenBuffer);
+        LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
+            streams[streamId]["coder"]["magic"].asString().c_str());
+        return -1;
+    }
+
+    if (streams[streamId]["delta"].isUInt()) {
+        const uint32_t count = streams[streamId]["count"].asUInt();
+        std::vector<uint32_t> ordinals(count, 0);
+        uint32_t off = 0;
+        uint32_t value = 0;
+        uint32_t ordinal = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (!readVarint(baseLenBuffer, srclen, off, value)) {
+                MemoryUtil::safeFree(baseLenBuffer);
+                LOG_ERROR("Decode base lengths failed: malformed ordinal");
+                return -1;
+            }
+            ordinal += value;
+            ordinals[i] = ordinal;
+        }
+        for (uint32_t i = 0; i < count; ++i) {
+            if (!readVarint(baseLenBuffer, srclen, off, value)) {
+                MemoryUtil::safeFree(baseLenBuffer);
+                LOG_ERROR("Decode base lengths failed: malformed length");
+                return -1;
+            }
+            unmapedReadLength.push_back(std::make_pair(ordinals[i], value));
+        }
+    } else {
+        const uint32_t* baseLenPtr = (const uint32_t*)baseLenBuffer;
+        const uint32_t baseLenCount = srclen >> 2;
+        for (uint32_t i = 0; i + 1 < baseLenCount; i += 2) {
+            unmapedReadLength.push_back(std::make_pair(baseLenPtr[i], baseLenPtr[i + 1]));
+        }
+    }
+    readOffset += dstlen;
+    MemoryUtil::safeFree(baseLenBuffer);
+    return 0;
+}
+
+/*
+ * The SEQ column's exception streams (see SeqExceptionClass): one per character that occurred,
+ * each a strictly increasing list of block offsets with its character in the stream meta's
+ * "ch". A character that never occurs has no stream, so this reads sub-streams until one turns
+ * up that is not an exception stream (see seqExcFormOf / seqExcLayoutOf); the per-record refill
+ * then walks the lists collected here.
+ *
+ * The one older archive still read is the first layout's lone "npos": a single list of absolute
+ * offsets holding every position that layout knew of, 'N' and 'n' alike, with no "ch" and with
+ * its count in the field-level "ncount". It wrote an 'N' back at each of those positions, and
+ * so does this.
+ */
+int32_t SamCodecActuator::predecodeSeqExceptionStreams(const Json::Value& baseMeta,
+                                                       const Json::Value& streams,
+                                                       uint32_t& streamId)
+{
+    seqExc.clear();
+    for (;;) {
+        const std::string name = (streams.size() > (size_t)streamId + 1)
+                                     ? streams[streamId + 1]["sname"].asString()
+                                     : std::string();
+        /* Every form name identifies an exception stream, so the block's exception streams are
+           the ones that come next and this stops at the first other name. */
+        if (seqExcFormOf(name) == SeqExcForm::None) {
+            break;   /* this block has no further exception stream */
+        }
+        streamId++;
+        const SeqExcLayout layout = seqExcLayoutOf(baseMeta, streams[streamId]);
+        const uint8_t ch = layout.ch;
+        const uint32_t dstlen = streams[streamId]["dstlen"].asUInt();
+        const uint32_t srclen = streams[streamId]["srclen"].asUInt();
+        if (streams[streamId]["coder"]["magic"].asString() != "coder_bwt_cm") {
+            LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
+                streams[streamId]["coder"]["magic"].asString().c_str());
+            return -1;
+        }
+
+        coder_io excIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ npos");
+        auto excCoder = std::make_unique<coder_bwt_cm>(&excIo);
+        /* The payload carries the positions alone - the character travels in the stream's meta
+           ("ch") - and every form is expanded by the same reader. */
+        std::vector<uint8_t> raw(srclen);
+        std::vector<uint32_t> pos;
+        if (excCoder->decode_line(raw.data(), srclen, UINT8_MAX, false) < 0 ||
+            !seqExcDecodePositions(layout, raw.data(), srclen, pos)) {
+            LOG_ERROR("Decode SEQ exception positions failed: %u bytes, %u positions, form %d",
+                      srclen, layout.count, (int)layout.form);
+            return -1;
+        }
+        readOffset += dstlen;
+
+        seqExc.push_back(SeqExcStream());
+        seqExc.back().byte = ch;
+        seqExc.back().pos = std::move(pos);
+        LOG_DEBUG("SEQ exc read ch=%u '%c' positions=%u first=%u", (unsigned)ch, (char)ch,
+                  (uint32_t)seqExc.back().pos.size(),
+                  seqExc.back().pos.empty() ? 0u : seqExc.back().pos[0]);
+    }
+    return 0;
+}
+
+/*
+ * The QUAL column. Its frequency-table sub-stream is decoded first, because the alphabet it
+ * carries is what the value coder is built with; the value stream's decoder is then built by
+ * the magic its meta carries (see CoderFactory::makeQualDecoder, the only place that knows
+ * which coder takes which parameters).
+ */
+int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
+{
+    const Json::Value& qualStreamMeta = qualMeta["streams"];
+    if (qualStreamMeta.size() != 2) {
+        LOG_ERROR("quality streams check failded, size = %d", qualStreamMeta.size());
+        return -1;
+    }
+    if (qualStreamMeta[1]["coder"]["magic"] != "coder_bwt_cm") {
+        LOG_ERROR("Unsupport coder type: %s", qualStreamMeta[1]["coder"]["magic"].asString().c_str());
+        return -1;
+    }
+
+    const uint32_t qualDstLength = qualStreamMeta[0]["dstlen"].asUInt();
+    const uint32_t freqDstLength = qualStreamMeta[1]["dstlen"].asUInt();
+    coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength, &ioErrSink, "QUAL freq table");
+    auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
+    const uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
+    /* Same as fastq_actuator: counting with uint8_t wraps when the alphabet exceeds 127
+       symbols, causing a heap out-of-bounds write. */
+    const uint32_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
+    uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
+    const int32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr, qualFreqSrcLength, UINT8_MAX, false);
+    if (qualFreq < 0 || (uint32_t)qualFreq != qualFreqSrcLength) {
+        LOG_ERROR("Decode quality frequncy failed");
+        delete [] qualFreqArr;
+        return -1;
+    }
+    for (uint32_t i = 0; i < qualFreqArrLength; i += 2) {
+        qualFreqTable.push_back(std::make_pair(qualFreqArr[i], qualFreqArr[i + 1]));
+    }
+    delete [] qualFreqArr;
+
+    std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
+    ioVector.push_back(qualIo);
+    /*
+     * Turning the magic the stream carries into a decoder is the factory's business (see
+     * CoderFactory::makeQualDecoder); what this side supplies is the alphabet it has just
+     * decoded and the prior the engine holds. The stream's meta says whether the encoder
+     * started from one, and the package index is the key the prior is stored under: under
+     * piped input the absolute offset degenerates to 0, so looking it up by offset always
+     * misses.
+     */
+    QualDecoderArgs qualArgs;
+    qualArgs.freqTable = qualFreqTable.empty() ? nullptr : &qualFreqTable;
+    qualArgs.priorRequired = qualStreamMeta[0].isMember("prior");
+    qualArgs.priorAddress = qualArgs.priorRequired ? qualStreamMeta[0]["prior"].asInt64() : -1;
+    AuxPayloadPtr qualPriorBlob =
+        (qualArgs.priorRequired && pbgzEngine != nullptr)
+            ? pbgzEngine->getQualPrior(inBlockPtr->getPackageIndex())
+            : AuxPayloadPtr();
+    qualArgs.priorBlob = qualPriorBlob.get();
+    qualDecoder = CoderFactory::makeQualDecoder(
+        qualStreamMeta[0]["coder"]["magic"].asString(), qualIo.get(), qualArgs);
+    if (qualDecoder == nullptr) {
+        LOG_ERROR("Unsupport coder type: %s",
+                  qualStreamMeta[0]["coder"]["magic"].asString().c_str());
+        return -1;
+    }
+    readOffset += (qualDstLength + freqDstLength);
+    return 0;
+}
+
+/*
+ * Any ordinary column: one stream, whose decoder is the one its magic names. The stream's
+ * compression level and - for coder_arith - the file-level POS delta prior travel with the
+ * meta; a missing prior must fall back to the coder's uniform table, exactly as the encoder
+ * cold-starts (see the encoder's note on that fallback).
+ *
+ * The position of the stream is recorded as well: preDecodeForTLEN rebuilds decoders for
+ * POS(3)/CIGAR(5)/PNEXT(7) from these, which is what lets TLEN reconstruction obtain the full
+ * mate index before the column is decoded line by line.
+ */
+int32_t SamCodecActuator::initFieldDecoder(uint32_t fieldIdx, const Json::Value& fieldMeta)
+{
+    const std::string coderName = fieldMeta["coder"]["magic"].asString();
+    const uint32_t dstLen = fieldMeta["dstlen"].asUInt();
+    fieldIoStart[fieldIdx] = readOffset;
+    fieldIoDstLen[fieldIdx] = dstLen;
+    if (fieldMeta["coder"].isMember("level")) {
+        fieldIoLevel[fieldIdx] = fieldMeta["coder"]["level"].asInt();
+    }
+
+    std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
+    ioVector.push_back(io);
+
+    /*
+     * The level is handed over for the coders whose stream records one: the textual coder
+     * always reads the field meta's value, while coder_arith takes it only when the meta
+     * carries one; a bwt_cm stream keeps its own settings instead.
+     */
+    FieldDecoderArgs args;
+    if (coderName == "coder_affix_match" ||
+        (coderName == "coder_arith" && fieldMeta["coder"].isMember("level"))) {
+        args.level = fieldMeta["coder"]["level"].asInt();
+    }
+    AuxPayloadPtr posPrior;
+    if (coderName == "coder_arith") {
+        posPrior = (pbgzEngine != nullptr) ? pbgzEngine->getPosPrior() : AuxPayloadPtr();
+        args.posPrior = posPrior.get();
+    }
+
+    fieldDecoders[fieldIdx] = CoderFactory::makeFieldDecoder(coderName, io.get(), args);
+    if (fieldDecoders[fieldIdx] == nullptr) {
+        LOG_ERROR("Unsupport coder type: %s", coderName.c_str());
+        return -1;
+    }
+    readOffset += dstLen;
+    return 0;
+}
+
+/*
+ * The TLEN column's exception stream: the records whose TLEN the pair walk cannot produce.
+ * Reading it fills tlenCache before the column is decoded, and its layout is read back from the
+ * field meta (see the marker note on tlenDecodeVarints): the marker is authoritative where it
+ * is there, and without one the archive is older - the fixed layout, unless the stream's size
+ * rules that out, in which case the archive was written between the change to varint and the
+ * marker and holds varints.
+ */
+int32_t SamCodecActuator::decodeTlenExceptionStream(const Json::Value& stream,
+                                                    const Json::Value& tlenMeta)
+{
+    const uint32_t srclen = stream["srclen"].asUInt();
+    const uint32_t dstlen = stream["dstlen"].asUInt();
+    if (stream["coder"]["magic"].asString() != "coder_bwt_cm") {
+        LOG_ERROR("Unsupported TLEN exception coder type: %s", stream["coder"]["magic"].asString().c_str());
+        return -1;
+    }
+    uint8_t* excBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
+    if (excBuffer == nullptr) {
+        return -1;
+    }
+    coder_io tlenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "TLEN exceptions");
+    if (stream["coder"].isMember("level")) {
+        tlenIo.meta["level"] = stream["coder"]["level"].asInt();
+    }
+    coder_bwt_cm tlenDecoder(&tlenIo);
+    if (tlenDecoder.decode_line(excBuffer, srclen, UINT8_MAX, false) < 0) {
+        MemoryUtil::safeFree(excBuffer);
+        LOG_ERROR("Decode TLEN exceptions failed");
+        return -1;
+    }
+
+    const uint32_t declared = tlenMeta["exceptions"].asUInt();
+    const Json::Value& layout = tlenMeta["exc"];
+    std::map<uint32_t, int32_t> decoded;
+    bool decodedOk;
+    if (layout.isUInt()) {
+        decodedOk = (layout.asUInt() == (Json::Value::UInt)TLEN_EXC_LAYOUT_VARINT)
+                        ? tlenDecodeVarints(excBuffer, srclen, declared, decoded)
+                        : tlenDecodeFixedPairs(excBuffer, srclen, declared, decoded);
+    } else {
+        decodedOk = tlenDecodeFixedPairs(excBuffer, srclen, declared, decoded) ||
+                    tlenDecodeVarints(excBuffer, srclen, declared, decoded);
+    }
+    if (!decodedOk) {
+        MemoryUtil::safeFree(excBuffer);
+        LOG_ERROR("Corrupt TLEN exception stream: neither the varint layout nor the "
+                  "fixed-pair layout fits (%u bytes, %u exceptions)", srclen, declared);
+        return -1;
+    }
+    tlenCache.insert(decoded.begin(), decoded.end());
+    MemoryUtil::safeFree(excBuffer);
+    readOffset += dstlen;
+    return 0;
+}
+
+/*
+ * The TLEN column. Under the reconstruction optimization it carries nothing but the exception
+ * stream above; otherwise it is an ordinary column whose decoder is built here.
+ */
+int32_t SamCodecActuator::initTlenFieldDecoders(const Json::Value& tlenMeta, uint32_t fieldIdx)
+{
+    if (tlenMeta.isMember("optimized") && tlenMeta["optimized"].asBool()) {
+        if (tlenMeta.isMember("streams") && tlenMeta["streams"].isArray()) {
+            const Json::Value& tlenStreams = tlenMeta["streams"];
+            for (Json::Value::const_iterator it = tlenStreams.begin(); it != tlenStreams.end(); ++it) {
+                const Json::Value& stream = *it;
+                if (stream["sname"].asString() != "tlenexc") {
+                    continue;
+                }
+                if (decodeTlenExceptionStream(stream, tlenMeta) != 0) {
+                    return -1;
+                }
+            }
+        }
         return 0;
     }
 
-    uint8_t* buffer = inBlockPtr->getBuffer();
-    uint8_t tmpBuf[1024];
-    Json::Value& streams = meta["sam"]["streams"];
+    const std::string coderName = tlenMeta["coder"]["magic"].asString();
+    const uint32_t dstLen = tlenMeta["dstlen"].asUInt();
+    if (coderName != "coder_bwt_cm") {
+        LOG_ERROR("Unsupported TLEN coder type: %s", coderName.c_str());
+        return -1;
+    }
+    std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "TLEN");
+    ioVector.push_back(io);
+    fieldDecoders[fieldIdx] = std::make_shared<coder_bwt_cm>(io.get());
+    readOffset += dstLen;
+    return 0;
+}
 
-    /*
-     * Pre-decode QNAME (field 0) into decodedQnames. PNEXT (pnext_qname_rebuild
-     * mode) is rebuilt by pairing records with the same QNAME, so every line's
-     * QNAME must be known before PNEXT is reconstructed. QNAME is decoded with
-     * the per-sub-stream decoders already built by initDecoder (idDecoders),
-     * mirroring decompressIdField.
-     */
+/*
+ * The QNAME column's own decoders, rebuilt from the recorded sub-stream offsets so the main
+ * loop's idDecoders are not consumed by this pre-decode (mirrors decompressIdField).
+ *
+ * Two kinds of sub-stream are read up front: the numeric layout, which has no per-line
+ * terminator (one varint per line, served from numericPos), and the counter layout, which
+ * carries the same one-delta-per-line content and rebuilds it from its own payload without
+ * touching state the main loop decodes through. The value-domain and constant layouts stay
+ * with the main loop and get a null decoder, which the rebuild loop reads as "handled
+ * elsewhere".
+ */
+int32_t SamCodecActuator::predecodeIdStreams(IdPredecodeState& state)
+{
+    Json::Value& streams = meta["sam"]["streams"];
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    state.streams.reserve(idStreamOffsets.size());
+    state.decoders.reserve(idStreamOffsets.size());
+    for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
+        std::shared_ptr<coder_io> io = makeCoderIo(buffer + idStreamOffsets[si], idStreamDstLens[si], "QNAME predecode");
+        state.streams.push_back(io);
+        int32_t lvl = -1;
+        if (streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
+            streams[0]["streams"][si]["coder"].isMember("level")) {
+            lvl = streams[0]["streams"][si]["coder"]["level"].asInt();
+        }
+        if (idStreamCoders[si] == "coder_affix_match" || idStreamCoders[si] == "coder_bwt_cm") {
+            FieldDecoderArgs idPreArgs;
+            idPreArgs.level = lvl;
+            state.decoders.push_back(
+                CoderFactory::makeFieldDecoder(idStreamCoders[si], io.get(), idPreArgs));
+        } else if (idStreamCoders[si] == "coder_qname") {
+            state.decoders.push_back(CoderFactory::makeFieldDecoder(idStreamCoders[si], io.get(),
+                                                                    FieldDecoderArgs()));
+        } else {
+            state.decoders.push_back(nullptr);
+        }
+    }
+
+    state.numericBufs.assign(idStreamOffsets.size(), nullptr);
+    state.numericLens.assign(idStreamOffsets.size(), 0);
+    state.numericPos.assign(idStreamOffsets.size(), 0);
+    state.numericAcc.assign(idStreamOffsets.size(), 0);
+    for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
+        if (si >= state.decoders.size()) {
+            continue;
+        }
+        if (!(streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
+              streams[0]["streams"][si].isMember("mode"))) {
+            continue;
+        }
+        const std::string preMode = streams[0]["streams"][si]["mode"].asString();
+        const uint32_t srclen = streams[0]["streams"][si]["srclen"].asUInt();
+        if (preMode == "cnt") {
+            uint8_t* cb = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
+            if (cb == nullptr) {
+                return -1;
+            }
+            const int32_t cl = expandCounterSubStream(buffer + idStreamOffsets[si],
+                                                      idStreamDstLens[si],
+                                                      streams[0]["streams"][si], cb, srclen + 8);
+            if (cl < 0) {
+                MemoryUtil::safeFree(cb);
+                LOG_ERROR("Predecode id counter sub-stream(%u) failed", si);
+                return -1;
+            }
+            state.numericBufs[si] = cb;
+            state.numericLens[si] = (uint32_t)cl;
+            continue;
+        }
+        if (!state.decoders[si] || preMode != "numeric") {
+            continue;
+        }
+        uint8_t* b = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
+        if (b == nullptr) {
+            return -1;
+        }
+        int32_t dl = state.decoders[si]->decode_line(b, srclen, UINT8_MAX, false);
+        if (dl < 0) {
+            MemoryUtil::safeFree(b);
+            LOG_ERROR("Predecode id numeric sub-stream(%u) failed: %d", si, dl);
+            return -1;
+        }
+        state.numericBufs[si] = b;
+        state.numericLens[si] = (uint32_t)dl;
+    }
+    return 0;
+}
+
+/*
+ * Pre-decode the FLAG column (field 1).
+ *
+ * PNEXT is stored as a delta against POS only when the mate position is meaningful (FLAG bit
+ * 0x1 set and bit 0x8 clear) and holds the original value otherwise, so this column has to be
+ * known before PNEXT is rebuilt; it mirrors compressPNextFieldDelta.
+ *
+ * The column is read through a decoder of its own, so the one the main loop keeps is not
+ * consumed. Which coder that decoder is comes from the stream's magic (see
+ * CoderFactory::makeFieldDecoder); a null result means this build cannot read that coder, and
+ * the flag column is simply left unreconstructed.
+ */
+int32_t SamCodecActuator::predecodeFlagColumn()
+{
+    Json::Value& streams = meta["sam"]["streams"];
+    auto flagStartIt = fieldIoStart.find(1);
+    if (flagStartIt == fieldIoStart.end() || !streams.isValidIndex(1) ||
+        !streams[1].isMember("coder")) {
+        return 0;
+    }
+
+    const uint32_t off = flagStartIt->second;
+    const uint32_t dstlen = fieldIoDstLen[1];
+    const std::string coderName = streams[1]["coder"]["magic"].asString();
+    const std::string mode = streams[1].isMember("mode") ? streams[1]["mode"].asString() : "";
+
+    uint8_t tmpBuf[1024];
+    std::shared_ptr<coder_io> tmpIo = makeCoderIo(inBlockPtr->getBuffer() + off, dstlen, "FLAG predecode");
+    FieldDecoderArgs flagArgs;
+    auto flagLvIt = fieldIoLevel.find(1);
+    if (flagLvIt != fieldIoLevel.end()) {
+        flagArgs.level = flagLvIt->second;
+    }
+    std::shared_ptr<coder> tmpDec = CoderFactory::makeFieldDecoder(coderName, tmpIo.get(), flagArgs);
+    if (!tmpDec) {
+        return 0;
+    }
+
+    const bool binary = (mode == "number" || mode == "");
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        const bool need2hold = CoderFactory::decoderHoldsCallerBuffer(coderName);
+        int32_t len;
+        if (binary) {
+            len = tmpDec->decode_line(tmpBuf, sizeof(uint16_t), UINT8_MAX, need2hold);
+            mappedFlag[lineNo] = (len >= (int32_t)sizeof(uint16_t)) ? *(uint16_t*)tmpBuf : 0;
+        } else {
+            len = tmpDec->decode_line(tmpBuf, (uint32_t)sizeof(tmpBuf), '\t', need2hold);
+            if (len > 1) {
+                const std::string flagStr((char*)tmpBuf, (size_t)len - 1);
+                try {
+                    mappedFlag[lineNo] = (uint16_t)std::stoll(flagStr);
+                } catch (...) {
+                    mappedFlag[lineNo] = 0;
+                }
+            } else {
+                mappedFlag[lineNo] = 0;
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+ * Pre-decode RNAME (field 2) so the POS delta chain below can detect chromosome switches from
+ * mappedChr, mirroring the encoder. Another decoder of its own, so the main loop's RNAME
+ * decoder state stays untouched.
+ */
+int32_t SamCodecActuator::predecodeRnameColumn()
+{
+    Json::Value& streams = meta["sam"]["streams"];
+    auto rnameStartIt = fieldIoStart.find(2);
+    if (rnameStartIt == fieldIoStart.end() || !streams.isValidIndex(2) ||
+        !streams[2].isMember("coder")) {
+        return 0;
+    }
+
+    const uint32_t rnOff = rnameStartIt->second;
+    const uint32_t rnDst = fieldIoDstLen[2];
+    const std::string rnCoderName = streams[2]["coder"]["magic"].asString();
+
+    std::shared_ptr<coder_io> rnIo = makeCoderIo(inBlockPtr->getBuffer() + rnOff, rnDst, "RNAME predecode");
+    FieldDecoderArgs rnArgs;
+    auto rnLvIt = fieldIoLevel.find(2);
+    if (rnLvIt != fieldIoLevel.end()) {
+        rnArgs.level = rnLvIt->second;
+    }
+    std::shared_ptr<coder> rnDec = CoderFactory::makeFieldDecoder(rnCoderName, rnIo.get(), rnArgs);
+    if (!rnDec) {
+        return 0;
+    }
+
+    const bool rnHold = CoderFactory::decoderHoldsCallerBuffer(rnCoderName);
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        uint16_t chrIndex = 0;
+        const int32_t len = rnDec->decode_line((uint8_t*)&chrIndex, sizeof(chrIndex), UINT8_MAX, rnHold);
+        mappedChr[lineNo] = (len >= (int32_t)sizeof(chrIndex)) ? chrIndex : 0xFFFF;
+    }
+    return 0;
+}
+
+/*
+ * Build the pre-decoder of one of the columns TLEN reconstruction needs. The decoder is the
+ * one the stream's magic names (see CoderFactory::makeFieldDecoder), with the level the field
+ * meta records and - for coder_arith - the file-level POS prior the encoder used, or the
+ * arithmetic decode diverges on the first symbol (the factory applies it).
+ *
+ * Answers false when there is nothing to pre-decode here: the field has no stream of its own,
+ * or this build cannot read the coder that wrote it.
+ */
+bool SamCodecActuator::buildTlenColumnPredecoder(uint32_t fieldIdx, TlenColumnPredecoder& out)
+{
+    Json::Value& streams = meta["sam"]["streams"];
+    auto startIt = fieldIoStart.find(fieldIdx);
+    if (startIt == fieldIoStart.end() || !streams.isValidIndex(fieldIdx) ||
+        !streams[fieldIdx].isMember("coder")) {
+        return false;
+    }
+
+    const uint32_t off = startIt->second;
+    const uint32_t dstlen = fieldIoDstLen[fieldIdx];
+    out.coderName = streams[fieldIdx]["coder"]["magic"].asString();
+    out.mode = streams[fieldIdx].isMember("mode") ? streams[fieldIdx]["mode"].asString() : "";
+
+    out.stream = makeCoderIo(inBlockPtr->getBuffer() + off, dstlen, "TLEN predecode");
+    FieldDecoderArgs args;
+    auto lvIt = fieldIoLevel.find(fieldIdx);
+    if (lvIt != fieldIoLevel.end()) {
+        args.level = lvIt->second;
+    }
+    AuxPayloadPtr posPrior;
+    if (out.coderName == "coder_arith") {
+        posPrior = (pbgzEngine != nullptr) ? pbgzEngine->getPosPrior() : AuxPayloadPtr();
+        args.posPrior = posPrior.get();
+    }
+    out.decoder = CoderFactory::makeFieldDecoder(out.coderName, out.stream.get(), args);
+    return out.decoder != nullptr;
+}
+
+/*
+ * Rebuild one column from its pre-decoder, line by line, and leave it in the cache the TLEN
+ * walk reads (tlenPreDecodedFields) together with the maps the reconstruction needs: POS
+ * fills mappedPos, CIGAR fills baseLengthBuffer and the parsed op lists, PNEXT fills
+ * nextMappedPos.
+ *
+ * Three field forms travel here. CIGAR is always textual. POS and PNEXT are fixed-width binary
+ * by default and textual when their mode says so; POS in "pos_delta" mode is a zigzag varint
+ * stream read byte by byte until the continuation bit clears (mirroring
+ * compressPosFieldDelta), whose values are the deltas from the previous line - reset to 0 at a
+ * chromosome switch, which is what the RNAME pre-decode above is for. PNEXT in "pnext_delta"
+ * mode holds a delta against POS only for records whose mate is mapped (FLAG 0x1 set, 0x8
+ * clear) and the absolute value otherwise.
+ */
+int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnPredecoder& pre)
+{
+    const std::string& coderName = pre.coderName;
+    const std::string& mode = pre.mode;
+    std::vector<std::string>& fieldCache = tlenPreDecodedFields[fieldIdx];
+    fieldCache.clear();
+    fieldCache.reserve(samLine);
+
+    uint8_t tmpBuf[1024];
+    /* Delta chain of pos_delta mode: the absolute POS reconstructed from the previous line. */
+    int64_t posPrev = 0;
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        /*
+         * coder_affix_match points last at the caller's output buffer unless need2hold is set;
+         * it must be set here, otherwise the cross-line context would be overwritten by the
+         * next decode. bwt_cm buffers internally on its own.
+         */
+        const bool need2hold = CoderFactory::decoderHoldsCallerBuffer(coderName);
+        /*
+         * Field form: CIGAR is always textual; POS/PNEXT default to fixed-width binary and are
+         * decoded as text only when mode is textual. POS uses a zigzag varint stream: the value
+         * is read byte-by-byte (fixed-length decode_line) until the continuation bit is clear.
+         * Textual data must never be decoded as fixed-length, otherwise bwt_cm's fixed-length
+         * branch would spin past the block boundary.
+         */
+        if (fieldIdx == 3 && mode == "pos_delta") {
+            /* Unsigned varint decode, mirroring compressPosFieldDelta. */
+            if (lineNo > 0) {
+                const auto curChrIt = mappedChr.find(lineNo);
+                const auto prevChrIt = mappedChr.find(lineNo - 1);
+                const uint16_t curChr = (curChrIt != mappedChr.end()) ? curChrIt->second : 0xFFFF;
+                const uint16_t prevChr = (prevChrIt != mappedChr.end()) ? prevChrIt->second : 0xFFFF;
+                if (curChr != prevChr) {
+                    posPrev = 0;
+                }
+            }
+            uint64_t u = 0;
+            int32_t shift = 0;
+            int32_t vlen;
+            do {
+                uint8_t b = 0;
+                vlen = pre.decoder->decode_line(&b, 1, UINT8_MAX, need2hold);
+                if (vlen != 1) {
+                    LOG_ERROR("Decode POS delta failed at line %u", lineNo);
+                    return -1;
+                }
+                u |= (uint64_t)(b & 0x7f) << shift;
+                if ((b & 0x80) == 0) break;
+                shift += 7;
+                if (shift >= 64) {
+                    LOG_ERROR("Decode POS delta overlong varint at line %u", lineNo);
+                    return -1;
+                }
+            } while (true);
+            int64_t delta = (int64_t)u;
+            int64_t pos = posPrev + delta;
+            posPrev = pos;
+            mappedPos[lineNo] = pos;
+            fieldCache.emplace_back(std::to_string(pos) + '\t');
+            continue;
+        }
+
+        bool binary = (fieldIdx != 5) && (mode == "number" || mode == "");
+        int32_t len;
+        if (binary) {
+            len = pre.decoder->decode_line(tmpBuf, 4, UINT8_MAX, need2hold);
+        } else {
+            len = pre.decoder->decode_line(tmpBuf, (uint32_t)sizeof(tmpBuf), '\t', need2hold);
+        }
+        if (len <= 1) {
+            fieldCache.emplace_back();
+            continue;
+        }
+
+        switch (fieldIdx) {
+            case 3:
+                if (binary) {
+                    mappedPos[lineNo] = (int64_t)(uint32_t)(*(uint32_t*)tmpBuf);
+                    fieldCache.emplace_back(std::to_string(mappedPos[lineNo]) + '\t');
+                } else {
+                    mappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                    fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                }
+                break;
+            case 5:
+                cigarReadLen[lineNo] = parseCigarRefConsumed(tmpBuf, len);
+                baseLengthBuffer[lineNo] = parseCigar(tmpBuf, len);
+                if (cigarOpList.size() <= lineNo) cigarOpList.resize(lineNo + 1);
+                parseCigarOps(tmpBuf, (uint32_t)len, cigarOpList[lineNo]);
+                fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                break;
+            case 7:
+                if (binary) {
+                    int64_t pnextBin = (int64_t)(uint32_t)(*(uint32_t*)tmpBuf);
+                    nextMappedPos[lineNo] = pnextBin;
+                    fieldCache.emplace_back(std::to_string(pnextBin) + '\t');
+                } else if (mode == "pnext_delta") {
+                    /* Check if PNEXT is valid based on FLAG bits (same logic as compression) */
+                    auto flagIt = mappedFlag.find(lineNo);
+                    bool isPNextValid = false;
+                    if (flagIt != mappedFlag.end()) {
+                        uint16_t flag = flagIt->second;
+                        /* PNEXT is valid only if:
+                         * - FLAG bit 0x1 is set (paired-end sequencing)
+                         * - FLAG bit 0x8 is not set (mate is mapped)
+                         */
+                        isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
+                    }
+
+                    if (isPNextValid) {
+                        /* Valid PNEXT: stored as delta against POS, reconstruct */
+                        int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                        int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                        int64_t pnext = delta + pos;
+                        nextMappedPos[lineNo] = pnext;
+                        fieldCache.emplace_back(std::to_string(pnext) + '\t');
+                    } else {
+                        /* Invalid PNEXT: stored as original value directly */
+                        if ((uint32_t)len > 1) {
+                            nextMappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                            fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                        } else {
+                            nextMappedPos[lineNo] = 0;
+                            fieldCache.emplace_back("0\t");
+                        }
+                    }
+                } else {
+                    nextMappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
+                    fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                }
+                break;
+            default:
+                fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
+                break;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Pre-decode QNAME (field 0) into decodedQnames.
+ *
+ * PNEXT in pnext_qname_rebuild mode is rebuilt by pairing records that share a QNAME, so every
+ * line's QNAME must be known before PNEXT is reconstructed. The column is decoded with the
+ * per-sub-stream decoders initDecoder already built (see predecodeIdStreams), mirroring
+ * decompressIdField.
+ */
+int32_t SamCodecActuator::rebuildQnameColumn()
+{
     decodedQnames.clear();
     decodedQnames.resize(samLine);
-    if (!idStreamOffsets.empty()) {
-        // Rebuild independent decoders from the recorded sub-stream offsets so we
-        // do not consume the idDecoders used by the main loop.
-        std::vector<std::shared_ptr<coder_io>> preIdIo;
-        std::vector<std::shared_ptr<coder>> preIdDec;
-        for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
-            std::shared_ptr<coder_io> io = makeCoderIo(buffer + idStreamOffsets[si], idStreamDstLens[si], "QNAME predecode");
-            preIdIo.push_back(io);
-            int32_t lvl = -1;
-            if (streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
-                streams[0]["streams"][si]["coder"].isMember("level")) {
-                lvl = streams[0]["streams"][si]["coder"]["level"].asInt();
-            }
-            if (idStreamCoders[si] == "coder_affix_match") {
-                auto dec = std::make_shared<coder_affix_match>(io.get());
-                if (lvl >= 0) dec->set_level(lvl);
-                preIdDec.push_back(dec);
-            } else if (idStreamCoders[si] == "coder_bwt_cm") {
-                auto dec = std::make_shared<coder_bwt_cm>(io.get());
-                if (lvl >= 0) dec->set_level(lvl);
-                preIdDec.push_back(dec);
-            } else if (idStreamCoders[si] == "coder_qname") {
-                preIdDec.push_back(std::make_shared<coder_qname>(io.get()));
-            } else {
-                preIdDec.push_back(nullptr);
-            }
-        }
+    if (idStreamOffsets.empty()) {
+        return 0;
+    }
 
-        /* Numeric sub-streams have no per-line terminator: decode the whole varint
-           stream up front and serve one value per line, mirroring decompressIdField. */
-        std::vector<uint8_t*> numBufs(idStreamOffsets.size(), nullptr);
-        std::vector<uint32_t> numLens(idStreamOffsets.size(), 0);
-        std::vector<uint32_t> numPos(idStreamOffsets.size(), 0);
-        std::vector<uint64_t> numAcc(idStreamOffsets.size(), 0);
-        for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
-            if (si >= preIdDec.size()) {
-                continue;
+    IdPredecodeState preState;
+    if (predecodeIdStreams(preState) != 0) {
+        return -1;
+    }
+    /* The rebuild loop below speaks in terms of the state's vectors, as it always has. */
+    auto& preIdDec = preState.decoders;
+    auto& numBufs = preState.numericBufs;
+    auto& numLens = preState.numericLens;
+    auto& numPos = preState.numericPos;
+    auto& numAcc = preState.numericAcc;
+
+    char qnameBuf[512];
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        std::string qname;
+        if (idUsesQnameCoder && !preIdDec.empty()) {
+            // Single-stream coder_qname: one QNAME per line (with trailing '\t').
+            bool hold = CoderFactory::decoderHoldsCallerBuffer(idStreamCoders[0]);
+            int32_t len = preIdDec[0]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), UINT8_MAX, hold);
+            if (len > 0) {
+                int32_t strip = (qnameBuf[len - 1] == '\t') ? 1 : 0;
+                qname.assign(qnameBuf, (size_t)len - strip);
             }
-            if (!(streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
-                  streams[0]["streams"][si].isMember("mode"))) {
-                continue;
-            }
-            const std::string preMode = streams[0]["streams"][si]["mode"].asString();
-            const uint32_t srclen = streams[0]["streams"][si]["srclen"].asUInt();
-            if (preMode == "cnt") {
-                /*
-                 * The counter layout carries the same one-delta-per-line content as the numeric one
-                 * and rebuilds it from its own payload, so it can be read here without touching any
-                 * state the main loop decodes through.
-                 */
-                uint8_t* cb = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
-                if (cb == nullptr) {
+        } else {
+            // Reconstruct QNAME from split sub-streams. Each sub-stream
+            // encodes its segment including the trailing separator (the
+            // split symbol is part of the segment bytes), mirroring
+            // decompressIdField; so we simply append each decoded segment.
+            for (uint32_t si = 0; si < preIdDec.size(); ++si) {
+                if (!preIdDec[si] && numBufs[si] == nullptr) continue;
+                if (numBufs[si] != nullptr) {
+                    /* Numeric sub-stream: one varint per line, no separator byte
+                       (the textual path strips a trailing '\t' here anyway). */
+                    if (numPos[si] >= numLens[si]) {
+                        break;
+                    }
+                    uint32_t zz = 0;
+                    if (!readVarint(numBufs[si], numLens[si], numPos[si], zz)) {
+                        LOG_ERROR("Corrupt id numeric sub-stream(%u) in predecode", si);
+                        return -1;
+                    }
+                    const uint32_t delta = zz >> 1;
+                    numAcc[si] = ((zz & 1u) == 0) ? (numAcc[si] + delta) : (numAcc[si] - delta);
+                    char ntmp[24];
+                    int nn = snprintf(ntmp, sizeof(ntmp), "%llu",
+                                      (unsigned long long)numAcc[si]);
+                    if (nn > 0) {
+                        qname.append(ntmp, (size_t)nn);
+                    }
+                    continue;
+                }
+                if (!idConstTexts.empty() && !idConstTexts[si].empty()) {
+                    /* Constant segment: the same text every line, stored once in the block. */
+                    qname.append(idConstTexts[si]);
+                    continue;
+                }
+                if (!idIntActive.empty() && idIntActive[si]) {
+                    /* Value-domain segment: the payload holds the values themselves, one per
+                       line, and carries no separator (the split symbol belongs to the segment
+                       that ends with it, exactly as in the numeric layout). */
+                    char ntmp[24];
+                    const uint64_t v = idIntModes[si].decode(idIntCoders[si]);
+                    const int nn = snprintf(ntmp, sizeof(ntmp), "%llu", (unsigned long long)v);
+                    if (nn > 0) {
+                        qname.append(ntmp, (size_t)nn);
+                    }
+                    continue;
+                }
+                if (!preIdDec[si]) {
+                    /* Every layout without a coder of its own is handled above; getting here
+                       means a mode this build does not know, which must not be dereferenced. */
+                    LOG_ERROR("Predecode id sub-stream(%u) has no decoder", si);
                     return -1;
                 }
-                const int32_t cl = expandCounterSubStream(buffer + idStreamOffsets[si],
-                                                          idStreamDstLens[si],
-                                                          streams[0]["streams"][si], cb, srclen + 8);
-                if (cl < 0) {
-                    MemoryUtil::safeFree(cb);
-                    LOG_ERROR("Predecode id counter sub-stream(%u) failed", si);
-                    return -1;
-                }
-                numBufs[si] = cb;
-                numLens[si] = (uint32_t)cl;
-                continue;
-            }
-            if (!preIdDec[si] || preMode != "numeric") {
-                /* Value-domain and constant layouts decode through state the main loop owns; they
-                   were never part of this pre-decode and still are not. */
-                continue;
-            }
-            uint8_t* b = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
-            if (b == nullptr) {
-                return -1;
-            }
-            int32_t dl = preIdDec[si]->decode_line(b, srclen, UINT8_MAX, false);
-            if (dl < 0) {
-                MemoryUtil::safeFree(b);
-                LOG_ERROR("Predecode id numeric sub-stream(%u) failed: %d", si, dl);
-                return -1;
-            }
-            numBufs[si] = b;
-            numLens[si] = (uint32_t)dl;
-        }
-
-        char qnameBuf[512];
-        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-            std::string qname;
-            if (idUsesQnameCoder && !preIdDec.empty()) {
-                // Single-stream coder_qname: one QNAME per line (with trailing '\t').
-                bool hold = (idStreamCoders[0] == "coder_affix_match");
-                int32_t len = preIdDec[0]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), UINT8_MAX, hold);
+                uint8_t sep = (si < idAnalysis.symbols.size()) ? idAnalysis.symbols[si] : UINT8_MAX;
+                // coder_affix_match keeps cross-line context in an internal
+                // buffer only when need2hold is set; without it, it points
+                // last at our fixed qnameBuf and the next line would corrupt
+                // the prefix reference.
+                bool hold = CoderFactory::decoderHoldsCallerBuffer(idStreamCoders[si]);
+                int32_t len = preIdDec[si]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), sep, hold);
                 if (len > 0) {
                     int32_t strip = (qnameBuf[len - 1] == '\t') ? 1 : 0;
-                    qname.assign(qnameBuf, (size_t)len - strip);
+                    qname.append(qnameBuf, (size_t)len - strip);
                 }
+            }
+        }
+        decodedQnames[lineNo] = qname;
+    }
+    for (uint32_t si = 0; si < numBufs.size(); ++si) {
+        MemoryUtil::safeFree(numBufs[si]);
+    }
+    return 0;
+}
+
+/*
+ * PNEXT (field 7) in pnext_qname_rebuild mode.
+ *
+ * The stream carries only the exception (line, delta) pairs in streams[7]["streams"][0]; every
+ * other line is rebuilt here by pairing the records that share a QNAME and are mutually mapped.
+ * mappedPos is already populated by the POS (field 3) pre-decode, and the flags and QNAMEs come
+ * from the two pre-decodes above. The result fills tlenPreDecodedFields[7] and nextMappedPos
+ * for every line.
+ */
+int32_t SamCodecActuator::rebuildPnextByQname()
+{
+    Json::Value& streams = meta["sam"]["streams"];
+    std::unordered_map<uint32_t, int64_t> pnextCache;   /* line -> value, for the exception pairs */
+    pnextCache.clear();
+    // Decode the exception stream (pairs of contentIdx, delta).
+    if (streams[7].isMember("streams") && streams[7]["streams"].size() > 0) {
+        Json::Value& excMeta = streams[7]["streams"][0];
+        uint32_t excOff = fieldIoStart[7];
+        uint32_t excDstLen = excMeta["dstlen"].asUInt();
+        std::string excCoderName = excMeta["coder"]["magic"].asString();
+        std::shared_ptr<coder_io> excIo = makeCoderIo(inBlockPtr->getBuffer() + excOff, excDstLen, "PNEXT exc predecode");
+        std::shared_ptr<coder> excDec =
+            CoderFactory::makeFieldDecoder(excCoderName, excIo.get(), FieldDecoderArgs());
+        if (excDec) {
+            // Exception coder level: prefer the value stored in the sub-stream meta.
+            if (excMeta["coder"].isMember("level")) {
+                excDec->set_level(excMeta["coder"]["level"].asInt());
             } else {
-                // Reconstruct QNAME from split sub-streams. Each sub-stream
-                // encodes its segment including the trailing separator (the
-                // split symbol is part of the segment bytes), mirroring
-                // decompressIdField; so we simply append each decoded segment.
-                for (uint32_t si = 0; si < preIdDec.size(); ++si) {
-                    if (!preIdDec[si] && numBufs[si] == nullptr) continue;
-                    if (numBufs[si] != nullptr) {
-                        /* Numeric sub-stream: one varint per line, no separator byte
-                           (the textual path strips a trailing '\t' here anyway). */
-                        if (numPos[si] >= numLens[si]) {
-                            break;
-                        }
-                        uint32_t zz = 0;
-                        if (!readVarint(numBufs[si], numLens[si], numPos[si], zz)) {
-                            LOG_ERROR("Corrupt id numeric sub-stream(%u) in predecode", si);
-                            return -1;
-                        }
-                        const uint32_t delta = zz >> 1;
-                        numAcc[si] = ((zz & 1u) == 0) ? (numAcc[si] + delta) : (numAcc[si] - delta);
-                        char ntmp[24];
-                        int nn = snprintf(ntmp, sizeof(ntmp), "%llu",
-                                          (unsigned long long)numAcc[si]);
-                        if (nn > 0) {
-                            qname.append(ntmp, (size_t)nn);
-                        }
-                        continue;
-                    }
-                    if (!idConstTexts.empty() && !idConstTexts[si].empty()) {
-                        /* Constant segment: the same text every line, stored once in the block. */
-                        qname.append(idConstTexts[si]);
-                        continue;
-                    }
-                    if (!idIntActive.empty() && idIntActive[si]) {
-                        /* Value-domain segment: the payload holds the values themselves, one per
-                           line, and carries no separator (the split symbol belongs to the segment
-                           that ends with it, exactly as in the numeric layout). */
-                        char ntmp[24];
-                        const uint64_t v = idIntModes[si].decode(idIntCoders[si]);
-                        const int nn = snprintf(ntmp, sizeof(ntmp), "%llu", (unsigned long long)v);
-                        if (nn > 0) {
-                            qname.append(ntmp, (size_t)nn);
-                        }
-                        continue;
-                    }
-                    if (!preIdDec[si]) {
-                        /* Every layout without a coder of its own is handled above; getting here
-                           means a mode this build does not know, which must not be dereferenced. */
-                        LOG_ERROR("Predecode id sub-stream(%u) has no decoder", si);
-                        return -1;
-                    }
-                    uint8_t sep = (si < idSplitSymbols.size()) ? idSplitSymbols[si] : UINT8_MAX;
-                    // coder_affix_match keeps cross-line context in an internal
-                    // buffer only when need2hold is set; without it, it points
-                    // last at our fixed qnameBuf and the next line would corrupt
-                    // the prefix reference.
-                    bool hold = (idStreamCoders[si] == "coder_affix_match");
-                    int32_t len = preIdDec[si]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), sep, hold);
-                    if (len > 0) {
-                        int32_t strip = (qnameBuf[len - 1] == '\t') ? 1 : 0;
-                        qname.append(qnameBuf, (size_t)len - strip);
-                    }
-                }
+                auto lvIt = fieldIoLevel.find(7);
+                if (lvIt != fieldIoLevel.end()) excDec->set_level(lvIt->second);
             }
-            decodedQnames[lineNo] = qname;
-        }
-        for (uint32_t si = 0; si < numBufs.size(); ++si) {
-            MemoryUtil::safeFree(numBufs[si]);
-        }
-    }
-
-    /*
-     * Decode FLAG (field 1) first so that PNEXT (field 7) can be decoded
-     * correctly: PNEXT is stored as delta against POS only when the mate
-     * position is meaningful (FLAG bit 0x1 set and bit 0x8 clear), otherwise
-     * it stores the original value. This mirrors compressPNextFieldDelta.
-     */
-    auto flagStartIt = fieldIoStart.find(1);
-    if (flagStartIt != fieldIoStart.end() && streams.isValidIndex(1) && streams[1].isMember("coder")) {
-        uint32_t off = flagStartIt->second;
-        uint32_t dstlen = fieldIoDstLen[1];
-        std::string coderName = streams[1]["coder"]["magic"].asString();
-        std::string mode = streams[1].isMember("mode") ? streams[1]["mode"].asString() : "";
-
-        std::shared_ptr<coder_io> tmpIo = makeCoderIo(buffer + off, dstlen, "FLAG predecode");
-        std::shared_ptr<coder> tmpDec;
-        if (coderName == "coder_bwt_cm") {
-            tmpDec = std::make_shared<coder_bwt_cm>(tmpIo.get());
-        } else if (coderName == "coder_affix_match") {
-            tmpDec = std::make_shared<coder_affix_match>(tmpIo.get());
-        } else {
-            tmpDec = nullptr;
-        }
-        if (tmpDec) {
-            auto lvIt = fieldIoLevel.find(1);
-            if (lvIt != fieldIoLevel.end()) {
-                tmpDec->set_level(lvIt->second);
-            }
-
-            bool binary = (mode == "number" || mode == "");
-            for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-                bool need2hold = (coderName == "coder_affix_match");
-                int32_t len;
-                if (binary) {
-                    len = tmpDec->decode_line(tmpBuf, sizeof(uint16_t), UINT8_MAX, need2hold);
-                    if (len >= (int32_t)sizeof(uint16_t)) {
-                        mappedFlag[lineNo] = *(uint16_t*)tmpBuf;
-                    } else {
-                        mappedFlag[lineNo] = 0;
-                    }
-                } else {
-                    len = tmpDec->decode_line(tmpBuf, (uint32_t)sizeof(tmpBuf), '\t', need2hold);
-                    if (len > 1) {
-                        std::string flagStr((char*)tmpBuf, (size_t)len - 1);
-                        try {
-                            mappedFlag[lineNo] = (uint16_t)std::stoll(flagStr);
-                        } catch (...) {
-                            mappedFlag[lineNo] = 0;
-                        }
-                    } else {
-                        mappedFlag[lineNo] = 0;
-                    }
-                }
-            }
-        }
-    }
-
-    /*
-     * Pre-decode RNAME (field 2) so the POS delta chain below can detect
-     * chromosome switches from mappedChr, mirroring the encoder. A separate
-     * decoder is used so the main loop's RNAME decoder state is untouched.
-     */
-    auto rnameStartIt = fieldIoStart.find(2);
-    if (rnameStartIt != fieldIoStart.end() && streams.isValidIndex(2) && streams[2].isMember("coder")) {
-        uint32_t rnOff = rnameStartIt->second;
-        uint32_t rnDst = fieldIoDstLen[2];
-        std::string rnCoderName = streams[2]["coder"]["magic"].asString();
-        std::shared_ptr<coder_io> rnIo = makeCoderIo(buffer + rnOff, rnDst, "RNAME predecode");
-        std::shared_ptr<coder> rnDec;
-        if (rnCoderName == "coder_bwt_cm") {
-            rnDec = std::make_shared<coder_bwt_cm>(rnIo.get());
-        } else if (rnCoderName == "coder_affix_match") {
-            rnDec = std::make_shared<coder_affix_match>(rnIo.get());
-        }
-        if (rnDec) {
-            auto rnLvIt = fieldIoLevel.find(2);
-            if (rnLvIt != fieldIoLevel.end()) {
-                rnDec->set_level(rnLvIt->second);
-            }
-            bool rnHold = (rnCoderName == "coder_affix_match");
-            for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-                uint16_t chrIndex = 0;
-                int32_t len = rnDec->decode_line((uint8_t*)&chrIndex, sizeof(chrIndex), UINT8_MAX, rnHold);
-                mappedChr[lineNo] = (len >= (int32_t)sizeof(chrIndex)) ? chrIndex : 0xFFFF;
-            }
-        }
-    }
-
-    /* Fields needed to reconstruct TLEN: POS(3), CIGAR(5), PNEXT(7). */
-    static const uint32_t tlenFields[] = {3, 5, 7};
-
-    for (uint32_t f : tlenFields) {
-        auto startIt = fieldIoStart.find(f);
-        if (startIt == fieldIoStart.end() || !streams.isValidIndex(f) || !streams[f].isMember("coder")) {
-            continue;
-        }
-
-        uint32_t off = startIt->second;
-        uint32_t dstlen = fieldIoDstLen[f];
-        std::string coderName = streams[f]["coder"]["magic"].asString();
-        std::string mode = streams[f].isMember("mode") ? streams[f]["mode"].asString() : "";
-
-        std::shared_ptr<coder_io> tmpIo = makeCoderIo(buffer + off, dstlen, "TLEN predecode");
-        std::shared_ptr<coder> tmpDec;
-        if (coderName == "coder_bwt_cm") {
-            tmpDec = std::make_shared<coder_bwt_cm>(tmpIo.get());
-        } else if (coderName == "coder_affix_match") {
-            tmpDec = std::make_shared<coder_affix_match>(tmpIo.get());
-        } else if (coderName == "coder_arith") {
-            tmpDec = std::make_shared<coder_arith>(tmpIo.get());
-        } else {
-            continue;
-        }
-        auto lvIt = fieldIoLevel.find(f);
-        if (lvIt != fieldIoLevel.end()) {
-            tmpDec->set_level(lvIt->second);
-        }
-        /* A coder_arith decoder must use the same file-level prior the encoder
-         * did, or the arithmetic decode diverges on the first symbol. */
-        if (coderName == "coder_arith") {
-            AuxPayloadPtr posPrior =
-                (pbgzEngine != nullptr) ? pbgzEngine->getPosPrior() : AuxPayloadPtr();
-            if (posPrior && !posPrior->empty()) {
-                static_cast<coder_arith*>(tmpDec.get())
-                    ->set_prior(posPrior->data(), (uint32_t)posPrior->size());
-            }
-        }
-
-        std::vector<std::string>& fieldCache = tlenPreDecodedFields[f];
-        fieldCache.clear();
-        fieldCache.reserve(samLine);
-
-        /* Delta chain of pos_delta mode: the absolute POS reconstructed from the previous line. */
-        int64_t posPrev = 0;
-        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-            /*
-             * coder_affix_match points last at the caller's output buffer
-             * unless need2hold is set; it must be set here, otherwise the
-             * cross-line context would be overwritten by the next decode.
-             * bwt_cm buffers internally on its own.
-             */
-            bool need2hold = (coderName == "coder_affix_match");
-            /*
-             * Field form: CIGAR is always textual (encoded line-wise by
-             * compressCigar); POS/PNEXT default to fixed-width binary and are
-             * decoded as text only when mode is textual. POS uses a zigzag
-             * varint stream: the value is read byte-by-byte (fixed-length
-             * decode_line) until the continuation bit is clear. Textual data
-             * must never be decoded as fixed-length, otherwise bwt_cm's
-             * fixed-length branch would spin past the block boundary.
-             */
-            if (f == 3 && mode == "pos_delta") {
-                /* Unsigned varint decode, mirroring compressPosFieldDelta. */
-                if (lineNo > 0) {
-                    const auto curChrIt = mappedChr.find(lineNo);
-                    const auto prevChrIt = mappedChr.find(lineNo - 1);
-                    const uint16_t curChr = (curChrIt != mappedChr.end()) ? curChrIt->second : 0xFFFF;
-                    const uint16_t prevChr = (prevChrIt != mappedChr.end()) ? prevChrIt->second : 0xFFFF;
-                    if (curChr != prevChr) {
-                        posPrev = 0;
-                    }
-                }
-                uint64_t u = 0;
-                int32_t shift = 0;
-                int32_t vlen;
-                do {
-                    uint8_t b = 0;
-                    vlen = tmpDec->decode_line(&b, 1, UINT8_MAX, need2hold);
-                    if (vlen != 1) {
-                        LOG_ERROR("Decode POS delta failed at line %u", lineNo);
-                        return -1;
-                    }
-                    u |= (uint64_t)(b & 0x7f) << shift;
-                    if ((b & 0x80) == 0) break;
+            const int32_t pairCount = streams[7]["exceptions"].asUInt();
+            const std::string excEnc = streams[7].isMember("exc_enc")
+                                           ? streams[7]["exc_enc"].asString()
+                                           : std::string();
+            /* One buffer size for both varint layouts, so the parse loop below is shared:
+               an entry is at most a u32 varint (<= 5 B) plus a zigzag i64 varint (<= 10 B). */
+            std::vector<uint8_t> raw((size_t)pairCount * 16, 0);
+            size_t rawOff = 0;
+            auto nextVarint = [&raw, &rawOff](uint64_t& out) -> bool {
+                out = 0;
+                int shift = 0;
+                while (rawOff < raw.size()) {
+                    const uint8_t b = raw[rawOff++];
+                    out |= (uint64_t)(b & 0x7f) << shift;
+                    if ((b & 0x80) == 0) return true;
                     shift += 7;
-                    if (shift >= 64) {
-                        LOG_ERROR("Decode POS delta overlong varint at line %u", lineNo);
+                    if (shift >= 64) return false;
+                }
+                return false;
+            };
+            if (excEnc == "varint2") {
+                /* Every ordinal as a forward delta, then every delta as a zigzag varint;
+                   where all the deltas are the same value that value is in the meta and the
+                   second run is not there at all (see compressPNextFieldDelta). */
+                excDec->decode_line(raw.data(), (uint32_t)raw.size(), UINT8_MAX, false);
+                const bool constDelta = streams[7].isMember("exc_delta");
+                const uint64_t constZ = constDelta ? streams[7]["exc_delta"].asUInt64() : 0;
+                std::vector<uint32_t> ordinals((size_t)pairCount, 0);
+                uint32_t ordinal = 0;
+                for (int32_t i = 0; i < pairCount; ++i) {
+                    uint64_t step = 0;
+                    if (!nextVarint(step)) {
+                        LOG_ERROR("PNEXT exception varint stream truncated");
                         return -1;
                     }
-                } while (true);
-                int64_t delta = (int64_t)u;
-                int64_t pos = posPrev + delta;
-                posPrev = pos;
-                mappedPos[lineNo] = pos;
-                fieldCache.emplace_back(std::to_string(pos) + '\t');
-                continue;
-            }
-
-            bool binary = (f != 5) && (mode == "number" || mode == "");
-            int32_t len;
-            if (binary) {
-                len = tmpDec->decode_line(tmpBuf, 4, UINT8_MAX, need2hold);
+                    ordinal += (uint32_t)step;
+                    ordinals[i] = ordinal;
+                }
+                for (int32_t i = 0; i < pairCount; ++i) {
+                    uint64_t z = constZ;
+                    if (!constDelta && !nextVarint(z)) {
+                        LOG_ERROR("PNEXT exception varint stream truncated");
+                        return -1;
+                    }
+                    const int64_t delta = (int64_t)(z >> 1) ^ -(int64_t)(z & 1); /* de-zigzag */
+                    const uint32_t lineNo = ordinals[i];
+                    const int64_t basePos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                    pnextCache[lineNo] = delta + basePos;
+                }
+            } else if (excEnc == "varint") {
+                /* Absolute contentIdx then a zigzag-LEB128 delta per pair, the layout this
+                   replaced; archives written by it still decode here. */
+                excDec->decode_line(raw.data(), (uint32_t)raw.size(), UINT8_MAX, false);
+                for (int32_t i = 0; i < pairCount; ++i) {
+                    uint64_t ci = 0, z = 0;
+                    if (!nextVarint(ci) || !nextVarint(z)) {
+                        LOG_ERROR("PNEXT exception varint stream truncated");
+                        return -1;
+                    }
+                    const int64_t delta = (int64_t)(z >> 1) ^ -(int64_t)(z & 1); /* de-zigzag */
+                    const uint32_t lineNo = (uint32_t)ci;
+                    const int64_t basePos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                    pnextCache[lineNo] = delta + basePos;
+                }
             } else {
-                len = tmpDec->decode_line(tmpBuf, (uint32_t)sizeof(tmpBuf), '\t', need2hold);
-            }
-            if (len <= 1) {
-                fieldCache.emplace_back();
-                continue;
-            }
-
-            switch (f) {
-                case 3:
-                    if (binary) {
-                        mappedPos[lineNo] = (int64_t)(uint32_t)(*(uint32_t*)tmpBuf);
-                        fieldCache.emplace_back(std::to_string(mappedPos[lineNo]) + '\t');
-                    } else {
-                        mappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
-                        fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
-                    }
-                    break;
-                case 5:
-                    cigarReadLen[lineNo] = parseCigarRefConsumed(tmpBuf, len);
-                    baseLengthBuffer[lineNo] = parseCigar(tmpBuf, len);
-                    if (cigarOpList.size() <= lineNo) cigarOpList.resize(lineNo + 1);
-                    parseCigarOps(tmpBuf, (uint32_t)len, cigarOpList[lineNo]);
-                    fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
-                    break;
-                case 7:
-                    if (binary) {
-                        int64_t pnextBin = (int64_t)(uint32_t)(*(uint32_t*)tmpBuf);
-                        nextMappedPos[lineNo] = pnextBin;
-                        fieldCache.emplace_back(std::to_string(pnextBin) + '\t');
-                    } else if (mode == "pnext_delta") {
-                        /* Check if PNEXT is valid based on FLAG bits (same logic as compression) */
-                        auto flagIt = mappedFlag.find(lineNo);
-                        bool isPNextValid = false;
-                        if (flagIt != mappedFlag.end()) {
-                            uint16_t flag = flagIt->second;
-                            /* PNEXT is valid only if:
-                             * - FLAG bit 0x1 is set (paired-end sequencing)
-                             * - FLAG bit 0x8 is not set (mate is mapped)
-                             */
-                            isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
-                        }
-
-                        if (isPNextValid) {
-                            /* Valid PNEXT: stored as delta against POS, reconstruct */
-                            int64_t delta = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
-                            int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
-                            int64_t pnext = delta + pos;
-                            nextMappedPos[lineNo] = pnext;
-                            fieldCache.emplace_back(std::to_string(pnext) + '\t');
-                        } else {
-                            /* Invalid PNEXT: stored as original value directly */
-                            if ((uint32_t)len > 1) {
-                                nextMappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
-                                fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
-                            } else {
-                                nextMappedPos[lineNo] = 0;
-                                fieldCache.emplace_back("0\t");
-                            }
-                        }
-                    } else {
-                        nextMappedPos[lineNo] = (int64_t)std::stoll(std::string((char*)tmpBuf, len - 1));
-                        fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
-                    }
-                    break;
-                default:
-                    fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
-                    break;
+                /* Legacy layout: fixed int32 x 2 per pair. */
+                std::vector<int32_t> excBuf((size_t)pairCount * 2, 0);
+                excDec->decode_line((uint8_t*)excBuf.data(),
+                    (uint32_t)((size_t)pairCount * 2 * sizeof(int32_t)), UINT8_MAX, false);
+                for (int32_t i = 0; i < pairCount; ++i) {
+                    uint32_t contentIdx = (uint32_t)excBuf[2 * i];
+                    int32_t delta = excBuf[2 * i + 1];
+                    /* The exception stores the 0-based data-line index (contentIdx on
+                       the compression side, i.e. lineIdx - headEndLine). On this
+                       decompression side lineNo is also 0-based data-line indexed, so
+                       no headEndLine offset is added here. */
+                    uint32_t lineNo = contentIdx;
+                    int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
+                    pnextCache[lineNo] = delta + pos;
+                }
             }
         }
     }
 
-    /*
-     * PNEXT (field 7) in pnext_qname_rebuild mode stores only exception
-     * (line, delta) pairs in streams[7]["streams"][0]. Non-exception lines are
-     * rebuilt here by pairing records that share the same QNAME and are
-     * mutually mapped. mappedPos is already populated by the POS (field 3)
-     * pre-decode above. The result fills tlenPreDecodedFields[7] and
-     * nextMappedPos for every line.
-     */
-    std::string pnextMode = streams.isValidIndex(7) && streams[7].isMember("mode")
-        ? streams[7]["mode"].asString() : "";
-    if (pnextMode == "pnext_qname_rebuild") {
-        pnextCache.clear();
-        // Decode the exception stream (pairs of contentIdx, delta).
-        if (streams[7].isMember("streams") && streams[7]["streams"].size() > 0) {
-            Json::Value& excMeta = streams[7]["streams"][0];
-            uint32_t excOff = fieldIoStart[7];
-            uint32_t excDstLen = excMeta["dstlen"].asUInt();
-            std::string excCoderName = excMeta["coder"]["magic"].asString();
-            std::shared_ptr<coder_io> excIo = makeCoderIo(buffer + excOff, excDstLen, "PNEXT exc predecode");
-            std::shared_ptr<coder> excDec;
-            if (excCoderName == "coder_bwt_cm") {
-                excDec = std::make_shared<coder_bwt_cm>(excIo.get());
-            } else if (excCoderName == "coder_affix_match") {
-                excDec = std::make_shared<coder_affix_match>(excIo.get());
-            }
-            if (excDec) {
-                // Exception coder level: prefer the value stored in the sub-stream meta.
-                if (excMeta["coder"].isMember("level")) {
-                    excDec->set_level(excMeta["coder"]["level"].asInt());
-                } else {
-                    auto lvIt = fieldIoLevel.find(7);
-                    if (lvIt != fieldIoLevel.end()) excDec->set_level(lvIt->second);
-                }
-                const int32_t pairCount = streams[7]["exceptions"].asUInt();
-                const std::string excEnc = streams[7].isMember("exc_enc")
-                                               ? streams[7]["exc_enc"].asString()
-                                               : std::string();
-                /* One buffer size for both varint layouts, so the parse loop below is shared:
-                   an entry is at most a u32 varint (<= 5 B) plus a zigzag i64 varint (<= 10 B). */
-                std::vector<uint8_t> raw((size_t)pairCount * 16, 0);
-                size_t excOff = 0;
-                auto nextVarint = [&raw, &excOff](uint64_t& out) -> bool {
-                    out = 0;
-                    int shift = 0;
-                    while (excOff < raw.size()) {
-                        const uint8_t b = raw[excOff++];
-                        out |= (uint64_t)(b & 0x7f) << shift;
-                        if ((b & 0x80) == 0) return true;
-                        shift += 7;
-                        if (shift >= 64) return false;
-                    }
-                    return false;
-                };
-                if (excEnc == "varint2") {
-                    /* Every ordinal as a forward delta, then every delta as a zigzag varint;
-                       where all the deltas are the same value that value is in the meta and the
-                       second run is not there at all (see compressPNextFieldDelta). */
-                    excDec->decode_line(raw.data(), (uint32_t)raw.size(), UINT8_MAX, false);
-                    const bool constDelta = streams[7].isMember("exc_delta");
-                    const uint64_t constZ = constDelta ? streams[7]["exc_delta"].asUInt64() : 0;
-                    std::vector<uint32_t> ordinals((size_t)pairCount, 0);
-                    uint32_t ordinal = 0;
-                    for (int32_t i = 0; i < pairCount; ++i) {
-                        uint64_t step = 0;
-                        if (!nextVarint(step)) {
-                            LOG_ERROR("PNEXT exception varint stream truncated");
-                            return -1;
-                        }
-                        ordinal += (uint32_t)step;
-                        ordinals[i] = ordinal;
-                    }
-                    for (int32_t i = 0; i < pairCount; ++i) {
-                        uint64_t z = constZ;
-                        if (!constDelta && !nextVarint(z)) {
-                            LOG_ERROR("PNEXT exception varint stream truncated");
-                            return -1;
-                        }
-                        const int64_t delta = (int64_t)(z >> 1) ^ -(int64_t)(z & 1); /* de-zigzag */
-                        const uint32_t lineNo = ordinals[i];
-                        const int64_t basePos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
-                        pnextCache[lineNo] = delta + basePos;
-                    }
-                } else if (excEnc == "varint") {
-                    /* Absolute contentIdx then a zigzag-LEB128 delta per pair, the layout this
-                       replaced; archives written by it still decode here. */
-                    excDec->decode_line(raw.data(), (uint32_t)raw.size(), UINT8_MAX, false);
-                    for (int32_t i = 0; i < pairCount; ++i) {
-                        uint64_t ci = 0, z = 0;
-                        if (!nextVarint(ci) || !nextVarint(z)) {
-                            LOG_ERROR("PNEXT exception varint stream truncated");
-                            return -1;
-                        }
-                        const int64_t delta = (int64_t)(z >> 1) ^ -(int64_t)(z & 1); /* de-zigzag */
-                        const uint32_t lineNo = (uint32_t)ci;
-                        const int64_t basePos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
-                        pnextCache[lineNo] = delta + basePos;
-                    }
-                } else {
-                    /* Legacy layout: fixed int32 x 2 per pair. */
-                    std::vector<int32_t> excBuf((size_t)pairCount * 2, 0);
-                    excDec->decode_line((uint8_t*)excBuf.data(),
-                        (uint32_t)((size_t)pairCount * 2 * sizeof(int32_t)), UINT8_MAX, false);
-                    for (int32_t i = 0; i < pairCount; ++i) {
-                        uint32_t contentIdx = (uint32_t)excBuf[2 * i];
-                        int32_t delta = excBuf[2 * i + 1];
-                        /* The exception stores the 0-based data-line index (contentIdx on
-                           the compression side, i.e. lineIdx - headEndLine). On this
-                           decompression side lineNo is also 0-based data-line indexed, so
-                           no headEndLine offset is added here. */
-                        uint32_t lineNo = contentIdx;
-                        int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
-                        pnextCache[lineNo] = delta + pos;
-                    }
-                }
-            }
+    // Build qname -> lines mapping from decodedQnames (only mapped, paired lines).
+    std::unordered_map<std::string, std::vector<uint32_t>> qnameToLines;
+    qnameToLines.reserve(samLine);
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        auto flagIt = mappedFlag.find(lineNo);
+        bool paired = flagIt != mappedFlag.end() && (flagIt->second & 0x1) && !(flagIt->second & 0x8);
+        if (paired && !decodedQnames[lineNo].empty()) {
+            qnameToLines[decodedQnames[lineNo]].push_back(lineNo);
         }
+    }
 
-        // Build qname -> lines mapping from decodedQnames (only mapped, paired lines).
-        std::unordered_map<std::string, std::vector<uint32_t>> qnameToLines;
-        qnameToLines.reserve(samLine);
-        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+    // Rebuild PNEXT for every line.
+    std::vector<std::string>& pnextCacheOut = tlenPreDecodedFields[7];
+    pnextCacheOut.clear();
+    pnextCacheOut.reserve(samLine);
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        int64_t pnext = 0;
+        auto cacheIt = pnextCache.find(lineNo);
+        if (cacheIt != pnextCache.end()) {
+            pnext = cacheIt->second; // exception: stored value
+        } else {
+            // Rebuild from mate: the encoder guarantees a non-exception line
+            // belongs to a QNAME group of exactly two mutually-mapped
+            // records, so the other record in the group is the mate.
             auto flagIt = mappedFlag.find(lineNo);
             bool paired = flagIt != mappedFlag.end() && (flagIt->second & 0x1) && !(flagIt->second & 0x8);
             if (paired && !decodedQnames[lineNo].empty()) {
-                qnameToLines[decodedQnames[lineNo]].push_back(lineNo);
-            }
-        }
-
-        // Rebuild PNEXT for every line.
-        std::vector<std::string>& pnextCacheOut = tlenPreDecodedFields[7];
-        pnextCacheOut.clear();
-        pnextCacheOut.reserve(samLine);
-        for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-            int64_t pnext = 0;
-            auto cacheIt = pnextCache.find(lineNo);
-            if (cacheIt != pnextCache.end()) {
-                pnext = cacheIt->second; // exception: stored value
-            } else {
-                // Rebuild from mate: the encoder guarantees a non-exception line
-                // belongs to a QNAME group of exactly two mutually-mapped
-                // records, so the other record in the group is the mate.
-                auto flagIt = mappedFlag.find(lineNo);
-                bool paired = flagIt != mappedFlag.end() && (flagIt->second & 0x1) && !(flagIt->second & 0x8);
-                if (paired && !decodedQnames[lineNo].empty()) {
-                    const auto& mates = qnameToLines[decodedQnames[lineNo]];
-                    if (mates.size() == 2) {
-                        for (uint32_t ml : mates) {
-                            if (ml == lineNo) continue;
-                            pnext = mappedPos.count(ml) ? mappedPos[ml] : 0;
-                            break;
-                        }
+                const auto& mates = qnameToLines[decodedQnames[lineNo]];
+                if (mates.size() == 2) {
+                    for (uint32_t ml : mates) {
+                        if (ml == lineNo) continue;
+                        pnext = mappedPos.count(ml) ? mappedPos[ml] : 0;
+                        break;
                     }
                 }
             }
-            nextMappedPos[lineNo] = pnext;
-            pnextCacheOut.emplace_back(std::to_string(pnext) + '\t');
         }
+        nextMappedPos[lineNo] = pnext;
+        pnextCacheOut.emplace_back(std::to_string(pnext) + '\t');
     }
+    return 0;
+}
 
-    /* Full mate index: built at once once all (pos, pnext) pairs are known. */
+/* Full mate index: built at once, once all (pos, pnext) pairs are known. */
+void SamCodecActuator::buildTlenMateIndex()
+{
     tlenMateIndex.clear();
     for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
         auto posIt = mappedPos.find(lineNo);
@@ -6074,9 +5268,239 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
             tlenMateIndex[std::make_pair(posIt->second, pnextIt->second)] = lineNo;
         }
     }
+}
+
+int32_t SamCodecActuator::preDecodeForTLEN() {
+    if (samLine == 0 || !meta.isMember("sam")) {
+        return 0;
+    }
+
+    Json::Value& streams = meta["sam"]["streams"];
+
+    /* QNAME (field 0) first: the PNEXT mode below pairs records by it. See rebuildQnameColumn. */
+    if (rebuildQnameColumn() != 0) {
+        return -1;
+    }
+
+    /*
+     * FLAG (field 1) first: PNEXT is stored as a delta against POS only when the mate position
+     * is meaningful, and that is decided by the flag bits. See predecodeFlagColumn, which is
+     * also what mirrors compressPNextFieldDelta.
+     */
+    if (predecodeFlagColumn() != 0) {
+        return -1;
+    }
+
+    /*
+     * Pre-decode RNAME (field 2) so the POS delta chain below can detect
+     * chromosome switches from mappedChr, mirroring the encoder. A separate
+     * decoder is used so the main loop's RNAME decoder state is untouched.
+     */
+    if (predecodeRnameColumn() != 0) {
+        return -1;
+    }
+
+    /* Fields needed to reconstruct TLEN: POS(3), CIGAR(5), PNEXT(7). */
+    static const uint32_t tlenFields[] = {3, 5, 7};
+
+    for (uint32_t f : tlenFields) {
+        TlenColumnPredecoder pre;
+        if (!buildTlenColumnPredecoder(f, pre)) {
+            continue;   /* nothing to pre-decode here (no stream, or an unreadable coder) */
+        }
+        if (rebuildTlenColumn(f, pre) != 0) {
+            return -1;
+        }
+    }
+
+    /*
+     * PNEXT (field 7): in pnext_qname_rebuild mode the stream carries only the exceptions and
+     * the rest of the column is rebuilt from the QNAME groups (see rebuildPnextByQname).
+     */
+    std::string pnextMode = streams.isValidIndex(7) && streams[7].isMember("mode")
+        ? streams[7]["mode"].asString() : "";
+    if (pnextMode == "pnext_qname_rebuild" && rebuildPnextByQname() != 0) {
+        return -1;
+    }
+
+    buildTlenMateIndex();
     return 0;
 }
 
+
+/*
+ * Reconstruct one split segment of this line's ID, whatever layout it was written in, and append
+ * it to the output block.
+ *
+ * The layouts differ in where the bytes come from and whether the split symbol travels with them:
+ * "numeric" (and "cnt", which initDecoder expanded into exactly that varint buffer) keeps one
+ * value per line in a buffer decoded once, so the value is rendered back to decimal text and the
+ * split symbol re-appended here; "dict" carries one index per line into the block's few texts;
+ * "hexd" is a uniform code per character over a fixed alphabet; a constant segment is the text
+ * itself, stored once; the value-domain layout ("intd"/"intu") decodes one value per line from its
+ * model; and the legacy textual layout is one decode_line per line, split symbol included.
+ *
+ * Returns 0 when the segment is done, -1 on a corrupt or truncated stream.
+ */
+int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& splitMeta,
+                                                RoughIOBlock* outputBlock, uint32_t& idLength)
+{
+    const uint32_t splitDstLen = splitMeta["dstlen"].asUInt();
+    std::string coderName = splitMeta["coder"]["magic"].asString();
+
+    /* "cnt" is the same layout from here on: initDecoder already expanded the counter's deltas
+       into the varint buffer that the numeric layout carries (see id_int::Counter). */
+    const std::string idMode = splitMeta.isMember("mode") ? splitMeta["mode"].asString()
+                                                         : std::string();
+    const bool numericMode = (idMode == "numeric" || idMode == "cnt");
+    if (numericMode) {
+        /*
+         * Numeric layout: the whole varint stream was decoded once by
+         * initDecoder (no per-line terminator exists). Serve exactly one value
+         * per line here, render it back to decimal text and re-append the split
+         * symbol, so the caller sees the same output shape as the textual path.
+         */
+        readOffset += splitDstLen;
+        idLength += splitDstLen;
+
+        if (splitIdx >= idNumericBufs.size() || idNumericBufs[splitIdx] == nullptr ||
+            idNumericPos[splitIdx] >= idNumericLens[splitIdx]) {
+            LOG_ERROR("id numeric segment(%u) exhausted", splitIdx);
+            return -1;
+        }
+        uint8_t* numBuf = idNumericBufs[splitIdx];
+        uint32_t& npos = idNumericPos[splitIdx];
+        uint64_t& nacc = idNumericAcc[splitIdx];
+        const uint32_t nlen = idNumericLens[splitIdx];
+
+        uint32_t zz = 0;
+        if (!readVarint(numBuf, nlen, npos, zz)) {
+            LOG_ERROR("Corrupt id numeric segment(%u): truncated varint", splitIdx);
+            return -1;
+        }
+        const uint32_t delta = zz >> 1;
+        nacc = ((zz & 1u) == 0) ? (nacc + delta) : (nacc - delta);
+
+        const uint8_t sep = (splitIdx < idAnalysis.symbols.size())
+                            ? (uint8_t)idAnalysis.symbols[splitIdx] : (uint8_t)'\t';
+        char tmp[24];
+        int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)nacc);
+        if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
+            LOG_ERROR("Reconstruct id numeric segment(%u) overflow", splitIdx);
+            return -1;
+        }
+        memcpy(outputBlock->getCurrent(), tmp, (uint32_t)n);
+        outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)n);
+        outputBlock->getCurrent()[0] = sep;
+        outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+        return 0;
+    }
+    if (!idDictEntries.empty() && !idDictEntries[splitIdx].empty()) {
+        /* Dictionary segment: one index per line, and the text those few index values stand for
+           came with the payload (the trailing split symbol included, like the textual layout).
+           initDecoder already turned the index stream into one absolute index per line. */
+        if (splitIdx >= idNumericBufs.size() || idNumericBufs[splitIdx] == nullptr ||
+            idNumericPos[splitIdx] >= idNumericLens[splitIdx]) {
+            LOG_ERROR("id dictionary segment(%u) exhausted", splitIdx);
+            return -1;
+        }
+        uint32_t idx = 0;
+        if (!readVarint(idNumericBufs[splitIdx], idNumericLens[splitIdx],
+                        idNumericPos[splitIdx], idx) ||
+            idx >= idDictEntries[splitIdx].size()) {
+            LOG_ERROR("Reconstruct id dictionary segment(%u): bad index", splitIdx);
+            return -1;
+        }
+        const std::string& text = idDictEntries[splitIdx][(size_t)idx];
+        if (outputBlock->getRemain() < text.size()) {
+            LOG_ERROR("Reconstruct id dictionary segment(%u) overflow", splitIdx);
+            return -1;
+        }
+        memcpy(outputBlock->getCurrent(), text.data(), text.size());
+        outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)text.size());
+        return 0;
+    }
+    if (!idHexAlphabets.empty() && !idHexAlphabets[splitIdx].chars.empty()) {
+        /* Fixed-alphabet segment: the length when they vary, then one uniform character code
+           each, then the split symbol this segment ends with (the encoder stored neither). */
+        const std::string& alpha = idHexAlphabets[splitIdx].chars;
+        RangeCoder& hrc = idHexCoders[splitIdx];
+        uint32_t len = idHexAlphabets[splitIdx].minLen;
+        if (idHexAlphabets[splitIdx].maxLen > len) {
+            const uint32_t range = idHexAlphabets[splitIdx].maxLen - len + 1;
+            const uint32_t v = hrc.GetFreq(range);
+            hrc.Decode(v, 1);
+            len += v;
+        }
+        const uint8_t sep = (splitIdx < idAnalysis.symbols.size())
+                            ? (uint8_t)idAnalysis.symbols[splitIdx] : (uint8_t)'\t';
+        if (hrc.err != 0 || len == 0 || len > 256) {
+            LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) failed", splitIdx);
+            return -1;
+        }
+        if (outputBlock->getRemain() < len + 1) {
+            LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) overflow", splitIdx);
+            return -1;
+        }
+        char tmp[257];
+        for (uint32_t c = 0; c < len; ++c) {
+            const uint32_t v = hrc.GetFreq((uint32_t)alpha.size());
+            hrc.Decode(v, 1);
+            if (hrc.err != 0 || v >= alpha.size()) {
+                LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) failed", splitIdx);
+                return -1;
+            }
+            tmp[c] = alpha[v];
+        }
+        memcpy(outputBlock->getCurrent(), tmp, len);
+        outputBlock->setDataLen(outputBlock->getDataLen() + len);
+        outputBlock->getCurrent()[0] = sep;
+        outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+        return 0;
+    }
+    if (!idConstTexts.empty() && !idConstTexts[splitIdx].empty()) {
+        /* Constant segment: stored once for the block, so nothing per line was coded for it.
+           The text carries its own trailing split symbol, exactly as the textual path emits it. */
+        const std::string& text = idConstTexts[splitIdx];
+        if (outputBlock->getRemain() < text.size()) {
+            LOG_ERROR("Reconstruct id constant segment(%u) overflow", splitIdx);
+            return -1;
+        }
+        memcpy(outputBlock->getCurrent(), text.data(), text.size());
+        outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)text.size());
+        return 0;
+    }
+    if (!idIntActive.empty() && idIntActive[splitIdx]) {
+        /* Value-domain segment: one value per line, then the split symbol this segment ends
+           with (the encoder stored neither as text). */
+        const uint8_t sep = (splitIdx < idAnalysis.symbols.size())
+                            ? (uint8_t)idAnalysis.symbols[splitIdx] : (uint8_t)'\t';
+        const uint64_t v = idIntModes[splitIdx].decode(idIntCoders[splitIdx]);
+        char tmp[24];
+        int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)v);
+        if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
+            LOG_ERROR("Reconstruct id value-domain segment(%u) overflow", splitIdx);
+            return -1;
+        }
+        memcpy(outputBlock->getCurrent(), tmp, (uint32_t)n);
+        outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)n);
+        outputBlock->getCurrent()[0] = sep;
+        outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+        return 0;
+    }
+
+    // Decode segment (legacy textual layout)
+    int32_t segmentLen = idDecoders[splitIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
+        (splitIdx < idAnalysis.symbols.size()) ? idAnalysis.symbols[splitIdx] : UINT8_MAX, false);
+    if (segmentLen < 0) {
+        LOG_ERROR("Decode id field segment(%u) failed: %d", splitIdx, segmentLen);
+        return -1;
+    }
+    readOffset += splitDstLen;
+    idLength += splitDstLen;
+    outputBlock->setDataLen(outputBlock->getDataLen() + segmentLen);
+    return 0;
+    }
 
 int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fieldMeta, RoughIOBlock* outputBlock) {
     if (fieldIdx != 0) {
@@ -6101,161 +5525,9 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
 
     // Reconstruct ID from split segments
     for (uint32_t splitIdx = 0; splitIdx < idStreams.size(); ++splitIdx) {
-        Json::Value& splitMeta = idStreams[splitIdx];
-        uint32_t splitDstLen = splitMeta["dstlen"].asUInt();
-        std::string coderName = splitMeta["coder"]["magic"].asString();
-
-        /* "cnt" is the same layout from here on: initDecoder already expanded the counter's deltas
-           into the varint buffer that the numeric layout carries (see id_int::Counter). */
-        const std::string idMode = splitMeta.isMember("mode") ? splitMeta["mode"].asString()
-                                                             : std::string();
-        const bool numericMode = (idMode == "numeric" || idMode == "cnt");
-        if (numericMode) {
-            /*
-             * Numeric layout: the whole varint stream was decoded once by
-             * initDecoder (no per-line terminator exists). Serve exactly one value
-             * per line here, render it back to decimal text and re-append the split
-             * symbol, so the caller sees the same output shape as the textual path.
-             */
-            readOffset += splitDstLen;
-            idLength += splitDstLen;
-
-            if (splitIdx >= idNumericBufs.size() || idNumericBufs[splitIdx] == nullptr ||
-                idNumericPos[splitIdx] >= idNumericLens[splitIdx]) {
-                LOG_ERROR("id numeric segment(%u) exhausted", splitIdx);
-                return -1;
-            }
-            uint8_t* numBuf = idNumericBufs[splitIdx];
-            uint32_t& npos = idNumericPos[splitIdx];
-            uint64_t& nacc = idNumericAcc[splitIdx];
-            const uint32_t nlen = idNumericLens[splitIdx];
-
-            uint32_t zz = 0;
-            if (!readVarint(numBuf, nlen, npos, zz)) {
-                LOG_ERROR("Corrupt id numeric segment(%u): truncated varint", splitIdx);
-                return -1;
-            }
-            const uint32_t delta = zz >> 1;
-            nacc = ((zz & 1u) == 0) ? (nacc + delta) : (nacc - delta);
-
-            const uint8_t sep = (splitIdx < idSplitSymbols.size())
-                                ? (uint8_t)idSplitSymbols[splitIdx] : (uint8_t)'\t';
-            char tmp[24];
-            int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)nacc);
-            if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
-                LOG_ERROR("Reconstruct id numeric segment(%u) overflow", splitIdx);
-                return -1;
-            }
-            memcpy(outputBlock->getCurrent(), tmp, (uint32_t)n);
-            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)n);
-            outputBlock->getCurrent()[0] = sep;
-            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
-            continue;
-        }
-        if (!idDictEntries.empty() && !idDictEntries[splitIdx].empty()) {
-            /* Dictionary segment: one index per line, and the text those few index values stand for
-               came with the payload (the trailing split symbol included, like the textual layout).
-               initDecoder already turned the index stream into one absolute index per line. */
-            if (splitIdx >= idNumericBufs.size() || idNumericBufs[splitIdx] == nullptr ||
-                idNumericPos[splitIdx] >= idNumericLens[splitIdx]) {
-                LOG_ERROR("id dictionary segment(%u) exhausted", splitIdx);
-                return -1;
-            }
-            uint32_t idx = 0;
-            if (!readVarint(idNumericBufs[splitIdx], idNumericLens[splitIdx],
-                            idNumericPos[splitIdx], idx) ||
-                idx >= idDictEntries[splitIdx].size()) {
-                LOG_ERROR("Reconstruct id dictionary segment(%u): bad index", splitIdx);
-                return -1;
-            }
-            const std::string& text = idDictEntries[splitIdx][(size_t)idx];
-            if (outputBlock->getRemain() < text.size()) {
-                LOG_ERROR("Reconstruct id dictionary segment(%u) overflow", splitIdx);
-                return -1;
-            }
-            memcpy(outputBlock->getCurrent(), text.data(), text.size());
-            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)text.size());
-            continue;
-        }
-        if (!idHexAlphabets.empty() && !idHexAlphabets[splitIdx].chars.empty()) {
-            /* Fixed-alphabet segment: the length when they vary, then one uniform character code
-               each, then the split symbol this segment ends with (the encoder stored neither). */
-            const std::string& alpha = idHexAlphabets[splitIdx].chars;
-            RangeCoder& hrc = idHexCoders[splitIdx];
-            uint32_t len = idHexAlphabets[splitIdx].minLen;
-            if (idHexAlphabets[splitIdx].maxLen > len) {
-                const uint32_t range = idHexAlphabets[splitIdx].maxLen - len + 1;
-                const uint32_t v = hrc.GetFreq(range);
-                hrc.Decode(v, 1);
-                len += v;
-            }
-            const uint8_t sep = (splitIdx < idSplitSymbols.size())
-                                ? (uint8_t)idSplitSymbols[splitIdx] : (uint8_t)'\t';
-            if (hrc.err != 0 || len == 0 || len > 256) {
-                LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) failed", splitIdx);
-                return -1;
-            }
-            if (outputBlock->getRemain() < len + 1) {
-                LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) overflow", splitIdx);
-                return -1;
-            }
-            char tmp[257];
-            for (uint32_t c = 0; c < len; ++c) {
-                const uint32_t v = hrc.GetFreq((uint32_t)alpha.size());
-                hrc.Decode(v, 1);
-                if (hrc.err != 0 || v >= alpha.size()) {
-                    LOG_ERROR("Reconstruct id fixed-alphabet segment(%u) failed", splitIdx);
-                    return -1;
-                }
-                tmp[c] = alpha[v];
-            }
-            memcpy(outputBlock->getCurrent(), tmp, len);
-            outputBlock->setDataLen(outputBlock->getDataLen() + len);
-            outputBlock->getCurrent()[0] = sep;
-            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
-            continue;
-        }
-        if (!idConstTexts.empty() && !idConstTexts[splitIdx].empty()) {
-            /* Constant segment: stored once for the block, so nothing per line was coded for it.
-               The text carries its own trailing split symbol, exactly as the textual path emits it. */
-            const std::string& text = idConstTexts[splitIdx];
-            if (outputBlock->getRemain() < text.size()) {
-                LOG_ERROR("Reconstruct id constant segment(%u) overflow", splitIdx);
-                return -1;
-            }
-            memcpy(outputBlock->getCurrent(), text.data(), text.size());
-            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)text.size());
-            continue;
-        }
-        if (!idIntActive.empty() && idIntActive[splitIdx]) {
-            /* Value-domain segment: one value per line, then the split symbol this segment ends
-               with (the encoder stored neither as text). */
-            const uint8_t sep = (splitIdx < idSplitSymbols.size())
-                                ? (uint8_t)idSplitSymbols[splitIdx] : (uint8_t)'\t';
-            const uint64_t v = idIntModes[splitIdx].decode(idIntCoders[splitIdx]);
-            char tmp[24];
-            int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)v);
-            if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
-                LOG_ERROR("Reconstruct id value-domain segment(%u) overflow", splitIdx);
-                return -1;
-            }
-            memcpy(outputBlock->getCurrent(), tmp, (uint32_t)n);
-            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)n);
-            outputBlock->getCurrent()[0] = sep;
-            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
-            continue;
-        }
-
-        // Decode segment (legacy textual layout)
-        int32_t segmentLen = idDecoders[splitIdx]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
-            (splitIdx < idSplitSymbols.size()) ? idSplitSymbols[splitIdx] : UINT8_MAX, false);
-        if (segmentLen < 0) {
-            LOG_ERROR("Decode id field segment(%u) failed: %d", splitIdx, segmentLen);
+        if (reconstructIdSegment(splitIdx, idStreams[splitIdx], outputBlock, idLength) != 0) {
             return -1;
         }
-        readOffset += splitDstLen;
-        idLength += splitDstLen;
-        outputBlock->setDataLen(outputBlock->getDataLen() + segmentLen);
     }
     return idLength;
 }
@@ -6379,7 +5651,9 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             *(outputBlock->getCurrent()) = '\t';
             outputBlock->setDataLen(outputBlock->getDataLen() + 1);
         } else {
-            if (fieldMeta["coder"]["magic"].asString() == "coder_fc") {
+            if (CoderFactory::decoderIsWholeBlock(fieldMeta["coder"]["magic"].asString())) {
+                /* A whole-block coder: its stream is already decoded into the staging buffer
+                   (see initDecoder), so this record is copied out of it up to its tab. */
                 uint8_t* pBaseTmp = outputBlock->getCurrent();
                 uint8_t* ptr = pBaseOut;
                 uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
@@ -6589,27 +5863,16 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 
 int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
     uint8_t* dst = outputBlock->getCurrent();
-    if (qualFcv2Decoder != nullptr) {
-        /* The strand direction comes with the stream; the base context uses this
-           record's already-decoded SEQ (basePtr), corresponding to seqStart on
-           the compression side. */
-        if (qualFcv2Decoder->decode_record(dst, actualBaseLen, basePtr, actualBaseLen) < 0) {
-            LOG_ERROR("Decode quality by fcv2 failed, len = %u", actualBaseLen);
-            return -1;
-        }
-    } else if (qualCmDecoder != nullptr) {
-        /*
-         * bwt_cm likewise needs no SEQ context. The compression side fed
-         * records one by one via encode_line; here they are fetched one by one
-         * with the same length, without a delimiter; the length is given by the
-         * caller.
-         */
-        if (qualCmDecoder->decode_line(dst, actualBaseLen) < 0) {
-            LOG_ERROR("Decode quality by bwt_cm failed, len = %u", actualBaseLen);
-            return -1;
-        }
-    } else {
-        qualCoder->decode_qual_gen2(basePtr, dst, actualBaseLen);
+    /*
+     * One call, whichever coder the stream says wrote this column: the record goes to dst,
+     * and the record's already-decoded SEQ (basePtr, corresponding to seqStart on the
+     * compression side) is the context. The strand direction travels with the stream itself,
+     * and the byte-stream coders need neither: they fetch as many values as this record asks
+     * for - the encoding side fed the same records one by one, with no delimiter in between.
+     */
+    if (qualDecoder->decode_record(dst, actualBaseLen, basePtr, actualBaseLen) < 0) {
+        LOG_ERROR("Decode quality failed, len = %u", actualBaseLen);
+        return -1;
     }
 
     /*
@@ -6714,23 +5977,9 @@ uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength
 }
 
 void SamCodecActuator::parseCigarOps(uint8_t* cigarString, uint32_t cigarLength, std::vector<CigarOp>& ops) {
-    ops.clear();
-    if (cigarString == nullptr || cigarLength == 0) {
-        return;
-    }
-    uint32_t currentNumber = 0;
-    for (uint32_t i = 0; i < cigarLength; ++i) {
-        char ch = cigarString[i];
-        if (ch >= '0' && ch <= '9') {
-            currentNumber = currentNumber * 10 + (ch - '0');
-        } else {
-            if (currentNumber > 0 && (ch == 'M' || ch == 'I' || ch == 'D' || ch == 'N' ||
-                                      ch == 'S' || ch == 'H' || ch == 'P' || ch == '=' || ch == 'X')) {
-                ops.push_back(CigarOp{ch, currentNumber});
-            }
-            currentNumber = 0;
-        }
-    }
+    /* The shared parse (see sam_seq_payload.h); the span it answers is parseCigarRefConsumed's.
+       Qualified, or the name in this scope would be the member itself. */
+    ::parseCigarOps(cigarString, cigarLength, ops);
 }
 
 int32_t SamCodecActuator::buildSamIndex() {

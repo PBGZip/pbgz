@@ -33,9 +33,16 @@
 #include "block_wrapper.h"
 #include "log/logger.h"
 #include "safe_line_reader.h"
+#include "actg.h"
+#include "reference.h"
+#include "sam_info.h"
+#include "sam_qname_column.h"
+#include "sam_seq_payload.h"
 #include "coder/coder_bwt_cm.h"
+#include "coder/coder_fc.h"
 #include "coder/coder_fcv2.h"
 #include "coder/coder_arith.h"
+#include "coder/coder_io.h"
 #include "coder_factory.h"
 #include "field_coder_config.h"
 
@@ -63,6 +70,26 @@ const uint32_t SAMPLE_TARGET = 4u << 20;   /* 4 MB */
  * keep their default coder.
  */
 const uint32_t MIN_SELECT_SAMPLE = 64u << 10;   /* 64 KB */
+
+/*
+ * Amount of SEQ taken for the reference trial, in bases.
+ *
+ * The trial has to build the payload before it can measure anything, so its sample is bounded
+ * separately from the fields' shared byte budget: 4 MB of bases is a few tens of thousands of
+ * short reads, enough for the two block coders to separate on a stream whose statistics are
+ * dominated by how well the reads agree with the reference.
+ */
+const uint32_t kSeqRefSampleBytes = 4u << 20;   /* 4 MB of SEQ */
+
+/*
+ * How many lines of the QNAME column the layout trial encodes with each candidate.
+ *
+ * The two layouts are whole-column encoders, so their comparison costs two real encodes; a read
+ * name is short, so 20000 of them is a small sample in bytes and, on long-read data, usually the
+ * whole block. It is the same bound the verdict was measured with when the first block's
+ * compression took it, which is what keeps the choice the same.
+ */
+const uint32_t QNAME_TRIAL_LINES = 20000;
 
 /* coder_bwt_cm internal block sizes per level, mirroring coder_bwt_cm. */
 const uint32_t BWT_LEVEL_SIZE[10] = {
@@ -943,8 +970,493 @@ void runTrialsInParallel(const std::vector<std::function<void()>>& tasks)
     }
 }
 
+/*
+ * The decimal value of a field view, stopping at the first non-digit. The columns this is used on
+ * (FLAG, POS) hold nothing else.
+ */
+static uint64_t parseDecimalField(const LineSample& field)
+{
+    uint64_t value = 0;
+    for (uint32_t i = 0; i < field.len; ++i) {
+        if (field.data[i] < '0' || field.data[i] > '9') {
+            break;
+        }
+        value = value * 10 + (uint64_t)(field.data[i] - '0');
+    }
+    return value;
+}
+
+/*
+ * Which candidate coders a field is trialled with: the intersection of two tables, the field's
+ * list for this compression mode (field_coder_config.h) and the registry's profile/level gate
+ * (CoderFactory). An empty result means the field uses a fixed strategy (PNEXT/TLEN
+ * differencing/inference) or has no coder available at this profile/level, and does not take part
+ * in the generic selection.
+ */
+static std::vector<CoderType> eligibleCandidates(uint32_t fieldIdx, uint8_t mode, uint8_t level)
+{
+    const std::vector<CoderType>& configured = samFieldCandidates(fieldIdx, mode);
+    std::vector<CoderType> candidates;
+    for (size_t c = 0; c < configured.size(); ++c) {
+        const CoderType type = configured[c];
+        const CoderDescriptor* desc = CoderFactory::descriptor(type);
+        if (desc == nullptr || !desc->trialCandidate || !CoderFactory::canMake(type) ||
+            !CoderFactory::eligible(type, mode, level)) {
+            continue;
+        }
+        candidates.push_back(type);
+    }
+    return candidates;
+}
+
+/* The chromosome index of an RNAME view, or the SAM "none" sentinel (0xFFFF) for '*', '=' and for
+   a name the file's header does not declare - all three mean the same thing to the reference walk. */
+static uint16_t chrIndexOf(const LineSample& field)
+{
+    if (field.len == 0) {
+        return 0xFFFF;
+    }
+    if (field.len == 1 && (field.data[0] == '*' || field.data[0] == '=')) {
+        return 0xFFFF;
+    }
+    const uint16_t idx =
+        SamInfo::getInstance().getChrNameIndex(std::string((const char*)field.data, field.len));
+    return (idx != 65535) ? idx : 0xFFFF;
+}
+
+/*
+ * The candidates on the SEQ match payload: coder_bwt_cm and coder_fc, whichever codes the payload
+ * smaller. segmentLen is the length of the stream the choice applies to, which is what coder_fc's
+ * own length limits are about.
+ *
+ * coder_lzma was the third candidate and is not missed: it won on size (1.7519 bits/base against
+ * coder_bwt_cm's 1.7590 on ERR11436629 SEQ) but cost ~17x the time to do it, and no setting of its
+ * own changed that. See the note in coder_factory.cpp where its row was.
+ *
+ * The result is a FieldCodecSelection so the per-field table reports this trial like any other:
+ * decidedLen is the measured segment, so the ratio it prints is the one the payload really got.
+ */
+static FieldCodecSelection trialSeqMatchCoder(const uint8_t* sample, uint32_t sampleLen,
+                                              uint32_t segmentLen, uint8_t level)
+{
+    const CoderType kCandidates[2] = {CoderType::BWT_CM, CoderType::FC};
+
+    FieldCodecSelection sel;
+    sel.status = FieldStatus::SELECTED;
+    sel.selectedCoder = CoderType::BWT_CM;
+    sel.sampleLen = segmentLen;
+    sel.decidedLen = segmentLen;
+    sel.rounds = 1;
+    uint32_t bestLen = UINT32_MAX;
+    std::vector<uint8_t> scratch((size_t)sampleLen * 2 + 65536);
+    for (int i = 0; i < 2; ++i) {
+        const CoderType type = kCandidates[i];
+        /*
+         * coder_fc refuses inputs of FC_MIN_LEN bytes or less. It is fed the whole segment in
+         * production, so the guard is on the segment length; the sample must also be able to
+         * carry it, or the trial would be measuring a refusal.
+         */
+        if (type == CoderType::FC &&
+            (segmentLen <= FC_MIN_LEN || segmentLen >= (uint32_t)FC_MAX_LEN ||
+             sampleLen <= FC_MIN_LEN)) {
+            continue;
+        }
+        coder_io trialIo(scratch.data(), (int32_t)scratch.size());
+        CoderFactory::applyLevel(&trialIo, type, level);
+        std::shared_ptr<coder> trialCoder = CoderFactory::makeEncoder(type, &trialIo);
+        const auto started = std::chrono::steady_clock::now();
+        trialCoder->encode_line(sample, sampleLen);
+        trialCoder->encode_flush();
+        const uint32_t usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - started).count();
+        if (trialIo.err != coder_io::IO_OK || trialIo.data_len <= 0) {
+            continue;   /* this coder cannot carry the segment at all */
+        }
+        sel.addTrial(type, (uint32_t)trialIo.data_len, usec);
+        if ((uint32_t)trialIo.data_len < bestLen) {
+            bestLen = (uint32_t)trialIo.data_len;
+            sel.selectedCoder = type;
+        }
+    }
+    sel.bestCompLen = (bestLen == UINT32_MAX) ? 0 : bestLen;
+    return sel;
+}
+
+uint32_t CodecSelector::extractSeqReferenceSamples(RoughIOBlock* block,
+                                                   std::vector<SeqRefRecord>& records,
+                                                   std::vector<uint8_t>& seq,
+                                                   std::vector<uint32_t>& nPositions,
+                                                   uint32_t sampleBudget)
+{
+    records.clear();
+    seq.clear();
+    nPositions.clear();
+    if (block == nullptr || block->getBuffer() == nullptr) {
+        return 0;
+    }
+    const uint8_t* buffer = block->getBuffer();
+    const std::vector<size_t>& npos = block->getNpos();
+    seq.reserve(sampleBudget);
+
+    for (size_t lineIdx = 0; lineIdx < npos.size(); ++lineIdx) {
+        if (seq.size() >= sampleBudget) {
+            break;   /* sample full; the rest of the block is not read */
+        }
+        const size_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        const size_t lineEnd = npos[lineIdx];
+        if (lineStart >= lineEnd || buffer[lineStart] == '@') {
+            continue;   /* header line */
+        }
+
+        size_t colBeg[SAM_FIELD_COUNT];
+        size_t colEnd[SAM_FIELD_COUNT];
+        uint32_t col = 0;
+        size_t p = lineStart;
+        while (col < SAM_FIELD_COUNT && p < lineEnd) {
+            colBeg[col] = p;
+            while (p < lineEnd && buffer[p] != '\t') {
+                ++p;
+            }
+            colEnd[col] = p;
+            ++col;
+            ++p;    /* step over the tab, or past the end of the line */
+        }
+        if (col < 10) {
+            continue;   /* a record line carries at least ten columns */
+        }
+
+        const size_t seqBeg = colBeg[SAM_SEQ];
+        const size_t seqEnd = colEnd[SAM_SEQ];
+        if (seqEnd <= seqBeg) {
+            continue;
+        }
+        const size_t avail = seqEnd - seqBeg;
+        const size_t left = sampleBudget - seq.size();
+        const size_t take = (avail < left) ? avail : left;
+
+        SeqRefRecord rec;
+        rec.seqBeg = (uint32_t)seq.size();
+        rec.seqEnd = (uint32_t)(seq.size() + take);
+        rec.flag.data = buffer + colBeg[SAM_FLAG];
+        rec.flag.len = (uint32_t)(colEnd[SAM_FLAG] - colBeg[SAM_FLAG]);
+        rec.rname.data = buffer + colBeg[SAM_RNAME];
+        rec.rname.len = (uint32_t)(colEnd[SAM_RNAME] - colBeg[SAM_RNAME]);
+        rec.pos.data = buffer + colBeg[SAM_POS];
+        rec.pos.len = (uint32_t)(colEnd[SAM_POS] - colBeg[SAM_POS]);
+        rec.cigar.data = buffer + colBeg[SAM_CIGAR];
+        rec.cigar.len = (uint32_t)(colEnd[SAM_CIGAR] - colBeg[SAM_CIGAR]);
+
+        const size_t base = seq.size();
+        for (size_t i = 0; i < take; ++i) {
+            const uint8_t ch = buffer[seqBeg + i];
+            if (ch == 'N') {
+                nPositions.push_back((uint32_t)(base + i));
+            }
+            seq.push_back(ch);
+        }
+        records.push_back(rec);
+    }
+    return (uint32_t)seq.size();
+}
+
+/*
+ * Compressed size of one form of a class's N positions, or 0 when it cannot be coded at all.
+ * Only the size is wanted, so the bytes land in a scratch buffer and are discarded; the form the
+ * verdict picks is written into the block later, by the block pass.
+ *
+ * This lives here rather than in sam_seq_payload.h because only the trial has any use for it: that
+ * module holds what both stages need, and measuring candidates is this stage's job.
+ */
+static uint32_t nposFormSize(const uint8_t* data, uint32_t len, uint8_t level)
+{
+    if (len == 0) {
+        return 0;
+    }
+    std::vector<uint8_t> scratch((size_t)len * 2 + 65536);
+    coder_io trialIo(scratch.data(), (int32_t)scratch.size());
+    CoderFactory::applyLevel(&trialIo, CoderType::BWT_CM, level);
+    std::shared_ptr<coder> trialCoder = CoderFactory::makeEncoder(CoderType::BWT_CM, &trialIo);
+    trialCoder->encode_line(data, len);
+    trialCoder->encode_flush();
+    return (trialIo.err == coder_io::IO_OK && trialIo.data_len > 0) ? (uint32_t)trialIo.data_len : 0;
+}
+
+/*
+ * Which of the three forms of a class's N positions is the smallest: 0 = absolute ("npos"),
+ * 1 = deltas ("nposd"), 2 = runs ("nposr"). A tie keeps the earlier form, which is what an archive
+ * written before the later form existed carries.
+ *
+ * `exc` must have been filled with keepForms set, or the two alternatives are empty and can never
+ * win. It is taken by reference because the run in progress has to be closed before the runs can
+ * be measured, and doing that here means no caller can forget to (closeRun is idempotent) - the
+ * mistake that once made this comparison come out in favour of the varints every time.
+ */
+static int32_t pickSeqExcForm(SeqExceptionClass& exc, uint8_t level)
+{
+    exc.closeRun();   /* the run in progress is not in runGaps/runLens until it is closed */
+
+    const uint32_t absSize = nposFormSize((const uint8_t*)exc.abs.data(),
+                                          (uint32_t)(exc.abs.size() * sizeof(uint32_t)), level);
+    const uint32_t varSize = nposFormSize(exc.varint.data(), (uint32_t)exc.varint.size(), level);
+    std::vector<uint8_t> runBuf;
+    runBuf.reserve((exc.runGaps.size() << 1) + 16);
+    buildRunForm(exc, runBuf);
+    const uint32_t runSize = nposFormSize(runBuf.data(), (uint32_t)runBuf.size(), level);
+
+    int32_t best = 0;
+    uint32_t bestSize = absSize;
+    if (varSize > 0 && (bestSize == 0 || varSize < bestSize)) {
+        best = 1;
+        bestSize = varSize;
+    }
+    if (runSize > 0 && (bestSize == 0 || runSize < bestSize)) {
+        best = 2;
+    }
+    return best;
+}
+
+bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* reference, uint8_t level,
+                                            PreprocessInfo& info)
+{
+    if (block == nullptr || reference == nullptr) {
+        return false;
+    }
+
+    /* The @SQ lines the reference walk resolves RNAME against. The reader thread normally already
+       put them into SamInfo before this block was dispatched (CompressEngine::preDispatchBlock);
+       a block that carries its own header - splitSamHeader off - supplies them here instead, and
+       re-parsing a table that is already there is a no-op. */
+    SamUtil::prefetchHeaderChromosomes(block->getBuffer(), block->getDataLen(), block->getNpos());
+
+    std::vector<SeqRefRecord> records;
+    std::vector<uint8_t> seq;
+    std::vector<uint32_t> nPositions;
+    extractSeqReferenceSamples(block, records, seq, nPositions, kSeqRefSampleBytes);
+    if (seq.empty()) {
+        return false;
+    }
+
+    std::vector<uint8_t> match;
+    match.reserve(seq.size());
+    std::vector<uint8_t> ref2bit;
+    std::vector<uint8_t> coded;
+    std::vector<CigarOp> ops;
+    uint32_t refCoded = 0;
+    for (size_t r = 0; r < records.size(); ++r) {
+        const SeqRefRecord& rec = records[r];
+        const uint32_t seqLength = rec.seqEnd - rec.seqBeg;
+        if (seqLength == 0) {
+            continue;
+        }
+        const uint8_t* seqStart = seq.data() + rec.seqBeg;
+
+        const uint16_t flag = (uint16_t)parseDecimalField(rec.flag);
+        const uint64_t startPos = parseDecimalField(rec.pos);
+        const uint16_t chrId = chrIndexOf(rec.rname);
+        const uint32_t refConsumed = parseCigarOps(rec.cigar.data, rec.cigar.len, ops);
+
+        /*
+         * The payload branch is the block pass's own (see buildSeqRecordPayload), so what is
+         * measured here is what will be written. The N positions were counted over the whole
+         * sample instead, from SEQ alone (see extractSeqReferenceSamples).
+         */
+        coded.assign(seqLength, 0);
+        ref2bit.assign(seqLength + 8, 0);
+        const SeqRecordPayload payload =
+            buildSeqRecordPayload(chrId, flag, startPos, refConsumed, ops, seqStart, seqLength,
+                                  reference, coded.data(), ref2bit.data());
+        if (payload.usedReference) {
+            ++refCoded;
+        }
+        match.insert(match.end(), payload.bytes, payload.bytes + payload.length);
+    }
+    if (match.empty()) {
+        return false;
+    }
+
+    /*
+     * The same RLE decision the block pass applies, and the trial runs on the "m" segment - the
+     * one the coder it picks will really encode.
+     */
+    const SeqRleSplit rle = splitSeqMatchStream(match.data(), (uint32_t)match.size());
+    const uint8_t* payload = rle.useRle ? rle.run.get() : match.data();
+    const uint32_t payloadLen = rle.useRle ? rle.runLength : (uint32_t)match.size();
+    if (payloadLen == 0) {
+        return false;
+    }
+
+    const FieldCodecSelection verdict = trialSeqMatchCoder(payload, payloadLen, payloadLen, level);
+    if (verdict.bestCompLen == 0) {
+        return false;   /* neither candidate could carry the segment: leave the column its default */
+    }
+    info.fields[SAM_SEQ] = verdict;
+
+    /*
+     * A verdict the caller has already published wins over this trial: a value >= 0 on either
+     * slot is a forced candidate (see PreprocessInfo::seqMatchCoder / nposForm), which is how a
+     * caller - and the unit tests - pins one instead of letting the trial decide, and -1 is the
+     * only undecided state either slot has.
+     */
+    if (info.seqMatchCoder.load(std::memory_order_relaxed) < 0) {
+        info.setSeqMatchCoder((int32_t)verdict.selectedCoder);
+    }
+
+    /*
+     * The N positions travel in one of three forms, and which one is smallest is a property of
+     * the file, not of the block (see sam_seq_payload.h); measure them here, once. A sample with
+     * no N at all takes no verdict and the block pass falls back to measuring it on the first
+     * block that has one.
+     */
+    if (!nPositions.empty() && info.nposForm.load(std::memory_order_relaxed) < 0) {
+        SeqExceptionClass exc;
+        exc.keepForms = true;   /* the forms are compared, so all three columns have to be kept */
+        exc.abs.reserve(nPositions.size() + 16);
+        exc.varint.reserve(nPositions.size() + 64);
+        for (size_t i = 0; i < nPositions.size(); ++i) {
+            exc.add(nPositions[i]);
+        }
+        info.setNposForm(pickSeqExcForm(exc, level));
+    }
+
+    LOG_DEBUG("SEQ trial: %u of %u records reference-coded, payload %u -> %s %u (match %u), "
+              "npos form %d",
+              refCoded, (unsigned)records.size(), payloadLen, coderTypeToMagic(verdict.selectedCoder),
+              verdict.bestCompLen, (uint32_t)match.size(),
+              info.nposForm.load(std::memory_order_relaxed));
+    return true;
+}
+
+bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
+{
+    if (block == nullptr || block->getBuffer() == nullptr) {
+        return false;
+    }
+    const uint8_t* buffer = block->getBuffer();
+    const std::vector<size_t>& npos = block->getNpos();
+    if (npos.empty()) {
+        return false;
+    }
+
+    /*
+     * The ID analysis and the tab positions, driven exactly as the block's own pre-analysis
+     * drives them (SamCodecActuator::scanDataLine): the first content line establishes which
+     * separators the column uses, every line after it only has to confirm they line up.
+     *
+     * fieldTabs is indexed the way the encoders index it - by line number minus headEndLine - so
+     * a line that is not a record (a stray header line past the header) still needs its slot.
+     */
+    IdSplitAnalysis analysis;
+    std::vector<std::vector<int64_t>> fieldTabs;
+    size_t headEndLine = 0;
+    while (headEndLine < npos.size()) {
+        const size_t lineStart = (headEndLine == 0) ? 0 : npos[headEndLine - 1] + 1;
+        if (lineStart >= npos[headEndLine] || buffer[lineStart] != '@') {
+            break;
+        }
+        ++headEndLine;   /* the header is the block's leading lines */
+    }
+
+    bool sawFirstRecord = false;
+    for (size_t lineIdx = headEndLine; lineIdx < npos.size(); ++lineIdx) {
+        const size_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        const size_t lineEnd = npos[lineIdx];
+        if (lineStart >= lineEnd || buffer[lineStart] == '@') {
+            fieldTabs.emplace_back();
+            continue;
+        }
+        std::vector<int64_t> tabs;
+        for (size_t i = lineStart; i < lineEnd; ++i) {
+            if (buffer[i] == '\t') {
+                tabs.push_back((int64_t)(i - lineStart));
+            }
+        }
+        if (tabs.empty()) {
+            return false;   /* not a record line: the block is not the SAM text this expects */
+        }
+        /* The QNAME field runs up to and including its tab. */
+        const uint32_t qnameLen = (uint32_t)tabs[0] + 1;
+        if (!sawFirstRecord) {
+            analyzeQnameFirstLine(buffer + lineStart, qnameLen, analysis);
+            sawFirstRecord = true;
+        } else {
+            analyzeQnameLine(buffer + lineStart, qnameLen, analysis);
+        }
+        fieldTabs.push_back(std::move(tabs));
+    }
+
+    if (!sawFirstRecord || analysis.symbols.empty() || analysis.posLength == UINT32_MAX) {
+        /*
+         * Nothing to choose: the block holds no record, or the split turned out to be unavailable
+         * (a line does not carry the separators the first one does), and the column is then
+         * written whole (SamCodecActuator::compressIdFieldInAll) with no layout involved.
+         *
+         * The symbols check can only fire on a block that is not SAM text at all, since the field's
+         * own tab is one of the separators: a valid column always yields at least the single
+         * segment that the tab ends.
+         */
+        return false;
+    }
+
+    /*
+     * Run both encoders the way the block pass runs them. They write into a block, so give them
+     * one of their own - the same size the input block has, which is more than the encoded column
+     * needs - and throw it away; the block being compressed is only read.
+     */
+    RoughIOBlock scratch(block->getBufferSize());
+    scratch.setBlockType(block->getBlockType());
+    coder_err_sink sink;
+
+    QnameColumnInput in;
+    in.buffer = buffer;
+    in.npos = &npos;
+    in.headEndLine = (int64_t)headEndLine;
+    in.fieldTabs = &fieldTabs;
+
+    Json::Value metaAffix;
+    Json::Value metaQname;
+    uint32_t srcAffix = 0;
+    uint32_t srcQname = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int32_t lenAffix = encodeQnameSplit(in, analysis, &scratch, &sink, QNAME_TRIAL_LINES,
+                                              metaAffix, srcAffix);
+    const uint32_t affixUs = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - t0).count();
+    scratch.setDataLen(0);
+    const auto t1 = std::chrono::steady_clock::now();
+    const int32_t lenQname = encodeQnameByQname(in, &scratch, &sink, QNAME_TRIAL_LINES, metaQname,
+                                                srcQname);
+    const uint32_t qnameUs = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - t1).count();
+    scratch.setDataLen(0);
+
+    /* The same verdict the block pass used to reach for itself: the affix layout unless the
+       qname stream is smaller, and a failure of one side leaves the other. */
+    const bool useAffix = (lenQname < 0) || (lenAffix >= 0 && lenAffix <= lenQname);
+
+    FieldCodecSelection sel;
+    sel.status = FieldStatus::SELECTED;
+    sel.selectedCoder = useAffix ? CoderType::AFFIX_MATCH : CoderType::QNAME;
+    sel.sampleLen = srcAffix;      /* both layouts are handed the same lines */
+    sel.decidedLen = srcAffix;
+    sel.rounds = 1;
+    if (lenAffix >= 0) {
+        sel.addTrial(CoderType::AFFIX_MATCH, (uint32_t)lenAffix, affixUs);
+    }
+    if (lenQname >= 0) {
+        sel.addTrial(CoderType::QNAME, (uint32_t)lenQname, qnameUs);
+    }
+    sel.bestCompLen = (uint32_t)(useAffix ? lenAffix : lenQname);
+    info.fields[SAM_QNAME] = sel;
+    info.setQnameUseAffix(useAffix ? 1 : 0);
+
+    LOG_DEBUG("QNAME trial: affix=%d qname=%d (up to %u of the block's %u lines) -> %s", lenAffix,
+              lenQname, QNAME_TRIAL_LINES, (unsigned)fieldTabs.size(),
+              useAffix ? "affix" : "qname");
+    return true;
+}
+
 int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                                  uint8_t compressLevel, uint8_t mode)
+                                  uint8_t compressLevel, uint8_t mode, Reference* reference)
 {
     std::vector<std::string> fieldBufs;
     std::vector<std::vector<LineSample>> fieldLines;
@@ -969,6 +1481,75 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
     for (uint32_t f = 0; f < SAM_FIELD_COUNT_SELECT; ++f) {
         const std::string& buf = fieldBufs[f];
         totalSample += buf.size();
+
+        /*
+         * SEQ, when the run has a reference: the column is not written as its raw text but as the
+         * match payload (see sam_seq_payload.h), and the coders that carry it are not the same
+         * pair the raw-text list holds. So the payload trial replaces the raw-text one rather than
+         * joining it - measuring the text and writing the payload is how the per-field table ended
+         * up naming a coder the archive never used - and it is the trial that also settles the
+         * form the N positions travel in (see selectSeqReferenceCoder).
+         *
+         * It comes before the raw-text threshold below: it is the only source of those two
+         * verdicts, and a block too small to compare coders on its text is still a valid sample
+         * for them. It runs in the same parallel batch as the other trials, and falls back to the
+         * raw-text trial when it can take no verdict (no record in the sample could consult the
+         * reference, or the payload is too small for either candidate): the column really is
+         * written the way the generic list describes then.
+         */
+        if (f == (uint32_t)SAM_SEQ && reference != nullptr) {
+            const uint8_t* sampleData = (const uint8_t*)buf.data();
+            const uint32_t sampleLen = (uint32_t)buf.size();
+            const std::vector<LineSample>* sampleLines = &fieldLines[f];
+            std::vector<CoderType> seqCandidates = eligibleCandidates(f, mode, compressLevel);
+            trials.push_back([block, reference, compressLevel, &info, f, sampleData, sampleLen,
+                              sampleLines, seqCandidates]() {
+                PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
+                if (selectSeqReferenceCoder(block, reference, compressLevel, info)) {
+                    return;
+                }
+                if (seqCandidates.empty()) {
+                    info.fields[f].status = FieldStatus::SKIPPED;
+                    info.fields[f].sampleLen = sampleLen;
+                } else {
+                    info.fields[f] = selectCoder(sampleData, sampleLen, sampleLines, seqCandidates);
+                }
+            });
+            continue;
+        }
+
+        /*
+         * QNAME is the other column the generic trial cannot describe: it is never written as its
+         * raw text but as one of two layouts, and which one is a property of the file's naming
+         * scheme. The layout trial replaces the raw-text one rather than joining it - measuring the
+         * text and writing a layout is how the per-field table ended up naming a coder the archive
+         * never used - and it falls back to the raw text when it can take no verdict (a column
+         * with no separator, or one whose split is unavailable, is written whole).
+         *
+         * Like the SEQ trial it comes before the raw-text threshold, which says when two coders on
+         * the same bytes can be told apart - a question the layout trial does not ask.
+         */
+        if (f == (uint32_t)SAM_QNAME) {
+            const uint8_t* sampleData = (const uint8_t*)buf.data();
+            const uint32_t sampleLen = (uint32_t)buf.size();
+            const std::vector<LineSample>* sampleLines = &fieldLines[f];
+            std::vector<CoderType> qnameCandidates = eligibleCandidates(f, mode, compressLevel);
+            trials.push_back([block, compressLevel, &info, f, sampleData, sampleLen, sampleLines,
+                              qnameCandidates]() {
+                PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
+                if (selectQnameLayout(block, info)) {
+                    return;
+                }
+                if (qnameCandidates.empty()) {
+                    info.fields[f].status = FieldStatus::SKIPPED;
+                    info.fields[f].sampleLen = sampleLen;
+                } else {
+                    info.fields[f] = selectCoder(sampleData, sampleLen, sampleLines, qnameCandidates);
+                }
+            });
+            continue;
+        }
+
         /*
          * POS is exempted from the raw-text threshold: its delta-varint stream
          * (the actual coder input) is about a quarter of the raw column, so the
@@ -1045,27 +1626,10 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
         }
 
         /*
-         * Which candidate coders are tried for a field is the intersection of
-         * two tables: the field's list for this compression mode
-         * (field_coder_config.h) and the registry's profile/level gate
-         * (CoderFactory). An empty result means the field uses a fixed strategy
-         * (PNEXT/TLEN differencing/inference) or has no coder available at this
-         * profile/level, and does not take part in the generic selection.
-         *
-         * The list is captured by value: the trials are collected here and run
-         * after this loop, in parallel.
+         * The list is captured by value: the trials are collected here and run after this loop, in
+         * parallel (see eligibleCandidates for which coders it holds).
          */
-        const std::vector<CoderType>& configured = samFieldCandidates(f, mode);
-        std::vector<CoderType> trialCandidates;
-        for (size_t c = 0; c < configured.size(); ++c) {
-            const CoderType type = configured[c];
-            const CoderDescriptor* desc = CoderFactory::descriptor(type);
-            if (desc == nullptr || !desc->trialCandidate || !CoderFactory::canMake(type) ||
-                !CoderFactory::eligible(type, mode, compressLevel)) {
-                continue;
-            }
-            trialCandidates.push_back(type);
-        }
+        const std::vector<CoderType> trialCandidates = eligibleCandidates(f, mode, compressLevel);
 
         if (trialCandidates.empty()) {
             info.fields[f].status = FieldStatus::SKIPPED;
@@ -1152,7 +1716,7 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, PreprocessInfo& info)
 }
 
 int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
-                               uint8_t compressLevel, uint8_t mode)
+                               uint8_t compressLevel, uint8_t mode, Reference* reference)
 {
     if (block == nullptr) {
         return -1;
@@ -1161,7 +1725,7 @@ int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, Pr
     info.reset(type);
 
     if (BlockUtil::isSAMBlock(type)) {
-        return analyzeSam(block, inputTotalBytes, info, compressLevel, mode);
+        return analyzeSam(block, inputTotalBytes, info, compressLevel, mode, reference);
     }
     if (BlockUtil::isFastqBlock(type)) {
         return analyzeFastq(block, info);

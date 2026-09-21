@@ -31,6 +31,7 @@
 #include "coder/coder_qual.h"
 #include "coder/coder_fcv2.h"
 #include "coder/coder_bwt_cm.h"
+#include "coder/coder_qcm.h"
 #include "field_coder_config.h"
 #include "log/logger.h"
 
@@ -246,6 +247,48 @@ bool trialBwtCm(const std::vector<QualSampleRecord>& records, size_t recordCount
     return outLen > 0 && outLen < buf.size();
 }
 
+/*
+ * Trial-compress with coder_qcm.
+ *
+ * coder_qcm is an ordinary byte-stream coder: it takes the quality values as
+ * they come and needs neither the record boundaries nor the strand, so the
+ * sample is simply fed record by record (which is also how the QUAL stream
+ * itself is written) and committed with one flush. The records are not
+ * delimited anywhere in the stream, and the coder does not depend on where the
+ * boundaries fall - the same records are fetched back one by one on the decode
+ * side, where their lengths come from the already-decoded SEQ.
+ */
+bool trialQcm(const std::vector<QualSampleRecord>& records, size_t recordCount,
+              uint32_t& outLen, uint32_t& usec)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < recordCount; i++) {
+        total += records[i].qual.size();
+    }
+    if (total == 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> buf(trialCapacity(total), 0);
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        coder_io io(buf.data(), (int32_t)buf.size());
+        coder_qcm coder(&io);
+        for (size_t i = 0; i < recordCount; i++) {
+            const QualSampleRecord& r = records[i];
+            if (r.qual.empty()) {
+                continue;
+            }
+            coder.encode_line((const uint8_t*)r.qual.data(), (uint32_t)r.qual.size());
+        }
+        coder.encode_flush();
+        outLen = (io.data_len > 0) ? (uint32_t)io.data_len : 0;
+    }
+    usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    return outLen > 0 && outLen < buf.size();
+}
+
 /* Translate the coder-layer tier into the parameters carried by PreprocessInfo
  * (fields correspond one-to-one). */
 QualFcv2Params toQualParams(const Fcv2Cfg& cfg)
@@ -371,12 +414,15 @@ struct QualRoundResult {
     Fcv2Cfg  fcv2Cfg;          /* the winning one among the several fcv2 tiers */
     bool     cmOk = false;
     uint32_t cmLen = 0;
+    bool     qcmOk = false;
+    uint32_t qcmLen = 0;
     uint32_t bestLen = 0;
     CoderType bestCoder = CoderType::QUAL;
     bool     anyOk = false;
     uint32_t fcv2Us = 0;
     uint32_t qualUs = 0;
     uint32_t cmUs = 0;
+    uint32_t qcmUs = 0;
 };
 
 /*
@@ -447,6 +493,9 @@ struct RoundSlots {
     bool     cmOk = false;
     uint32_t cmLen = 0;
     uint32_t cmUs = 0;
+    bool     qcmOk = false;
+    uint32_t qcmLen = 0;
+    uint32_t qcmUs = 0;
 };
 
 /* Reduce one rung to a verdict - the same comparison the serial code did. */
@@ -493,6 +542,22 @@ QualRoundResult assembleRound(const RoundSlots& s, const std::vector<Fcv2Cfg>& c
             r.bestCoder = CoderType::BWT_CM;
         }
     }
+
+    /*
+     * coder_qcm is compared last, and the comparison is strict, so a tie keeps
+     * coder_bwt_cm: it is the coder that has been in production longest, and a
+     * tie means the newer model bought nothing measurable on this block.
+     */
+    if (s.qcmOk) {
+        r.qcmOk = true;
+        r.qcmUs = s.qcmUs;
+        r.qcmLen = s.qcmLen;
+        r.anyOk = true;
+        if (r.qcmLen < r.bestLen || (!r.qualOk && !r.fcv2Ok && !r.cmOk)) {
+            r.bestLen = r.qcmLen;
+            r.bestCoder = CoderType::QCM;
+        }
+    }
     return r;
 }
 
@@ -534,6 +599,7 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     const bool tryQual = qualCoderCandidate(CoderType::QUAL);
     const bool tryFcv2 = qualCoderCandidate(CoderType::FCV2);
     const bool tryBwtCm = qualCoderCandidate(CoderType::BWT_CM);
+    const bool tryQcm = qualCoderCandidate(CoderType::QCM);
 
     /* The candidate tiers are only built when fcv2 is in play; the slots below
      * keep the same shape either way, with every tier marked as not-tried. */
@@ -585,7 +651,8 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     }
 
     std::vector<std::function<void()>> tasks;
-    tasks.reserve(probes.size() * (cfgs.size() + (size_t)tryQual + (size_t)tryBwtCm));
+    tasks.reserve(probes.size() * (cfgs.size() + (size_t)tryQual + (size_t)tryBwtCm +
+                                   (size_t)tryQcm));
     for (size_t i = 0; i < probes.size(); i++) {
         const uint32_t probe = probes[i];
         const size_t count = recordsForBudget(records, probe);
@@ -609,6 +676,11 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
             const int bwtLevel = bwtLevelFor(probe);
             tasks.push_back([&records, &slots, i, count, bwtLevel]() {
                 slots[i].cmOk = trialBwtCm(records, count, bwtLevel, slots[i].cmLen, slots[i].cmUs);
+            });
+        }
+        if (tryQcm) {
+            tasks.push_back([&records, &slots, i, count]() {
+                slots[i].qcmOk = trialQcm(records, count, slots[i].qcmLen, slots[i].qcmUs);
             });
         }
     }
@@ -638,16 +710,23 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
         /* Only one candidate compresses successfully; more data cannot change
          * the comparison. */
         {
+            /*
+             * The runner-up is the smallest candidate that is not the leader. This
+             * used to be an if-chain per leader; listing the candidates once keeps
+             * it correct as candidates are added (coder_qcm joined the set).
+             */
             uint32_t runnerUp = UINT32_MAX;
-            if (r.bestCoder == CoderType::QUAL) {
-                if (r.fcv2Ok) runnerUp = r.fcv2Len;
-                if (r.cmOk && r.cmLen < runnerUp) runnerUp = r.cmLen;
-            } else if (r.bestCoder == CoderType::FCV2) {
-                runnerUp = r.qualOk ? r.qualLen : UINT32_MAX;
-                if (r.cmOk && r.cmLen < runnerUp) runnerUp = r.cmLen;
-            } else { /* BWT_CM */
-                runnerUp = r.qualOk ? r.qualLen : UINT32_MAX;
-                if (r.fcv2Ok && r.fcv2Len < runnerUp) runnerUp = r.fcv2Len;
+            if (r.qualOk && r.bestCoder != CoderType::QUAL && r.qualLen < runnerUp) {
+                runnerUp = r.qualLen;
+            }
+            if (r.fcv2Ok && r.bestCoder != CoderType::FCV2 && r.fcv2Len < runnerUp) {
+                runnerUp = r.fcv2Len;
+            }
+            if (r.cmOk && r.bestCoder != CoderType::BWT_CM && r.cmLen < runnerUp) {
+                runnerUp = r.cmLen;
+            }
+            if (r.qcmOk && r.bestCoder != CoderType::QCM && r.qcmLen < runnerUp) {
+                runnerUp = r.qcmLen;
             }
             if (runnerUp == UINT32_MAX) {
                 break;
@@ -673,6 +752,9 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     if (tryBwtCm) {
         sel.addTrial(CoderType::BWT_CM, final.cmOk ? final.cmLen : 0, final.cmUs);
     }
+    if (tryQcm) {
+        sel.addTrial(CoderType::QCM, final.qcmOk ? final.qcmLen : 0, final.qcmUs);
+    }
 
     if (!final.anyOk) {
         sel.status = FieldStatus::FAILED;
@@ -695,10 +777,11 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
      */
     const char* preset = (final.bestCoder == CoderType::FCV2) ? fcv2PresetName(final.fcv2Cfg) : nullptr;
     LOG_DEBUG("Qual codec trial: coder_qual=%u (%u us), fcv2=%u (%u us), bwt_cm=%u (%u us), "
-              "mean_read_len=%llu, picked=%s%s%s",
+              "qcm=%u (%u us), mean_read_len=%llu, picked=%s%s%s",
               final.qualOk ? final.qualLen : 0, final.qualUs,
               final.fcv2Ok ? final.fcv2Len : 0, final.fcv2Us,
               final.cmOk ? final.cmLen : 0, final.cmUs,
+              final.qcmOk ? final.qcmLen : 0, final.qcmUs,
               (unsigned long long)meanLen,
               coderTypeToMagic(sel.selectedCoder),
               (preset != nullptr) ? "/" : "",
