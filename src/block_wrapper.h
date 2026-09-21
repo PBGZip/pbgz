@@ -303,7 +303,7 @@ public:
         gzInEof = false;
         parStarted = false;
         parMode = false;
-        parThreads = 4;
+        parThreads = 4;    /* default until the caller supplies a budget (see setParThreads) */
     }
 
     ~BamGzBlockReader() {
@@ -315,7 +315,11 @@ public:
         }
     }
 
-    /* Number of inflate workers for the parallel BGZF decoder (>=1). */
+    /*
+     * Number of inflate workers for the parallel BGZF decoder (>=1); the compression engine
+     * passes bamBgzfThreadNum(threadNum), so `-t` decides it (see BlockFactory::createBlockReader).
+     * A caller that passes nothing keeps the default of 4.
+     */
     void setParThreads(int n) { parThreads = (n >= 1) ? n : 4; }
 
 protected:
@@ -340,6 +344,24 @@ private:
 
 class BlockWriter;
 class PbgzBlockWriter;
+
+/*
+ * Thread budget for the BAM container's parallel BGZF stage, derived from -t: a quarter of the
+ * pipeline's threads, at least one.
+ *
+ * The stage sits inside the pipeline on both sides of the format - while compressing, the
+ * reader inflates a BGZF (BAM) input block by block (BamGzBlockReader); while `-b` writes a
+ * BAM, the writer deflates the BGZF blocks and converts SAM text to records (BamWriter). The
+ * pipeline's own blocks already spread over -t threads, so a quarter keeps this stage from
+ * competing with the rest of the work while still covering its share of it; one thread is the
+ * floor, because a BGZF stream must be walked forward in order and the stage has to make
+ * progress even when -t is 1..4.
+ */
+inline uint32_t bamBgzfThreadNum(uint32_t threadNum)
+{
+    const uint32_t quarter = threadNum / 4;
+    return (quarter > 0) ? quarter : 1;
+}
 
 /*
  * Creator for BlockReader/BlockWriter.
@@ -367,11 +389,16 @@ public:
      * set, such a file is read as opaque binary instead, so compressing an archive stores its
      * bytes verbatim: decompressing the result once yields that archive byte for byte, and
      * decompressing it again yields the original data.
+     *
+     * bgzfThreads is the worker count for the parallel BGZF inflate of a BAM input (see
+     * BamGzBlockReader::setParThreads); 0 keeps the reader's own default. Callers with a thread
+     * budget pass bamBgzfThreadNum(threadNum).
      */
     static BlockReader* createBlockReader(IOReader* ioReader, uint8_t compressLevel = 0,
                                           bool splitSamHeader = true,
                                           bool bamStructMode = false,
-                                          bool pbgzAsOpaque = false);
+                                          bool pbgzAsOpaque = false,
+                                          uint32_t bgzfThreads = 0);
 
     /*
      * The SAM block granularity actually used by the readers for a level:

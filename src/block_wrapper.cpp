@@ -1581,7 +1581,7 @@ uint32_t BlockFactory::samReadsPerBlockOfLevel(uint8_t compressLevel)
 }
 
 BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compressLevel, bool splitSamHeader,
-                                              bool bamStructMode, bool pbgzAsOpaque) {
+                                              bool bamStructMode, bool pbgzAsOpaque, uint32_t bgzfThreads) {
     if (ioReader == nullptr) {
         LOG_ERROR("Create block reader failed: io reader is null.");
         return nullptr;
@@ -1629,10 +1629,14 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
             }
             reader = bamReader;
         } else {
-            /* The inner layer is still BGZF (e.g. .bam.gz); inflate it to raw BAM first */
+            /* The inner layer is still BGZF (e.g. a plain .bam, or .bam.gz); inflate it to raw BAM first */
             BamGzBlockReader* bamReader = MemoryUtil::safeNewClass<BamGzBlockReader>(ioReader, detectBuf, detectLen, samReadsPerBlock, splitSamHeader);
             if (bamReader != nullptr && bamStructMode) {
                 bamReader->setStructMode(true);
+            }
+            if (bamReader != nullptr && bgzfThreads > 0) {
+                /* Parallel inflate workers, derived from -t by the caller (see bamBgzfThreadNum). */
+                bamReader->setParThreads((int)bgzfThreads);
             }
             reader = bamReader;
         }

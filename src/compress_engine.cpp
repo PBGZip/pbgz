@@ -98,8 +98,13 @@ BlockReader* CompressEngine::createBlockReader() {
      * pbgzAsOpaque=true: on this side a pbgz file is not an input format. It is read as opaque
      * binary so its bytes are stored instead of being decoded as if they were the original data
      * (see the note on BlockFactory::createBlockReader).
+     *
+     * bgzfThreads: a BAM input is inflated to raw BAM by the reader, in parallel; -t decides how
+     * many workers that stage gets (a quarter of it, see bamBgzfThreadNum) instead of the fixed
+     * count it used to keep to itself.
      */
-    BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel, true, bamStruct, true);
+    BlockReader* blockReader = BlockFactory::createBlockReader(
+        ioReader, parameter.compressLevel, true, bamStruct, true, bamBgzfThreadNum(parameter.threadNum));
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
     }

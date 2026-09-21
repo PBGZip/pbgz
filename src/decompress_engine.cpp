@@ -111,9 +111,13 @@ BlockReader* DecompressEngine::createBlockReader() {
 BlockWriter* DecompressEngine::createBlockWriter() {
     if (parameter.isDecToBam) {
         /* -b: convert the decompressed SAM text to standard BAM when writing.
-           The writer does its SAM->BAM conversion and BGZF deflate in parallel;
-           -t bounds how many threads it may use. */
-        BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(ioWriter, parameter.threadNum);
+           The writer does its SAM->BAM conversion and BGZF deflate in parallel, on the same
+           -t-derived budget the compression side gives its BGZF inflate (a quarter of -t, at
+           least one thread): the pipeline's blocks already spread over -t threads, so the BAM
+           container's own parallel stage is kept to its share instead of saturating the cores.
+           See bamBgzfThreadNum. */
+        BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(
+            ioWriter, bamBgzfThreadNum(parameter.threadNum));
         if (blockWriter == nullptr) {
             LOG_ERROR("Failed to create bam writer.");
             return nullptr;

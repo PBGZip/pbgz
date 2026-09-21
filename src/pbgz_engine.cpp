@@ -428,7 +428,14 @@ int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
 }
 
 int32_t PbgzEngine::startReadTask() {
-    pthread_setname_np(pthread_self(), "readtask");
+    /*
+     * Deliberately unnamed. This task runs on the caller's thread, and start() is called from
+     * main(), so the thread being renamed here is the main thread - whose comm is what the
+     * whole process is called: renaming it to "readtask" made ps/top/profilers report the run
+     * as "readtask" instead of "pbgz" (and every thread created afterwards inherited that name).
+     * The reader stays identifiable as the thread whose TID equals the process PID; the writer
+     * and coder threads keep their names because those are threads of their own.
+     */
     PBGZ_PROF_SCOPE(pbgzprof::READ_TOTAL);
     BlockReader* blockReader = createBlockReader();
     if (blockReader == nullptr) {
