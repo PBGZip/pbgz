@@ -94,7 +94,12 @@ CompressEngine::~CompressEngine() {
 
 BlockReader* CompressEngine::createBlockReader() {
     const bool bamStruct = (parameter.mode == PBGZ_MODE_FAST);
-    BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel, true, bamStruct);
+    /*
+     * pbgzAsOpaque=true: on this side a pbgz file is not an input format. It is read as opaque
+     * binary so its bytes are stored instead of being decoded as if they were the original data
+     * (see the note on BlockFactory::createBlockReader).
+     */
+    BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel, true, bamStruct, true);
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
     }

@@ -358,10 +358,20 @@ public:
      * blocks: 1-5 -> 10000 reads/block, 6-7 -> 25000, 8-9 -> 100000. With splitSamHeader=false
      * the SAM header does not form its own block (merging with the first data block), for
      * downstream consumers such as sorting that need a self-contained @SQ within the block.
+     *
+     * pbgzAsOpaque is for the compression pipeline. There a file that already is a pbgz archive
+     * is not an input format but the product of the same pipeline: its blocks carry already-coded
+     * payloads, and PbgzBlockReader hands exactly those over (that is what decompression, indexing
+     * and region queries need). An actuator receiving them as if they were the original text or
+     * records cannot parse them - every block comes out empty and the input is lost. With this
+     * set, such a file is read as opaque binary instead, so compressing an archive stores its
+     * bytes verbatim: decompressing the result once yields that archive byte for byte, and
+     * decompressing it again yields the original data.
      */
     static BlockReader* createBlockReader(IOReader* ioReader, uint8_t compressLevel = 0,
                                           bool splitSamHeader = true,
-                                          bool bamStructMode = false);
+                                          bool bamStructMode = false,
+                                          bool pbgzAsOpaque = false);
 
     /*
      * The SAM block granularity actually used by the readers for a level:

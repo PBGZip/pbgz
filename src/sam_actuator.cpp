@@ -392,6 +392,24 @@ int32_t SamCodecActuator::preAnalysis() {
     }
 
     /*
+     * A SAM block's line positions are recorded by the format's own reader (SamBlockReader /
+     * BamGzBlockReader): they split the input on newlines and keep every record boundary, so a
+     * non-empty block with no line position at all is not SAM/BAM text. The pbgz-input path is
+     * the case that matters here - it hands over the archive's already-coded payloads (see
+     * PbgzBlockReader::readBlock) - but any such block must not be coded as text.
+     *
+     * Failing here is what makes the bytes survive: the caller sees it and swaps in a
+     * BinaryCompressActuator (CompressEngine::actuatorPreProc), which stores the block verbatim.
+     * Returning 0 instead would let compress() take its "header only" branch and write an empty
+     * block, dropping the whole block's data without a word.
+     */
+    if (inBlockPtr->getDataLen() > 0 && inBlockPtr->getNpos().empty()) {
+        LOG_ERROR("SAM block(%ld) carries %ld bytes but no line positions, not SAM/BAM text.",
+                  (long)inBlockPtr->getBlockId(), (long)inBlockPtr->getDataLen());
+        return -1;
+    }
+
+    /*
      * The SEQ column's file-level decisions (its match coder, and the form the N positions travel
      * in) are not taken here: they are the codec pre-selection's, which measures them on the first
      * block before any actuator exists (see CodecSelector::selectSeqReferenceCoder). This pass only
@@ -498,6 +516,19 @@ int32_t SamCodecActuator::compress() {
             LOG_ERROR("Compress SAM header failed.");
             return -1;
         }
+    }
+
+    /*
+     * The same guard as preAnalysis(), for the callers that compress without running the
+     * pre-analysis first: a block with bytes but no line position cannot be "header only" -
+     * taking that branch would write an empty block and drop the data. The pipeline always
+     * runs preAnalysis() first (CompressEngine::actuatorPreProc), where the block is turned
+     * into a binary one instead, so this is the belt to that branch's braces: fail loudly.
+     */
+    if (inBlockPtr->getDataLen() > 0 && inBlockPtr->getNpos().empty()) {
+        LOG_ERROR("SAM block(%ld) carries %ld bytes but no line positions, cannot code as text.",
+                  (long)inBlockPtr->getBlockId(), (long)inBlockPtr->getDataLen());
+        return -1;
     }
 
     if (inBlockPtr->getNpos().size() <= (size_t)headEndLine) {

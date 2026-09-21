@@ -135,6 +135,20 @@ uint32_t FastqCodecActuator::countN_Optimized(const uint8_t* data, size_t length
 }
 
 int32_t FastqCodecActuator::compress() {
+    /*
+     * The same guard as preAnalysis() (which fails a block with no line position), for the
+     * callers that compress without running the pre-analysis first. A FASTQ record is four
+     * lines, all of them found through the reader's line positions, so a block with bytes but
+     * no line position cannot be coded as FASTQ: writing it would produce a block that decodes
+     * to nothing while its meta claims the md5 of the real data. Fail instead, which lets the
+     * pipeline store the block as binary rather than lose it (CompressEngine::actuatorPreProc).
+     */
+    if (inBlockPtr->getDataLen() > 0 && inBlockPtr->getNpos().empty()) {
+        LOG_ERROR("FASTQ block(%ld) carries %ld bytes but no line positions, not FASTQ text.",
+                  (long)inBlockPtr->getBlockId(), (long)inBlockPtr->getDataLen());
+        return -1;
+    }
+
     if (0 != initEncoder()) {
         LOG_ERROR("Init encoder failed");
         return -1;

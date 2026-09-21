@@ -1581,7 +1581,7 @@ uint32_t BlockFactory::samReadsPerBlockOfLevel(uint8_t compressLevel)
 }
 
 BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compressLevel, bool splitSamHeader,
-                                              bool bamStructMode) {
+                                              bool bamStructMode, bool pbgzAsOpaque) {
     if (ioReader == nullptr) {
         LOG_ERROR("Create block reader failed: io reader is null.");
         return nullptr;
@@ -1604,11 +1604,22 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
 
     BlockReader* reader = nullptr;
     if (startsWithPbgz(detectBuf, detectLen)) {
-        /*
-         * PBGZ: prefetched bytes are returned to PbgzBlockReader (piped input cannot be seeked
-         * back), and header parsing is done by PbgzBlockReader::init() consuming the prefetch buffer.
-         */
-        reader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader, detectBuf, detectLen);
+        if (pbgzAsOpaque) {
+            /*
+             * Compressing an archive: read it as opaque binary rather than as an archive. The
+             * blocks of a pbgz file hold already-coded payloads, which no actuator can parse as
+             * the original text/records - reading them that way made every block come out empty
+             * (the whole input silently reduced to nothing). Stored verbatim, the archive instead
+             * survives: one decompression gives this very file back, the next the data inside it.
+             */
+            reader = MemoryUtil::safeNewClass<BinaryBlockReader>(ioReader, detectBuf, detectLen);
+        } else {
+            /*
+             * PBGZ: prefetched bytes are returned to PbgzBlockReader (piped input cannot be seeked
+             * back), and header parsing is done by PbgzBlockReader::init() consuming the prefetch buffer.
+             */
+            reader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader, detectBuf, detectLen);
+        }
     } else if (isBamSample(detectBuf, detectLen)) {
         if (startsWithBamMagic(detectBuf, detectLen)) {
             /* Already a raw BAM byte stream (the io layer has inflated BGZF, e.g. .bam) */
