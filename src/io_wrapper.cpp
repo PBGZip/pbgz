@@ -332,32 +332,11 @@ static int32_t msyncMapped(uint8_t* addr, size_t len, int flags)
     return msync(addr, len, flags);
 }
 
-/* Synchronously flush the byte range [startOff, endOff) of the mapping to disk
-   (page-aligned). Used by writeIO/writeIOAt so that data is durable before the
-   write call returns instead of only being handed to the kernel page cache and
-   written back asynchronously. */
-static int32_t msyncRangeSync(uint8_t* addr, size_t startOff, size_t endOff)
-{
-    if (addr == nullptr || endOff <= startOff) {
-        return 0;
-    }
-    long pageSize = sysconf(_SC_PAGESIZE);
-    if (pageSize <= 0) {
-        pageSize = 4096;
-    }
-    const size_t alignedStart = (startOff / (size_t)pageSize) * (size_t)pageSize;
-    const size_t alignedEnd = ((endOff + (size_t)pageSize - 1) / (size_t)pageSize) * (size_t)pageSize;
-    if (alignedEnd <= alignedStart) {
-        return 0;
-    }
-    return msync(addr + alignedStart, alignedEnd - alignedStart, MS_SYNC);
-}
-
-/* Non-blocking variant of msyncRangeSync: schedules the dirty pages for
-   write-back and returns immediately. The caller's closeIO() performs the
-   final synchronous msync + fsync, so on a clean shutdown durability is
-   unchanged; only the per-write blocking cost (which serialised the whole
-   writer thread to disk latency, ~46 MB/s on a spinning volume) disappears. */
+/* Flush the byte range [startOff, endOff) of the mapping (page-aligned) without blocking:
+   the dirty pages are scheduled for write-back and the call returns immediately. Blocking
+   here per write (MS_SYNC) serialised the whole writer thread to disk latency, ~46 MB/s on
+   a spinning volume; the caller's closeIO() performs the final synchronous msync + fsync,
+   so on a clean shutdown durability is unchanged. */
 static int32_t msyncRangeAsync(uint8_t* addr, size_t startOff, size_t endOff)
 {
     if (addr == nullptr || endOff <= startOff) {

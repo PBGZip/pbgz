@@ -37,10 +37,8 @@
 #include "coder_qual.h"
 #include "utils/md5_util.h"
 #include "coder_json.h"
-#include "io_wrapper.h"
 #include "actg.h"
 #include "city.h"
-#include "pbgz_manager.h"
 #include "pbgz_stat.h"
 #include "config_manager.h"
 
