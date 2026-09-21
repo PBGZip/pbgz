@@ -25,7 +25,6 @@
 
 #include <stdint.h>
 #include <string>
-#include <map>
 #include <memory>
 #include <json/json.h>
 #include "utils/guard_bar.h"
