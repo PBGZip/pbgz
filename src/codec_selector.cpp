@@ -33,7 +33,6 @@
 #include "block_wrapper.h"
 #include "log/logger.h"
 #include "safe_line_reader.h"
-#include "actg.h"
 #include "reference.h"
 #include "sam_info.h"
 #include "sam_qname_column.h"
@@ -1534,7 +1533,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             const uint32_t sampleLen = (uint32_t)buf.size();
             const std::vector<LineSample>* sampleLines = &fieldLines[f];
             std::vector<CoderType> qnameCandidates = eligibleCandidates(f, mode, compressLevel);
-            trials.push_back([block, compressLevel, &info, f, sampleData, sampleLen, sampleLines,
+            trials.push_back([block, &info, f, sampleData, sampleLen, sampleLines,
                               qnameCandidates]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
                 if (selectQnameLayout(block, info)) {

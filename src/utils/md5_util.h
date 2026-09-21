@@ -78,16 +78,21 @@ void md5_compute(const uint8_t *input, size_t length, uint8_t digest[16]);
  */
 void md5_to_hex(const uint8_t digest[16], char output[33]);
 
-/**
- * Convert 16-byte binary digest to string object
+#ifdef __cplusplus
+}
+#endif
+
+/*
+ * Convert 16-byte binary digest to string object.
+ *
+ * C++ linkage on purpose: it returns std::string, which a C-linkage function
+ * cannot (and C callers could not use anyway), so it sits outside the
+ * extern "C" block above along with the rest of the C++-only helpers.
+ *
  * @param digest 16-byte binary digest
  * @return std::string
  */
 std::string md5_to_string(const uint8_t digest[16]);
-
-#ifdef __cplusplus
-}
-#endif
 
 inline void calcMd5sum(std::string& md5, const uint8_t* data, uint32_t dataLen) {
     uint8_t digest[16];

@@ -31,11 +31,8 @@
 #include "codec_actuator.h"
 #include "coder.h"
 #include "coder_io.h"
-#include "coder_qual.h"
-#include "coder_fcv2.h"
 #include "reference.h"
 #include "coder_bwt_cm.h"
-#include "coder_qcm.h"
 #include "coder_factory.h"
 /* The reference-coded SEQ payload, and the CIGAR operation it walks: shared with the codec
    pre-selection, which trials that payload on a sample of the first block (see

@@ -380,7 +380,7 @@ public:
     }
 
     /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
-    int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false)
+    int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false) override
     {
         uint8_t ch;
         int32_t len = 0, n;
@@ -475,7 +475,7 @@ stream_end:
     }
 
     /* fake */
-    int32_t decode_line(uint8_t*, uint32_t, uint8_t*, uint8_t, bool)
+    int32_t decode_line(uint8_t*, uint32_t, uint8_t*, uint8_t, bool) override
     {
         return 0;
     }

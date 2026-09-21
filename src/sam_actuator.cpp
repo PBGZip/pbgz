@@ -33,7 +33,6 @@
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_arith.h"
 #include "coder/coder_qual.h"
-#include "coder/coder_fcv2.h"
 #include "utils/md5_util.h"
 #include "coder/coder_json.h"
 
@@ -41,7 +40,6 @@
 #include <cstring>
 #include "log/logger.h"
 #include "sam_info.h"
-#include "actg.h"
 #include "utils/path_util.h"
 #include "pbgz_index.h"
 #include "compress_engine.h"
