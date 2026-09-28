@@ -22,21 +22,16 @@
  */
 
 #include <vector>
-#include <algorithm>
 #include <cstdio>
 #include <map>
 
 #include "index_actuator.h"
+#include "pbgz_index.h"   /* SamIndex, used by the index paths below */
 #include "sam_info.h"
-#include "sam_actuator.h"
-#include "io_wrapper.h"
 #include "log/logger.h"
-#include "coder/coder.h"
 #include "coder/coder_io.h"
 #include "coder/coder_json.h"
 #include "coder/coder_bwt_cm.h"
-#include "coder/coder_affix_match.h"
-#include "utils/memory_util.h"
 
 IndexActuator::IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine)
     : Actuator(inPtr, outPtr, engine), flagDecoder(nullptr), chrDecoder(nullptr), posDecoder(nullptr) {

@@ -32,7 +32,6 @@
 #include "coder/coder_fc.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_arith.h"
-#include "coder/coder_qual.h"
 #include "utils/md5_util.h"
 #include "city.h"
 #include "coder/coder_json.h"

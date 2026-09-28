@@ -42,7 +42,7 @@ public:
 
     virtual ~CompressEngine();
 
-    virtual int32_t init();
+    virtual int32_t init() override;
 
     PbgzStat* getStats() { return stats.get(); }
 
@@ -87,7 +87,7 @@ protected:
 
     virtual  Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
-    virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr);
+    virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
 
     /*

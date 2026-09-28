@@ -19,14 +19,9 @@
 
 #include <string>
 #include <vector>
-#include <algorithm>
 
-#include "coder/coder_bwt_cm.h"
-#include "coder/coder_fcv2.h"
 #include "coder/coder_json.h"
-#include "coder/coder_qual.h"
 #include "coder_factory.h"
-#include "field_coder_config.h"
 #include "sam_field_rules.h"
 #include "sam_info.h"
 #include "sam_seq_payload.h"
@@ -36,8 +31,6 @@
 #include "utils/md5_util.h"
 
 namespace {
-
-const char kSeqBaseTable[] = "=ACMGRSVTWYHKDBN";
 
 /* Append v as n little-endian bytes. */
 void appendLe(std::vector<uint8_t>& out, uint32_t v, size_t n)
@@ -547,7 +540,6 @@ int32_t BamCodecActuator::compress()
     }
 
     Json::Value streamMeta;
-    uint32_t totalSrc = 0;
 
     /* QNAME: NUL-free by construction, so a '\n' separator makes the stream
        self-delimiting without a separate length column. */
@@ -560,7 +552,6 @@ int32_t BamCodecActuator::compress()
         qnameStream.push_back('\n');
         qoff += cols->qnameLen[i];
     }
-    totalSrc += (uint32_t)qnameStream.size();
     if (encodeQnameColumn(qnameStream.data(), qnameStream.size(), cols->nRecords, streamMeta) < 0) {
         return -1;
     }
@@ -571,7 +562,6 @@ int32_t BamCodecActuator::compress()
     for (size_t i = 0; i < cols->flag.size(); ++i) {
         appendLe(flagStream, cols->flag[i], 2);
     }
-    totalSrc += (uint32_t)flagStream.size();
     if (encodeColumn(SAM_FLAG, CoderType::BWT_CM, flagStream.data(), flagStream.size(), streamMeta,
                      "FLAG", "u16") < 0) {
         return -1;
@@ -586,7 +576,6 @@ int32_t BamCodecActuator::compress()
         putSvarint(nextRefStream, (int64_t)cols->nextRefId[i] - prevNextRef);
         prevNextRef = cols->nextRefId[i];
     }
-    totalSrc += (uint32_t)(refStream.size() + nextRefStream.size());
     if (encodeColumn(SAM_RNAME, CoderType::BWT_CM, refStream.data(), refStream.size(), streamMeta,
                      "RNAME", "varint-delta") < 0) {
         return -1;
@@ -599,10 +588,8 @@ int32_t BamCodecActuator::compress()
     if (encodePosColumn(streamMeta) < 0) {
         return -1;
     }
-    totalSrc += (uint32_t)(cols->pos.size() * 4);
 
     /* MAPQ: uint8 stream. */
-    totalSrc += (uint32_t)cols->mapq.size();
     if (encodeColumn(SAM_MAPQ, CoderType::BWT_CM, cols->mapq.data(), cols->mapq.size(), streamMeta,
                      "MAPQ", "u8") < 0) {
         return -1;
@@ -630,7 +617,6 @@ int32_t BamCodecActuator::compress()
 
     /* SEQ: encode against the reference when available (per-base diff stream),
        otherwise the whole text column. */
-    totalSrc += (uint32_t)cols->seq.size();
     if (encodeSeqColumnRef(streamMeta) < 0) {
         return -1;
     }
@@ -638,7 +624,6 @@ int32_t BamCodecActuator::compress()
     if (encodeQualColumn(streamMeta) < 0) {
         return -1;
     }
-    totalSrc += (uint32_t)cols->qual.size();
 
     /* Aux tags: payload + per-record length. */
     std::vector<uint8_t> tagLenStream;
@@ -649,7 +634,6 @@ int32_t BamCodecActuator::compress()
                      "TAGS_N", "varint") < 0) {
         return -1;
     }
-    totalSrc += (uint32_t)cols->tags.size();
     if (encodeColumn(SAM_FIELD_COUNT, CoderType::BWT_CM, cols->tags.data(), cols->tags.size(), streamMeta,
                      "TAGS", "bytes") < 0) {
         return -1;
@@ -1033,7 +1017,6 @@ int32_t BamCodecActuator::decompress()
             seqAll.reserve(raw.size());
             std::vector<uint8_t> refBuf;
             size_t dfi = 0;
-            size_t cOff = 0;
             for (uint32_t r = 0; r < nRec; ++r) {
                 const uint32_t len = (uint32_t)lSeq[r];
                 seqOff[r + 1] = seqOff[r] + len;
@@ -1095,7 +1078,6 @@ int32_t BamCodecActuator::decompress()
                     seqAll.push_back(raw[dfi++]);
                     ++rd;
                 }
-                cOff += nOps;
             }
             if (dfi != raw.size()) {
                 LOG_ERROR("BamCodecActuator::decompress: SEQR stream length mismatch");

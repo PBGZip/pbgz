@@ -33,9 +33,7 @@
 #include "utils/memory_util.h"
 #include "coder_io.h"
 #include "coder_bwt_cm.h"
-#include "coder_affix_match.h"
 #include "coder_fc.h"
-#include "coder_qual.h"
 #include "sam_field_layout.h"   /* kSeqExc*Name: the names the reader and both writers must agree on */
 #include "seq_stream_util.h"
 #include "utils/md5_util.h"

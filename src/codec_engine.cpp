@@ -23,21 +23,11 @@
 
 #include "codec_engine.h"
 #include "log/logger.h"
-#include "coder/coder.h"
 #include "utils/memory_util.h"
-#include "pbgz_manager.h"
 #include "block_wrapper.h"
-#include "fastq_actuator.h"
 #include "binary_actuator.h"
-#include "utils/path_util.h"
-#include "coder_ppmd.h"
-#include "coder_json.h"
-#include "config_manager.h"
 #ifdef __SSE4_2__ 
-#include "hardware.h"
 #endif
-#include <set>
-#include "sam_actuator.h"
 
 CodecEngine::~CodecEngine() {
     MemoryUtil::safeDeleteClass(pRefGene);

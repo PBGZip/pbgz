@@ -283,8 +283,9 @@ private:
     // Per-record names and base offsets, filled when the squash is parsed from the FASTA (see
     // getSequences); empty when it came from an NI index.
     std::vector<SequenceSpan> refSequences;
-    // Length of bases used as key when building index table, must be odd
-    const uint32_t baseGroupLen = 31;
+    // Length of bases used as key when building index table, must be odd. Compile-time constant: it
+    // sizes the base-group scratch buffers in buildIndex, and referencCheck rejects any other value.
+    static constexpr uint32_t baseGroupLen = 31;
     // Base step when building index table
     const uint32_t baseGroupStep = 32;
     // Concurrency level

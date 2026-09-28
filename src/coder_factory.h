@@ -30,7 +30,6 @@
 #include <utility>
 #include <vector>
 
-#include "pbgz_types.h"
 #include "preprocess_info.h"
 #include "coder/coder.h"
 

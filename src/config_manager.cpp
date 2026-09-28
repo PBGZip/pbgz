@@ -21,12 +21,9 @@
  * SOFTWARE.
  */
 
-#include <fstream>
 #include <json/json.h>
-#include <iostream>
 #include <unistd.h>
 #include <pwd.h>
-#include <filesystem>
 
 #include "config_manager.h"
 

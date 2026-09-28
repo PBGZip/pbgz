@@ -22,9 +22,7 @@
  */
 
 #include <gtest/gtest.h>
-#include <memory>
 #include <cstring>
-#include <algorithm>
 #include <random>
 #include <chrono>
 
@@ -453,8 +451,10 @@ TEST_F(ActgTest, ActgStretchMappingXor) {
     // Test case 4: Various lengths
     {
         for (int len = 1; len <= 10; ++len) {
-            uint8_t base[len];
-            uint8_t refe[len];
+            // Fixed-size buffers, only the first len bytes are used: a variable-length array is not
+            // standard C++ (clang: -Wvla-cxx-extension).
+            uint8_t base[10];
+            uint8_t refe[10];
             uint8_t output[40];  // Enough for 10 bytes max
             
             for (int i = 0; i < len; ++i) {
@@ -552,9 +552,10 @@ TEST_F(ActgTest, ActgXor) {
     // Test case 3: Various lengths
     {
         for (int len = 1; len <= 20; ++len) {
-            uint8_t x1[len];
-            uint8_t x2[len];
-            uint8_t output[len];
+            // Fixed-size buffers, only the first len bytes are used (no VLAs, see above).
+            uint8_t x1[20];
+            uint8_t x2[20];
+            uint8_t output[20];
             
             for (int i = 0; i < len; ++i) {
                 x1[i] = i % 256;

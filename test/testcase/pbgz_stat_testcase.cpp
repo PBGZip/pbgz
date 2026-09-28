@@ -22,9 +22,6 @@
  */
 
 #include <gtest/gtest.h>
-#include <iostream>
-#include <sstream>
-#include <vector>
 #include "../src/pbgz_stat.h"
 
 class PbgzStatTest : public ::testing::Test {

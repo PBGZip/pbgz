@@ -5,6 +5,7 @@
 #include "sam_seq_payload.h"
 
 #include <atomic>
+#include "seq_stream_util.h"   /* appendVarint, used by the payload writers */
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -12,7 +13,6 @@
 
 #include "actg.h"
 #include "log/logger.h"
-#include "sam_field_layout.h"
 #include "sam_info.h"
 
 /*

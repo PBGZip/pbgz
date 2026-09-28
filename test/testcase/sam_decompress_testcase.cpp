@@ -23,7 +23,6 @@
 
 #include <gtest/gtest.h>
 #include <fstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -37,7 +36,6 @@
 #include "config_manager.h"
 #include "utils/memory_util.h"
 #undef private
-#include <random>
 #include <compress_engine.h>
 #include <decompress_engine.h>
 #include <sam_info.h>

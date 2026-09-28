@@ -30,7 +30,6 @@
 #include "actuator.h"
 #include "coder/coder_io.h"
 #include "coder/coder_bwt_cm.h"
-#include "pbgz_index.h"
 
 class IndexActuator : public Actuator {
 public:

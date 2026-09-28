@@ -26,9 +26,6 @@
 #include <cstdint>
 #include <string>
 #include <map>
-#include <iostream>
-#include <iomanip>
-#include <memory>
 #include <functional>
 
 enum class MetricType {

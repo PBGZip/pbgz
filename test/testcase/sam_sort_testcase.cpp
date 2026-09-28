@@ -23,13 +23,10 @@
 
 #include <gtest/gtest.h>
 #include <fstream>
-#include <filesystem>
-#include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdint>
 #include <cstdio>
-#include <random>
 
 #include "coder/coder.h"
 
@@ -758,6 +755,7 @@ TEST_F(SamSortTest, TestUnmappedItemsNotProcessed) {
             }
         }
         // Should be 0 or very few since unmapped items are not written
+        EXPECT_LT(contentCount, 3);
         samFile.close();
     }
 }

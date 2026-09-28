@@ -23,6 +23,12 @@ public:
         outputDataPool = std::make_unique<MockBlockingQueue>(blockSz);
     }
 
+    /*
+     * PbgzEngine::init() takes no argument; without this declaration the one-argument overload below
+     * hides it for name lookup (clang: -Woverloaded-virtual).
+     */
+    using IndexEngine::init;
+
     int32_t init(const std::string& outputFile) {
         /*
          * IndexEngine::startEnginePostProc requires ioReader to be a FileReader: indexing is only

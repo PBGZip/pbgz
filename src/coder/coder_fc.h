@@ -152,7 +152,7 @@ public:
     }
 
     /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
-    int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false)
+    int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false) override
     {
         check_exit(io->m != coder_io::MDEC, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "only support block decompress, not support line method"); // Not yet extended to line method
         check_exit(split_ch == UINT8_MAX, coder_ns::CODER_ERR_INNER, "check failed (%d) : %d", __LINE__, split_ch);

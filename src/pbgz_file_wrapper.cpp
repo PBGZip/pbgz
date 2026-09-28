@@ -25,7 +25,6 @@
 #include "io_block.h"
 #include "log/logger.h"
 #include "coder_json.h"
-#include "utils/memory_util.h"
 
 // Buffer as temporary storage for parsing meta and other information, no need to be too large
 const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 16 * 1024 * 1024;

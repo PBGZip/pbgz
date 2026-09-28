@@ -23,6 +23,8 @@
 
 
 #include "pbgz_index.h"
+#include <algorithm>   /* std::upper_bound */
+#include <sstream>     /* std::istringstream */
 #include "io_wrapper.h"
 #include "log/logger.h"
 

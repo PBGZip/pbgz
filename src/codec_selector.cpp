@@ -37,6 +37,7 @@
 #include "sam_info.h"
 #include "sam_qname_column.h"
 #include "sam_seq_payload.h"
+#include "seq_stream_util.h"   /* SeqRleSplit, used by the SEQ trials below */
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_fc.h"
 #include "coder/coder_fcv2.h"

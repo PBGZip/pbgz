@@ -25,9 +25,6 @@
 
 #include <stdint.h>
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
-#include <string>
 #include <utility>
 #include <vector>
 

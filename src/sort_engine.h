@@ -49,7 +49,7 @@ public:
 
     virtual int32_t writerSam(int64_t samSortPos, std::string& samFileLine) override;
 
-    virtual void close() { fileWriter.closeIO(); }
+    virtual void close() override { fileWriter.closeIO(); }
 
 private:
     FileWriter fileWriter;
@@ -71,7 +71,7 @@ public:
 
     virtual int32_t writerSam(int64_t, std::string& samFileLine) override;
 
-    virtual void close();
+    virtual void close() override;
 
 private:
     RoughIOBlock* outBlock;
@@ -105,11 +105,11 @@ protected:
 
     virtual int32_t startEnginePostProc() override;
 
-    virtual void updateInputStatics(RoughIOBlock* inBlockPtr) { 
+    virtual void updateInputStatics(RoughIOBlock* inBlockPtr) override { 
         PbgzManager::getInstance().updateReadDataLen(inBlockPtr);
     }
 
-    virtual void updateOutputStatics(RoughIOBlock* outBlockPtr) {
+    virtual void updateOutputStatics(RoughIOBlock* outBlockPtr) override {
         PbgzManager::getInstance().updateWriteDataLen(outBlockPtr);
     }
 

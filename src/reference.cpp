@@ -21,13 +21,12 @@
  * SOFTWARE.
  */
 
+#include <algorithm>   /* std::sort */
 #include <atomic>
-#include <fstream>
 #include <utility>
 
 #include "spinlock/spinlock-pthread.h"
 #include "city.h"
-#include "cfgpath/cfgpath.h"
 #include "utils/md5_util.h"
 #include "reference.h"
 #include "pbgz_errno.h"
@@ -37,7 +36,6 @@
 #include "utils/memory_util.h"
 #include "coder_json.h"
 #include "utils/path_util.h"
-#include "utils/file_lock.h"
 #include "pbgz_manager.h"
 #include "actg.h"
 #ifdef __SSE4_2__
@@ -593,10 +591,8 @@ bool Reference::makeSquashIndex() {
 
 void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
     int64_t pcnt = this->parallel;
-    const uint32_t bg_step = baseGroupStep;
     const uint32_t bg_len = baseGroupLen;
     const uint32_t *actg_stretch_tab = actgStretch;
-    const int32_t hbuckets = hashBuckets;
     const int32_t hmask = hashMask;
 
     int64_t total = (refGeneSquashlen << 2) / baseGroupStep;
@@ -625,8 +621,10 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
 
         offset_start = bhash - bhash_start;
 
-        tpools.push_back(std::thread([p, current, offset_start, hbuckets, hmask, &bhash_start,
-                                      &bg_step, &bg_len, &actg_stretch_tab, &hb_cnt, &slocks, pnn]() {
+        /* bg_len is only read in constant expressions here (it is initialized from the compile-time
+           baseGroupLen), so it does not have to be captured. */
+        tpools.push_back(std::thread([p, current, offset_start, hmask, &bhash_start,
+                                      &actg_stretch_tab, &hb_cnt, &slocks, pnn]() {
             int64_t n = 0, m = 0;
             uint8_t *s = p;
             uint32_t kpos = bg_len >> 1;
@@ -636,10 +634,17 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
             int64_t *pnnn = (pnn) ? pnn : (&n);
             uint64_t xsquash;
 
-            const uint32_t len_bgs = (bg_len >> 2) + ((bg_len & 0x3) ? 1 : 0);
+            /*
+             * The scratch buffers take their sizes from the compile-time baseGroupLen instead of the
+             * captured bg_len: the two are the same value (bg_len is assigned baseGroupLen just above,
+             * and referencCheck rejects any other length), but only the member is a constant
+             * expression, so sizing from it keeps these ordinary arrays rather than variable-length
+             * ones, which are a clang extension in C++.
+             */
+            static constexpr uint32_t len_bgs = (baseGroupLen >> 2) + ((baseGroupLen & 0x3) ? 1 : 0);
             const char actg4[4] = {'A', 'C', 'T', 'G'};
-            char actg_bg[bg_len + 1];
-            char actg_bg_pair[bg_len + 1]; /* Complementary base */
+            char actg_bg[baseGroupLen + 1];
+            char actg_bg_pair[baseGroupLen + 1]; /* Complementary base */
             char actg_bgs[len_bgs];    /* squash base group */
             char actg_bgs_pair[len_bgs];
 

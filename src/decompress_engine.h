@@ -25,7 +25,6 @@
 
 #include <map>
 #include <mutex>
-#include <vector>
 
 #include "codec_engine.h"
 #include "actuator.h"

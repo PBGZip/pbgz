@@ -4,19 +4,14 @@
 
 #include <gtest/gtest.h>
 #include <fstream>
-#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdint>
 #include <cstdio>
-#include <thread>
-#include <mutex>
 #include <gmock/gmock.h>
 
 #include "coder/coder.h"
-#include "blocking_queue.h"
-#include "io_block.h"
 #include "utils/memory_util.h"
 #include "io_wrapper.h"
 
@@ -28,7 +23,6 @@ namespace SamSortTestData {
     const std::string sortedSamFile1 = "sorted_sam_0_1.sam";
     const std::string sortedSamFile2 = "sorted_sam_0_2.sam";
     const std::string mergedOutputFile = "merged_output.sam";
-    const uint32_t MAX_BLOCK_SIZE = 8 << 20;
 };
 
 
@@ -36,10 +30,8 @@ namespace SamSortTestData {
 #define private public
 #include "pbgz_types.h"
 #include "sort_engine.h"
-#include "sam_sort_actuator.h"
 #include "config_manager.h"
 #include "sam_info.h"
-#include "pbgz_manager.h"
 #undef private
 #undef protected
 
@@ -52,6 +44,12 @@ public:
         freeOutputPool = std::make_unique<MockBlockingQueue>(blockSz);
         outputDataPool = std::make_unique<MockBlockingQueue>(blockSz);
     }
+
+    /*
+     * PbgzEngine::init() takes no argument; without this declaration the one-argument overload below
+     * hides it for name lookup (clang: -Woverloaded-virtual).
+     */
+    using SortEngine::init;
 
     int32_t init(const std::string& outputFile) {
         ioWriter = MemoryUtil::safeNewClass<FileWriter>(outputFile);

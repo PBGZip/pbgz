@@ -21,12 +21,10 @@
  * SOFTWARE.
  */
 
-#include <algorithm>
 #include <set>
 
 #include "sort_engine.h"
 #include "pbgz_manager.h"
-#include "sam_info.h"
 #include "sam_sort_actuator.h"
 #include "utils/path_util.h"
 #include "sam_sort.h"

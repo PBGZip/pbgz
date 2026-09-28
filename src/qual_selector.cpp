@@ -23,7 +23,6 @@
 #include <string.h>
 #include <algorithm>
 #include <chrono>
-#include <memory>
 #include <atomic>
 #include <functional>
 #include <thread>

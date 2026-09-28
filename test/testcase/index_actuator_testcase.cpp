@@ -22,9 +22,6 @@
  */
 
 #include <gtest/gtest.h>
-#include <fstream>
-#include <filesystem>
-#include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -34,7 +31,6 @@
 #define protected public
 #include "index_actuator.h"
 #include "pbgz_index.h"
-#include "io_wrapper.h"
 #include "sam_info.h"
 #undef private
 #undef protected

@@ -24,15 +24,10 @@
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
-#include <memory>
-#include <chrono>
-#include <thread>
-#include <vector>
 #define private public
 #include "reference.h"
 #undef private
 #include "pbgz_errno.h"
-#include "utils/path_util.h"
 #include "coder.h"
 #include "utils/memory_util.h"
 

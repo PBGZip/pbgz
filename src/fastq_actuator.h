@@ -30,8 +30,6 @@
 #include "codec_actuator.h"
 #include "coder.h"
 #include "coder_io.h"
-#include "coder_qual.h"
-#include "pbgz_stat.h"
 
 // Forward declaration
 class CompressEngine;
@@ -52,7 +50,7 @@ enum class CommentType {
     UNKNOWN        // Unknown type
 };
 
-typedef struct {
+typedef struct Mapping {
     void set(uint8_t *_squashBuffer, uint32_t _squashBufferLen, uint8_t *_squashBuffCmplt, uint32_t __squashBuffCmpltLen, uint32_t _offset) {
         squashBuffer[0] = _squashBuffer;
         squashBufferLen[0] = _squashBufferLen;

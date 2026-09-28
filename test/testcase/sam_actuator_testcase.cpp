@@ -29,7 +29,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cctype>
-#include <algorithm>
 #include <map>
 #include <random>
 #include <utility>

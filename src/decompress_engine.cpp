@@ -24,6 +24,7 @@
 #include <set>
 
 #include "decompress_engine.h"
+#include "pbgz_index.h"   /* SamIndex, used by the index paths below */
 #include "utils/path_util.h"
 #include "coder_json.h"
 #include "coder_ppmd.h"

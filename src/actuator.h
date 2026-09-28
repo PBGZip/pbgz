@@ -26,7 +26,6 @@
 #include <json/json.h>
 
 #include "io_block.h"
-#include "pbgz_types.h"
 #include "coder/coder_io.h"
 
 #include <memory>

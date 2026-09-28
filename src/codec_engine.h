@@ -24,19 +24,12 @@
 #pragma once
 
 #include <stdint.h>
-#include <list>
-#include <vector>
-#include <thread>
-#include <memory>
 
 #include "io_block.h"
-#include "blocking_queue.h"
 #include "pbgz_types.h"
-#include "io_wrapper.h"
 #include "reference.h"
 #include "block_wrapper.h"
 #include "actuator.h"
-#include "pbgz_index.h"
 #include "pbgz_engine.h"
 #include "utils/path_util.h"
 #include "pbgz_manager.h"
@@ -81,11 +74,11 @@ protected:
         return 0;
     }
 
-    virtual void updateInputStatics(RoughIOBlock* inBlockPtr) { 
+    virtual void updateInputStatics(RoughIOBlock* inBlockPtr) override {
         PbgzManager::getInstance().updateReadDataLen(inBlockPtr);
     }
 
-    virtual void updateOutputStatics(RoughIOBlock* outBlockPtr) {
+    virtual void updateOutputStatics(RoughIOBlock* outBlockPtr) override {
         PbgzManager::getInstance().updateWriteDataLen(outBlockPtr);
     }
 
@@ -103,5 +96,5 @@ protected:
     std::mutex dynamicFileMetaMutex;
     bool refeOffsetFLag;
 
-    virtual Reference* getReference() { return pRefGene; }
+    virtual Reference* getReference() override { return pRefGene; }
 };

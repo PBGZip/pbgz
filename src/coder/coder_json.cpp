@@ -22,6 +22,7 @@
  */
 
 #include "coder_json.h"
+#include "coder.h"   /* coder_ns helpers (safe_alloc/safe_free/check_exit) used below */
 
 coder_json::coder_json(int32_t level) : cLevel(level)
 {

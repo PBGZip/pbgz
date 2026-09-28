@@ -27,7 +27,6 @@
 #include <json/json.h>
 #include <zstd.h>
 
-#include "coder.h"
 
 /* JSON encoder using zstd streaming compression algorithm */
 class coder_json

@@ -25,7 +25,6 @@
 #include <vector>
 #include <algorithm>
 #include <map>
-#include <sstream>
 #include <cstdio>
 
 PbgzStat::PbgzStat() {

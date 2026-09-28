@@ -27,7 +27,6 @@
 #include <string>
 #include <string.h>
 
-#include "coder/coder.h"
 #include "log/logger.h"
 #include "io_block.h"
 #include "pbgz_types.h"

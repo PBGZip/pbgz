@@ -136,11 +136,11 @@ protected:
 class FileReader : public IOReader {
 
 public:
-    int32_t openIO();
+    int32_t openIO() override;
 
-    void closeIO() {return fo.closeIO();}
+    void closeIO() override {return fo.closeIO();}
 
-    size_t readIO(void* pBuffer, size_t readSize);
+    size_t readIO(void* pBuffer, size_t readSize) override;
 
     size_t readLine(std::string& line) override;
 
@@ -223,10 +223,10 @@ public:
     PipeReader() : lineBuffer(nullptr), bufferSize(0), bufferPos(0), bytesRead(0) { }
 
     // Pipe reading does not require open and close operations
-    int openIO() { return 0; }
-    void closeIO() { return; }
+    int openIO() override { return 0; }
+    void closeIO() override { return; }
 
-    size_t readIO(void* pBuffer, size_t readSize);
+    size_t readIO(void* pBuffer, size_t readSize) override;
     size_t readLine(std::string& line) override;
 
     ~PipeReader();

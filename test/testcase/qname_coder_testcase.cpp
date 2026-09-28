@@ -26,7 +26,6 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include <memory>
 
 #include "coder/coder.h"
 #include "coder/coder_io.h"

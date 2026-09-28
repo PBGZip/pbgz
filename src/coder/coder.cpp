@@ -22,7 +22,13 @@
  */
 
 #include "coder.h"
-#include "coder_fc.h"
+/*
+ * fcinit()/FC_OK come through here (coder_fc.h -> fc/pp.h -> fc_header.h). include-cleaner cannot
+ * see that path and reports the header as unused; replacing it with the leaf headers it suggests
+ * breaks other builds, so it is pinned with an IWYU pragma instead of removed.
+ */
+#include "fc.h"
+#include "fc_header.h"  
 
 /*
  * The four callbacks have self-sufficient defaults, and registration is an

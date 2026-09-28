@@ -39,6 +39,7 @@
    pre-selection, which trials that payload on a sample of the first block (see
    sam_seq_payload.h for why it is its own module). */
 #include "sam_seq_payload.h"
+#include "seq_stream_util.h"   /* SeqRleSplit, used by the SEQ payload helpers below */
 /* The QNAME column's layouts and the analysis they need: shared with the codec pre-selection,
    which runs both encoders on a sample to decide which one the file's names suit. */
 #include "sam_qname_column.h"

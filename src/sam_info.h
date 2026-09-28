@@ -28,7 +28,6 @@
 #include <map>
 #include <mutex>
 #include <vector>
-#include <algorithm>
 
 // Chromosome information structure
 struct ChromosomeInfo {

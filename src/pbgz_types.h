@@ -23,9 +23,9 @@
 
 #pragma once
 
+#include <cstdint>   /* uint8_t/uint32_t: this header used to get them through <chrono> */
 #include <string>
 #include <unistd.h>
-#include <chrono>
 
 /* Compression mode, mirroring CRAM's archive/fast split: archive (default) uses
  * the high-ratio textual SAM/BAM path; fast uses the structured column path,

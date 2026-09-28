@@ -23,8 +23,6 @@
 
 #include <gtest/gtest.h>
 #include <fstream>
-#include <filesystem>
-#include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -33,7 +31,6 @@
 #include "fastq_actuator.h"
 #include <io_wrapper.h>
 #include <block_wrapper.h>
-#include "compress_engine.h"
 #include <random>
 #undef private
 

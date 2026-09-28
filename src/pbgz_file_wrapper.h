@@ -24,7 +24,6 @@
 #pragma once
 
 #include <stdint.h>
-#include <string>
 
 #include "pbgz_file.h"
 #include "io_wrapper.h"

@@ -21,11 +21,9 @@
  * SOFTWARE.
  */
 
-#include <iostream>
 #include <getopt.h>
 #include <filesystem>
 
-#include "pbgz_file.h"
 #include "log/logger.h"
 #include "pbgz_engine.h"
 #include "pbgz_types.h"
@@ -806,7 +804,9 @@ int main(int argc, char** argv) {
 
     // Build option string containing only options supported by current subcommand
     std::string argOption = "";
-    option longopts[pbgzArgs.size() + 1];
+    // The long-option table plus its all-zero terminator. It is built at run time, so it has to be a
+    // container: a variable-length array is not standard C++ (clang: -Wvla-cxx-extension).
+    std::vector<option> longopts(pbgzArgs.size() + 1);
     int optIndex = 0;
 
     for (uint32_t i = 0; i < pbgzArgs.size(); ++i) {
@@ -843,7 +843,7 @@ int main(int argc, char** argv) {
     optind = 2;
 
     int opt = 0;
-    while((opt = getopt_long(argc, argv, argOption.c_str(), longopts, NULL)) != -1) {
+    while((opt = getopt_long(argc, argv, argOption.c_str(), longopts.data(), NULL)) != -1) {
         switch (opt) {
         case 'z':{
             parameter.isDecToGZ = true;

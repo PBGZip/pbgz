@@ -32,11 +32,9 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <vector>
 
 #include "reference.h"
-#include "seq_stream_util.h"
 
 /*
  * One CIGAR operation: the op character and its length. The SEQ reference walk iterates these, and

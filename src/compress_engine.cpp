@@ -31,6 +31,7 @@
 #include "codec_actuator_adapter.h"
 #include "codec_selector.h"
 #include "field_coder_config.h"
+#include "pbgz_index.h"   /* SamIndex / BlockPosition, used by the index paths below */
 #include "sam_info.h"
 
 #include <bzlib.h>

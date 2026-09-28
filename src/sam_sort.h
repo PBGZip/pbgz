@@ -23,10 +23,11 @@
 
 #pragma once
 
+#include <cstdint>   /* uint32_t/int64_t */
+#include <string>    /* std::string, std::stoll */
 #include <vector>
+#include <queue>     /* std::priority_queue, used by the merge heap below */
 
-#include "io_wrapper.h"
-#include "sam_info.h"
 
 
 struct SortedSamItem {

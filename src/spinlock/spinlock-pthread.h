@@ -24,6 +24,11 @@
 #ifndef _SPINLOCK_PTHREAD_H
 #define _SPINLOCK_PTHREAD_H
 
+/* This header is the only one that needs pthread_mutex_t: it used to rely on whichever translation
+   unit included <pthread.h> (or <thread>) before it, which stops holding once an unused include is
+   removed from the includer. */
+#include <pthread.h>
+
 #define SPINLOCK_ATTR static __inline __attribute__((always_inline, no_instrument_function))
 
 #define spinlock pthread_mutex_t

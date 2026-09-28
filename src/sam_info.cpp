@@ -22,6 +22,7 @@
  */
 
 #include "sam_info.h"
+#include <algorithm>   /* std::sort */
 #include "log/logger.h"
 
 void SamInfo::addChrNameIndex(const std::string& chrName) {

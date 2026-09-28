@@ -23,8 +23,6 @@
 
 #include <gtest/gtest.h>
 #include "pbgz_file.h"
-#include "coder.h"
-#include "utils/memory_util.h"
 #include <coder_json.h>
 
 // Test cases for PbgzFileHeader

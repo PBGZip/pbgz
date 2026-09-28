@@ -22,6 +22,7 @@
  */
 
 #include <vector>
+#include <algorithm>   /* std::stable_sort */
 #include <cstdio>
 
 #include "sam_sort_actuator.h"

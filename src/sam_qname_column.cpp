@@ -7,15 +7,14 @@
 #include <cstring>
 #include <memory>
 
-#include "actg.h"
 #include "coder/coder_affix_match.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_io.h"
 #include "coder/coder_qname.h"
 #include "coder/id_int_model.h"
 #include "io_block.h"
+#include "seq_stream_util.h"
 #include "log/logger.h"
-#include "sam_field_layout.h"
 #include "utils/memory_util.h"
 
 /*

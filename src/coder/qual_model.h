@@ -24,7 +24,6 @@
 #include <vector>
 #include <stdint.h>
 #include <memory.h>
-#include <iostream>
 #include <cinttypes> 
 
 #include "clr.h"
@@ -217,5 +216,4 @@ private:
     int64_t ctx_cnt;
     QUAL_MODEL *model;
     SYMFREQ sym_freq_initial; // Initialize which symbols the model has and their initial frequency values
-    uint64_t tot_qual = 0; // Sum of quality values in current line
 };

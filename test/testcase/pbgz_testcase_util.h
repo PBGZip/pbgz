@@ -1,16 +1,8 @@
 #pragma once
 
 #include <gtest/gtest.h>
-#include <fstream>
-#include <filesystem>
-#include <stdexcept>
-#include <string>
-#include <vector>
 #include <cstdint>
 #include <cstdio>
-#include <thread>
-#include <mutex>
-#include "coder/coder.h"
 #include "blocking_queue.h"
 #include "io_block.h"
 #include "utils/memory_util.h"

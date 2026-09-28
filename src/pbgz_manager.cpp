@@ -26,6 +26,7 @@
 #include <cstring>
 
 #include "pbgz_manager.h"
+#include "coder/coder.h"   /* coder_ns helpers used below */
 #include "pbgz_errno.h"
 #include "utils/path_util.h"
 #include "block_wrapper.h"
