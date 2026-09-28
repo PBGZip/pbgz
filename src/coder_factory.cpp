@@ -63,14 +63,27 @@ std::shared_ptr<coder> createQname(coder_io* io)     { return std::make_shared<c
 /* Generic byte-stream coders work on every field. */
 bool supportsAny(uint32_t /*fileType*/, uint32_t /*fieldIdx*/) { return true; }
 
+/* A FASTQ block type carries one of the two generation bits, possibly with GZIP set. */
+bool isFastqType(uint32_t fileType)
+{
+    return (fileType & ((uint32_t)FASTQ_GEN2 | (uint32_t)FASTQ_GEN3)) != 0;
+}
+
 /*
- * coder_fcv2 needs each record's read length and strand direction, which only
- * the QUAL column of an aligned SAM/BAM provides.
+ * coder_fcv2 needs each record's read length and strand direction, which only a QUAL column
+ * whose records are aligned provides: the SAM/BAM one, and the FASTQ one.
+ *
+ * A FASTQ record carries no FLAG, so the strand it hands the coder is always "forward" - the
+ * cycle index the coder actually models is recovered from the record's length, which a FASTQ
+ * gives it just as an aligned SAM does. So FASTQ is admitted (see also the FASTQ QUAL row in
+ * field_coder_config.h, which is what decides whether it is trialled).
  */
 bool supportsFcv2(uint32_t fileType, uint32_t fieldIdx)
 {
-    return (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) &&
-           fieldIdx == (uint32_t)SAM_QUAL;
+    if (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) {
+        return fieldIdx == (uint32_t)SAM_QUAL;
+    }
+    return isFastqType(fileType) && fieldIdx == (uint32_t)FQ_QUAL;
 }
 
 /*
@@ -79,8 +92,11 @@ bool supportsFcv2(uint32_t fileType, uint32_t fieldIdx)
  */
 bool supportsAffix(uint32_t fileType, uint32_t fieldIdx)
 {
-    return (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) &&
-           samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH);
+    if (fileType == (uint32_t)SAM || fileType == (uint32_t)BAM) {
+        return samFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH);
+    }
+    return isFastqType(fileType) && fastqFieldCandidate(fieldIdx, CoderType::AFFIX_MATCH,
+                                                        PBGZ_MODE_ARCHIVE);
 }
 
 /*---------------------------------------------------------------------------

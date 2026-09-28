@@ -574,3 +574,83 @@ TEST_F(Fcv2CfgTest, StreamVersionIsChecked)
         EXPECT_EQ(dec.begin_decode(), coder_ns::CODER_ERR_UNSUPPORTED_VERSION);
     }
 }
+
+/*
+ * A value outside the stream's alphabet must fail the stream, never be dropped.
+ *
+ * The alphabet is fixed once the coder is built: from the frequency table, or from the prior's own
+ * alphabet (which comes from the blocks the prior was trained on). Nothing stops a later block from
+ * carrying a quality value the earlier ones never used - SRR2769247 followed by SRR18473920 is such
+ * a pair, one using quality values 'B'..'i' and the other '#'..'G' - and coder_fcv2 used to skip
+ * such a byte silently. The decoder has no way to know a byte was skipped, so it read every
+ * following symbol at the wrong offset: the block's checksum failed, and with enough data the
+ * decoder ran off the end of the stream and the process died on the load.
+ *
+ * What must hold instead: the coder reports what it can code (coversByte), and a value it cannot
+ * code latches coder_io::IO_UNCODABLE so the caller can hand the block to a codec that covers it.
+ */
+TEST_F(Fcv2CfgTest, OutOfAlphabetValueFailsTheStreamInsteadOfBeingDropped)
+{
+    /* An alphabet holding exactly two values: '!' and 'B'. */
+    std::vector<uint32_t> freq(256, 0);
+    freq[(uint8_t)'!'] = 10;
+    freq[(uint8_t)'B'] = 5;
+
+    std::vector<uint8_t> comp(4096, 0);
+    coder_io io(comp.data(), (int32_t)comp.size());
+    coder_fcv2 enc(&io, freq);
+
+    EXPECT_TRUE(enc.coversByte('!'));
+    EXPECT_TRUE(enc.coversByte('B'));
+    EXPECT_FALSE(enc.coversByte('C'));   /* 'C' is in no block the alphabet was built from */
+    EXPECT_FALSE(enc.coversByte('h'));
+
+    /* Records inside the alphabet encode normally. */
+    uint8_t seq[8] = {'A', 'C', 'G', 'T', 'A', 'C', 'G', 'T'};
+    uint8_t good[8] = {'!', 'B', 'B', '!', '!', 'B', '!', 'B'};
+    enc.encode_record(good, sizeof(good), false, seq, sizeof(seq));
+    EXPECT_EQ(io.err, coder_io::IO_OK);
+
+    /* One value outside it fails the stream rather than shortening it by a symbol. */
+    uint8_t bad[4] = {'!', 'C', 'B', '!'};
+    enc.encode_record(bad, sizeof(bad), false, seq, sizeof(bad));
+    EXPECT_EQ(io.err, coder_io::IO_UNCODABLE);
+}
+
+/*
+ * The same alphabet, used on both sides, still round-trips: the failure above is not a property of
+ * narrow alphabets as such but of values leaving them.
+ */
+TEST_F(Fcv2CfgTest, NarrowAlphabetRoundTrips)
+{
+    std::vector<uint32_t> freq(256, 0);
+    freq[(uint8_t)'!'] = 10;
+    freq[(uint8_t)'B'] = 5;
+
+    std::vector<uint8_t> seq(32, 'A');
+    std::vector<uint8_t> qual(32);
+    for (size_t i = 0; i < qual.size(); i++) {
+        qual[i] = ((i / 3) % 2 == 0) ? (uint8_t)'!' : (uint8_t)'B';
+    }
+
+    std::vector<uint8_t> comp(4096, 0);
+    {
+        coder_io eio(comp.data(), (int32_t)comp.size());
+        coder_fcv2 enc(&eio, freq);
+        for (int r = 0; r < 50; r++) {
+            enc.encode_record(qual.data(), (uint32_t)qual.size(), false, seq.data(), (uint32_t)seq.size());
+        }
+        enc.encode_flush();
+        EXPECT_EQ(eio.err, coder_io::IO_OK);
+    }
+
+    coder_io dio(comp.data(), (int32_t)comp.size());
+    coder_fcv2 dec(&dio, freq);
+    ASSERT_EQ(dec.begin_decode(), 0);
+    for (int r = 0; r < 50; r++) {
+        std::vector<uint8_t> out(qual.size(), 0);
+        ASSERT_EQ(dec.decode_record(out.data(), (uint32_t)out.size(), seq.data(), (uint32_t)seq.size()),
+                  (int32_t)out.size());
+        EXPECT_EQ(out, qual);
+    }
+}

@@ -29,6 +29,7 @@
 #include "field_coder_config.h"
 #include "sam_field_rules.h"
 #include "sam_info.h"
+#include "sam_seq_payload.h"
 #include "log/logger.h"
 #include "preprocess_info.h"
 #include "profile_stats.h"
@@ -366,9 +367,32 @@ int32_t BamCodecActuator::encodeCigarColumn(Json::Value& streamMeta)
     return encodeColumn(SAM_CIGAR, CoderType::BWT_CM, buf.data(), buf.size(), streamMeta, "CIGAR", "varint");
 }
 
+bool BamCodecActuator::seqReferenceUsable()
+{
+    if (pRefeGene == nullptr) {
+        return false;
+    }
+    if (!refeUsableChecked) {
+        refeUsableChecked = true;
+        refeUsableForSeq = referenceLinesUpWithHeader(pRefeGene);
+        if (!refeUsableForSeq) {
+            warnReferenceNotUsableForSeq();
+        }
+    }
+    return refeUsableForSeq;
+}
+
 int32_t BamCodecActuator::encodeSeqColumnRef(Json::Value& streamMeta)
 {
-    const bool noRef = (pRefeGene == nullptr);
+    /*
+     * seqRefEligible addresses the reference by @SQ index (its cumulative length), so it is only
+     * meaningful when the FASTA really is laid out the header's way. When it is not, every
+     * record's diff would be taken against foreign bases - worse than storing the bases - so the
+     * column falls to the raw path instead. The verdict is a property of the run and is cached
+     * per actuator; the raw path is named in the stream meta, which is what the decoder reads,
+     * so this side needs no counterpart in the decoder.
+     */
+    const bool noRef = !seqReferenceUsable();
     const int64_t refMaxBase = noRef ? 0 : ((int64_t)pRefeGene->getSquashLength() << 2);
 
     /* pass 1: does any record qualify for the reference path? */

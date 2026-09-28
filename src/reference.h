@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <string>
 #include <memory>
+#include <vector>
 #include <json/json.h>
 #include "utils/guard_bar.h"
 #include "io_wrapper.h"
@@ -90,6 +91,31 @@ public:
     /// @brief Get MD5 checksum of FASTA reference genome file
     /// @return MD5 checksum string
     const std::string& getFastaChecksum() const;
+
+    /*
+     * One FASTA record's place in the reference: its name (the first whitespace-delimited token
+     * of the header line) and the base offset that record starts at in the concatenated
+     * reference. The offsets count bases, not squash bytes - a sequence does not start on a
+     * squash byte boundary unless its predecessors' lengths sum to a multiple of four - which is
+     * the same domain getStretch2Bits1Char takes.
+     *
+     * The SAM/BAM SEQ path addresses the reference by *header order*: it turns each @SQ entry's
+     * cumulative length into a base offset, which is only the sequence's real offset if the
+     * FASTA lists exactly those sequences in that order. This list is what lets a caller check
+     * that (see referenceLinesUpWithHeader) instead of silently reading the wrong bases.
+     *
+     * Empty when the squash came from an NI index rather than the FASTA, whose layout carries no
+     * names; a caller must then keep trusting the layout, as it did before this list existed.
+     */
+    struct SequenceSpan {
+        std::string name;
+        uint64_t offset;
+
+        SequenceSpan(const std::string& n, uint64_t o) : name(n), offset(o) {}
+    };
+
+    /// @brief Per-record names and base offsets of the FASTA this reference was built from
+    const std::vector<SequenceSpan>& getSequences() const { return refSequences; }
 
     /// @brief Clean up unmatched regions in reference genome
     /// Set unmatched squash bytes to 0 within specified range
@@ -253,6 +279,9 @@ private:
     std::string fastaChecksum;
     // FASTA file content length
     int64_t fastaLength;
+    // Per-record names and base offsets, filled when the squash is parsed from the FASTA (see
+    // getSequences); empty when it came from an NI index.
+    std::vector<SequenceSpan> refSequences;
     // Length of bases used as key when building index table, must be odd
     const uint32_t baseGroupLen = 31;
     // Base step when building index table

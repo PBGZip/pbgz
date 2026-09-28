@@ -61,6 +61,22 @@ namespace {
 const uint32_t SAMPLE_TARGET = 4u << 20;   /* 4 MB */
 
 /*
+ * The two sizes the field trials are made of, overridable from the environment for measurement
+ * (PBGZ_TRIAL_SAMPLE for the raw bytes scanned into the field samples, PBGZ_TRIAL_PROBE for the
+ * number of sample bytes each candidate is actually measured on). Both are read once per process;
+ * with neither set the constants above and PROBE_START below apply.
+ */
+static uint32_t trialSampleTarget()
+{
+    static const uint32_t v = []() -> uint32_t {
+        const char* e = getenv("PBGZ_TRIAL_SAMPLE");
+        const int n = (e != nullptr) ? atoi(e) : 0;
+        return (n > 0) ? (uint32_t)n : SAMPLE_TARGET;
+    }();
+    return v;
+}
+
+/*
  * Minimum per-field sample required before we trust a codec comparison.
  * Each coder carries a small fixed overhead (BWT index, range-coder flush,
  * EOF marker, on the order of tens of bytes). At 64KB a real 1.7pp coder
@@ -236,6 +252,19 @@ bool trialLines(CoderType type, const std::vector<LineSample>& lines,
     if (lines.empty()) {
         return false;
     }
+
+    /*
+     * Every sampled line, not just the ones inside the probe.
+     *
+     * That hands a line-based coder several times the source its rival sees and then compares the two
+     * output lengths directly, which is not a comparison at all. Trimming it to the probe was tried
+     * and measured: on the CRR file it made coder_affix_match win the ID column over coder_bwt_cm by
+     * 4.68% against 6.67% of that probe, while the column it produces is 2,080,823 bytes against
+     * bwt_cm's 1,798,577 - 15% worse. The reason is not the sample size but the sample itself: the
+     * ID column is written as separator-split sub-streams (see compressIdInSplit), so a trial on the
+     * raw column does not predict it whichever way the two are measured. Trimming here would trade a
+     * real loss for a comparison that is fair but still beside the point (see the probe note below).
+     */
     const auto t0 = std::chrono::steady_clock::now();
     uint64_t total = 0;
     for (size_t i = 0; i < lines.size(); ++i) {
@@ -288,9 +317,152 @@ int CodecSelector::pickBwtLevel(uint32_t sampleLen)
     return 9;
 }
 
-/* Starting sample size for the evaluation. Too small a sample is easily biased
- * by local data, so it matches the minimum trustworthy sample size. */
-const uint32_t PROBE_START = MIN_SELECT_SAMPLE;
+/*
+ * Number of sample bytes each candidate is measured on.
+ *
+ * A stream coder is handed this much of the sample and nothing more, so the probe decides what the
+ * trial can see. Too small a probe is not merely noisy, it is biased: coder_fc finds its redundancy
+ * in a column's long range (repeated read prefixes, shared adapter tails), which 64 KB does not
+ * show, while coder_bwt_cm's internal block is sized to the probe (see pickBwtLevel) and so looks
+ * comparatively good on it. The two then differ by a fraction of a percent that does not survive to
+ * the column: on CRR1161494_f1 the 64 KB probe read bwt_cm 24.33% against fc 24.41% and gave bwt_cm
+ * the column, whose real ratio is 15.08% with fc against 15.42% with bwt_cm - 2.3% of the column,
+ * 1.7% of the file.
+ *
+ * Measured on that file (same binary, only the probe varying; fc/bwt_cm trial ratios, and the SEQ
+ * column the verdict then produced):
+ *
+ *     64 KB   fc 24.41% vs bwt 24.33%  -> bwt_cm   21,947,409
+ *    128 KB   fc 23.73% ...            -> fc       21,458,967
+ *    256 KB   fc 22.78% vs bwt 23.01%  -> fc       21,458,967
+ *      1 MB   fc 20.42% vs bwt 20.74%  -> fc       21,458,967
+ *      8 MB   fc 15.78% vs bwt 16.12%  -> fc       21,458,967   (real column: fc 15.08%)
+ *
+ * The verdict is right from 128 KB on and does not move again; 256 KB is taken for margin, and costs
+ * nothing measurable, because the trial's budget is spent on the QUAL path (a 1 MB sample through
+ * four candidates) rather than on these - the preprocessing time was 1.35 s at 256 KB against 1.42 s
+ * at 64 KB for the same file. Of five FASTQ families re-measured at 64 KB / 256 KB / 1 MB, only the
+ * one that was misjudged moves at all; the other four come out byte for byte the same.
+ */
+const uint32_t PROBE_START = 256u << 10;
+
+/*
+ * Same, overridable from the environment for measurement (PBGZ_TRIAL_PROBE).
+ *
+ * The probe is what decides how much of a sample reach the coders, and a whole-column coder such as
+ * coder_fc finds most of its redundancy in a column's long range, which a probe of a few tens of KB
+ * cannot show. A line-based coder, on the other hand, is measured on the sampled lines it is handed
+ * either way (see trialLines), so the two are only comparable once both see the same amount of
+ * source.
+ */
+static uint32_t trialProbeStart()
+{
+    static const uint32_t v = []() -> uint32_t {
+        const char* e = getenv("PBGZ_TRIAL_PROBE");
+        const int n = (e != nullptr) ? atoi(e) : 0;
+        return (n > 0) ? (uint32_t)n : PROBE_START;
+    }();
+    return v;
+}
+
+/*
+ * How much of a size penalty the verdict will take for a much faster coder.
+ *
+ * The trial records each candidate's time (see FieldCodecSelection::trialUs) so that selection can
+ * trade ratio against throughput - coders routinely differ severalfold in speed while differing by
+ * under a point in ratio, as coder_lzma did before it was dropped from the SEQ payload's candidate
+ * set (it won by 0.4% and cost 17x). The trial time is one measurement on a few hundred KB, so it
+ * is only evidence of an order-of-magnitude difference: hence a large speed factor against a small
+ * size penalty, and no effect at all when no candidate clears both. PBGZ_SPEED_TRADE=0 restores the
+ * pure size verdict, and the two margins are overridable for measurement.
+ */
+struct SpeedTrade {
+    bool   enabled;
+    double maxPenaltyPct;   /* extra output tolerated on the faster candidate, in percent */
+    double minFactor;       /* how many times faster it has to be */
+};
+
+static const SpeedTrade& speedTrade()
+{
+    static const SpeedTrade t = []() -> SpeedTrade {
+        SpeedTrade v;
+        v.enabled = true;
+        v.maxPenaltyPct = 1.0;
+        v.minFactor = 2.0;
+        const char* off = getenv("PBGZ_SPEED_TRADE");
+        if (off != nullptr && atoi(off) == 0) {
+            v.enabled = false;
+        }
+        const char* pct = getenv("PBGZ_SPEED_TRADE_PCT");
+        if (pct != nullptr && atof(pct) > 0.0) {
+            v.maxPenaltyPct = atof(pct);
+        }
+        const char* fac = getenv("PBGZ_SPEED_TRADE_FACTOR");
+        if (fac != nullptr && atof(fac) > 1.0) {
+            v.minFactor = atof(fac);
+        }
+        return v;
+    }();
+    return t;
+}
+
+/*
+ * The winner among the trialled candidates of one field.
+ *
+ * The smallest output wins, unless a candidate the trial measured at least minFactor faster fits
+ * within maxPenaltyPct of that output, in which case the fastest such candidate is taken. A
+ * candidate that abstained (trialLen 0) is never picked, and the trade only applies when the
+ * incumbent leader itself has a usable time; with neither set this is exactly the old rule.
+ *
+ * outLen receives the measured length of the chosen coder, which is what the caller reports as the
+ * field's best length - so a coder that won on speed is reported with its own (slightly larger)
+ * length rather than the leader's.
+ */
+static CoderType pickTrialWinner(const FieldCodecSelection& sel, uint32_t& outLen)
+{
+    CoderType best = CoderType::FC;
+    uint32_t bestLen = UINT32_MAX;
+    uint32_t bestUs = 0;
+    for (uint32_t i = 0; i < sel.trialCount; ++i) {
+        if (sel.trialLen[i] == 0) {
+            continue;
+        }
+        if (sel.trialLen[i] < bestLen) {
+            bestLen = sel.trialLen[i];
+            best = sel.trialCoder[i];
+            bestUs = sel.trialUs[i];
+        }
+    }
+    outLen = (bestLen == UINT32_MAX) ? 0 : bestLen;
+
+    const SpeedTrade& trade = speedTrade();
+    if (!trade.enabled || bestLen == UINT32_MAX || bestUs == 0) {
+        return best;
+    }
+
+    const double limit = (double)bestLen * (1.0 + trade.maxPenaltyPct / 100.0);
+    CoderType fastest = best;
+    uint32_t fastestLen = bestLen;
+    uint32_t fastestUs = bestUs;
+    for (uint32_t i = 0; i < sel.trialCount; ++i) {
+        if (sel.trialLen[i] == 0 || sel.trialUs[i] == 0) {
+            continue;
+        }
+        if ((double)sel.trialLen[i] > limit) {
+            continue;
+        }
+        if (sel.trialUs[i] < fastestUs) {
+            fastestUs = sel.trialUs[i];
+            fastestLen = sel.trialLen[i];
+            fastest = sel.trialCoder[i];
+        }
+    }
+    if (fastest != best && (double)fastestUs * trade.minFactor <= (double)bestUs) {
+        outLen = fastestLen;
+        return fastest;
+    }
+    return best;
+}
 
 /*
  * Sort candidates into the registry's trialPriority order, so the verdict does
@@ -341,12 +513,12 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     std::vector<CoderType> ordered = candidates;
     orderCandidates(ordered);
 
-    const uint32_t probe = (PROBE_START < len) ? PROBE_START : len;
+    const uint32_t probeTarget = trialProbeStart();
+    const uint32_t probe = (probeTarget < len) ? probeTarget : len;
     sel.rounds = 1;
     sel.decidedLen = probe;
 
     uint32_t bestLen = UINT32_MAX;
-    CoderType bestCoder = CoderType::FC;
     bool haveBest = false;
 
     for (size_t i = 0; i < ordered.size(); ++i) {
@@ -378,7 +550,6 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
         sel.addTrial(type, ok ? outLen : 0u, outUs);
         if (ok && (!haveBest || outLen < bestLen)) {
             bestLen = outLen;
-            bestCoder = type;
             haveBest = true;
         }
     }
@@ -388,9 +559,14 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
         return sel;
     }
 
+    /*
+     * The winner is taken from the recorded sizes and times together: the smallest output, unless a
+     * clearly faster coder is close enough in size to be worth taking (see pickTrialWinner).
+     */
+    uint32_t chosenLen = 0;
     sel.status = FieldStatus::SELECTED;
-    sel.selectedCoder = bestCoder;
-    sel.bestCompLen = bestLen;
+    sel.selectedCoder = pickTrialWinner(sel, chosenLen);
+    sel.bestCompLen = chosenLen;
     return sel;
 }
 
@@ -610,6 +786,72 @@ void collectQualSamplesInto(RoughIOBlock* block,
         collectedQualBytes += qualLen;
     }
 }
+
+/*
+ * Append one FASTQ record's quality: its QUAL line with the record's base line as the context,
+ * and no strand, because a FASTQ record carries no FLAG (see the FASTQ QUAL row in
+ * field_coder_config.h for why fcv2 is still a candidate).
+ *
+ * Only complete records are accepted - fcv2 recovers the cycle from the real read length, so a
+ * truncated QUAL would train the wrong context - and records over the cap are dropped without
+ * stopping the scan.
+ */
+void appendFastqQualRecord(const uint8_t* qualLine, uint32_t qualLen,
+                           const uint8_t* baseLine, uint32_t baseLen,
+                           std::vector<QualSampleRecord>& records,
+                           std::vector<uint32_t>& freqByByte,
+                           uint64_t& collectedQualBytes,
+                           uint64_t qualBudget)
+{
+    if (qualLen == 0) {
+        return;
+    }
+    if (collectedQualBytes + qualLen > qualBudget) {
+        return;
+    }
+    for (uint32_t p = 0; p < qualLen; ++p) {
+        freqByByte[qualLine[p]]++;
+    }
+    QualSampleRecord rec;
+    rec.qual.assign((const char*)qualLine, qualLen);
+    rec.seq.assign((const char*)baseLine, baseLen);
+    rec.rev = false;
+    records.push_back(rec);
+    collectedQualBytes += qualLen;
+}
+
+/*
+ * The FASTQ counterpart of collectQualSamplesInto: a record is four lines, so they are consumed
+ * four at a time and the QUAL line is taken with the base line beside it.
+ */
+void collectFastqQualSamplesInto(RoughIOBlock* block,
+                                 std::vector<QualSampleRecord>& records,
+                                 std::vector<uint32_t>& freqByByte,
+                                 uint32_t sampleBudget,
+                                 uint64_t qualBudget,
+                                 uint64_t& collectedQualBytes)
+{
+    SafeLineReader reader(block);
+
+    const uint8_t* lines[4];
+    uint32_t lens[4];
+    uint32_t slot = 0;
+    while (reader.nextLine(lines[slot], lens[slot])) {
+        if (reader.scannedBytes() >= sampleBudget) {
+            break;
+        }
+        ++slot;
+        if (slot < 4) {
+            continue;
+        }
+        slot = 0;
+        if (lens[0] == 0 || lines[0][0] != '@') {
+            continue;
+        }
+        appendFastqQualRecord(lines[3], lens[3], lines[1], lens[1], records, freqByByte,
+                              collectedQualBytes, qualBudget);
+    }
+}
 } /* namespace */
 
 void CodecSelector::extractQualSamples(RoughIOBlock* block,
@@ -646,6 +888,11 @@ void CodecSelector::accumulateQualPrior(RoughIOBlock* block, QualPriorAccum& acc
      * the accumulated amount exceed the remaining one and skip subsequent
      * blocks entirely.
      */
+    if (BlockUtil::isFastqBlock(block->getBlockType())) {
+        collectFastqQualSamplesInto(block, acc.records, acc.freqByByte, UINT32_MAX,
+                                    QUAL_PRIOR_TRAIN_MAX, acc.collectedBytes);
+        return;
+    }
     collectQualSamplesInto(block, acc.records, acc.freqByByte, UINT32_MAX, QUAL_PRIOR_TRAIN_MAX, acc.collectedBytes);
 }
 
@@ -835,14 +1082,22 @@ uint32_t CodecSelector::extractPosDeltaSamples(RoughIOBlock* block,
 
 uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
                                              std::vector<std::string>& fieldBufs,
-                                             uint32_t sampleBudget)
+                                             std::vector<std::vector<LineSample>>& fieldLines,
+                                             std::vector<QualSampleRecord>& qualRecords,
+                                             std::vector<uint32_t>& qualFreq,
+                                             uint32_t sampleBudget,
+                                             uint64_t qualBudget)
 {
     fieldBufs.assign(FQ_FIELD_COUNT, std::string());
+    fieldLines.assign(FQ_FIELD_COUNT, std::vector<LineSample>());
+    qualRecords.clear();
+    qualFreq.assign(256, 0);
     SafeLineReader reader(block);
 
     const uint8_t* lines[4];
     uint32_t lens[4];
     uint32_t slot = 0;
+    uint64_t collectedQual = 0;
 
     while (reader.nextLine(lines[slot], lens[slot])) {
         if (reader.scannedBytes() >= sampleBudget) {
@@ -858,10 +1113,24 @@ uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
         const uint8_t* id = lines[0];
         const uint8_t* comment = lines[2];
         if (lens[0] > 0 && lens[2] > 0 && id[0] == '@' && comment[0] == '+') {
+            /* The line views: the block's own bytes, newline included, which is
+             * what a line-based coder is fed by the block pass. Line 2 is the
+             * comment line, which is usually not written at all. */
+            static const uint32_t kFieldOfLine[4] = {FQ_ID, FQ_SEQ, FQ_COMMENT, FQ_QUAL};
+            for (uint32_t l = 0; l < 4; ++l) {
+                LineSample s;
+                s.data = lines[l];
+                s.len = lens[l] + 1;   /* the trailing newline; see the header */
+                fieldLines[kFieldOfLine[l]].push_back(s);
+            }
+
             if (lens[0] > 1) fieldBufs[FQ_ID].append((const char*)(id + 1), (size_t)(lens[0] - 1));
             if (lens[1] > 0) fieldBufs[FQ_SEQ].append((const char*)lines[1], (size_t)lens[1]);
             if (lens[3] > 0) fieldBufs[FQ_QUAL].append((const char*)lines[3], (size_t)lens[3]);
             if (lens[2] > 1) fieldBufs[FQ_COMMENT].append((const char*)(comment + 1), (size_t)(lens[2] - 1));
+
+            appendFastqQualRecord(lines[3], lens[3], lines[1], lens[1], qualRecords, qualFreq,
+                                  collectedQual, qualBudget);
         }
 
         slot = 0;
@@ -872,8 +1141,9 @@ uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
 /*
  * Whether the prior is worth writing.
  *
- * The cost of the prior is fixed: one auxiliary block, about 0.6 MB packed for a
- * QUAL prior, independent of input size. The benefit is that every block's QUAL
+ * The cost of the prior is fixed for a given file: one auxiliary block, the packed
+ * model snapshot, which measures 11 KB - 549 KB across the files sampled in the note
+ * below and does not grow with input size. The benefit is that every block's QUAL
  * saves a roughly fixed fraction, growing linearly with the total QUAL volume. A
  * constant cost line and a benefit line through the origin must intersect; the
  * intersection is the break-even point, and below it writing the prior is always
@@ -893,8 +1163,47 @@ uint32_t CodecSelector::extractFastqFieldSamples(RoughIOBlock* block,
  */
 static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, uint64_t inputTotalBytes)
 {
-    /* Break-even point for the total QUAL volume. */
-    const uint64_t QUAL_PRIOR_MIN_TOTAL = 1ull * 1024ull * 1024ull;
+    /*
+     * Break-even point for the total QUAL volume: 150 MB, the value the note above describes.
+     *
+     * Measured by compressing the same input twice, once with the prior forced on and once with it
+     * forced off (PBGZ_QUAL_PRIOR), and reading the QUAL column of both runs:
+     *
+     *   file                    total QUAL    prior saves   prior costs   net        break-even
+     *   Arab_test.fq  (36 MB)     13.8 MB         8,840        11,170    -2,330        17 MB
+     *   Arab_test.fq  (34 MB)     12.8 MB         6,920        11,183    -4,263        21 MB
+     *   SRR2769247    (202 MB)    90.0 MB       258,960       382,049  -123,089       133 MB
+     *   SRR18473920   (302 MB)   138.6 MB       464,076       129,397  +334,679        39 MB
+     *   con_sorted.sam(316 MB)     90.0 MB       473,710       549,326   -75,616       104 MB
+     *
+     * The cost is one packed snapshot, 11 KB - 549 KB depending on how compressible the model is; the
+     * benefit is a fixed fraction of the QUAL volume, 0.05% - 0.53%. Their ratio is the break-even,
+     * and it lands between 17 MB and 133 MB of QUAL. A single constant must sit at the top of that
+     * range to never write the prior at a loss, which 150 MB does on every file measured; the price
+     * is forgoing the prior on a file like SRR18473920 whose own break-even is 39 MB.
+     *
+     * Note this is a *size* trade-off only. Dropping the prior also drops the cross-block pretraining
+     * that writing it requires, which is worth real time on the compression side: SRR2769247 compresses
+     * in 27 s without the prior and 42 s with it (+56%), while decompression is 4 s faster with it.
+     */
+    const uint64_t QUAL_PRIOR_MIN_TOTAL = 150ull * 1024ull * 1024ull;
+
+    /*
+     * Measurement override, PBGZ_QUAL_PRIOR=0 never writes the prior and =1 always does, so the two
+     * sides of the trade-off below can be measured on one input; unset keeps the rule.
+     */
+    static const int forced = []() -> int {
+        const char* e = getenv("PBGZ_QUAL_PRIOR");
+        return (e != nullptr) ? atoi(e) : -1;
+    }();
+    if (forced == 0) {
+        LOG_INFO("QUAL prior forced off (PBGZ_QUAL_PRIOR=0).");
+        return false;
+    }
+    if (forced == 1) {
+        LOG_INFO("QUAL prior forced on (PBGZ_QUAL_PRIOR=1).");
+        return true;
+    }
 
     if (inputTotalBytes == 0 || scannedBytes == 0) {
         LOG_INFO("Input size unknown, keep QUAL prior.");
@@ -1008,6 +1317,23 @@ static std::vector<CoderType> eligibleCandidates(uint32_t fieldIdx, uint8_t mode
     return candidates;
 }
 
+/* The same intersection for a FASTQ field, read off kFastqFieldCoderConfig. */
+static std::vector<CoderType> eligibleFastqCandidates(uint32_t fieldIdx, uint8_t mode, uint8_t level)
+{
+    const std::vector<CoderType>& configured = fastqFieldCandidates(fieldIdx, mode);
+    std::vector<CoderType> candidates;
+    for (size_t c = 0; c < configured.size(); ++c) {
+        const CoderType type = configured[c];
+        const CoderDescriptor* desc = CoderFactory::descriptor(type);
+        if (desc == nullptr || !desc->trialCandidate || !CoderFactory::canMake(type) ||
+            !CoderFactory::eligible(type, mode, level)) {
+            continue;
+        }
+        candidates.push_back(type);
+    }
+    return candidates;
+}
+
 /* The chromosome index of an RNAME view, or the SAM "none" sentinel (0xFFFF) for '*', '=' and for
    a name the file's header does not declare - all three mean the same thing to the reference walk. */
 static uint16_t chrIndexOf(const LineSample& field)
@@ -1046,7 +1372,6 @@ static FieldCodecSelection trialSeqMatchCoder(const uint8_t* sample, uint32_t sa
     sel.sampleLen = segmentLen;
     sel.decidedLen = segmentLen;
     sel.rounds = 1;
-    uint32_t bestLen = UINT32_MAX;
     std::vector<uint8_t> scratch((size_t)sampleLen * 2 + 65536);
     for (int i = 0; i < 2; ++i) {
         const CoderType type = kCandidates[i];
@@ -1072,12 +1397,17 @@ static FieldCodecSelection trialSeqMatchCoder(const uint8_t* sample, uint32_t sa
             continue;   /* this coder cannot carry the segment at all */
         }
         sel.addTrial(type, (uint32_t)trialIo.data_len, usec);
-        if ((uint32_t)trialIo.data_len < bestLen) {
-            bestLen = (uint32_t)trialIo.data_len;
-            sel.selectedCoder = type;
-        }
     }
-    sel.bestCompLen = (bestLen == UINT32_MAX) ? 0 : bestLen;
+
+    /*
+     * Same rule as the generic fields: smallest output, with a clearly faster coder taken when it
+     * stays within the size tolerance (see pickTrialWinner). It is what the note above is about -
+     * coder_lzma used to win here by 0.4% while costing 17x the time, and coder_fc against
+     * coder_bwt_cm is the same shape of trade at a much smaller factor.
+     */
+    uint32_t chosenLen = 0;
+    sel.selectedCoder = pickTrialWinner(sel, chosenLen);
+    sel.bestCompLen = chosenLen;
     return sel;
 }
 
@@ -1345,7 +1675,7 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
      * a line that is not a record (a stray header line past the header) still needs its slot.
      */
     IdSplitAnalysis analysis;
-    std::vector<std::vector<int64_t>> fieldTabs;
+    std::vector<LineTabs> fieldTabs;
     size_t headEndLine = 0;
     while (headEndLine < npos.size()) {
         const size_t lineStart = (headEndLine == 0) ? 0 : npos[headEndLine - 1] + 1;
@@ -1363,7 +1693,7 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
             fieldTabs.emplace_back();
             continue;
         }
-        std::vector<int64_t> tabs;
+        LineTabs tabs;
         for (size_t i = lineStart; i < lineEnd; ++i) {
             if (buffer[i] == '\t') {
                 tabs.push_back((int64_t)(i - lineStart));
@@ -1380,7 +1710,7 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
         } else {
             analyzeQnameLine(buffer + lineStart, qnameLen, analysis);
         }
-        fieldTabs.push_back(std::move(tabs));
+        fieldTabs.push_back(tabs);
     }
 
     if (!sawFirstRecord || analysis.symbols.empty() || analysis.posLength == UINT32_MAX) {
@@ -1459,7 +1789,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
 {
     std::vector<std::string> fieldBufs;
     std::vector<std::vector<LineSample>> fieldLines;
-    info.scannedBytes = extractSamFieldSamples(block, fieldBufs, fieldLines, SAMPLE_TARGET, mode);
+    info.scannedBytes = extractSamFieldSamples(block, fieldBufs, fieldLines, trialSampleTarget(), mode);
 
     info.fields.resize(SAM_FIELD_COUNT_SELECT);
     uint64_t totalSample = 0;
@@ -1690,26 +2020,105 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
     return 0;
 }
 
-int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, PreprocessInfo& info)
+int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, uint64_t inputTotalBytes,
+                                    PreprocessInfo& info, uint8_t compressLevel, uint8_t mode)
 {
     std::vector<std::string> fieldBufs;
-    info.scannedBytes = extractFastqFieldSamples(block, fieldBufs, SAMPLE_TARGET);
+    std::vector<std::vector<LineSample>> fieldLines;
+    std::vector<QualSampleRecord> qualRecords;
+    std::vector<uint32_t> qualFreq;
+    info.scannedBytes = extractFastqFieldSamples(block, fieldBufs, fieldLines, qualRecords,
+                                                 qualFreq, trialSampleTarget(), QUAL_PRIOR_TRAIN_MAX);
 
     info.fields.resize(FQ_FIELD_COUNT);
     uint64_t totalSample = 0;
+    bool qualSelectedFcv2 = false;
+    uint64_t qualSampleBytes = 0;
+
+    std::vector<std::function<void()>> trials;
+
     for (uint32_t f = 0; f < FQ_FIELD_COUNT; ++f) {
         const std::string& buf = fieldBufs[f];
         totalSample += buf.size();
+
+        /*
+         * QUAL: the dedicated path, as on the SAM side. The candidates are coder_qual,
+         * fcv2, bwt_cm and qcm as the FASTQ QUAL row lists them - the two record-level
+         * ones need the read's bases and the record's length, so the column cannot be
+         * measured as a concatenated byte stream - and the sample is the QUAL of the
+         * whole block up to QUAL_PRIOR_TRAIN_MAX, because fcv2 is an adaptive mixer
+         * that is underestimated before it converges.
+         */
+        if (f == (uint32_t)FQ_QUAL) {
+            const uint64_t bufSize = buf.size();
+            if (bufSize < MIN_SELECT_SAMPLE) {
+                info.fields[f].status = FieldStatus::SKIPPED;
+                info.fields[f].sampleLen = (uint32_t)buf.size();
+                continue;
+            }
+            const std::vector<CoderType> qualCandidates = fastqFieldCandidates(FQ_QUAL, mode);
+            if (qualCandidates.empty()) {
+                /*
+                 * The mode's QUAL row lists no coder, so there is nothing to compare and no
+                 * verdict to take: the column then falls through to the row's default (the fast
+                 * row's is coder_qual; see kFastqFieldCoderConfig). Marked skipped rather than
+                 * failed - nothing was tried, and nothing went wrong.
+                 */
+                info.fields[f].status = FieldStatus::SKIPPED;
+                info.fields[f].sampleLen = (uint32_t)buf.size();
+                continue;
+            }
+            trials.push_back([&qualRecords, &qualFreq, compressLevel, &info, &qualSelectedFcv2,
+                              &qualSampleBytes, bufSize, qualCandidates]() {
+                PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + FQ_QUAL);
+                info.fields[FQ_QUAL] = QualSelector::select(qualRecords, qualFreq, compressLevel,
+                                                            qualCandidates);
+                qualSampleBytes = bufSize;
+                qualSelectedFcv2 = (info.fields[FQ_QUAL].status == FieldStatus::SELECTED &&
+                                    info.fields[FQ_QUAL].selectedCoder == CoderType::FCV2);
+            });
+            continue;
+        }
+
         if (buf.size() < MIN_SELECT_SAMPLE) {
             info.fields[f].status = FieldStatus::SKIPPED;
             info.fields[f].sampleLen = (uint32_t)buf.size();
             continue;
         }
-        info.fields[f] = selectCoder((const uint8_t*)buf.data(), (uint32_t)buf.size());
+
+        const std::vector<CoderType> trialCandidates = eligibleFastqCandidates(f, mode, compressLevel);
+        if (trialCandidates.empty()) {
+            info.fields[f].status = FieldStatus::SKIPPED;
+            info.fields[f].sampleLen = (uint32_t)buf.size();
+            continue;
+        }
+
+        const uint8_t* sampleData = (const uint8_t*)buf.data();
+        const uint32_t sampleLen = (uint32_t)buf.size();
+        const std::vector<LineSample>* sampleLines = &fieldLines[f];
+        trials.push_back([&info, f, sampleData, sampleLen, sampleLines, trialCandidates]() {
+            PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
+            info.fields[f] = selectCoder(sampleData, sampleLen, sampleLines, trialCandidates);
+        });
+    }
+
+    runTrialsInParallel(trials);
+
+    /*
+     * The QUAL prior is trained from the first blocks and written once per file;
+     * whether that pays for the auxiliary block is the same trade-off as on the
+     * SAM side, and the estimate uses the same QUAL share of the scanned bytes.
+     */
+    if (qualSelectedFcv2 && qualPriorPaysOff(qualSampleBytes, info.scannedBytes, inputTotalBytes)) {
+        info.setQualPriorRequested(true);
+    }
+
+    for (uint32_t f = 0; f < FQ_FIELD_COUNT; ++f) {
         LOG_DEBUG("Preprocess FASTQ field %u: sample=%u, coder=%s, comp=%u (%.2f%%)",
                   f, info.fields[f].sampleLen, coderTypeToMagic(info.fields[f].selectedCoder),
                   info.fields[f].bestCompLen, info.fields[f].ratio() * 100.0);
     }
+
     info.sampleBytes = (uint32_t)totalSample;
     return 0;
 }
@@ -1727,7 +2136,7 @@ int32_t CodecSelector::analyze(RoughIOBlock* block, uint64_t inputTotalBytes, Pr
         return analyzeSam(block, inputTotalBytes, info, compressLevel, mode, reference);
     }
     if (BlockUtil::isFastqBlock(type)) {
-        return analyzeFastq(block, info);
+        return analyzeFastq(block, inputTotalBytes, info, compressLevel, mode);
     }
 
     /* Unsupported type: leave info empty; actuators use their defaults. */

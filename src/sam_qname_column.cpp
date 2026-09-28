@@ -77,7 +77,8 @@ int32_t analyzeQnameFirstLine(const uint8_t* pBuffer, uint32_t bufLen,
 
 int32_t analyzeQnameLine(const uint8_t* pBuffer, uint32_t bufferLen,
                          IdSplitAnalysis& analysis) {
-    std::vector<int32_t> currentLinePos;
+    std::vector<int32_t>& currentLinePos = analysis.lineScratch;   /* reused: see the note in the header */
+    currentLinePos.clear();
     uint32_t lastPos = 0;
     uint32_t lastFindPos = 0;
     for (uint32_t idx = 0; idx < analysis.symbols.size(); ++idx) {
@@ -195,11 +196,11 @@ static IdDictLayout buildIdDictLayout(const std::vector<std::string>& texts)
     }
 
     uint8_t head[16];
-    const uint32_t hn = tlenPutVarint(head, (uint32_t)entries.size());
+    const uint32_t hn = writeVarint(head, (uint32_t)entries.size());
     layout.buf.assign(head, head + hn);
     for (size_t e = 0; e < entries.size(); ++e) {
         uint8_t lb[8];
-        const uint32_t ln = tlenPutVarint(lb, (uint32_t)entries[e].size());
+        const uint32_t ln = writeVarint(lb, (uint32_t)entries[e].size());
         layout.buf.insert(layout.buf.end(), lb, lb + ln);
         layout.buf.insert(layout.buf.end(), entries[e].begin(), entries[e].end());
     }
@@ -429,7 +430,7 @@ static IdValueScan scanIdValues(const std::vector<std::string>& payloads, uint8_
             scan.ok = false;
             break;
         }
-        pos += tlenPutVarint(varints + pos, (uint32_t)zz);
+        pos += writeVarint(varints + pos, (uint32_t)zz);
         scan.deltas.push_back((int64_t)cur - (int64_t)prevVal);
         if (cur == prevVal + 1) {
             deltaOneCnt++;

@@ -88,7 +88,10 @@ static const uint32_t SAM_FIELD_COUNT_SELECT = SAM_FIELD_COUNT + 1;
  * inferred fields (PNEXT/TLEN) have no generic fast candidate list because they
  * are not fed to the generic trial (POS is evaluated on its varint delta stream,
  * see selectPosDeltaCoder; PNEXT/TLEN are differenced/inferred). QUAL's fast
- * list is empty because its dedicated selector keeps using the archive row.
+ * list is empty because its dedicated selector keeps using the archive row, and
+ * its fast fallback here is therefore unused; the FASTQ table's QUAL row below is
+ * the one place that reads a fast QUAL default, and it is coder_qual rather than
+ * coder_rans.
  */
 #define PBGZ_FQ_RANS   std::vector<CoderType>{CoderType::RANS}
 #define PBGZ_FQ_NONE   std::vector<CoderType>{}
@@ -106,6 +109,40 @@ inline const FieldCoderConfig kSamFieldCoderConfig[SAM_FIELD_COUNT_SELECT] = {
     /* SEQ   */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::FC, PBGZ_FQ_RANS, CoderType::RANS},
     /* QUAL  */ {{CoderType::QUAL, CoderType::FCV2, CoderType::BWT_CM, CoderType::QCM}, CoderType::QUAL, PBGZ_FQ_NONE, CoderType::RANS},
     /* OPTION */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+};
+
+/*
+ * The FASTQ table: one record is four lines - ID / SEQ / QUAL / comment (see FastqField).
+ *
+ * It is a table of its own because the two formats' columns are not the same material even
+ * where they are analogues: a FASTQ ID is a whole '@...' line rather than one tab-delimited
+ * field, its SEQ has no CIGAR beside it to be walked against a reference, and its comment line
+ * is usually not written at all. So their candidates and defaults are declared per format
+ * rather than shared.
+ *
+ *   ID      the '@...' line, written line by line and segmented at its separators (see
+ *           FastqCodecActuator::compressIdInSplit) - the layout the segmentation coder gains
+ *           on, which is why affix is a candidate. coder_fc is not: it wants the column as one
+ *           block, so a verdict for it could not be honored here.
+ *   SEQ     written whole when there is no reference, so coder_fc is a candidate - the actuator
+ *           takes its whole-block path then - subject to its size window (FC_MIN_LEN/
+ *           FC_MAX_LEN), outside which the column falls back to bwt_cm.
+ *   QUAL    goes through the dedicated QualSelector path, which reads its candidates from this
+ *           row - dropping a coder here is how it is taken out of the QUAL decision. The fast
+ *           profile leaves the list empty, so no trial runs, and keeps its default at
+ *           coder_qual: a quality column is largely a function of the read's bases, which only
+ *           a record-level coder can see, so coding QUAL as a plain byte stream (coder_rans)
+ *           can come out larger than gzip on QUAL-heavy short reads. coder_qual is the
+ *           column's original coder and stays its default in fast mode.
+ *   COMMENT only written when the line is neither '+' alone nor a copy of the ID line, so most
+ *           files never encode this column and its verdict is simply unused. Written line by
+ *           line, like the ID, so its candidates match the ID's.
+ */
+inline const FieldCoderConfig kFastqFieldCoderConfig[FQ_FIELD_COUNT] = {
+    /* ID      */ {{CoderType::BWT_CM, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* SEQ     */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
+    /* QUAL    */ {{CoderType::QUAL, CoderType::FCV2, CoderType::BWT_CM, CoderType::QCM}, CoderType::QUAL, PBGZ_FQ_NONE, CoderType::QUAL},
+    /* COMMENT */ {{CoderType::BWT_CM, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
 };
 
 #undef PBGZ_FQ_RANS
@@ -168,6 +205,43 @@ inline bool samFieldCandidate(uint32_t fieldIdx, CoderType type)
 inline bool qualCoderCandidate(CoderType type)
 {
     return samFieldCandidate(SAM_QUAL, type);
+}
+
+/*
+ * The FASTQ accessors, mirroring the SAM ones: the candidate list for a field under the current
+ * -m mode, membership in it, and the mode's default (see qualCoderCandidate above for what the
+ * QUAL row decides).
+ */
+inline const FieldCoderConfig* fastqFieldCoderConfig(uint32_t fieldIdx)
+{
+    if (fieldIdx >= FQ_FIELD_COUNT) {
+        return nullptr;
+    }
+    return &kFastqFieldCoderConfig[fieldIdx];
+}
+
+inline const std::vector<CoderType>& fastqFieldCandidates(uint32_t fieldIdx, uint8_t mode)
+{
+    const FieldCoderConfig* cfg = fastqFieldCoderConfig(fieldIdx);
+    if (cfg == nullptr) {
+        return emptyCoderList();
+    }
+    return (mode == PBGZ_MODE_FAST) ? cfg->fastCandidates : cfg->candidates;
+}
+
+inline bool fastqFieldCandidate(uint32_t fieldIdx, CoderType type, uint8_t mode)
+{
+    const std::vector<CoderType>& list = fastqFieldCandidates(fieldIdx, mode);
+    return std::find(list.begin(), list.end(), type) != list.end();
+}
+
+inline CoderType fastqFieldDefaultCoder(uint32_t fieldIdx, uint8_t mode, CoderType fallback)
+{
+    const FieldCoderConfig* cfg = fastqFieldCoderConfig(fieldIdx);
+    if (cfg == nullptr) {
+        return fallback;
+    }
+    return (mode == PBGZ_MODE_FAST) ? cfg->fastFallback : cfg->fallback;
 }
 
 /* Archive-profile default coder; returns the caller-supplied fallback when nothing is registered. */

@@ -186,7 +186,20 @@ public:
 private:
     static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
                               uint8_t compressLevel, uint8_t mode, Reference* reference);
-    static int32_t analyzeFastq(RoughIOBlock* block, PreprocessInfo& info);
+
+    /*
+     * FASTQ: ID / SEQ / QUAL / comment, trialled with the FASTQ table's candidate
+     * lists (see field_coder_config.h) under this run's -m mode and level. QUAL
+     * goes through QualSelector with the FASTQ QUAL row, the same dedicated path
+     * SAM's QUAL column takes: the coders are record-level (coder_qual codes
+     * against the read's bases, fcv2 against its cycle), so the column cannot be
+     * trialled as a plain byte stream.
+     *
+     * inputTotalBytes only decides whether a QUAL prior is worth training and
+     * writing, exactly as on the SAM side.
+     */
+    static int32_t analyzeFastq(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
+                                uint8_t compressLevel, uint8_t mode);
 
     /*
      * One record of the SEQ reference trial: its SEQ inside the sample's concatenated bases, and
@@ -279,9 +292,31 @@ private:
                                            std::vector<LineSample>& posLines,
                                            std::vector<LineSample>& chrLines,
                                            uint32_t maxLines);
+    /*
+     * FASTQ sampling: the per-field concatenated bytes, the per-line views a
+     * line-based coder has to be fed with (see LineSample), and the QUAL column's
+     * per-record sample with its alphabet counts - the quality coders need record
+     * boundaries, so they cannot be measured from the concatenated stream.
+     *
+     * One pass produces all three: a record is four lines, so walking it once is
+     * what keeps the line views, the concatenated bytes and the QUAL records
+     * describing the same sample.
+     *
+     * The line views are the block's own bytes including the line's trailing
+     * newline, which is the layout a line-based coder is fed (the ID and comment
+     * columns are split at their separators, a variable-length SEQ line carries its
+     * newline); the concatenated bytes are the field contents without the leading
+     * '@'/'+' and without the newline, which is what the whole-stream coders are
+     * measured on. QUAL is not trialled from either - it goes to QualSelector as
+     * records - so its line views are built but unused.
+     */
     static uint32_t extractFastqFieldSamples(RoughIOBlock* block,
                                          std::vector<std::string>& fieldBufs,
-                                         uint32_t sampleBudget);
+                                         std::vector<std::vector<LineSample>>& fieldLines,
+                                         std::vector<QualSampleRecord>& qualRecords,
+                                         std::vector<uint32_t>& qualFreq,
+                                         uint32_t sampleBudget,
+                                         uint64_t qualBudget = UINT64_MAX);
 
     /* Choose the smallest coder_bwt_cm block level whose size fits the sample. */
     static int pickBwtLevel(uint32_t sampleLen);

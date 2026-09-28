@@ -106,6 +106,21 @@ namespace PathUtil {
     /// @return bool true if file is gzip format, false otherwise
     bool isGzFile(const std::string& fileName);
 
+    /// @brief Uncompressed size a gzip file stands for, read from its trailer (ISIZE),
+    ///        which holds the length modulo 2^32.
+    ///
+    /// The transparent-gz readers cannot report the length of their input, and a decision
+    /// that has to compare a volume against a constant (the QUAL prior, see
+    /// qualPriorPaysOff) cannot do without it. ISIZE answers it for the common single-member
+    /// file. It is reported as 0 - "unknown" - when it cannot be trusted: the field is
+    /// smaller than the compressed file (only possible if the length wrapped past 4 GiB or
+    /// the file concatenates several gzip members, in which case ISIZE describes the last
+    /// member only), or the file is not gzip / cannot be read.
+    ///
+    /// @param fileName Gzip file name
+    /// @return Uncompressed size in bytes, or 0 when unknown
+    int64_t getGzUncompressedSize(const std::string& fileName);
+
     /// @brief Extract original filename from gzip file header
     /// @param fileName Gzip file name
     /// @return Original filename extracted from gz header or derived from gz filename

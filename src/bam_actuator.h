@@ -28,8 +28,8 @@ public:
                      Reference* pRef = nullptr);
     virtual ~BamCodecActuator() override {}
 
-    int32_t compress();
-    int32_t decompress();
+    int32_t compress() override;
+    int32_t decompress() override;
 
 private:
     /*
@@ -70,6 +70,20 @@ private:
 
     uint32_t pickedFor(uint32_t fieldIdx, CoderType fallback) const;
 
+    /*
+     * Whether the reference may be used for SEQ, i.e. whether the loaded FASTA is laid out the
+     * way the @SQ list addresses it (see referenceLinesUpWithHeader). seqRefEligible derives a
+     * record's reference position from the chromosome's cumulative @SQ length, which only names
+     * the right bases under that condition; a reference that fails is dropped for SEQ rather
+     * than read anyway. The verdict is taken on the first call - by then the header has been
+     * parsed - and cached for this block's actuator.
+     */
+    bool seqReferenceUsable();
+
     BamColumns* cols;
     Reference* pRefeGene;
+
+    /* seqReferenceUsable's cached verdict; false until it has been taken. */
+    bool refeUsableChecked = false;
+    bool refeUsableForSeq = false;
 };

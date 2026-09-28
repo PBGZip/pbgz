@@ -76,4 +76,16 @@ public:
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
                                       const std::vector<uint32_t>& freqByByte,
                                       uint8_t compressLevel = 5);
+
+    /*
+     * Same, with the candidate set given by the caller instead of read off the SAM QUAL row.
+     * This is how the FASTQ QUAL column is evaluated: its candidates are the FASTQ table's
+     * QUAL row (see fastqFieldCandidates), because what a FASTQ record can hand the coders is
+     * not the same as what an aligned SAM record can - no FLAG, so no strand - even though the
+     * coders themselves are the same ones.
+     */
+    static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
+                                      const std::vector<uint32_t>& freqByByte,
+                                      uint8_t compressLevel,
+                                      const std::vector<CoderType>& candidates);
 };

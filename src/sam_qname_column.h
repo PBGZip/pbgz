@@ -66,6 +66,16 @@ struct IdSplitAnalysis {
     /* Segments counted so far; once the split turns out to be unavailable (a line does not carry
        the separators in the same order) every later line leaves it at UINT32_MAX. */
     uint32_t posLength = 0;
+    /*
+     * Scratch: the positions found in the line being analysed, reused from line to line.
+     *
+     * analyzeQnameLine() used to fill a local vector and then copy it into positions, so a QNAME
+     * with two separators cost a handful of allocations - and the analysis runs once per line of
+     * every block (rdtsc buckets put it at about a quarter of the pre-analysis pass). Holding the
+     * buffer here leaves only the copy that positions itself needs. It carries no information
+     * between lines: each call clears it first.
+     */
+    std::vector<int32_t> lineScratch;
 };
 
 /*
@@ -76,13 +86,41 @@ struct IdSplitAnalysis {
 int32_t analyzeQnameFirstLine(const uint8_t* buffer, uint32_t length, IdSplitAnalysis& analysis);
 int32_t analyzeQnameLine(const uint8_t* buffer, uint32_t length, IdSplitAnalysis& analysis);
 
+/*
+ * One line's tab positions, in the order the SAM reader recorded them: entry k is the offset of the
+ * (k+1)-th tab, or of the line's '\n', which is what ends the last stored field. A record has at
+ * most eleven of them - the parse stops at the OPTION column - and the count is what tells a line
+ * without an OPTION column (ten) from one with (eleven).
+ *
+ * This is a vector-like view with its storage inside the entry, because the table of them - one
+ * entry per line of the block, SamCodecActuator::contentPos - used to be a
+ * std::vector<std::vector<int64_t>>: every line's inner vector grew from empty and was then copied
+ * into the table, six heap operations per line, for a table that all twelve field passes read.
+ * The stride is fixed and small, so the positions ride in the entry itself and no line allocates.
+ *
+ * The type lives here because QnameColumnInput carries the pointer to the table; the field layout
+ * encoders index the same table directly.
+ */
+struct LineTabs {
+    static const uint32_t CAP = 11;
+    int64_t pos[CAP];
+    uint32_t count = 0;
+
+    uint32_t size() const { return count; }
+    bool empty() const { return count == 0; }
+    int64_t operator[](size_t k) const { return pos[k]; }
+    /* Nothing pushes past CAP: the parse stops at the OPTION column, and the QNAME trial that also
+       fills this table only ever reads its first entry. */
+    void push_back(int64_t v) { if (count < CAP) pos[count++] = v; }
+};
+
 /* Where the QNAME column's lines are: the block being compressed, and what its parse recorded. */
 struct QnameColumnInput {
     const uint8_t* buffer = nullptr;
     const std::vector<size_t>* npos = nullptr;
     int64_t headEndLine = 0;
     /* The tab positions of each content line (RoughIOBlock's parse, the actuator's contentPos). */
-    const std::vector<std::vector<int64_t>>* fieldTabs = nullptr;
+    const std::vector<LineTabs>* fieldTabs = nullptr;
 };
 
 /*

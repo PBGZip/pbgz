@@ -276,6 +276,15 @@ public:
      */
     coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable);
 
+    /*
+     * Whether the stream's alphabet contains this quality byte. The alphabet is fixed once the
+     * coder is built - from the frequency table, or from the prior's own alphabet when a prior was
+     * loaded - and a value outside it cannot be coded (encoding one fails the stream with
+     * coder_io::IO_UNCODABLE). The caller checks the block's values first and routes the column to
+     * another codec when the prior does not cover them.
+     */
+    bool coversByte(uint8_t b) const;
+
     /* Version taking context parameter tiers; cfg is written verbatim into the
        stream header for the decoder to read back. */
     coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, const Fcv2Cfg& cfg);

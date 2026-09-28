@@ -267,10 +267,28 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
      * sense to ask "is it worth amortizing across the whole file". Piped input has no
      * length available; returning 0 means unknown, and the decision logic decides how
      * to handle it.
+     *
+     * The length wanted is the one the samples were taken in: codec selection reads the
+     * block buffers, which for a gz input hold decompressed bytes, so the figure has to be
+     * the file's uncompressed length, not the size of the .gz on disk. A FileReader answers
+     * with the size of its file - right for a plain input, and for BAM the block reader
+     * inflates while the samples are taken from inflated text, which understates the volume
+     * the same way. Transparent gz input reaches neither: its reader is not a FileReader at
+     * all, so the length has to come from the gzip trailer (see
+     * PathUtil::getGzUncompressedSize), and without that every gz input looks as if its
+     * length were unknown, which is the one case the prior is always written for.
      */
+    uint64_t inputTotalBytes = 0;
     FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
-    const uint64_t inputTotalBytes = (fileReader != nullptr && fileReader->getFileSize() > 0)
-                                     ? (uint64_t)fileReader->getFileSize() : 0;
+    if (fileReader != nullptr && fileReader->getFileSize() > 0) {
+        inputTotalBytes = (uint64_t)fileReader->getFileSize();
+    } else if (parameter.inputFile != STDIN) {
+        const int64_t uncompressed = PathUtil::getGzUncompressedSize(parameter.inputFile);
+        if (uncompressed > 0) {
+            inputTotalBytes = (uint64_t)uncompressed;
+            LOG_INFO("Input length from gzip trailer: %lld bytes uncompressed.", (long long)uncompressed);
+        }
+    }
 
     /*
      * The -m mode picks which candidate list each field trials (see
@@ -444,9 +462,16 @@ void CompressEngine::finalizePretrain() {
 
     uint64_t trainedBytes = 0;
     QualFcv2Params qualParams;
+    /*
+     * Which field's verdict carries the fcv2 tier depends on the format: SAM's QUAL column for
+     * an aligned file, FASTQ's for a FASTQ. The two are indexed by their own field enums, so
+     * this is the one place that has to know both.
+     */
+    const uint32_t qualFieldIdx = BlockUtil::isFastqBlock(preprocessInfo.fileType)
+                                      ? (uint32_t)FQ_QUAL : (uint32_t)SAM_QUAL;
     const FieldCodecSelection* qualSel =
-        (preprocessInfo.fields.size() > (size_t)SAM_QUAL)
-            ? &preprocessInfo.fields[SAM_QUAL] : nullptr;
+        (preprocessInfo.fields.size() > (size_t)qualFieldIdx)
+            ? &preprocessInfo.fields[qualFieldIdx] : nullptr;
     if (qualSel != nullptr && qualSel->selectedCoder == CoderType::FCV2) {
         qualParams = qualSel->fcv2Params;   /* train with the same parameter tier as the compression side, otherwise the prior is unusable */
     }

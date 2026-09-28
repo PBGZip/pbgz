@@ -59,6 +59,24 @@ private:
             c -= c >> RATE;
         }
 
+        /*
+         * One update for either outcome: towards 1 when the coded bit is set, towards 0 otherwise.
+         *
+         * The context model codes one bit at a time and the two directions used to be two branches,
+         * one per bit and four counter updates inside each. The bit being coded is essentially
+         * unpredictable to the branch predictor - it is the coder's own model, not the control
+         * flow, that knows the probability - so the misprediction was paid once per bit on the
+         * hottest path in the coder. Selecting the increment instead keeps the work identical:
+         * (c ^ 0xFFFF) >> RATE is what update_high adds and -(c >> RATE) is what update_low adds,
+         * both on the same 16-bit counter.
+         */
+        inline void update(int32_t bit)
+        {
+            const uint16_t up = (uint16_t)((c ^ 0xFFFF) >> RATE);
+            const uint16_t down = (uint16_t)(c >> RATE);
+            c = (uint16_t)(c + (bit ? up : (uint16_t)(0 - down)));
+        }
+
         inline void set(uint16_t count)
         {
             c = count;
@@ -528,28 +546,18 @@ private:
             const int32_t x2 = counter2[f][ctx][j + 1].get();
             const int32_t ssep = x1 + (((x2 - x1) * (p & 4095)) >> 12);
 
-            if (c & i) /* Current bit is 1 */
-            {
-                coder->encode_bit<18>(1, p + ssep + ssep + ssep); /* p + ssep + ssep + ssep represents the probability of high probability symbols, i.e., the probability that next bit is 1 */
+            /* p + ssep + ssep + ssep represents the probability of high probability symbols, i.e.,
+               the probability that next bit is 1. The bit is coded and the four counters are updated
+               without branching on it: see _counter::update. */
+            const int32_t bit = (c & i) ? 1 : 0;
+            coder->encode_bit<18>(bit, p + ssep + ssep + ssep);
 
-                counter0[ctx].update_high();
-                counter1[c1][ctx].update_high();
-                counter2[f][ctx][j].update_high();
-                counter2[f][ctx][j + 1].update_high();
+            counter0[ctx].update(bit);
+            counter1[c1][ctx].update(bit);
+            counter2[f][ctx][j].update(bit);
+            counter2[f][ctx][j + 1].update(bit);
 
-                ctx += ctx + 1; /* ctx left shift by one bit + 1, here ctx is the bit context of current byte */
-            }
-            else /* Current bit is 0 */
-            {
-                coder->encode_bit<18>(0, p + ssep + ssep + ssep);
-
-                counter0[ctx].update_low();
-                counter1[c1][ctx].update_low();
-                counter2[f][ctx][j].update_low();
-                counter2[f][ctx][j + 1].update_low();
-
-                ctx += ctx; /* ctx left shift by one bit, here ctx is the bit context of current byte */
-            }
+            ctx += ctx + bit; /* ctx left shift by one bit (+1 when the bit was 1) */
         }
 
         c2 = c1;        /* c2 updates to ctx of previous byte, here ctx is the actual value of processed character */
@@ -579,24 +587,14 @@ private:
             const int32_t x2 = counter2[f][ctx][j + 1].get();
             const int32_t ssep = x1 + (((x2 - x1) * (p & 0xFFF)) >> 12);
 
-            if (coder->decode_bit<18>(p + ssep + ssep + ssep))
-            {
-                counter0[ctx].update_high();
-                counter1[c1][ctx].update_high();
-                counter2[f][ctx][j].update_high();
-                counter2[f][ctx][j + 1].update_high();
+            /* Same as put(): the decoded bit drives the four counter updates without a branch. */
+            const int32_t bit = coder->decode_bit<18>(p + ssep + ssep + ssep);
+            counter0[ctx].update(bit);
+            counter1[c1][ctx].update(bit);
+            counter2[f][ctx][j].update(bit);
+            counter2[f][ctx][j + 1].update(bit);
 
-                ctx += ctx + 1; /* ctx left shift by one bit, here ctx is the bit context of current byte */
-            }
-            else
-            {
-                counter0[ctx].update_low();
-                counter1[c1][ctx].update_low();
-                counter2[f][ctx][j].update_low();
-                counter2[f][ctx][j + 1].update_low();
-
-                ctx += ctx; /* ctx left shift by one bit, here ctx is the bit context of current byte */
-            }
+            ctx += ctx + bit; /* ctx left shift by one bit (+1 when the bit was 1) */
         }
 
         c2 = c1;

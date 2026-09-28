@@ -2,8 +2,11 @@
  * sam_seq_payload.h - the reference-coded SEQ payload: how it is built, how it is split, and the
  * three forms its N positions can travel in.
  *
- * This is the encoder-side counterpart of sam_field_layout.h (which holds the readers). It exists
- * because two stages need the same machinery and neither owns it:
+ * This is the encoder-side counterpart of sam_field_layout.h (which holds the readers), with two
+ * deliberate exceptions that both sides need - the consensus stretch helper and the predicates that
+ * decide whether a record can be coded against a reference at all: a reader has to make the same
+ * decision on the same record, so they live with the encoder rather than being written twice. It
+ * exists because two stages need the same machinery and neither owns it:
  *
  *   - the codec pre-selection trials the SEQ match stream on a sample of the first block, to pick
  *     the coder the column will be written with and the form its N positions will travel in;
@@ -33,6 +36,7 @@
 #include <vector>
 
 #include "reference.h"
+#include "seq_stream_util.h"
 
 /*
  * One CIGAR operation: the op character and its length. The SEQ reference walk iterates these, and
@@ -60,30 +64,9 @@ uint32_t parseCigarOps(const uint8_t* cigar, uint32_t cigarLength, std::vector<C
 uint32_t cigarRefConsumed(const uint8_t* cigar, uint32_t cigarLength);
 
 /*
- * The two halves of a match stream split into runs and values.
- *
- * The match stream is a sparse 0..3 byte stream in which a block whose reads all take their bases
- * from the reference is ~99% zeros. When the zero share is high enough to pay for it, the stream is
- * replaced by two independent sub-streams: this one (the varint run lengths of the zero runs) and
- * the surviving non-zero values, one byte each. The decision is splitSeqMatchStream's, and its two
- * halves are the "m" and "mval" sub-streams (see writeSeqMatchStreams).
+ * The two halves of a match stream split into runs and values (SeqRleSplit / splitSeqMatchStream)
+ * sit in seq_stream_util.h: the shape is byte-level and both formats' SEQ columns use it.
  */
-struct SeqRleSplit {
-    bool useRle = false;
-    std::unique_ptr<uint8_t[]> run;   /* varint run lengths of the zero runs */
-    std::unique_ptr<uint8_t[]> val;   /* the surviving non-zero values, one byte each */
-    uint32_t runLength = 0;
-    uint32_t valLength = 0;
-};
-
-/*
- * Whether the match stream is split, and the split itself when it is.
- *
- * The verdict is per block and depends only on the payload: RLE is taken when at least 98% of the
- * bytes are zero. Values are written into the two buffers owned by the result; the caller only
- * reads them.
- */
-SeqRleSplit splitSeqMatchStream(const uint8_t* match, uint32_t matchLen);
 
 /*
  * Whether this record's bases can be coded against the reference at all, and where its first base
@@ -99,8 +82,47 @@ SeqRleSplit splitSeqMatchStream(const uint8_t* match, uint32_t matchLen);
  * filled from the file's @SQ lines - in the preprocessing stage by the reader thread, and again by
  * whichever actuator pass sees the header.
  */
+/*
+ * What "this record has no reference to address" looks like: SAM's two placeholder chromosome ids -
+ * 0xFFFF for the '*' that stands in for a name, 0xFFFE for an index that does not know the name -
+ * and the FLAG bit that marks a record unmapped. Writers and reader both test for them, and a
+ * placeholder spelled out at each test is one that can drift.
+ */
+inline constexpr uint16_t SEQ_CHR_ID_NONE = 0xFFFF;
+inline constexpr uint16_t SEQ_CHR_ID_UNKNOWN = 0xFFFE;
+inline constexpr uint8_t SEQ_FLAG_UNMAPPED = 0x04;
+
 bool seqRecordUsesReference(uint16_t chrId, uint16_t flag, uint64_t startPos, uint32_t refConsumed,
                             Reference* reference, int64_t& refPos);
+
+/*
+ * Whether the loaded reference is laid out the way the @SQ list addresses it, i.e. whether
+ * seqRecordUsesReference's offset (the running sum of the @SQ lengths) really names that
+ * chromosome's first base in the reference.
+ *
+ * It does only if the FASTA lists exactly those sequences in that order. A FASTA of another
+ * assembly, of the same assembly under other names (NCBI accessions against FlyBase arm names,
+ * say), or with sequences in another order all break it - and break it *silently*: the offset
+ * still exists, it just points into a different sequence, so the per-base XOR against the
+ * reference is mostly non-zero and the SEQ column comes out barely better than raw text, or
+ * worse. That is what this check exists to catch.
+ *
+ * Returns true when the correspondence holds, and also when it cannot be checked at all: a
+ * reference loaded from an NI index carries no names, and callers have always trusted its
+ * layout, so nothing may change for them. A nullptr reference is reported as unusable.
+ */
+bool referenceLinesUpWithHeader(const Reference* reference);
+
+/*
+ * Tell the user, once per run, that the reference cannot be used for SEQ (see
+ * referenceLinesUpWithHeader). Both actuators call it when their check fails, so the message
+ * lives here rather than being spelled out - and printed - twice.
+ *
+ * Only the first caller prints: the reason is a property of the run, not of the block, and a
+ * block-based encoder would otherwise repeat it once per block.
+ */
+void warnReferenceNotUsableForSeq();
+
 
 /*
  * Walk the CIGAR and write the record's per-base 2-bit payload: XOR against the reference on the
@@ -118,6 +140,43 @@ bool seqRecordUsesReference(uint16_t chrId, uint16_t flag, uint64_t startPos, ui
 bool buildSeqReferenceCodedBases(const std::vector<CigarOp>& ops, const uint8_t* seq,
                                  uint32_t seqLength, int64_t refPos, Reference* reference,
                                  uint8_t* ref2bitScratch, uint8_t* out);
+
+/*
+ * The same walk against a squash buffer the caller owns rather than the file's reference, with
+ * `baseStart` the base offset that squash[0] stands for.
+ *
+ * This is what lets a block whose file reference cannot be addressed be coded against a reference
+ * the block builds from its own alignments (see SamCodecActuator::buildBlockConsensus): that
+ * consensus only covers the window its records span, so the walk needs to be told where the buffer
+ * starts rather than being handed a Reference. Reading the squash directly is a scalar loop where
+ * Reference::getStretch2Bits1Char uses a table, which is fine here: this path only ever runs where
+ * the alternative is storing every base as a character.
+ */
+bool buildSeqSquashCodedBases(const std::vector<CigarOp>& ops, const uint8_t* seq,
+                              uint32_t seqLength, int64_t refPos, const uint8_t* squash,
+                              uint8_t* ref2bitScratch, uint8_t* out);
+
+/*
+ * Where a record's first base sits in a squash buffer that covers the base window
+ * [windowStart, windowStart + windowBases) of the file's coordinate space, or false when the
+ * record cannot be coded against it at all.
+ *
+ * The windowed twin of seqRecordUsesReference, and the same three conditions hold; what changes is
+ * that the offset is returned rebased on the window and the bound is the window's end rather than
+ * the reference's. The two are deliberately separate functions rather than one parameterised by a
+ * window: the mode is recorded in the block's meta, so the file-reference path and this one never
+ * have to agree with each other, and the former is what every existing archive was written with.
+ */
+bool seqRecordUsesSquashWindow(uint16_t chrId, uint16_t flag, uint64_t startPos,
+                               uint32_t refConsumed, int64_t windowStart, int64_t windowBases,
+                               int64_t& refPos);
+
+/*
+ * Read `outLen` 2-bit codes out of a squash buffer (four per byte, the first base in the high
+ * bits) starting at base offset `actgPos`. The caller has bounds-checked the stretch. Shared by
+ * the encoder's walk above and the decoder's, which restores bases the same way.
+ */
+void seqSquashStretch(const uint8_t* squash, uint8_t* out, uint32_t outLen, uint64_t actgPos);
 
 /*
  * What one record contributes to the match stream, once its bases have been coded.
@@ -157,6 +216,19 @@ SeqRecordPayload buildSeqRecordPayload(uint16_t chrId, uint16_t flag, uint64_t s
                                        uint32_t refConsumed, const std::vector<CigarOp>& ops,
                                        const uint8_t* seq, uint32_t seqLength,
                                        Reference* reference, uint8_t* coded, uint8_t* ref2bit);
+
+/*
+ * The same decision against a block-local squash window instead of the file's reference (see
+ * buildSeqSquashCodedBases / seqRecordUsesSquashWindow). `refPos` in the result stays absolute, in
+ * the file's coordinate space, so it reads the same as buildSeqRecordPayload's; nothing updates
+ * the reference's match statistics for such a record, there being no file reference involved.
+ */
+SeqRecordPayload buildSeqSquashRecordPayload(uint16_t chrId, uint16_t flag, uint64_t startPos,
+                                             uint32_t refConsumed, const std::vector<CigarOp>& ops,
+                                             const uint8_t* seq, uint32_t seqLength,
+                                             const uint8_t* squash, int64_t windowStart,
+                                             int64_t windowBases, uint8_t* coded,
+                                             uint8_t* ref2bit);
 
 /*
  * Encoder-side accumulator for one exception character: a strictly increasing list of its positions

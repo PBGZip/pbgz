@@ -54,6 +54,16 @@ public:
 
     /* Commit the stream. */
     virtual void flush() = 0;
+
+    /*
+     * Whether this coder can code the given quality byte.
+     *
+     * Every coder here but coder_fcv2 can: its alphabet is fixed for the stream - by the frequency
+     * table, or by the prior it loaded, whose alphabet comes from the blocks the prior was trained
+     * on - so a value outside it cannot be coded at all (see coder_io::IO_UNCODABLE). The caller
+     * asks before feeding a block, and gives the column to a coder that can when the answer is no.
+     */
+    virtual bool coversByte(uint8_t b) const { (void)b; return true; }
 };
 
 /*

@@ -156,6 +156,46 @@ namespace PathUtil {
         return st.st_size;
     }
 
+    int64_t getGzUncompressedSize(const std::string& fileName) {
+        struct stat st;
+        if (0 != stat(fileName.c_str(), &st)) {
+            return 0;
+        }
+        const int64_t fileSize = st.st_size;
+        /* The trailer is ISIZE(4) + CRC32(4); a smaller file cannot carry one. */
+        if (fileSize <= 8) {
+            return 0;
+        }
+
+        FILE* fp = fopen(fileName.c_str(), "rb");
+        if (fp == nullptr) {
+            LOG_ERROR("File %s open failed.", fileName.c_str());
+            return 0;
+        }
+        uint8_t trailer[4] = {0};
+        const bool readOk = (0 == fseek(fp, (long)(fileSize - 4), SEEK_SET)) &&
+                            (4 == fread(trailer, 1, 4, fp));
+        fclose(fp);
+        if (!readOk) {
+            return 0;
+        }
+
+        /* ISIZE is little-endian. */
+        const uint32_t isize = (uint32_t)trailer[0] | ((uint32_t)trailer[1] << 8) |
+                               ((uint32_t)trailer[2] << 16) | ((uint32_t)trailer[3] << 24);
+
+        /*
+         * A gzip stream that holds anything but already-compressed data expands, so a length that
+         * does not even reach the compressed size is not this file's length: either the real length
+         * wrapped past 4 GiB or the file is a chain of members and ISIZE covers the last one only.
+         * Both are cases to report as unknown rather than to guess at.
+         */
+        if ((int64_t)isize < fileSize) {
+            return 0;
+        }
+        return (int64_t)isize;
+    }
+
     bool isGzFile(const std::string& fileName) {
         // Open file in binary mode for reading
         FILE* fp = fopen(fileName.c_str(), "rb");

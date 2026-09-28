@@ -34,6 +34,7 @@
 #include "coder/coder_arith.h"
 #include "coder/coder_qual.h"
 #include "utils/md5_util.h"
+#include "city.h"
 #include "coder/coder_json.h"
 
 #include <cstdlib>
@@ -101,7 +102,9 @@ SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, Pb
     refPosBegin = 0;
     refPosEnd = 0;
     optionCacheEmpty = true;
-    optionRecLines.clear();
+    optionRecText.clear();
+    optionRecOff.clear();
+    optionRecPresent.clear();
 }
 
 SamCodecActuator::~SamCodecActuator() {
@@ -286,24 +289,35 @@ int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
 int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
                                       std::pair<uint8_t, uint32_t>* qualityFrequnce)
 {
-    std::vector<int64_t> linePos;
+    /*
+     * The line's tab positions. The storage is inside the entry, so having one per call costs
+     * nothing and there is no buffer to reuse between lines (see LineTabs).
+     */
+    LineTabs linePos;
     uint32_t baseLen = 0;
     bool lineCigarMatchFlag = false;
     uint32_t baseFieldLen = 0;
-    for (uint32_t i = 0; i < line.length(); ++i) {
-        if (line.at(i) == '\t' || line.at(i) == '\n') {
+    /*
+     * The line is walked byte by byte and this pass runs once per line of every block, so the scan
+     * reads through a raw pointer and a hoisted length: the checked access of std::string::at(), or
+     * a size() call per iteration, is a branch per byte that the bound already makes unnecessary.
+     */
+    const char* const src = line.data();
+    const uint32_t srcLen = (uint32_t)line.size();
+    for (uint32_t i = 0; i < srcLen; ++i) {
+        if (src[i] == '\t' || src[i] == '\n') {
             // First tab before is ID column, need to split and analyze ID column
             if (linePos.empty()) {
                 if (contentPos.empty()) {
                     // Pass ID column content (from line start to first tab position)
-                    preAnalysisIdFirstLine((uint8_t*)line.data(), i + 1);
+                    preAnalysisIdFirstLine((uint8_t*)src, i + 1);
                 } else {
                     // Pass ID column content (from line start to first tab position)
-                    preAnalysisIdLine((uint8_t*)line.data(), i + 1);
+                    preAnalysisIdLine((uint8_t*)src, i + 1);
                 }
             } else if (linePos.size() == 2) {  // RNAME is the 3th field
-                uint32_t chrLen = i - linePos.at(1) - 1;
-                std::string chrName = line.substr(linePos.at(1) + 1, chrLen);
+                uint32_t chrLen = i - (uint32_t)linePos[1] - 1;
+                std::string chrName = line.substr((size_t)linePos[1] + 1, chrLen);
                 if (chrName != "*" && chrName != "=") {
                     if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
                         if (headEndLine >= 0) {
@@ -313,16 +327,16 @@ int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
                     }
                 }
             } else if (linePos.size() == 5) {  // CIGAR is the 6th field
-                uint32_t cigarLen = i - linePos.at(4) - 1;
+                uint32_t cigarLen = i - (uint32_t)linePos[4] - 1;
                 if (cigarLen > 1) {
                     lineCigarMatchFlag = true;
-                    uint8_t* cigarBegin  = (uint8_t*)line.c_str() + linePos.at(4) + 1;
+                    uint8_t* cigarBegin  = (uint8_t*)src + (size_t)linePos[4] + 1;
                     baseFieldLen = parseCigar(cigarBegin, cigarLen);
                 } else {
                     lineCigarMatchFlag = false;
                 }
             } else if (linePos.size() == 9) {   // Base is the 10th field
-                baseLen = i - linePos.at(8) - 1;
+                baseLen = i - (uint32_t)linePos[8] - 1;
                 if (baseLen > maxBaseLength) {
                     maxBaseLength = baseLen;
                 }
@@ -339,11 +353,11 @@ int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
                     }
                 }
             } else if (linePos.size() == 10) {  // Quality value is the 11th field
-                uint32_t qualityLen = i - linePos.at(9) - 1;
+                uint32_t qualityLen = i - (uint32_t)linePos[9] - 1;
                 if (baseLen != qualityLen) {
                     /* A QUAL of a single '*' denotes missing quality; its length need not equal the SEQ length */
                     const bool missingQual = (qualityLen == 1 &&
-                                              line.at(linePos.at(9) + 1) == '*');
+                                              src[(size_t)linePos[9] + 1] == '*');
                     if (!missingQual) {
                         LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
                         return -1;
@@ -357,7 +371,7 @@ int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
             }
         } else {
             if (linePos.size() == 9) {
-                char ch = line[i];
+                char ch = src[i];
                 if (ch == 'N' || ch == 'n') {
                     baseNCount++;
                 }
@@ -427,6 +441,20 @@ int32_t SamCodecActuator::preAnalysis() {
         qualityFrequnce[i].second = 0;
     }
 
+    /*
+     * One line buffer for the whole block: the loop below walks every line of it, and a fresh
+     * std::string per line means a heap allocation per line - a SAM line is longer than the
+     * small-string buffer - for a copy that only the duration of the call needs. assign() reuses
+     * whatever the previous line left behind.
+     *
+     * This pass has to be accounted for on its own: measured on a 35-block BAM it is 1.8 s against
+     * 0.32 s for the whole codec trial it feeds. rdtsc buckets over that file put ~70% of it in
+     * scanDataLine's walk and the tab table it fills, ~27% in the ID-column analysis, and ~4% in
+     * the RNAME and CIGAR work together; within that 70% the byte loop was the smaller half, the
+     * rest having been the per-line container churn (see LineTabs, and the ID-column side in
+     * sam_qname_column).
+     */
+    std::string line;
     // Parse SAM file header
     for (uint32_t idx = 0; idx < lineNum; ++idx) {
         uint32_t begin = (idx == 0 ? idx : npos[idx - 1]  + 1);
@@ -434,7 +462,7 @@ int32_t SamCodecActuator::preAnalysis() {
         if (begin >= end) {
             return -1;
         }
-        std::string line((char*)buffer + begin, end - begin);
+        line.assign((char*)buffer + begin, end - begin);
         if (buffer[begin] == '@') {
             if (parseHeaderLine(line) != 0) {
                 return -1;
@@ -812,9 +840,20 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressTLen<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 9: // SEQ
-                if (pRefeGene == nullptr) {
-                    LOG_DEBUG("Base will compress without reference");
-                    fieldDstLen = compressBaseWithoutRef(fieldIdx, fieldSrcLen, fieldMeta);
+                /*
+                 * A reference the @SQ list cannot address (see referenceUsableForSeq) is worse
+                 * than none, so the text path takes over rather than reading foreign bases. The
+                 * verdict is taken here rather than when the reference is handed in because the
+                 * @SQ table is only complete once the header has been parsed.
+                 */
+                if (!referenceUsableForSeq()) {
+                    /*
+                     * No reference this file can address. Code against one the block builds from
+                     * its own alignments where that is possible - the reads agree with each other
+                     * wherever they overlap, so the consensus recovers the sequence - and only
+                     * store the bases where it is not (see compressBaseSelfRef).
+                     */
+                    fieldDstLen = compressBaseSelfRef(fieldIdx, fieldSrcLen, fieldMeta);
                 } else {
                     LOG_DEBUG("Base will compress with reference");
                     fieldDstLen = compressBaseWithRef(fieldIdx, fieldSrcLen, fieldMeta);
@@ -824,8 +863,21 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressQuality(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 11: // Optional fields (all tags)
-                fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+            {
+                /*
+                 * The stripped layout first (see compressOptionStrip): the same column with the
+                 * repeated tag names left to the meta, which is where most of this field's time
+                 * goes. It declines the data it cannot describe, and then the plain line-wise
+                 * column - what this field has always used - is written instead.
+                 */
+                uint32_t stripDst = 0;
+                if (compressOptionStrip(fieldIdx, fieldSrcLen, fieldMeta, stripDst)) {
+                    fieldDstLen = (int32_t)stripDst;
+                } else {
+                    fieldDstLen = compressRegularField(fieldIdx, fieldSrcLen, fieldMeta);
+                }
                 break;
+            }
         }
 
         // Record statistics for this field
@@ -885,7 +937,7 @@ struct SamFieldRange {
     uint32_t lengthWithTab() const { return (uint32_t)(tab - start) + 1; }
 };
 
-static SamFieldRange samFieldRange(uint8_t* line, const std::vector<int64_t>& tabs,
+static SamFieldRange samFieldRange(uint8_t* line, const LineTabs& tabs,
                                    uint32_t fieldIdx, uint32_t lineEnd)
 {
     SamFieldRange range;
@@ -935,17 +987,19 @@ CoderType SamCodecActuator::seqMatchCoderFor()
 
 /*
  * Encode PNEXT's exception stream: the (contentIdx, delta) pairs of the records that cannot be
- * rebuilt from their mate.
+ * rebuilt from their mate and do have something to say - see the filter in
+ * compressPNextFieldDelta, which leaves out an unpaired record whose field is "0" because the
+ * decoder derives that 0 by itself.
  *
  * The contentIdx column goes out as forward deltas and the delta column as zigzag varints, and
  * where every delta is the same value that value moves into the meta and the column is dropped
- * outright: a block whose records are all unpaired - or all unmapped, like ERR14949932 - has
- * every line here with the same delta, and there the absolute layout this replaced spent
- * 937,737 B of stream on 3,343,586 entries whose delta is uniformly 0.
+ * outright. An empty list is written as no sub-stream at all (exc_enc "none"), which is the
+ * common shape for an all-single-end or all-unmapped block, like ERR14949932.
  *
  * contentIdx is the block-internal data-line index (small, increasing); delta = pnext - pos is
  * signed (the mate offset, negative when the record had no real PNEXT), so it goes through
- * zigzag. Records in fieldMeta how the stream was written, and returns its encoded size.
+ * zigzag. fieldMeta records how the stream was written, and the function returns its encoded
+ * size.
  */
 template<typename CoderType>
 uint32_t SamCodecActuator::writePnextExceptions(const std::vector<std::pair<uint32_t, int64_t>>& exc,
@@ -1031,16 +1085,46 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
      */
 
     // Pass 1: collect (lineIdx -> qname, pos, pnext, flag) for every data line.
+    /*
+     * The record table is indexed by data-line number rather than keyed by it: the second pass
+     * walks lines in increasing order (which is the order the old std::map produced, and the order
+     * the exception list's deltas depend on), so a vector reads the same and costs one allocation.
+     *
+     * The QNAME is kept as a slice of the block buffer instead of a std::string. A QNAME is longer
+     * than the small-string buffer, so the old per-line std::string was a heap allocation per line
+     * of the block.
+     */
     struct RecInfo {
-        std::string qname;
+        uint32_t qoff = 0;           // QNAME slice in the block buffer
+        uint32_t qlen = 0;
         int64_t pos = 0;
         int64_t pnext = 0;
         uint16_t flag = 0;
-        bool valid = false;   // paired (0x1) and mate mapped (not 0x8)
-        bool hasPnext = false; // pnext != 0/ *
+        uint32_t group = UINT32_MAX; // index into qnameGroups, when this line groups by name
+        bool has = false;            // this slot was walked (a '@' line is skipped outright)
+        bool valid = false;          // paired (0x1) and mate mapped (not 0x8)
+        bool hasPnext = false;       // pnext != 0/ *
     };
-    std::map<uint32_t, RecInfo> records;
-    std::unordered_map<std::string, std::vector<uint32_t>> qnameToLines;
+    /*
+     * One group per distinct QNAME: how many valid records carry it, and the two lines that could
+     * pair up. It replaces an unordered_map<std::string, std::vector<uint32_t>>, which hashed the
+     * name twice per line and allocated a vector for every distinct name in the block - a million
+     * of them on a position-sorted BAM - and a std::map insert per line. The groups live in one
+     * array reached through a hash -> index chain, so a name costs one CityHash64 and one lookup
+     * on the small table, and nothing is allocated per name. A chain collision is resolved by
+     * comparing the name bytes, so the grouping is exact rather than probabilistic.
+     */
+    struct QnameGroup {
+        uint32_t count = 0;          // valid records with this name
+        uint32_t line[2] = {0, 0};   // the first two of them
+        uint32_t qoff = 0;           // the name's slice, to confirm a hash hit
+        uint32_t qlen = 0;
+        uint32_t next = UINT32_MAX;  // next group with the same hash
+    };
+    const uint32_t slotCount = lineNum - headEndLine;
+    std::vector<RecInfo> records(slotCount);
+    std::vector<QnameGroup> qnameGroups;
+    std::unordered_map<uint64_t, uint32_t> qnameHead;
 
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -1054,8 +1138,10 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
         // QNAME is field 0 (line start .. first tab).
         uint32_t qnameLen = contentPos[contentIdx].empty()
             ? 0 : contentPos[contentIdx][0];
-        RecInfo ri;
-        ri.qname.assign((char*)line, qnameLen);
+        RecInfo& ri = records[contentIdx];
+        ri.has = true;
+        ri.qoff = lineStart;
+        ri.qlen = qnameLen;
 
         // FLAG (field 1)
         auto flagIt = mappedFlag.find(lineIdx);
@@ -1083,45 +1169,91 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
         }
         nextMappedPos[lineIdx] = ri.hasPnext ? ri.pnext : 0;
 
-        records[lineIdx] = std::move(ri);
         // Group by QNAME using the same criterion as the decoder (valid =
         // paired && mate mapped), so exception decisions match exactly.
-        if (records[lineIdx].valid) {
-            qnameToLines[records[lineIdx].qname].push_back(lineIdx);
+        if (ri.valid) {
+            const uint64_t h = CityHash64((const char*)line, qnameLen);
+            uint32_t g = UINT32_MAX;
+            auto headIt = qnameHead.find(h);
+            if (headIt != qnameHead.end()) {
+                for (uint32_t cand = headIt->second; cand != UINT32_MAX; cand = qnameGroups[cand].next) {
+                    if (qnameGroups[cand].qlen == qnameLen &&
+                        memcmp(buffer + qnameGroups[cand].qoff, line, qnameLen) == 0) {
+                        g = cand;
+                        break;
+                    }
+                }
+            }
+            if (g == UINT32_MAX) {
+                g = (uint32_t)qnameGroups.size();
+                QnameGroup ng;
+                ng.qoff = lineStart;
+                ng.qlen = qnameLen;
+                qnameGroups.push_back(ng);
+                if (headIt != qnameHead.end()) {
+                    qnameGroups[g].next = headIt->second;
+                    headIt->second = g;
+                } else {
+                    qnameHead.emplace(h, g);
+                }
+            }
+            ri.group = g;
+            QnameGroup& gr = qnameGroups[g];
+            if (gr.count < 2) {
+                gr.line[gr.count] = lineIdx;
+            }
+            gr.count++;
         }
     }
 
     // Pass 2: decide rebuildable vs exception.
     std::vector<std::pair<uint32_t, int64_t>> pnextExceptions; // (contentIdx, delta = pnext - pos)
-    for (auto& kv : records) {
-        uint32_t lineIdx = kv.first;
-        RecInfo& ri = kv.second;
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        RecInfo& ri = records[lineIdx - headEndLine];
+        if (!ri.has) {
+            continue;
+        }
 
         bool rebuildable = false;
-        if (ri.valid && ri.hasPnext) {
-            const auto& mates = qnameToLines[ri.qname];
+        if (ri.valid && ri.hasPnext && ri.group != UINT32_MAX) {
+            const QnameGroup& gr = qnameGroups[ri.group];
             // For the decoder to uniquely locate the mate from the QNAME group,
             // this QNAME must contain exactly two mutually-mapped records.
-            if (mates.size() == 2) {
-                for (uint32_t ml : mates) {
-                    if (ml == lineIdx) continue;
-                    const RecInfo& mr = records[ml];
-                    if (mr.valid && mr.hasPnext &&
-                        mr.pnext == ri.pos && ri.pnext == mr.pos) {
-                        rebuildable = true;
-                        break;
-                    }
+            if (gr.count == 2) {
+                const uint32_t mateLine = (gr.line[0] == lineIdx) ? gr.line[1] : gr.line[0];
+                const RecInfo& mr = records[mateLine - headEndLine];
+                if (mr.valid && mr.hasPnext &&
+                    mr.pnext == ri.pos && ri.pnext == mr.pos) {
+                    rebuildable = true;
                 }
             }
         }
         if (!rebuildable) {
-            uint32_t contentIdx = lineIdx - headEndLine;
-            /* Reconstruction on the decoder is pnext = delta + pos. When the record
-               had no real PNEXT (field was "0" or "*"), hasPnext is false and the
-               original value is 0, so delta must be -pos (not 0) for the decoder to
-               reproduce 0. */
-            int64_t delta = ri.hasPnext ? (ri.pnext - ri.pos) : (0 - (int64_t)ri.pos);
-            pnextExceptions.emplace_back(contentIdx, delta);
+            /*
+             * A record whose field holds no value (hasPnext false, i.e. it was "0" or "*") and
+             * that is not a mapped pair (valid false) has PNEXT 0, and the decoder reaches that
+             * 0 on its own: rebuildPnextByQname only consults the exception list, and a line it
+             * has no exception for stays 0 unless the FLAG marks it as a mapped pair it can
+             * pair up by QNAME. Storing an exception for such a line would have the decoder
+             * carry a value it can already derive, and because that value is delta = -POS it
+             * varies from record to record - which also keeps the "all deltas equal" case below
+             * from collapsing the column into the meta. On an all-single-end BAM that cost one
+             * exception per line for a constant 0: 36.8 MB of a 471 MB archive on a 25.9M-read
+             * file, where TLEN - the same field in the same situation - pays nothing because it
+             * is derived rather than stored.
+             *
+             * Everything else keeps the exception path as before, so the bytes this writes for a
+             * record are unchanged; only records that need no exception stop getting one.
+             */
+            if (ri.valid || ri.hasPnext) {
+                uint32_t contentIdx = lineIdx - headEndLine;
+                /* Reconstruction on the decoder is pnext = delta + pos. When the record
+                   had no real PNEXT (field was "0" or "*"), hasPnext is false and the
+                   original value is 0, so delta must be -pos (not 0) for the decoder to
+                   reproduce 0. */
+                int64_t delta = ri.hasPnext ? (ri.pnext - ri.pos) : (0 - (int64_t)ri.pos);
+                pnextExceptions.emplace_back(contentIdx, delta);
+            }
         }
     }
 
@@ -1726,6 +1858,291 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
     return (int32_t)totalDst;
 }
 
+/*
+ * The OPTION column, with the tag name and type left out of the stream.
+ *
+ * The column is the records' trailing `TAG:TYPE:VALUE` segments, tab-separated, one line per
+ * record, and the same few tags recur on every line: con_sorted.sam carries 78 MB of it over a
+ * million records, 64% of that text being the names and types, and only three distinct tag
+ * sequences occur in the whole file. The coder walks every input byte - coder_bwt_cm measures
+ * 88 ns/byte on this column against 85 ns/byte on the values alone - so leaving the names in costs
+ * that share of the time while buying nothing: measured on the same column, values-only is 2.4 s
+ * against 6.9 s, and what comes out is 1.5% *smaller*, not larger (the names were already nearly
+ * free to code).
+ *
+ * So each record contributes
+ *
+ *   - one index into a per-block table of tag sequences,  and
+ *   - one line of tab-separated values, in the order that sequence lists them,
+ *
+ * and the sequence table travels in the meta, one entry per segment: either a (name, type) pair,
+ * rebuilt as "NAME:TYPE:" in front of the value, or a verbatim entry for a segment that is not of
+ * that shape at all (fewer than two colons, or empty), whose value is the whole original segment.
+ * Both are exact: splitting at the first two colons and rejoining reproduces the segment byte for
+ * byte whatever the value contains, and a value can never hold a tab or a newline since the column
+ * is tab-separated lines to begin with.
+ *
+ * This layout is used only when the data suits it. If the block has more than kMaxSequences
+ * distinct sequences, or a record's column does not end in the newline that a block line ends in,
+ * the function returns false without having written anything and the caller falls back to the plain
+ * line-wise column. Nothing else is affected: the mode travels in the field meta, so a reader -
+ * including an older one for an archive written by an older writer - dispatches on what it finds.
+ */
+bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrcLen,
+                                           Json::Value& fieldMeta, uint32_t& dstLen)
+{
+    /* A block's tag set is small and constant; a file that varies wildly per record is one the
+       stripped layout cannot describe compactly, so it keeps the plain one. */
+    const size_t kMaxSequences = 4096;
+
+    struct SeqEntry {
+        std::string name;      /* empty when verbatim */
+        std::string type;
+        bool verbatim = false;
+    };
+    /* One line's segments as offsets into the block buffer, so a record costs no allocation. */
+    struct SegView {
+        uint32_t nameOff = 0, nameLen = 0;
+        uint32_t typeOff = 0, typeLen = 0;
+        uint32_t valueOff = 0, valueLen = 0;
+        uint32_t segOff = 0, segLen = 0;   /* the whole segment, for a verbatim entry */
+        bool verbatim = false;
+    };
+
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    const uint32_t lineNum = npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    std::vector<std::vector<SeqEntry>> sequences;
+    std::vector<uint8_t> indexText;
+    std::vector<uint8_t> valueText;
+    std::vector<SegView> segs;
+    uint32_t srcLen = 0;
+
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        const uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
+        const uint32_t lineEnd = npos[lineIdx] - lineStart;
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+        const uint32_t contentIdx = lineIdx - headEndLine;
+
+        /* The same view compressRegularField feeds: the record's fields 12.. as one column, or a
+           bare newline when the record has no OPTION at all (fieldIdx > the tabs present, or a
+           range that ends before it starts, which is what the same record looks like when the
+           scan recorded one more tab). */
+        const uint8_t* text = nullptr;
+        uint32_t len = 0;
+        bool hasField = true;
+        if ((uint32_t)fieldIdx > contentPos[contentIdx].size()) {
+            static const uint8_t kNewline = '\n';
+            text = &kNewline;
+            len = 1;
+            hasField = false;
+        } else {
+            const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+            text = field.start;
+            len = field.lengthWithTab();
+            if (len == 0) {
+                hasField = false;
+                static const uint8_t kNewline = '\n';
+                text = &kNewline;
+                len = 1;
+            }
+        }
+        srcLen += len;
+
+        /* A block is split at line ends, so the column ends with the record's newline, which this
+           layout leaves implicit. Anything else is not something it can express. */
+        if (len == 0 || text[len - 1] != '\n') {
+            return false;
+        }
+        --len;
+
+        /* Split the line into segments: tab-separated, and a record with no OPTION has none. A
+           field that is present but empty - a record whose last column exists and holds nothing -
+           is one empty verbatim segment instead, because the two have to stay apart: the reader
+           turns the tab it appended after QUAL into the line's newline for the first, and appends
+           that newline itself for the second, which is the difference between a record that ends
+           in "...\\t\\n" and one that ends in "...\\n". */
+        segs.clear();
+        if (len == 0 && hasField) {
+            SegView v;
+            v.verbatim = true;
+            segs.push_back(v);
+        } else if (len > 0) {
+            uint32_t segStart = 0;
+            for (uint32_t i = 0; i <= len; ++i) {
+                if (i != len && text[i] != '\t') {
+                    continue;
+                }
+                SegView v;
+                v.segOff = segStart;
+                v.segLen = i - segStart;
+                const uint8_t* s = text + segStart;
+                uint32_t c1 = UINT32_MAX, c2 = UINT32_MAX;
+                for (uint32_t j = 1; j < v.segLen; ++j) {
+                    if (s[j] == ':' && c1 == UINT32_MAX) {
+                        c1 = j;
+                    } else if (s[j] == ':' && c2 == UINT32_MAX) {
+                        c2 = j;
+                        break;
+                    }
+                }
+                if (c2 == UINT32_MAX) {
+                    v.verbatim = true;
+                } else {
+                    v.nameOff = segStart;
+                    v.nameLen = c1;
+                    v.typeOff = segStart + c1 + 1;
+                    v.typeLen = c2 - c1 - 1;
+                    v.valueOff = segStart + c2 + 1;
+                    v.valueLen = v.segLen - c2 - 1;
+                }
+                segs.push_back(v);
+                segStart = i + 1;
+            }
+        }
+
+        /* Find this line's sequence, comparing segment by segment - there are a handful of them and
+           a few segments each, so a key string per line would cost more than it saves. */
+        int32_t seqIdx = -1;
+        for (size_t s = 0; s < sequences.size() && seqIdx < 0; ++s) {
+            const std::vector<SeqEntry>& seq = sequences[s];
+            if (seq.size() != segs.size()) {
+                continue;
+            }
+            bool same = true;
+            for (size_t k = 0; k < segs.size(); ++k) {
+                const SeqEntry& e = seq[k];
+                if (e.verbatim != segs[k].verbatim) {
+                    same = false;
+                    break;
+                }
+                if (e.verbatim) {
+                    continue;   /* the text is carried by the value stream per record */
+                }
+                if (e.name.size() != segs[k].nameLen ||
+                    memcmp(e.name.data(), text + segs[k].nameOff, segs[k].nameLen) != 0 ||
+                    e.type.size() != segs[k].typeLen ||
+                    memcmp(e.type.data(), text + segs[k].typeOff, segs[k].typeLen) != 0) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                seqIdx = (int32_t)s;
+            }
+        }
+        if (seqIdx < 0) {
+            if (sequences.size() >= kMaxSequences) {
+                return false;
+            }
+            std::vector<SeqEntry> seq;
+            seq.reserve(segs.size());
+            for (const SegView& v : segs) {
+                SeqEntry e;
+                e.verbatim = v.verbatim;
+                if (!v.verbatim) {
+                    e.name.assign((const char*)text + v.nameOff, v.nameLen);
+                    e.type.assign((const char*)text + v.typeOff, v.typeLen);
+                }
+                seq.push_back(std::move(e));
+            }
+            sequences.push_back(std::move(seq));
+            seqIdx = (int32_t)(sequences.size() - 1);
+        }
+
+        char idxBuf[16];
+        const int idxLen = snprintf(idxBuf, sizeof(idxBuf), "%d\n", (int)seqIdx);
+        indexText.insert(indexText.end(), idxBuf, idxBuf + idxLen);
+
+        /* The values, in sequence order: the segment's value, or the whole segment for a verbatim
+           entry. Every one is separated by a tab and the record ends with the newline. */
+        for (const SegView& v : segs) {
+            if (v.verbatim) {
+                valueText.insert(valueText.end(), text + v.segOff, text + v.segOff + v.segLen);
+            } else {
+                valueText.insert(valueText.end(), text + v.valueOff, text + v.valueOff + v.valueLen);
+            }
+            valueText.push_back('\t');
+        }
+        if (!segs.empty()) {
+            valueText.back() = '\n';
+        } else {
+            valueText.push_back('\n');
+        }
+    }
+
+    /* Commit. Both sub-streams are written before the meta says so, and a failure puts the block
+       back where it was so the caller can write the plain layout. */
+    const uint32_t savedDst = outBlockPtr->getDataLen();
+    Json::Value streams(Json::arrayValue);
+    uint32_t totalDst = 0;
+    bool ok = true;
+    {
+        const char* const streamNames[2] = { "sidx", "vals" };
+        const std::vector<uint8_t>* const texts[2] = { &indexText, &valueText };
+        for (int i = 0; i < 2 && ok; ++i) {
+            std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(),
+                                                       outBlockPtr->getRemain(), streamNames[i]);
+            std::shared_ptr<coder> c = makeFieldEncoder(fieldIdx,
+                                                        samFieldDefaultCoder(fieldIdx, CoderType::BWT_CM),
+                                                        io.get(), true);
+            if (c == nullptr) {
+                ok = false;
+                break;
+            }
+            c->encode_line(texts[i]->data(), (uint32_t)texts[i]->size());
+            c->encode_flush();
+            if (io->err != coder_io::IO_OK) {
+                ok = false;
+                break;
+            }
+            Json::Value s;
+            s["sname"] = streamNames[i];
+            s["srclen"] = (Json::Value::UInt)texts[i]->size();
+            s["dstlen"] = (Json::Value::UInt)io->data_len;
+            s["coder"] = io->meta;
+            streams.append(s);
+            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + io->data_len);
+            totalDst += io->data_len;
+        }
+    }
+    if (!ok) {
+        outBlockPtr->setDataLen(savedDst);
+        return false;
+    }
+
+    Json::Value seqJson(Json::arrayValue);
+    for (const std::vector<SeqEntry>& seq : sequences) {
+        Json::Value segJson(Json::arrayValue);
+        for (const SeqEntry& e : seq) {
+            Json::Value one(Json::arrayValue);
+            one.append(e.verbatim ? 1 : 0);
+            one.append(e.name);
+            one.append(e.type);
+            segJson.append(one);
+        }
+        seqJson.append(segJson);
+    }
+
+    fieldMeta["mode"] = "opt_strip";
+    fieldMeta["seqs"] = seqJson;
+    fieldMeta["streams"] = streams;
+    fieldMeta["srclen"] = srcLen;
+    fieldMeta["dstlen"] = totalDst;
+    fieldMeta["field"] = fieldIdx;
+    fieldSrcLen = srcLen;
+    dstLen = totalDst;
+
+    LOG_INFO("SAM OPTION tag-strip compression: %u bytes -> %u bytes (%zu sequences, %zu records), ratio = %.2f%%",
+             srcLen, totalDst, sequences.size(), (size_t)(lineNum - headEndLine),
+             (double)(totalDst * 100) / (double)(srcLen ? srcLen : 1));
+    return true;
+}
+
 int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
@@ -1814,36 +2231,36 @@ uint32_t SamCodecActuator::parseCigarRefConsumed(uint8_t* cigarString, uint32_t 
  * when pos > pnext, this read is on the right, the left end = pos, and the
  * template length is negative.
  */
-int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
+bool SamCodecActuator::gatherTLEN(uint32_t lineIdx, TlenInput& in) {
     /* Not paired (FLAG bit 0) or either end unmapped (bits 2/3): TLEN is set to 0. */
     auto flagIt = mappedFlag.find(lineIdx);
     if (flagIt == mappedFlag.end() || !(flagIt->second & 0x1) ||
         (flagIt->second & 0x4) || (flagIt->second & 0x8)) {
-        return 0;
+        return false;
     }
 
     /* Reference sequence unavailable or mate on a different reference: TLEN is set to 0. */
     auto chrIt = mappedChr.find(lineIdx);
     if (chrIt == mappedChr.end() || chrIt->second == 0xFFFF) {
-        return 0;
+        return false;
     }
     auto nextChrIt = nextMappedChr.find(lineIdx);
     if (nextChrIt == nextMappedChr.end() || nextChrIt->second == 0xFFFF) {
-        return 0;
+        return false;
     }
     if (nextChrIt->second != 0xFFFE && nextChrIt->second != chrIt->second) {
-        return 0;
+        return false;
     }
 
     auto posIt = mappedPos.find(lineIdx);
     if (posIt == mappedPos.end()) {
-        return 0;
+        return false;
     }
     int64_t pos = posIt->second;
 
     auto pnextIt = nextMappedPos.find(lineIdx);
     if (pnextIt == nextMappedPos.end()) {
-        return 0;
+        return false;
     }
     int64_t pnext = pnextIt->second;
 
@@ -1861,11 +2278,21 @@ int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
         }
     }
 
-    int64_t templateLen;
+    in.pos = pos;
+    in.pnext = pnext;
+    in.refSpan = refSpan;
+    in.mateRefSpan = mateRefSpan;
+    return true;
+}
+
+int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
+    TlenInput in;
+    if (!gatherTLEN(lineIdx, in)) {
+        return 0;
+    }
     /* The rule and the two conventions it covers live in sam_field_rules.h, next to the BAM
        actuator that applies the same one to the same column. */
-    templateLen = samTemplateLen(pos, pnext, refSpan, mateRefSpan, minusOne);
-    return (int32_t)templateLen;
+    return (int32_t)samTemplateLen(in.pos, in.pnext, in.refSpan, in.mateRefSpan, minusOne);
 }
 
 template<typename CoderType>
@@ -1899,6 +2326,13 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
      * the decompression side.
      */
     uint64_t convMinus1 = 0, convPlain = 0;
+    /*
+     * Both conventions' values, kept for the second pass so that it does not have to gather the
+     * line's inputs again - only one convention survives the vote, and which one is not known until
+     * this pass ends. One int32 per line per convention.
+     */
+    std::vector<int32_t> tlenMinus1(lineNum, 0);
+    std::vector<int32_t> tlenPlain(lineNum, 0);
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
@@ -1913,8 +2347,16 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         if (fieldLength > 1) {
             std::string tlenStr = std::string((char*)fieldStart, fieldLength - 1);
             int32_t currentTLEN = (int32_t)std::stoll(tlenStr);
-            if (computeTLEN(lineIdx, true) == currentTLEN) convMinus1++;
-            if (computeTLEN(lineIdx, false) == currentTLEN) convPlain++;
+            TlenInput in;
+            const bool computable = gatherTLEN(lineIdx, in);
+            const int32_t tlenM1 = computable
+                ? (int32_t)samTemplateLen(in.pos, in.pnext, in.refSpan, in.mateRefSpan, true) : 0;
+            const int32_t tlenPl = computable
+                ? (int32_t)samTemplateLen(in.pos, in.pnext, in.refSpan, in.mateRefSpan, false) : 0;
+            tlenMinus1[lineIdx] = tlenM1;
+            tlenPlain[lineIdx] = tlenPl;
+            if (tlenM1 == currentTLEN) convMinus1++;
+            if (tlenPl == currentTLEN) convPlain++;
         }
     }
     const bool minusOne = (convMinus1 >= convPlain);
@@ -1941,7 +2383,8 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         if (fieldLength > 1) {
             std::string tlenStr = std::string((char*)fieldStart, fieldLength - 1);
             int32_t currentTLEN = (int32_t)std::stoll(tlenStr);
-            int32_t computedTLEN = computeTLEN(lineIdx, minusOne);
+            /* The vote's winner, from the values the first pass already computed. */
+            const int32_t computedTLEN = minusOne ? tlenMinus1[lineIdx] : tlenPlain[lineIdx];
             if (computedTLEN != currentTLEN) {
                 tlenExceptions.push_back(std::make_pair(contentIdx, currentTLEN));
             }
@@ -1963,10 +2406,10 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         for (uint32_t i = 0; i < tlenExceptions.size(); ++i) {
             const uint32_t lineIdx = tlenExceptions[i].first;
             /* Indices are collected in increasing order -> the delta stays small. */
-            tlenExcSrcLen += tlenPutVarint(tlenExcBuffer + tlenExcSrcLen, lineIdx - prevLine);
+            tlenExcSrcLen += writeVarint(tlenExcBuffer + tlenExcSrcLen, lineIdx - prevLine);
             prevLine = lineIdx;
-            tlenExcSrcLen += tlenPutVarint(tlenExcBuffer + tlenExcSrcLen,
-                                           tlenZigzag32(tlenExceptions[i].second));
+            tlenExcSrcLen += writeVarint(tlenExcBuffer + tlenExcSrcLen,
+                                           zigzag32(tlenExceptions[i].second));
         }
         tlenCoder->encode_line((uint8_t*)tlenExcBuffer, tlenExcSrcLen);
         tlenCoder->encode_flush();
@@ -2216,8 +2659,11 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
         std::shared_ptr<coder> payCoder = CoderFactory::makeEncoder(payType, matchIo);
         payCoder->encode_line(const_cast<uint8_t*>(payBuf), payLen);
         payCoder->encode_flush();
-        LOG_DEBUG("SEQ match stream: rle=%d coder=%s src=%u dst=%u", (int)rle.useRle,
-                  coderTypeToMagic(payType), payLen, (uint32_t)matchIo->data_len);
+        LOG_DEBUG("SEQ match stream: matchLen=%u nonZero=%u (%.2f%%) rle=%d coder=%s src=%u dst=%u",
+                  matchLen, rle.nonZero,
+                  (double)rle.nonZero * 100.0 / (double)(matchLen ? matchLen : 1),
+                  (int)rle.useRle, coderTypeToMagic(payType), payLen,
+                  (uint32_t)matchIo->data_len);
     }
     if (matchIo->err != coder_io::IO_OK) {
         LOG_ERROR("Encode base match stream overflow: output buffer too small");
@@ -2270,8 +2716,214 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
     return 0;
 }
 
-int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+bool SamCodecActuator::referenceUsableForSeq()
+{
     if (pRefeGene == nullptr) {
+        return false;
+    }
+    if (!refeUsableChecked) {
+        refeUsableChecked = true;
+        refeUsableForSeq = referenceLinesUpWithHeader(pRefeGene);
+        if (!refeUsableForSeq) {
+            warnReferenceNotUsableForSeq();
+        }
+    }
+    return refeUsableForSeq;
+}
+
+/*
+ * The 2-bit code a SEQ character stands for, or -1 when it is none of the four.
+ *
+ * The order is the one the squash uses throughout - actgSquash maps by (ch & 0x06) >> 1, which
+ * puts A at 0, C at 1, T at 2 and G at 3 - and the one atcg4 decodes with.
+ */
+static int atcgIndexOf(uint8_t ch)
+{
+    switch (ch) {
+        case 'A': return 0;
+        case 'C': return 1;
+        case 'T': return 2;
+        case 'G': return 3;
+        default: return -1;
+    }
+}
+
+bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& out)
+{
+    /*
+     * Bounds on what is worth doing. The window is what the squash must cover, so its size is
+     * what the block pays for in bytes whatever the coverage; the cap keeps one block's counters
+     * (four per base) and squash from growing past a few MB, and a block that mixes distant
+     * chromosomes - which an unsorted file produces - simply keeps the plain path. The coverage
+     * floor drops a window that is mostly gap: a squash there would cost more than it saves.
+     */
+    static const int64_t kMaxWindowBases = 2 << 20;   /* 2 Mb: ~8 MB of counters, ~0.5 MB of squash */
+    static const int64_t kMinCoverageShift = 3;       /* at least 1/8 of the window covered */
+
+    std::vector<size_t>& npos = inBlockPtr->getNpos();
+    const uint32_t lineNum = (uint32_t)npos.size();
+    uint8_t* buffer = inBlockPtr->getBuffer();
+
+    /* Pass 1: the window, over every record that could be walked against a reference at all. */
+    int64_t winStart = INT64_MAX;
+    int64_t winEnd = 0;
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+        const uint16_t chrId = mappedChr.find(lineIdx) == mappedChr.end() ? 0xFFFF : mappedChr[lineIdx];
+        if (chrId == 0xFFFF || chrId == 0xFFFE) {
+            continue;
+        }
+        const uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
+        if (flag & 0x04) {
+            continue;
+        }
+        const int64_t chrStart = SamInfo::getInstance().getPositionByIndex(chrId);
+        if (chrStart == -1) {
+            continue;
+        }
+        const auto posIt = mappedPos.find(lineIdx);
+        if (posIt == mappedPos.end()) {
+            continue;
+        }
+        const int64_t refStart = chrStart + (int64_t)posIt->second - 1;
+        const auto crlIt = cigarReadLen.find(lineIdx);
+        const uint32_t refConsumed = (crlIt != cigarReadLen.end()) ? crlIt->second : 0;
+        if (refStart < 0 || refConsumed == 0) {
+            continue;
+        }
+        if (refStart < winStart) {
+            winStart = refStart;
+        }
+        if (refStart + (int64_t)refConsumed > winEnd) {
+            winEnd = refStart + (int64_t)refConsumed;
+        }
+    }
+    if (winStart == INT64_MAX) {
+        return false;
+    }
+    const int64_t windowBases = winEnd - winStart;
+    if (windowBases <= 0 || windowBases > kMaxWindowBases) {
+        return false;
+    }
+
+    /* Pass 2: vote. One saturating counter per base, so a position that is covered by more than
+       255 reads still lets the majority through. */
+    std::vector<uint8_t> count[4];
+    for (int k = 0; k < 4; ++k) {
+        count[k].assign((size_t)windowBases, 0);
+    }
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
+        const uint32_t lineEnd = (uint32_t)npos[lineIdx] - lineStart;
+        uint8_t* line = buffer + lineStart;
+        if (*line == '@') {
+            continue;
+        }
+        const uint32_t contentIdx = lineIdx - headEndLine;
+        const uint16_t chrId = mappedChr.find(lineIdx) == mappedChr.end() ? 0xFFFF : mappedChr[lineIdx];
+        const uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
+        const auto posIt = mappedPos.find(lineIdx);
+        if (chrId == 0xFFFF || chrId == 0xFFFE || (flag & 0x04) || posIt == mappedPos.end()) {
+            continue;
+        }
+        const int64_t chrStart = SamInfo::getInstance().getPositionByIndex(chrId);
+        if (chrStart == -1) {
+            continue;
+        }
+        const int64_t refStart = chrStart + (int64_t)posIt->second - 1;
+        const auto crlIt = cigarReadLen.find(lineIdx);
+        if (crlIt == cigarReadLen.end() || crlIt->second == 0) {
+            continue;
+        }
+        const SamFieldRange seq = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
+        const uint8_t* seqStart = seq.start;
+        const uint32_t seqLength = seq.lengthWithoutTab();
+        if (seqLength == 0 || contentIdx >= cigarOpList.size() || cigarOpList[contentIdx].empty()) {
+            continue;
+        }
+        /* The same CIGAR walk as the coding side, so the vote lands on exactly the bases the
+           walk will later compare against: only M/=/X consume the reference. */
+        const std::vector<CigarOp>& ops = cigarOpList[contentIdx];
+        uint32_t readPos = 0;
+        int64_t refPos = refStart - winStart;
+        for (size_t oi = 0; oi < ops.size() && readPos < seqLength; ++oi) {
+            const CigarOp& op = ops[oi];
+            if (op.op == 'M' || op.op == '=' || op.op == 'X') {
+                for (uint32_t i = 0; i < op.len && readPos < seqLength; ++i, ++readPos, ++refPos) {
+                    const int k = atcgIndexOf(seqStart[readPos]);
+                    if (k >= 0 && refPos >= 0 && refPos < windowBases) {
+                        uint8_t& c = count[k][(size_t)refPos];
+                        if (c < 255) {
+                            ++c;
+                        }
+                    }
+                }
+            } else if (op.op == 'I' || op.op == 'S') {
+                readPos += op.len;
+            } else if (op.op == 'D' || op.op == 'N') {
+                refPos += op.len;
+            }
+        }
+    }
+
+    /* Majority rule; a position nobody covered stays at code 0, which the walk reads as any
+       other code - the read's own base then survives as a non-zero payload byte. */
+    const uint64_t squashLen = (uint64_t)(windowBases >> 2) + !!(windowBases & 0x3) + 1;
+    std::vector<uint8_t> squash((size_t)squashLen, 0);
+    int64_t covered = 0;
+    for (int64_t i = 0; i < windowBases; ++i) {
+        int best = 4;
+        uint8_t bestCount = 0;
+        for (int k = 0; k < 4; ++k) {
+            if (count[k][(size_t)i] > bestCount) {
+                bestCount = count[k][(size_t)i];
+                best = k;
+            }
+        }
+        if (best >= 4) {
+            continue;
+        }
+        ++covered;
+        const uint64_t bit = (uint64_t)i;
+        squash[(size_t)(bit >> 2)] |= (uint8_t)(best << (6 - 2 * (bit & 0x3)));
+    }
+    if ((covered << kMinCoverageShift) < windowBases) {
+        return false;
+    }
+
+    out.windowStart = winStart;
+    out.windowBases = windowBases;
+    out.squash.swap(squash);
+    return true;
+}
+
+int32_t SamCodecActuator::compressBaseSelfRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta)
+{
+    BlockConsensus cons;
+    if (!buildBlockConsensus(fieldIdx, cons)) {
+        /* Nothing to build a reference from: the plain path is what is left. */
+        return compressBaseWithoutRef(fieldIdx, fieldSrcLen, fieldMeta);
+    }
+    LOG_INFO("SEQ block %lld coded against a consensus built from its own reads: window %lld + %lld bases",
+             (long long)inBlockPtr->getBlockId(), (long long)cons.windowStart,
+             (long long)cons.windowBases);
+    seqSelfRef = &cons;
+    const int32_t ret = compressBaseWithRef(fieldIdx, fieldSrcLen, fieldMeta);
+    seqSelfRef = nullptr;
+    return ret;
+}
+
+int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    /*
+     * Two things can play the reference here: the file's own (pRefeGene) and a consensus the
+     * block built from its alignments (seqSelfRef). The latter exists precisely because the
+     * former may be absent or unaddressable, so only the absence of both is an error.
+     */
+    if (pRefeGene == nullptr && seqSelfRef == nullptr) {
         LOG_ERROR("Reference genome is not available for base compression with reference");
         return -1;
     }
@@ -2393,12 +3045,23 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         const std::vector<CigarOp>& ops =
             (contentIdx < cigarOpList.size()) ? cigarOpList[contentIdx] : emptyCigarOps;
 
+        /*
+         * Which reference this record is walked against: the block's own consensus when one is
+         * in play (the windowed twin of the same decision), otherwise the file's. Both produce
+         * the identical payload shape, so nothing below this point has to know which it was.
+         */
         const SeqRecordPayload payload =
-            buildSeqRecordPayload(chrId, flag, startPos, refConsumed, ops, seqStart, seqLength,
-                                  pRefeGene, baseMappedBuffer.get(), ref2bitBuf.get());
+            (seqSelfRef != nullptr)
+                ? buildSeqSquashRecordPayload(chrId, flag, startPos, refConsumed, ops, seqStart,
+                                              seqLength, seqSelfRef->squash.data(),
+                                              seqSelfRef->windowStart, seqSelfRef->windowBases,
+                                              baseMappedBuffer.get(), ref2bitBuf.get())
+                : buildSeqRecordPayload(chrId, flag, startPos, refConsumed, ops, seqStart, seqLength,
+                                        pRefeGene, baseMappedBuffer.get(), ref2bitBuf.get());
         const uint32_t outLen = payload.length;
         const bool rawBases = payload.rawBases;
-        if (payload.usedReference) {
+        /* A consensus is not a file reference and carries no match statistics to update. */
+        if (payload.usedReference && seqSelfRef == nullptr) {
             pRefeGene->updateMatchedGene((uint64_t)payload.refPos,
                 (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
         }
@@ -2528,11 +3191,45 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         return -1;
     }
 
+    /*
+     * The block's own consensus, when that is what coded this column (see
+     * SamCodecActuator::buildBlockConsensus). It travels with the block rather than being
+     * rebuilt on the decoding side, because it is a function of this block's alignments: the
+     * sub-stream holds its squash and the field meta the window it covers, so the decoder can
+     * run the same windowed walk (see decompressBase). Appended last so that every stream the
+     * layouts already knew keeps its position, and read back by name rather than by being
+     * expected.
+     */
+    if (seqSelfRef != nullptr) {
+        std::shared_ptr<coder_io> selfIo = makeCoderIo(outBlockPtr->getCurrent(),
+                                                       outBlockPtr->getRemain(), "SEQ selfref");
+        CoderFactory::applyLevel(selfIo.get(), CoderType::BWT_CM, engineCompressLevel());
+        std::shared_ptr<coder_bwt_cm> selfCoder = std::make_shared<coder_bwt_cm>(selfIo.get());
+        selfCoder->encode_line(seqSelfRef->squash.data(), (uint32_t)seqSelfRef->squash.size());
+        selfCoder->encode_flush();
+        if (selfIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode SEQ self reference overflow: output buffer too small");
+            return -1;
+        }
+        Json::Value selfMeta;
+        selfMeta["srclen"] = (Json::Value::UInt)seqSelfRef->squash.size();
+        selfMeta["dstlen"] = selfIo->data_len;
+        selfMeta["coder"] = selfIo->meta;
+        selfMeta["sname"] = "selfref";
+        metaStreams.append(selfMeta);
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + selfIo->data_len);
+        totalDstLen += selfIo->data_len;
+        fieldMeta["selfref"] = (Json::Value::UInt)1;
+        fieldMeta["selfref_wstart"] = (Json::Value::Int64)seqSelfRef->windowStart;
+        fieldMeta["selfref_wbases"] = (Json::Value::Int64)seqSelfRef->windowBases;
+    }
+
     // Set metadata
     /* Count of the 'N' stream, which older archives read as their whole N list; every stream
        carries its own count in its stream meta. */
     fieldMeta["ncount"] = (Json::Value::UInt)excClasses[(uint8_t)'N'].count;
     fieldMeta["litbases"] = (Json::Value::UInt)1;
+
     /*
      * How to read a payload byte that is above the 2-bit range: as one of the record's own
      * characters, because the record does not use the reference (see the fallback in the record
@@ -2845,6 +3542,34 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
         CoderFactory::makeQualEncoder(pickedQualCoder, qualityIo.get(), qualCoderArgs,
                                       engineCompressLevel());
     pbgzprof::addSince(pbgzprof::QUAL_PREP, qualT0);
+
+    /*
+     * The prior carries the alphabet of the blocks it was trained on and a stream is coded with one
+     * alphabet throughout, so a block whose quality values left it cannot be coded with that prior
+     * (see coder_io::IO_UNCODABLE). The prior is dropped for such a block instead: the coder then
+     * builds its alphabet from the block's own values, exactly what the decoder does for a block
+     * whose meta carries no prior address.
+     */
+    if (pickedQualCoder == CoderType::FCV2 && qualPriorBlob.get() != nullptr && qualEncoder != nullptr) {
+        bool covered = true;
+        for (size_t i = 0; i < qualFreqTable.size(); ++i) {
+            if (!qualEncoder->coversByte((uint8_t)(qualFreqTable[i].first + '!'))) {
+                covered = false;
+                break;
+            }
+        }
+        if (!covered) {
+            LOG_INFO("QUAL prior does not cover block %lld's quality values, coding it without the prior.",
+                     (long long)inBlockPtr->getBlockId());
+            qualCoderArgs.priorBlob = nullptr;
+            std::shared_ptr<coder_io> plainIo =
+                makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
+            qualEncoder = CoderFactory::makeQualEncoder(pickedQualCoder, plainIo.get(), qualCoderArgs,
+                                                        engineCompressLevel());
+            qualityIo = plainIo;
+            qualPriorLoaded = false;
+        }
+    }
     if (!qualPriorLoaded) {
         qualPriorAddress = -1;
     }
@@ -2962,7 +3687,9 @@ int32_t SamCodecActuator::decompress() {
     // Reset read offset before decompression
     readOffset = 0;
     optionCacheEmpty = true;
-    optionRecLines.clear();
+    optionRecText.clear();
+    optionRecOff.clear();
+    optionRecPresent.clear();
     // Parse meta information
     initMetaInfo();
 
@@ -3126,10 +3853,10 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
     /* The SEQ exception streams and their cursors live in seqExc (see SeqExcStream). */
 
     uint8_t* pBaseOut = nullptr;
-    if (streams[9]["coder"]["magic"].asString() == "coder_fc") {
+    if (CoderFactory::decoderIsWholeBlock(streams[9]["coder"]["magic"].asString())) {
         /*
-         * coder_fc is a "whole-block" coder: SEQ must be fully decoded in one
-         * go, but the final SAM output is interleaved line by line
+         * A "whole-block" coder (coder_fc, see CoderFactory::decoderIsWholeBlock)
+         * decodes SEQ in one go, but the final SAM output is interleaved line by line
          * (ID\tFLAG\t...\tSEQ\tQUAL\n), so SEQ can only land somewhere else
          * first and be moved line by line afterwards. It is staged at the
          * **tail** of the outputBlock buffer (same landing spot as in
@@ -3369,7 +4096,7 @@ static int32_t expandCounterSubStream(const uint8_t* payload, uint32_t payloadLe
         if (wp + 5 > outCap) {
             return -1;
         }
-        wp += tlenPutVarint(out + wp, zz);
+        wp += writeVarint(out + wp, zz);
     }
     return (int32_t)wp;
 }
@@ -3589,7 +4316,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
                     LOG_ERROR("Decode id dictionary sub-stream(%u): index out of range", i);
                     return -1;
                 }
-                wp += tlenPutVarint(nbuf + wp, (uint32_t)acc);
+                wp += writeVarint(nbuf + wp, (uint32_t)acc);
             }
             nlen = wp;
         } else if (isHex) {
@@ -3655,7 +4382,15 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
     maxBaseLength = baseMeta["maxlen"].asUInt();
     minBaseLength = baseMeta["minlen"].asUInt();
     LOG_DEBUG("maxBaseLen = %d, minBaseLen = %d", maxBaseLength, minBaseLength);
-    bool isUseReference = pRefeGene != nullptr && baseMeta.isMember("streams");
+    /*
+     * A column coded against the block's own consensus uses the same layout as the reference
+     * one ("streams"), and - unlike it - can be read back with no external reference at all,
+     * which is the whole point of that layout. Everything below therefore treats the two the
+     * same; only the walk's source differs (see decompressBase).
+     */
+    baseSelfRefActive = false;
+    bool isUseReference = baseMeta.isMember("selfref") ||
+                          (pRefeGene != nullptr && baseMeta.isMember("streams"));
     if (!isUseReference) {
         /*
          * One stream for the whole column: initSeqWholeBlockDecoder builds its decoder
@@ -3715,6 +4450,24 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
                 return -1;
             }
         }
+
+        /*
+         * The block's own consensus, when the column was coded against one: its squash is the
+         * last sub-stream, and the meta says which window of the file's coordinate space it
+         * covers. Read here, before any record, because decompressBase walks every record
+         * against it (see baseSelfRefActive).
+         */
+        if (baseMeta.isMember("selfref")) {
+            id++;
+            if (id >= (uint32_t)baseMetaStreams.size() ||
+                predecodeSeqSelfRefStream(baseMetaStreams, id) != 0) {
+                LOG_ERROR("SEQ self reference stream is missing or unreadable");
+                return -1;
+            }
+            baseSelfRefWindowStart = baseMeta["selfref_wstart"].asInt64();
+            baseSelfRefWindowBases = baseMeta["selfref_wbases"].asInt64();
+            baseSelfRefActive = true;
+        }
     }
     return 0;
 }
@@ -3735,7 +4488,11 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
  */
 bool SamCodecActuator::recordDeferredFieldOffset(uint32_t idx, Json::Value& fieldMeta)
 {
-    if (idx == 11 && fieldMeta.isMember("mode") && fieldMeta["mode"].asString() == "tag_split") {
+    if (idx == 11 && fieldMeta.isMember("mode") &&
+        (fieldMeta["mode"].asString() == "tag_split" ||
+         fieldMeta["mode"].asString() == "opt_strip")) {
+        /* OPTION is the last field, so its streams need no advancing here either; the mode says
+           which layer decodes them (decompressOptionField). */
         fieldIoStart[idx] = readOffset;
         return true;
     }
@@ -3838,6 +4595,39 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lin
 int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFlag,
                                                 RoughIOBlock* outputBlock,
                                                 const Json::Value& fieldMeta) {
+    /*
+     * The stripped layout: the column was written without the repeated tag names, so each record's
+     * text is rebuilt from its sequence index and its values (see compressOptionStrip). The record
+     * index is the output line number less the block's header lines, since the column carries one
+     * entry per record and the line number counts the header too.
+     */
+    if (fieldMeta.isMember("mode") && fieldMeta["mode"].asString() == "opt_strip") {
+        if (optionCacheEmpty) {
+            if (decodeOptionStripColumn(fieldMeta) != 0) {
+                return -1;
+            }
+        }
+        /* lineNo counts data lines here, not lines of the block: one entry per record, which is
+           what the writer emitted (the header lines never reach a field decoder). */
+        const uint32_t recIdx = lineNo;
+        if (recIdx + 1 < optionRecOff.size() && recIdx < optionRecPresent.size() &&
+            optionRecPresent[recIdx] != 0) {
+            const uint32_t from = optionRecOff[recIdx];
+            const uint32_t len = optionRecOff[recIdx + 1] - from;
+            memcpy(outputBlock->getCurrent(), optionRecText.data() + from, len);
+            outputBlock->setDataLen(outputBlock->getDataLen() + len);
+            *(outputBlock->getCurrent()) = splitFlag;
+            outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+            return (int32_t)len + 1;
+        }
+        /* This line has no OPTION: turn the '\t' just appended after QUAL back into '\n'. */
+        uint8_t* pEnd = outputBlock->getCurrent();
+        if (pEnd > outputBlock->getBuffer()) {
+            *(pEnd - 1) = '\n';
+        }
+        return 0;
+    }
+
     if (!fieldMeta.isMember("tags") || fieldMeta["mode"].asString() != "tag_split") {
         /*
          * affix form: the OPTION of all lines in the block is one column. When a
@@ -3864,14 +4654,15 @@ int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFl
             return -1;
         }
     }
-    if (lineNo < optionRecLines.size()) {
-        const std::string& content = optionRecLines[lineNo];
-        if (!content.empty()) {
-            memcpy(outputBlock->getCurrent(), content.data(), content.size());
-            outputBlock->setDataLen(outputBlock->getDataLen() + (uint32_t)content.size());
+    if (lineNo + 1 < optionRecOff.size()) {
+        const uint32_t from = optionRecOff[lineNo];
+        const uint32_t len = optionRecOff[lineNo + 1] - from;
+        if (len != 0) {
+            memcpy(outputBlock->getCurrent(), optionRecText.data() + from, len);
+            outputBlock->setDataLen(outputBlock->getDataLen() + len);
             *(outputBlock->getCurrent()) = splitFlag;
             outputBlock->setDataLen(outputBlock->getDataLen() + 1);
-            return (int32_t)content.size() + 1;
+            return (int32_t)len + 1;
         }
     }
     /* This line has no OPTION: turn the '\t' just appended after QUAL back into '\n' (consistent with the old logic). */
@@ -3883,7 +4674,8 @@ int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFl
 }
 
 int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
-    optionRecLines.clear();
+    optionRecText.clear();
+    optionRecOff.clear();
     optionCacheEmpty = false;
 
     /* Start of this field's stream: recorded by initDecoder; readOffset cannot be used (it has been advanced by line-by-line decoding). */
@@ -3959,25 +4751,227 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
         optBase += dstlen;
     }
 
-    /* Reassemble the OPTION text line by line. */
+    /*
+     * Reassemble the OPTION text line by line, straight into the flat buffer.
+     *
+     * The tag names and types are read out of the meta once, not once per tag instance: asString()
+     * builds a std::string on every call, and a block of ten million tag instances spent most of its
+     * reassembly time on those temporaries even though the column has a handful of tags.
+     */
+    std::vector<std::string> tagNames(nTag), tagTypes(nTag);
+    for (uint32_t t = 0; t < nTag; ++t) {
+        tagNames[t] = tags[t][0].asString();
+        tagTypes[t] = tags[t][1].asString();
+    }
     const uint32_t lines = (uint32_t)recIds.size();
-    optionRecLines.resize(lines);
+    optionRecText.clear();
+    optionRecOff.clear();
+    optionRecOff.reserve((size_t)lines + 1);
+    optionRecOff.push_back(0);
     std::vector<size_t> colPos(nTag, 0);
     for (uint32_t r = 0; r < lines; ++r) {
-        std::string out;
         const auto& ids = recIds[r];
         for (size_t k = 0; k < ids.size(); ++k) {
             uint32_t tid = ids[k];
             if (tid >= nTag || colPos[tid] >= tagVals[tid].size()) continue;
             const std::string& v = tagVals[tid][colPos[tid]++];
-            if (k) out += '\t';
-            out += tags[tid][0].asString();
-            out += ':';
-            out += tags[tid][1].asString();
-            out += ':';
-            out += v;
+            if (k) optionRecText.push_back('\t');
+            optionRecText.insert(optionRecText.end(), tagNames[tid].begin(), tagNames[tid].end());
+            optionRecText.push_back(':');
+            optionRecText.insert(optionRecText.end(), tagTypes[tid].begin(), tagTypes[tid].end());
+            optionRecText.push_back(':');
+            optionRecText.insert(optionRecText.end(), v.begin(), v.end());
         }
-        optionRecLines[r] = out;
+        optionRecOff.push_back((uint32_t)optionRecText.size());
+    }
+    return 0;
+}
+
+/*
+ * Reads back the stripped OPTION layout (see compressOptionStrip): one sequence index per record
+ * and one line of values, both line-wise, with the tag sequences in the meta. A sequence entry of
+ * the verbatim kind is the whole segment, and any other entry is "NAME:TYPE:" in front of the
+ * value, which is how the record's text is put back together.
+ *
+ * Like the tag-split layout, everything is decoded when the first OPTION line is reached: the two
+ * sub-streams are sequential, so a record can only be read after the records before it, and the
+ * per-record text is cached in optionRecText.
+ */
+int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
+{
+    optionRecText.clear();
+    optionRecOff.clear();
+    optionRecPresent.clear();
+    optionCacheEmpty = false;
+
+    const Json::Value& streams = fieldMeta["streams"];
+    const Json::Value& seqs = fieldMeta["seqs"];
+    if (!streams.isArray() || !seqs.isArray()) {
+        LOG_ERROR("OPTION stripped layout is missing its sequence table or streams");
+        return -1;
+    }
+
+    /* The start of this field's streams: recorded by recordDeferredFieldOffset, because the
+       line-by-line decoders of the earlier fields have moved readOffset past it by now. */
+    uint32_t off = readOffset;
+    auto startIt = fieldIoStart.find(11);
+    if (startIt != fieldIoStart.end()) {
+        off = startIt->second;
+    }
+
+    /* The two sub-streams sit one after the other, in the order the writer emitted them. */
+    uint32_t sidxOff = 0, sidxLen = 0, valsOff = 0, valsLen = 0;
+    const Json::Value* sidxMeta = nullptr;
+    const Json::Value* valsMeta = nullptr;
+    for (uint32_t i = 0; i < streams.size(); ++i) {
+        const uint32_t dst = streams[i]["dstlen"].asUInt();
+        const std::string name = streams[i]["sname"].asString();
+        if (name == "sidx") {
+            sidxOff = off;
+            sidxLen = dst;
+            sidxMeta = &streams[i];
+        } else if (name == "vals") {
+            valsOff = off;
+            valsLen = dst;
+            valsMeta = &streams[i];
+        }
+        off += dst;
+    }
+    if (sidxMeta == nullptr || valsMeta == nullptr) {
+        LOG_ERROR("OPTION stripped layout is missing a sub-stream");
+        return -1;
+    }
+
+    /*
+     * The level travels the same way initFieldDecoder hands it over: the textual coder always
+     * reads it from the meta, coder_arith only when the meta carries one, and a bwt_cm stream keeps
+     * its own settings in its header instead.
+     */
+    auto openSub = [&](const Json::Value& meta, uint32_t at, uint32_t len) -> std::shared_ptr<coder> {
+        const std::string coderName = meta["coder"]["magic"].asString();
+        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + at, len, "OPTION stream");
+        ioVector.push_back(io);
+        FieldDecoderArgs args;
+        if (coderName == "coder_affix_match" ||
+            (coderName == "coder_arith" && meta["coder"].isMember("level"))) {
+            args.level = meta["coder"]["level"].asInt();
+        }
+        return CoderFactory::makeFieldDecoder(coderName, io.get(), args);
+    };
+
+    std::shared_ptr<coder> sidxCoder = openSub(*sidxMeta, sidxOff, sidxLen);
+    std::shared_ptr<coder> valsCoder = openSub(*valsMeta, valsOff, valsLen);
+    if (sidxCoder == nullptr || valsCoder == nullptr) {
+        LOG_ERROR("Unsupported OPTION sub-stream coder");
+        return -1;
+    }
+
+    /*
+     * The sequence table's flags and texts, read out of the meta once per sequence instead of once
+     * per record: seqText[i][k] is segment k of sequence i.
+     *
+     * A record's segments are the same sequences over and over, and seq[k][1].asString() builds a
+     * std::string on every call - a block of ten million tag instances was paying for twenty
+     * million of those temporaries while the table itself holds a handful of entries.
+     *
+     * Each sequence is built the first time a record references it, with the same accessors the
+     * per-record code used: a sequence the block never uses is never read, so a meta entry of an
+     * unexpected shape cannot fail a block that does not refer to it.
+     */
+    struct SeqSegment {
+        bool verbatim = false;
+        std::string prefix;   /* "NAME:TYPE:", empty when the segment is verbatim */
+    };
+    std::vector<std::vector<SeqSegment>> seqText((size_t)seqs.size());
+    std::vector<uint8_t> seqReady((size_t)seqs.size(), 0);
+
+    /*
+     * optionRecOff is a prefix sum: entry r is where record r's text starts, so the table needs its
+     * leading zero before the records are appended to.
+     */
+    optionRecOff.push_back(0);
+    uint8_t tmp[1 << 16];
+    std::vector<uint32_t> valueStarts;
+    while (true) {
+        const int32_t idxLen = sidxCoder->decode_line(tmp, sizeof(tmp), '\n', false);
+        if (idxLen <= 0) {
+            break;   /* end of the column */
+        }
+        uint32_t idxEnd = (uint32_t)idxLen;
+        if (idxEnd > 0 && tmp[idxEnd - 1] == '\n') {
+            --idxEnd;
+        }
+        uint32_t seqIdx = 0;
+        for (uint32_t k = 0; k < idxEnd; ++k) {
+            if (tmp[k] < '0' || tmp[k] > '9') {
+                LOG_ERROR("OPTION sequence index is not a number");
+                return -1;
+            }
+            seqIdx = seqIdx * 10 + (uint32_t)(tmp[k] - '0');
+        }
+        if (seqIdx >= (uint32_t)seqs.size()) {
+            LOG_ERROR("OPTION sequence index %u is out of range", seqIdx);
+            return -1;
+        }
+
+        const int32_t valsGot = valsCoder->decode_line(tmp, sizeof(tmp), '\n', false);
+        if (valsGot <= 0) {
+            LOG_ERROR("OPTION values line is missing");
+            return -1;
+        }
+        uint32_t valsEnd = (uint32_t)valsGot;
+        if (valsEnd > 0 && tmp[valsEnd - 1] == '\n') {
+            --valsEnd;
+        }
+
+        /* How many values there are is fixed by the sequence, not by the line's own length: a
+           single segment with an empty value and a record with no OPTION at all both write an
+           empty line, and only the sequence tells them apart (one value against none). */
+        const Json::Value& seq = seqs[seqIdx];
+        if (!seqReady[seqIdx]) {
+            const uint32_t segs = (uint32_t)seq.size();
+            seqText[seqIdx].resize(segs);
+            for (uint32_t k = 0; k < segs; ++k) {
+                SeqSegment& e = seqText[seqIdx][k];
+                e.verbatim = (seq[k][0].asInt() == 1);
+                if (!e.verbatim) {
+                    e.prefix = seq[k][1].asString() + ':' + seq[k][2].asString() + ':';
+                }
+            }
+            seqReady[seqIdx] = 1;
+        }
+        valueStarts.clear();
+        if (seq.size() > 0) {
+            uint32_t start = 0;
+            for (uint32_t k = 0; k <= valsEnd; ++k) {
+                if (k != valsEnd && tmp[k] != '\t') {
+                    continue;
+                }
+                valueStarts.push_back(start);
+                start = k + 1;
+            }
+        }
+
+        if (seq.size() != valueStarts.size()) {
+            LOG_ERROR("OPTION sequence has %u segments but the record carries %zu values",
+                      (unsigned)seq.size(), valueStarts.size());
+            return -1;
+        }
+        for (uint32_t k = 0; k < (uint32_t)valueStarts.size(); ++k) {
+            const uint32_t from = valueStarts[k];
+            const uint32_t to = (k + 1 < (uint32_t)valueStarts.size())
+                ? valueStarts[k + 1] - 1 : valsEnd;   /* minus the tab that separates them */
+            if (k) {
+                optionRecText.push_back('\t');
+            }
+            const SeqSegment& e = seqText[seqIdx][k];
+            if (!e.verbatim) {
+                optionRecText.insert(optionRecText.end(), e.prefix.begin(), e.prefix.end());
+            }
+            optionRecText.insert(optionRecText.end(), tmp + from, tmp + to);
+        }
+        optionRecOff.push_back((uint32_t)optionRecText.size());
+        optionRecPresent.push_back(seq.size() > 0 ? 1 : 0);
     }
     return 0;
 }
@@ -4130,7 +5124,12 @@ int32_t SamCodecActuator::initSeqWholeBlockDecoder(const Json::Value& baseMeta, 
     const uint32_t srcLength = baseMeta["totalsrclen"].asUInt();
     LOG_DEBUG("srclen = %d, dstlen = %d", srcLength, dstLength);
 
-    if (coderName == "coder_fc") {
+    /*
+     * Whether the stream is one a decoder can only take whole. The coder's own descriptor
+     * answers it (see CoderFactory::decoderIsWholeBlock) rather than a name comparison here:
+     * the property belongs to the coder.
+     */
+    if (CoderFactory::decoderIsWholeBlock(coderName)) {
         /*
          * The whole-block SEQ is decoded into the tail of the outputBlock buffer as staging,
          * then decompressBase moves it to the head line by line. No separate buffer is
@@ -4152,13 +5151,30 @@ int32_t SamCodecActuator::initSeqWholeBlockDecoder(const Json::Value& baseMeta, 
             LOG_ERROR("Decode SEQ by coder_fc failed, srclen = %u", srcLength);
             return -1;
         }
-    } else if (coderName == "coder_bwt_cm") {
-        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ");
-        ioVector.push_back(io);
-        fieldDecoders[idx] = std::make_shared<coder_bwt_cm>(io.get());
     } else {
-        LOG_ERROR("Unsupported coder name:%s", coderName.c_str());
-        return -1;
+        /*
+         * A record-by-record coder only has its stream prepared here; decompressBase pulls one
+         * record at a time from it. The coder is built from the magic the stream carries rather
+         * than from a list of accepted names: which one is written here is decided by the SEQ
+         * row of the profile in use (archive writes coder_bwt_cm, fast writes coder_rans), so a
+         * row must not need a change down here to be readable. The level is replayed from the
+         * same meta, so the decoder sits on the model the encoder built.
+         */
+        std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ");
+        io->meta = baseMeta;
+        io->meta["dstlen"] = dstLength;
+
+        FieldDecoderArgs args;
+        if (baseMeta["coder"].isMember("level")) {
+            args.level = baseMeta["coder"]["level"].asInt();
+        }
+        std::shared_ptr<coder> decoder = CoderFactory::makeFieldDecoder(coderName, io.get(), args);
+        if (decoder == nullptr) {
+            LOG_ERROR("Unsupported coder name:%s", coderName.c_str());
+            return -1;
+        }
+        ioVector.push_back(io);
+        fieldDecoders[idx] = decoder;
     }
     return (int32_t)dstLength;
 }
@@ -4367,6 +5383,40 @@ int32_t SamCodecActuator::predecodeSeqBaseLengthStream(const Json::Value& stream
     }
     readOffset += dstlen;
     MemoryUtil::safeFree(baseLenBuffer);
+    return 0;
+}
+
+int32_t SamCodecActuator::predecodeSeqSelfRefStream(const Json::Value& streams, uint32_t streamId)
+{
+    if (streams[streamId]["sname"].asString() != "selfref") {
+        LOG_ERROR("check sub stream failed. sname not match: %s",
+                  streams[streamId]["sname"].asString().c_str());
+        return -1;
+    }
+    const uint32_t srclen = streams[streamId]["srclen"].asUInt();
+    const uint32_t dstlen = streams[streamId]["dstlen"].asUInt();
+    if (srclen == 0) {
+        LOG_ERROR("SEQ self reference stream is empty");
+        return -1;
+    }
+
+    std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstlen,
+                                               "SEQ selfref");
+    io->meta = streams[streamId];
+    std::shared_ptr<coder> decoder =
+        CoderFactory::makeFieldDecoder(streams[streamId]["coder"]["magic"].asString(), io.get(),
+                                       FieldDecoderArgs());
+    if (decoder == nullptr) {
+        LOG_ERROR("check sub stream failed, coder name not match: %s",
+                  streams[streamId]["coder"]["magic"].asString().c_str());
+        return -1;
+    }
+    baseSelfRefSquash.assign(srclen, 0);
+    if (decoder->decode_line(baseSelfRefSquash.data(), srclen, UINT8_MAX, false) <= 0) {
+        LOG_ERROR("Decode SEQ self reference failed");
+        return -1;
+    }
+    readOffset += dstlen;
     return 0;
 }
 
@@ -5656,31 +6706,44 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
      * block_size upper bound x 2, see decompress()); no further growth happens
      * line by line.
      */
-    bool isUserReference = pRefeGene != nullptr && fieldMeta.isMember("streams");
+    /*
+     * Two ways a column can be reference-coded. Against the file's reference: the archive has the
+     * reference layout ("streams") and this side holds the reference. Or against a consensus the
+     * block built for itself: the archive carries the squash and the window it covers
+     * ("selfref"), and this side needs nothing else - which is the point, since that layout
+     * exists for the case where no usable reference is available at all.
+     */
+    const bool isSelfReference = baseSelfRefActive && fieldMeta.isMember("selfref");
+    bool isUserReference =
+        isSelfReference || (pRefeGene != nullptr && fieldMeta.isMember("streams"));
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
+        /*
+         * Every row length is known here, so the record is taken by its exact length and the
+         * separator is never looked for: split_ch = UINT8_MAX means "hand back out_len bytes"
+         * (see coder_rans::decode_line). Only a whole-block coder was decoded outright, into
+         * the staging buffer, and is copied from there instead.
+         */
+        const std::string seqCoder = fieldMeta["coder"]["magic"].asString();
         if (minBaseLength == maxBaseLength) {
             actualBaseLen = baseLengthBuffer[lineNo] == 0 ? maxBaseLength : baseLengthBuffer[lineNo];
-            if (fieldMeta["coder"]["magic"].asString() == "coder_fc") {
+            if (CoderFactory::decoderIsWholeBlock(seqCoder)) {
                 memcpy(outputBlock->getCurrent(), pBaseOut, actualBaseLen);
                 pBaseOut += actualBaseLen;
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
-            } else if (fieldMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
+            } else {
                 int32_t decLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), actualBaseLen, UINT8_MAX, false);
                 if (decLen < 0 || (uint32_t)decLen != actualBaseLen) {
                     LOG_ERROR("base decode failed in block %lld, line %d, expect len %d, actual len %d", (long long)inBlockPtr->getBlockId(), lineNo, actualBaseLen, decLen);
                     return -1;
                 }
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
-            } else {
-                LOG_ERROR("Not supported coder name:%s",fieldMeta["coder"]["magic"].asString().c_str());
-                return -1;
             }
 
             *(outputBlock->getCurrent()) = '\t';
             outputBlock->setDataLen(outputBlock->getDataLen() + 1);
         } else {
-            if (CoderFactory::decoderIsWholeBlock(fieldMeta["coder"]["magic"].asString())) {
+            if (CoderFactory::decoderIsWholeBlock(seqCoder)) {
                 /* A whole-block coder: its stream is already decoded into the staging buffer
                    (see initDecoder), so this record is copied out of it up to its tab. */
                 uint8_t* pBaseTmp = outputBlock->getCurrent();
@@ -5696,7 +6759,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 pBaseOut += actualBaseLen;
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
-            } else if (fieldMeta["coder"]["magic"].asString() == "coder_bwt_cm") {
+            } else {
                 /* decode_line's split mode reports BUF_SMALL as soon as it has
                    filled out_len characters without yet seeing the split char.
                    A row whose SEQ is exactly maxBaseLength long still needs one
@@ -5712,9 +6775,6 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 actualBaseLen = decLen;
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
-            } else {
-                LOG_ERROR("Not supported coder name:%s", fieldMeta["coder"]["magic"].asString().c_str());
-                return -1;
             }
         }
     } else {
@@ -5776,6 +6836,22 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                  */
                 bool findMappedPos = false;
                 int64_t refeMappedPos = 0;
+                if (isSelfReference) {
+                    /*
+                     * The consensus only covers the block's window, so the position is rebased
+                     * on it and the bound is the window's - the same decision the encoder took
+                     * (seqRecordUsesSquashWindow), which is what keeps the two sides in step.
+                     */
+                    const uint16_t chrIdx = mappedChr.find(lineNo) == mappedChr.end() ? 0xFFFF : mappedChr[lineNo];
+                    const auto crlIt = cigarReadLen.find(lineNo);
+                    const uint32_t refConsumed = (crlIt != cigarReadLen.end()) ? crlIt->second : 0;
+                    const auto posIt = mappedPos.find(lineNo);
+                    const uint64_t pos = (posIt != mappedPos.end()) ? (uint64_t)posIt->second : 0;
+                    const uint16_t mapFlag = mappedFlag.find(lineNo) == mappedFlag.end() ? 4 : mappedFlag[lineNo];
+                    findMappedPos = seqRecordUsesSquashWindow(chrIdx, mapFlag, pos, refConsumed,
+                                                              baseSelfRefWindowStart,
+                                                              baseSelfRefWindowBases, refeMappedPos);
+                } else {
                 do {
                     uint16_t chrIdx = mappedChr.find(lineNo) == mappedChr.end() ? 0xFFFF : mappedChr[lineNo];
                     if (chrIdx == 0xFFFF || chrIdx == 0xFFFE) {
@@ -5794,6 +6870,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                     }
                     findMappedPos = true;
                 } while(0);
+                }
 
                 if (!findMappedPos) {
                     decoderLen = readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
@@ -5830,11 +6907,21 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                             switch (op.op) {
                                 case 'M': case '=': case 'X':
                                     if (readPos + op.len > actualBaseLen) { readPos = actualBaseLen; break; }
-                                    pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, op.len, refPosLocal);
-                                    for (uint32_t i = 0; i < op.len; ++i) {
-                                        baseSquashBuffer[i] = refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i];
+                                    if (isSelfReference) {
+                                        /* The consensus is read the same way the file's reference
+                                           is, only from the block's own buffer. */
+                                        seqSquashStretch(baseSelfRefSquash.data(), refeStrecchBuffer,
+                                                         op.len, (uint64_t)refPosLocal);
+                                        for (uint32_t i = 0; i < op.len; ++i) {
+                                            out[readPos + i] = atcg4[(refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i]) & 0x3];
+                                        }
+                                    } else {
+                                        pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, op.len, refPosLocal);
+                                        for (uint32_t i = 0; i < op.len; ++i) {
+                                            baseSquashBuffer[i] = refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i];
+                                        }
+                                        pRefeGene->getActgFrom2Bits(baseSquashBuffer, op.len, out + readPos);
                                     }
-                                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, op.len, out + readPos);
                                     readPos += op.len;
                                     refPosLocal += op.len;
                                     break;

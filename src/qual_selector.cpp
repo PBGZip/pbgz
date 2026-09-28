@@ -21,6 +21,7 @@
 #include "qual_selector.h"
 
 #include <string.h>
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <atomic>
@@ -55,6 +56,12 @@ const uint32_t QUAL_LONG_READ_LEN = 500;
 int qualModelCountForMeanLen(uint64_t meanLen)
 {
     return (meanLen >= (uint64_t)QUAL_LONG_READ_LEN) ? LONG_READ_MODEL_COUNT : FCV2_MODEL_COUNT;
+}
+
+/* Whether a candidate list a caller passed in holds this coder. */
+static bool contains(const std::vector<CoderType>& list, CoderType type)
+{
+    return std::find(list.begin(), list.end(), type) != list.end();
 }
 
 namespace {
@@ -434,10 +441,9 @@ struct QualRoundResult {
  * of independent measurements: each rung (sample size) x each candidate coder
  * writes only its own slot.
  *
- * Every rung is executed even when an earlier one would already have settled.
- * That spends more CPU but no more wall time - the rungs run concurrently - and
- * the verdict is taken from the rung the ladder logic stops at, so running them
- * together cannot change the decision.
+ * What is handed over here is one rung's candidates, not the whole ladder: the
+ * ladder is walked lazily (see the walk in selectQualCoder), and the candidates
+ * of the rung being trialled are what run side by side.
  */
 void runInParallel(const std::vector<std::function<void()>>& tasks)
 {
@@ -567,6 +573,15 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
                                          const std::vector<uint32_t>& freqByByte,
                                          uint8_t compressLevel)
 {
+    return select(records, freqByByte, compressLevel,
+                  samFieldCandidates(SAM_QUAL, PBGZ_MODE_ARCHIVE));
+}
+
+FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& records,
+                                         const std::vector<uint32_t>& freqByByte,
+                                         uint8_t compressLevel,
+                                         const std::vector<CoderType>& candidates)
+{
     FieldCodecSelection sel;
 
     uint32_t sampleLen = 0;
@@ -592,14 +607,14 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
 
     /*
      * Which quality coders are in play is the config table's decision, not this
-     * file's: only what the QUAL row of kSamFieldCoderConfig lists is trialled
-     * (see qualCoderCandidate). An empty row therefore means "no selection" and
-     * the column falls through to the field's fallback coder.
+     * file's: only what the QUAL row lists is trialled (the caller passes the row's
+     * list, so this file stays format-agnostic). An empty row therefore means "no
+     * selection" and the column falls through to the field's fallback coder.
      */
-    const bool tryQual = qualCoderCandidate(CoderType::QUAL);
-    const bool tryFcv2 = qualCoderCandidate(CoderType::FCV2);
-    const bool tryBwtCm = qualCoderCandidate(CoderType::BWT_CM);
-    const bool tryQcm = qualCoderCandidate(CoderType::QCM);
+    const bool tryQual  = contains(candidates, CoderType::QUAL);
+    const bool tryFcv2  = contains(candidates, CoderType::FCV2);
+    const bool tryBwtCm = contains(candidates, CoderType::BWT_CM);
+    const bool tryQcm   = contains(candidates, CoderType::QCM);
 
     /* The candidate tiers are only built when fcv2 is in play; the slots below
      * keep the same shape either way, with every tier marked as not-tried. */
@@ -625,11 +640,11 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     const uint32_t MIN_SETTLE_PROBE = 1u << 20;   /* 1 MB */
 
     /*
-     * Build the whole probe ladder up front and trial-compress every candidate
-     * at every rung in parallel (see runInParallel). The ladder doubles the
-     * sample from 64 KB until it is exhausted, and never finalizes below
-     * MIN_SETTLE_PROBE, so that an adaptive encoder cannot win on a sample where
-     * it has not converged yet.
+     * Enumerate the probe ladder up front (it is cheap - the sample doubles from
+     * 64 KB until it is exhausted), then trial one rung at a time, that rung's
+     * candidates in parallel (see runInParallel and the walk below). The ladder
+     * never finalizes below MIN_SETTLE_PROBE, so that an adaptive encoder cannot
+     * win on a sample where it has not converged yet.
      */
     std::vector<uint32_t> probes;
     {
@@ -643,60 +658,72 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
         }
     }
 
-    std::vector<RoundSlots> slots(probes.size());
-    for (size_t i = 0; i < probes.size(); i++) {
-        slots[i].fcv2Ok.assign(cfgs.size(), false);
-        slots[i].fcv2Len.assign(cfgs.size(), 0);
-        slots[i].fcv2Us.assign(cfgs.size(), 0);
-    }
-
-    std::vector<std::function<void()>> tasks;
-    tasks.reserve(probes.size() * (cfgs.size() + (size_t)tryQual + (size_t)tryBwtCm +
-                                   (size_t)tryQcm));
-    for (size_t i = 0; i < probes.size(); i++) {
-        const uint32_t probe = probes[i];
-        const size_t count = recordsForBudget(records, probe);
-        if (tryQual) {
-            tasks.push_back([&records, &freqByByte, &slots, i, count]() {
-                slots[i].qualOk = trialQual(records, count, freqByByte, slots[i].qualLen, slots[i].qualUs);
-            });
-        }
-        for (size_t c = 0; c < cfgs.size(); c++) {
-            tasks.push_back([&records, &freqByByte, &slots, &cfgs, i, c, count]() {
-                uint32_t len = 0;
-                uint32_t us = 0;
-                if (trialFcv2(records, count, freqByByte, cfgs[c], len, us)) {
-                    slots[i].fcv2Ok[c] = true;
-                    slots[i].fcv2Len[c] = len;
-                    slots[i].fcv2Us[c] = us;
-                }
-            });
-        }
-        if (tryBwtCm) {
-            const int bwtLevel = bwtLevelFor(probe);
-            tasks.push_back([&records, &slots, i, count, bwtLevel]() {
-                slots[i].cmOk = trialBwtCm(records, count, bwtLevel, slots[i].cmLen, slots[i].cmUs);
-            });
-        }
-        if (tryQcm) {
-            tasks.push_back([&records, &slots, i, count]() {
-                slots[i].qcmOk = trialQcm(records, count, slots[i].qcmLen, slots[i].qcmUs);
-            });
-        }
-    }
-    runInParallel(tasks);
+    /* Slots for the rung being trialled; fresh per rung, so a trial that failed on this rung cannot
+     * inherit the previous rung's success. */
 
     QualRoundResult final;
     bool finalSet = false;
     uint32_t settleProbe = sampleLen;
 
+    /*
+     * Walk the ladder one rung at a time: a rung is trialled only if the rung before it did not
+     * settle. Every rung used to be trialled up front, on the argument that they run concurrently
+     * and therefore cost no wall time - but this phase is what saturates the cores, so the rungs the
+     * verdict never reads are plain wasted work, and they are the expensive ones (the sample doubles
+     * from rung to rung, so the cost does too): on con_sorted.bam the decision settles at the 2 MB
+     * rung while the 4 MB, 8 MB and full-sample rungs behind it - some 85% of the trialling - were
+     * computed and discarded. Walking lazily computes exactly the rungs the decision reads, in the
+     * same order and with the same settle rule, so the verdict is unchanged by construction.
+     */
     for (size_t i = 0; i < probes.size(); i++) {
         const uint32_t probe = probes[i];
-        QualRoundResult r = assembleRound(slots[i], cfgs);
+        const size_t count = recordsForBudget(records, probe);
+        RoundSlots slot;
+        slot.fcv2Ok.assign(cfgs.size(), false);
+        slot.fcv2Len.assign(cfgs.size(), 0);
+        slot.fcv2Us.assign(cfgs.size(), 0);
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(cfgs.size() + 3);
+        if (tryQual) {
+            tasks.push_back([&records, &freqByByte, &slot, count]() {
+                slot.qualOk = trialQual(records, count, freqByByte, slot.qualLen, slot.qualUs);
+            });
+        }
+        for (size_t c = 0; c < cfgs.size(); c++) {
+            tasks.push_back([&records, &freqByByte, &slot, &cfgs, c, count]() {
+                uint32_t len = 0;
+                uint32_t us = 0;
+                if (trialFcv2(records, count, freqByByte, cfgs[c], len, us)) {
+                    slot.fcv2Ok[c] = true;
+                    slot.fcv2Len[c] = len;
+                    slot.fcv2Us[c] = us;
+                }
+            });
+        }
+        if (tryBwtCm) {
+            const int bwtLevel = bwtLevelFor(probe);
+            tasks.push_back([&records, &slot, count, bwtLevel]() {
+                slot.cmOk = trialBwtCm(records, count, bwtLevel, slot.cmLen, slot.cmUs);
+            });
+        }
+        if (tryQcm) {
+            tasks.push_back([&records, &slot, count]() {
+                slot.qcmOk = trialQcm(records, count, slot.qcmLen, slot.qcmUs);
+            });
+        }
+        runInParallel(tasks);
+
+        QualRoundResult r = assembleRound(slot, cfgs);
         final = r;
         finalSet = true;
         settleProbe = probe;
         sel.rounds++;
+
+        if (getenv("PBGZ_QUAL_LADDER_TRACE") != nullptr) {
+            fprintf(stderr, "L rung=%zu probe=%u qual=%u/%u fcv2=%u/%u cm=%u/%u qcm=%u/%u best=%d\n",
+                    i, probe, r.qualLen, r.qualUs, r.fcv2Len, r.fcv2Us, r.cmLen, r.cmUs,
+                    r.qcmLen, r.qcmUs, (int)r.bestCoder);
+        }
 
         if (!r.anyOk) {
             break;
@@ -740,6 +767,10 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     }
 
     sel.decidedLen = finalSet ? settleProbe : sampleLen;
+    if (getenv("PBGZ_QUAL_LADDER_TRACE") != nullptr) {
+        fprintf(stderr, "L end rungs=%zu rungsBuilt=%zu settleProbe=%u sampleLen=%u candidates=%zu\n",
+                (size_t)sel.rounds, probes.size(), settleProbe, sampleLen, cfgs.size());
+    }
     sel.trialCount = 0;
     /* Only the coders the config table put in play are reported; a coder that was
      * never trialled is absent rather than listed with a zero length. */

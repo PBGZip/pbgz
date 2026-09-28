@@ -208,11 +208,25 @@ bool Reference::initSquashFromFasta() {
     uint8_t squashBuf[1024];
     std::string line;
 
+    /* Bases appended so far, i.e. the base offset the next record will start at. The squash
+       packs across record boundaries (the 4-base cache is not flushed at a header), so a byte
+       offset would not name a record's start - the base count does. */
+    uint64_t baseCount = 0;
+    refSequences.clear();
+
     while (reader->readLine(line) > 0) {
-        if (line.empty() || line[0] == '>') continue;
+        if (line.empty()) continue;
+        if (line[0] == '>') {
+            /* The record's name is the first whitespace-delimited token of its header, which is
+               the token a @SQ SN is compared against (see referenceLinesUpWithHeader). */
+            const size_t nameEnd = line.find_first_of(" \t", 1);
+            refSequences.emplace_back(line.substr(1, nameEnd - 1), baseCount);
+            continue;
+        }
 
         uint32_t lineLen = (uint32_t)line.length();
         uint32_t pos = 0;
+        baseCount += lineLen;
 
         if (cacheLen > 0) {
             uint32_t need = 4 - cacheLen;

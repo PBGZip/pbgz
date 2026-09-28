@@ -57,7 +57,7 @@ std::vector<uint8_t> tlenVarintPayload(const std::vector<std::pair<uint32_t, int
     for (const auto& entry : entries) {
         appendVarint(out, entry.first - prev);
         prev = entry.first;
-        appendVarint(out, tlenZigzag32(entry.second));
+        appendVarint(out, zigzag32(entry.second));
     }
     return out;
 }

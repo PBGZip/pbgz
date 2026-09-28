@@ -53,6 +53,14 @@ struct coder_io
         IO_OK = 0,
         IO_BUF_FULL = -1,    // Write side: data_len has reached data_capacity; writing further overflows
         IO_READ_EMPTY = -2,  // Read side: data_len has reached data_capacity; no data left to read
+        /*
+         * Write side: a symbol outside the coder's alphabet. Codecs whose alphabet is narrower than
+         * the data (coder_fcv2's, which is fixed by the frequency table or by a loaded prior) cannot
+         * code such a symbol, and neither dropping it nor substituting it keeps the stream decodable:
+         * the decoder would read a stream that is one symbol short or one symbol different. The
+         * stream is failed instead, and the caller chooses another codec for the block.
+         */
+        IO_UNCODABLE = -3,
     };
 
     /*

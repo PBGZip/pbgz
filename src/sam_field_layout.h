@@ -27,75 +27,9 @@
 
 #include <json/json.h>
 
-/*
- * LEB128 varint and zigzag helpers, used by the position, length and numeric sub-streams (the
- * names date from the TLEN stream, which was the first to replace a fixed-width layout with them).
- * Both replace layouts whose high bytes were almost always 0, and zigzag keeps small negative
- * differences small by moving the sign into the low bit.
- */
-static inline uint32_t tlenPutVarint(uint8_t* p, uint32_t v) {
-    uint32_t n = 0;
-    while (v >= 0x80) {
-        p[n++] = (uint8_t)(v | 0x80);
-        v >>= 7;
-    }
-    p[n++] = (uint8_t)v;
-    return n;
-}
-
-static inline uint32_t tlenZigzag32(int32_t v) {
-    return (uint32_t)((v << 1) ^ (v >> 31));
-}
-
-static inline int32_t tlenUnzigzag32(uint32_t v) {
-    return (int32_t)((v >> 1) ^ (uint32_t)(-(int32_t)(v & 1)));
-}
-
-/* Appends value as a base-128 varint, the encoding the position and length lists use. */
-static inline void appendVarint(std::vector<uint8_t>& out, uint32_t value)
-{
-    while (value >= 0x80) {
-        out.push_back((uint8_t)(value | 0x80));
-        value >>= 7;
-    }
-    out.push_back((uint8_t)value);
-}
-
-/* Same, for the signed values whose magnitude can exceed 32 bits once zigzagged. */
-static inline void appendVarint64(std::vector<uint8_t>& out, uint64_t value)
-{
-    while (value >= 0x80) {
-        out.push_back((uint8_t)(value | 0x80));
-        value >>= 7;
-    }
-    out.push_back((uint8_t)value);
-}
-
-/* Zigzag: the sign of a signed delta in the low bit, so small negatives stay small. */
-static inline uint64_t zigzag64(int64_t value)
-{
-    return ((uint64_t)value << 1) ^ (uint64_t)(value >> 63);
-}
-
-/* Reads one varint from buf[off], advancing off; false when it runs off the end or is longer than
-   five bytes. */
-static inline bool readVarint(const uint8_t* buf, uint32_t len, uint32_t& off, uint32_t& value)
-{
-    uint32_t result = 0;
-    int shift = 0;
-    for (;;) {
-        if (off >= len || shift > 28) {
-            return false;
-        }
-        const uint8_t byte = buf[off++];
-        result |= (uint32_t)(byte & 0x7F) << shift;
-        shift += 7;
-        if ((byte & 0x80) == 0) {
-            value = result;
-            return true;
-        }
-    }
-}
+/* The varint/zigzag helpers live with the other byte-stream shapes both formats share (see
+ * seq_stream_util.h); they are used here for the TLEN and numeric sub-streams. */
+#include "seq_stream_util.h"
 
 /* The marker the TLEN field meta carries, naming the layout its exception stream is in. */
 enum { TLEN_EXC_LAYOUT_FIXED = 0, TLEN_EXC_LAYOUT_VARINT = 1 };
@@ -124,7 +58,7 @@ static inline bool tlenDecodeVarints(const uint8_t* buf, uint32_t srclen, uint32
             return false;
         }
         line += delta;
-        out[line] = tlenUnzigzag32(zz);
+        out[line] = unzigzag32(zz);
         entries++;
     }
     return declared == 0 || entries == declared;

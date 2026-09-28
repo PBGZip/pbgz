@@ -61,6 +61,8 @@ public:
 
     void flush() override { coder->encode_flush(); }
 
+    bool coversByte(uint8_t b) const override { return coder->coversByte(b); }
+
 private:
     std::shared_ptr<coder_fcv2> coder;
 };

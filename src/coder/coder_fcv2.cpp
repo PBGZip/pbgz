@@ -418,6 +418,41 @@ struct ContextModel {
        stride of the weight array and the bound of the mix loops. */
     int modelCount;
     std::vector<Counter> m0, m1, m2, m3, m4, m5, m6;
+    /*
+     * The seven tables as an array of base pointers.
+     *
+     * The mix loop runs once per model per coded bit and needs each table's base; going through the
+     * switch in counterAt() made that a branch (and an unpredictable one at the point of use, since
+     * the model index is a loop variable) on the hottest path in the coder. The pointers are set
+     * once in init(), after the vectors are sized, and no table is ever reallocated afterwards, so
+     * they stay valid for the coder's lifetime.
+     */
+    Counter* table[FCV2_MAX_MODEL_COUNT] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+
+    /*
+     * Points `table` at the current buffers. Called by init(), and again by whoever moves a
+     * ContextModel into place - a vector move keeps its buffer, so the pointers survive the move,
+     * but a *copy* would leave the copy's table aimed at the source's memory. Copying is therefore
+     * deleted; moving is allowed and is what the prior loader uses (it builds a model, then moves
+     * it over the one the constructor made), and it calls this again so the invariant does not
+     * depend on the reader noticing that a move kept the buffers valid.
+     */
+    void rebindTables()
+    {
+        table[0] = m0.data();
+        table[1] = m1.data();
+        table[2] = m2.data();
+        table[3] = m3.data();
+        table[4] = m4.data();
+        table[5] = m5.data();
+        table[6] = m6.data();
+    }
+
+    ContextModel() = default;
+    ContextModel(const ContextModel&) = delete;
+    ContextModel& operator=(const ContextModel&) = delete;
+    ContextModel(ContextModel&&) = default;
+    ContextModel& operator=(ContextModel&&) = default;
     std::vector<int> weight; /* mixing weights, organized by position bin x tree node x model */
     /* cycle index -> position bin, precomputed by init(); see there. */
     std::vector<int> cycBucketTab;
@@ -449,6 +484,8 @@ struct ContextModel {
         m4.assign((size_t)BASE_STATES * cycleMax * TREE_CAP, COUNTER_INIT);
         m5.assign((size_t)deltaBucket * cycleMax * TREE_CAP, COUNTER_INIT);
         m6.assign((size_t)QA_BINS * cycleMax * TREE_CAP, COUNTER_INIT);
+        /* The mix loop's fast path: see the note on `table`. */
+        rebindTables();
         /* Initial weights are 1<<14, i.e. fixed-point 0.25, so the active models
            together start close to a simple average. */
         modelCount = cfg.modelCount;
@@ -494,15 +531,7 @@ struct ContextModel {
 
     inline Counter* counterAt(int model, size_t base, int node)
     {
-        switch (model) {
-        case 0:  return &m0[base + node];
-        case 1:  return &m1[base + node];
-        case 2:  return &m2[base + node];
-        case 3:  return &m3[base + node];
-        case 4:  return &m4[base + node];
-        case 5:  return &m5[base + node];
-        default: return &m6[base + node];
-        }
+        return table[model] + base + node;
     }
 };
 
@@ -550,6 +579,14 @@ public:
     uint32_t prevQualLen = 0;
 
     Fcv2Cfg cfg;             /* normalized context-parameter tiers */
+
+    /*
+     * Whether this coder's alphabet contains the given quality byte. The alphabet is fixed for the
+     * stream - by the frequency table, or by the prior when one is loaded - so the upper layer asks
+     * before handing over a block: a block carrying a value outside it cannot be coded (see
+     * coder_io::IO_UNCODABLE) and has to go through a codec that can.
+     */
+    bool coversByte(uint8_t b) const { return symbolOf[b] >= 0; }
 
     int alphaSize;
     int symbolOf[256];      /* raw byte -> internal symbol number */
@@ -773,6 +810,7 @@ public:
         HuffTree restoredTree;
         restoredTree.build(frequency, (int)storedAlpha);
         cm = std::move(restored);
+        cm.rebindTables();   /* see the note on ContextModel::table */
         tree = restoredTree;
         revCounter = restoredRevCounter;
         dupCounter = restoredDupCounter;
@@ -912,6 +950,11 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, con
 
 coder_fcv2::~coder_fcv2() = default;
 
+bool coder_fcv2::coversByte(uint8_t b) const
+{
+    return impl->coversByte(b);
+}
+
 bool coder_fcv2::export_model(std::vector<uint8_t>& out) const
 {
     return impl->exportModel(out);
@@ -1042,13 +1085,18 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
     for (uint32_t i = 0; i < len; i++) {
         int sym = d->symbolOf[qual[i]];
         if (sym < 0) {
-            /* A quality value not seen during the statistics phase cannot be
-               coded. The upper layer guarantees this never happens; if it does,
-               skipping the byte would break the round trip, and substituting
-               the last symbol is likewise unacceptable, so here we keep the
-               predecessors unchanged and skip the byte, letting the upper
-               layer's round-trip verification expose the problem. */
-            continue;
+            /*
+             * A quality value outside the alphabet cannot be coded. The alphabet is fixed for the
+             * whole stream (by the frequency table, or by the prior when one is loaded, whose
+             * alphabet comes from the blocks it was trained on), so this does happen in practice:
+             * a file whose later blocks carry quality values the earlier ones never used. Dropping
+             * the byte would leave a stream one symbol short and the decoder - which has no way to
+             * know - would read every following symbol at the wrong offset, so the whole rest of the
+             * block is wrong; substituting one would change the data. Fail the stream instead: the
+             * caller falls back to a codec whose alphabet covers the block.
+             */
+            d->io->set_err(coder_io::IO_UNCODABLE);
+            return;
         }
         /*
          * The base context takes the base of "the cycle that produced this

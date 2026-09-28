@@ -65,6 +65,16 @@ enum Cat {
     WRITE_SORT,
     WRITE_BLOCK,
 
+    /* FASTQ reference path inside SEQ_prep, which is the largest single item there */
+    SEQ_MAP = 38,
+    SEQ_STRIP,
+    MAP_PREP,    /* squash setup + hash + index query, one per (alignment, offset) attempt */
+    MAP_CAND,    /* scanning the index's candidate positions for one attempt */
+    MAP_ATTEMPTS,/* how many attempts a read costs, as a count */
+    MAP_SQUASH,  /* per read: complement + the four alignments' squash setup */
+    MAP_PAYLOAD, /* per read: building the mapped payload once a position is chosen */
+    MAP_WINDOW,  /* per read: the sliding-window loop, as one sample */
+
     FIELD_BASE = 64,
     FIELD_HDR = 90,
     FIELD_META = 91,
@@ -199,6 +209,14 @@ inline const char* catName(int cat)
         case CODER_CREATE:        return "CODER_createActuator(preAnalysis)";
         case CODER_COMPRESS:      return "CODER_compress";
         case CODER_PARSE:         return "CODER_parseRec2Cols(worker)";
+        case SEQ_MAP:             return "SEQ_map(reference search)";
+        case SEQ_STRIP:           return "SEQ_stripN+collect";
+        case MAP_PREP:            return "MAP_prep+hash+query";
+        case MAP_CAND:            return "MAP_candidates";
+        case MAP_ATTEMPTS:        return "MAP_attempts(count)";
+        case MAP_SQUASH:          return "MAP_readPrep+4x squash";
+        case MAP_PAYLOAD:         return "MAP_payload build";
+        case MAP_WINDOW:          return "MAP_window loop(as a whole)";
         case WRITE_TOTAL:         return "WRITE_total";
         case WRITE_WAIT:          return "WRITE_waitOutput";
         case WRITE_SORT:          return "WRITE_sort";
