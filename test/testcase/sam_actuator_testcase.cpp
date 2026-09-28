@@ -1458,9 +1458,10 @@ TEST_F(SamActuatorTest, testCigarParse) {
     CompressEngine engine(para);
     SamCodecActuator actuator(pInBlock, pOutBlock, &engine);
 
-    // Helper function: convert string to uint8_t* to pass to parseCigar
-    auto testParse = [](SamCodecActuator& a, const std::string& cigar) -> uint32_t {
-        return a.parseCigar(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(cigar.c_str())), cigar.length());
+    // The read span of a CIGAR string, straight from the shared parse (see sam_seq_payload.h): the
+    // actuator no longer has a parser of its own, so the helper takes no actuator.
+    auto testParse = [](SamCodecActuator&, const std::string& cigar) -> uint32_t {
+        return cigarSeqConsumed(reinterpret_cast<const uint8_t*>(cigar.c_str()), (uint32_t)cigar.length());
     };
 
     // Test basic M operations

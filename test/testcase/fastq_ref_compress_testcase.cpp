@@ -167,3 +167,31 @@ TEST_F(FastqRefCompressTest, testMappingFastqGen2) {
     // Clean up resources
     delete[] outBuffer;
 }
+
+/*
+ * A FASTA record written on one long line - legal, and what a single-sequence reference or a
+ * re-wrapped one often looks like. Building the squash used to go through a fixed 1024-byte stack
+ * scratch while the record's own length decides how many bytes are written, so a line of more than
+ * 4 K bases overran the buffer; this record is 20 K bases on one line, and the length the loader
+ * reports is the one its base count implies.
+ */
+TEST_F(FastqRefCompressTest, ReferenceLoadsARecordWrittenOnOneLongLine) {
+    const std::string path = "test_ref_longline.fa";
+    const uint32_t bases = 20000;   /* > 4 K, i.e. past the buffer the loader used to write into */
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out.is_open());
+        out << ">chr1\n";
+        for (uint32_t i = 0; i < bases; ++i) {
+            out << "ACGT"[i & 3];
+        }
+        out << "\n";
+    }
+
+    Reference ref(path, 1);
+    /* makeIndex is what loads the FASTA into a squash (see loadSquashAndMatched), i.e. the path the
+       command line takes and the one that used to overrun the scratch. */
+    EXPECT_TRUE(ref.makeIndex());
+    EXPECT_EQ(ref.getSquashLength(), (int64_t)(bases / 4));
+    std::remove(path.c_str());
+}

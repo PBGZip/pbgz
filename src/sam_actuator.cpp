@@ -331,7 +331,7 @@ int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
                 if (cigarLen > 1) {
                     lineCigarMatchFlag = true;
                     uint8_t* cigarBegin  = (uint8_t*)src + (size_t)linePos[4] + 1;
-                    baseFieldLen = parseCigar(cigarBegin, cigarLen);
+                    baseFieldLen = cigarSeqConsumed(cigarBegin, cigarLen);
                 } else {
                     lineCigarMatchFlag = false;
                 }
@@ -2180,10 +2180,10 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
             cigarReadLen[lineIdx] = 0;
             cigarOpList[contentIdx].clear();
         } else {
-            uint32_t sequeceLength = parseCigar(fieldStart, fieldLength);
+            uint32_t sequeceLength = cigarSeqConsumed(fieldStart, fieldLength);
             baseLengthBuffer[lineIdx - headEndLine] = sequeceLength;
             /* Reference span for TLEN reconstruction (field 8 is compressed after this field). */
-            cigarReadLen[lineIdx] = parseCigarRefConsumed(fieldStart, fieldLength);
+            cigarReadLen[lineIdx] = cigarRefConsumed(fieldStart, fieldLength);
             /* Store the parsed operation list for the SEQ reference rebuild. */
             parseCigarOps(fieldStart, fieldLength, cigarOpList[contentIdx]);
         }
@@ -2215,12 +2215,6 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
         fieldIdx, fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
 
     return fieldIo->data_len;
-}
-
-uint32_t SamCodecActuator::parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength) {
-    /* The reference span the CIGAR consumes: only M/D/N/=/X count. The parse itself is the shared
-       one (see sam_seq_payload.h), so the span and the operation list cannot disagree. */
-    return cigarRefConsumed(cigarString, cigarLength);
 }
 
 /*
@@ -6014,8 +6008,8 @@ int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnP
                 }
                 break;
             case 5:
-                cigarReadLen[lineNo] = parseCigarRefConsumed(tmpBuf, len);
-                baseLengthBuffer[lineNo] = parseCigar(tmpBuf, len);
+                cigarReadLen[lineNo] = cigarRefConsumed(tmpBuf, len);
+                baseLengthBuffer[lineNo] = cigarSeqConsumed(tmpBuf, len);
                 if (cigarOpList.size() <= lineNo) cigarOpList.resize(lineNo + 1);
                 parseCigarOps(tmpBuf, (uint32_t)len, cigarOpList[lineNo]);
                 fieldCache.emplace_back((const char*)tmpBuf, (size_t)len);
@@ -6899,50 +6893,50 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                     if (!hasOps) {
                         writeDirectBases(baseDiffSquashBuffer, (int32_t)actualBaseLen);
                     } else {
+                        /*
+                         * The same walk the writer runs, from the shared traversal (see
+                         * seqWalkCigar): every op that touches the read or the reference is handed
+                         * to the callbacks below, and the walk reports whether the ops described the
+                         * read at all.
+                         */
                         const std::vector<CigarOp>& ops = cigarOpList[lineNo];
-                        uint32_t readPos = 0;
-                        int64_t refPosLocal = refeMappedPos;
-                        for (size_t oi = 0; oi < ops.size(); ++oi) {
-                            const CigarOp& op = ops[oi];
-                            switch (op.op) {
-                                case 'M': case '=': case 'X':
-                                    if (readPos + op.len > actualBaseLen) { readPos = actualBaseLen; break; }
-                                    if (isSelfReference) {
-                                        /* The consensus is read the same way the file's reference
-                                           is, only from the block's own buffer. */
-                                        seqSquashStretch(baseSelfRefSquash.data(), refeStrecchBuffer,
-                                                         op.len, (uint64_t)refPosLocal);
-                                        for (uint32_t i = 0; i < op.len; ++i) {
-                                            out[readPos + i] = atcg4[(refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i]) & 0x3];
-                                        }
-                                    } else {
-                                        pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, op.len, refPosLocal);
-                                        for (uint32_t i = 0; i < op.len; ++i) {
-                                            baseSquashBuffer[i] = refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i];
-                                        }
-                                        pRefeGene->getActgFrom2Bits(baseSquashBuffer, op.len, out + readPos);
+                        const SeqWalkEnd end = seqWalkCigar(ops, actualBaseLen, refeMappedPos,
+                            [&](uint32_t readPos, int64_t pos, uint32_t len) {
+                                if (isSelfReference) {
+                                    /* The consensus is read the same way the file's reference is,
+                                       only from the block's own buffer. */
+                                    seqSquashStretch(baseSelfRefSquash.data(), refeStrecchBuffer, len,
+                                                     (uint64_t)pos);
+                                    for (uint32_t i = 0; i < len; ++i) {
+                                        out[readPos + i] =
+                                            atcg4[(refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i]) & 0x3];
                                     }
-                                    readPos += op.len;
-                                    refPosLocal += op.len;
-                                    break;
-                                case 'I': case 'S':
-                                    if (readPos + op.len > actualBaseLen) { readPos = actualBaseLen; break; }
-                                    for (uint32_t i = 0; i < op.len; ++i) {
-                                        out[readPos + i] = atcg4[baseDiffSquashBuffer[readPos + i] & 0x3];
+                                } else {
+                                    pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, len, pos);
+                                    for (uint32_t i = 0; i < len; ++i) {
+                                        baseSquashBuffer[i] = refeStrecchBuffer[i] ^ baseDiffSquashBuffer[readPos + i];
                                     }
-                                    readPos += op.len;
-                                    break;
-                                case 'D': case 'N':
-                                    refPosLocal += op.len;
-                                    break;
-                                case 'H': case 'P':
-                                default:
-                                    break; // consume neither SEQ nor reference
-                            }
-                        }
-                        /* Any residual positions (e.g. inconsistent CIGAR) fall back to direct. */
-                        for (; readPos < actualBaseLen; ++readPos) {
-                            out[readPos] = atcg4[baseDiffSquashBuffer[readPos] & 0x3];
+                                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, len, out + readPos);
+                                }
+                                return SeqWalkAction::Continue;
+                            },
+                            [&](uint32_t readPos, uint32_t len) {
+                                for (uint32_t i = 0; i < len; ++i) {
+                                    out[readPos + i] = atcg4[baseDiffSquashBuffer[readPos + i] & 0x3];
+                                }
+                                return SeqWalkAction::Continue;
+                            },
+                            [](uint32_t) { return SeqWalkAction::Continue; });
+                        /*
+                         * The ops did not describe this read - they ran past it, or did not consume
+                         * it exactly - and that is the case the writer answers by storing the bases
+                         * as they stand, so the whole payload is that form, including the part just
+                         * written above. This is what sharing the walk is for: the reader used to
+                         * clamp here instead and fill the rest from the payload's 2-bit codes, which
+                         * is not what the writer's fallback leaves in it.
+                         */
+                        if (!end.complete) {
+                            writeDirectBases(baseDiffSquashBuffer, (int32_t)actualBaseLen);
                         }
                     }
                 }
@@ -7026,9 +7020,9 @@ int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, 
        avoid signed/unsigned comparison warnings and resize clutter. */
     const size_t contentIdx = static_cast<size_t>(lineIdx - headEndLine);
     if (fieldLen > 1) {
-        uint32_t seqLength = parseCigar(outputBlock->getCurrent(), fieldLen);
+        uint32_t seqLength = cigarSeqConsumed(outputBlock->getCurrent(), fieldLen);
         baseLengthBuffer[lineIdx] = seqLength;
-        cigarReadLen[lineIdx] = parseCigarRefConsumed(outputBlock->getCurrent(), fieldLen);
+        cigarReadLen[lineIdx] = cigarRefConsumed(outputBlock->getCurrent(), fieldLen);
         if (cigarOpList.size() <= contentIdx) cigarOpList.resize(contentIdx + 1);
         parseCigarOps(outputBlock->getCurrent(), (uint32_t)fieldLen, cigarOpList[contentIdx]);
     } else {
@@ -7040,62 +7034,6 @@ int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, 
 
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
     return fieldLen;
-}
-
-uint32_t SamCodecActuator::parseCigar(uint8_t* cigarString, uint32_t cigarLength) {
-    // CIGAR format like 6S30M1I114S, M/I/S/=/X: consume SEQ, D/N/H/P don't consume SEQ, so actual SEQ length is the sum of operations that consume SEQ
-    if (cigarString == nullptr || cigarLength == 0) {
-        return 0;
-    }
-
-    uint32_t seqLength = 0;
-    uint32_t currentNumber = 0;
-    for (uint32_t i = 0; i < cigarLength; ++i) {
-        char ch = cigarString[i];
-        if (ch >= '0' && ch <= '9') {
-            // Accumulate numbers
-            currentNumber = currentNumber * 10 + (ch - '0');
-        } else {
-            // When encountering operator, determine if it consumes SEQ
-            if (currentNumber > 0) {
-                switch (ch) {
-                    case 'M':  // Match or mismatch
-                    case 'I':  // Insertion to reference sequence
-                    case 'S':  // Soft clipping at sequence start
-                    case '=':  // Match
-                    case 'X':  // Mismatch
-                    case 'm':  // Lowercase version
-                    case 'i':  // Lowercase version
-                    case 's':  // Lowercase version
-                    case 'x':  // Lowercase version
-                        // These operations consume SEQ length
-                        seqLength += currentNumber;
-                        break;
-                    case 'D':  // Deletion from reference sequence
-                    case 'N':  // Skip from reference sequence
-                    case 'H':  // Hard clipping at sequence start
-                    case 'P':  // Padding (silent deletion)
-                    case 'd':  // Lowercase version
-                    case 'n':  // Lowercase version
-                    case 'h':  // Lowercase version
-                    case 'p':  // Lowercase version
-                        // These operations don't consume SEQ length
-                        break;
-                    default:
-                        // Unknown operator, ignore
-                        break;
-                }
-                currentNumber = 0;
-            }
-        }
-    }
-    return seqLength;
-}
-
-void SamCodecActuator::parseCigarOps(uint8_t* cigarString, uint32_t cigarLength, std::vector<CigarOp>& ops) {
-    /* The shared parse (see sam_seq_payload.h); the span it answers is parseCigarRefConsumed's.
-       Qualified, or the name in this scope would be the member itself. */
-    ::parseCigarOps(cigarString, cigarLength, ops);
 }
 
 int32_t SamCodecActuator::buildSamIndex() {

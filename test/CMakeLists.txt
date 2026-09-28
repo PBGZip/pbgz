@@ -16,7 +16,9 @@ set(TEST_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/testcase)
 set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rd_party)
 
 # Find all test source files
-file(GLOB TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/testcase/*.cpp)
+# CONFIGURE_DEPENDS: a newly added testcase file is picked up by the next build, instead of
+# silently not being compiled until someone happens to re-run cmake.
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/testcase/*.cpp)
 
 # Find all main project source files
 file(GLOB PBGZ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp

@@ -181,11 +181,9 @@ private:
     int32_t decodeWholeStream(const Json::Value& streamMeta, const uint8_t* src, uint32_t srcLen,
                               uint8_t* dst, uint32_t dstLen, const char* tag);
 
-    void (FastqCodecActuator::*mapping)(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&);
 
     void mappingFastqGen2(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
 
-    void mappingFastQGen3(const uint8_t* base, uint32_t baseLength, uint8_t*& out, uint32_t& outLength, uint64_t& mappingPos, uint8_t& mappingDir);
 
     // SIMD-optimized N character counting methods
     static inline uint32_t countN_SSE2(const uint8_t* data, size_t length);

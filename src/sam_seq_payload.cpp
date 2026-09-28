@@ -15,16 +15,33 @@
 #include "sam_field_layout.h"
 #include "sam_info.h"
 
-/* The one CIGAR walk; `ops` is filled only when the caller wants the operations. */
-static uint32_t parseCigarImpl(const uint8_t* cigar, uint32_t cigarLength, std::vector<CigarOp>* ops)
+/*
+ * The one CIGAR parse: the reference span, the read span, and the operation list all come out of it.
+ * `ops` (and the spans) are filled only when the caller wants them.
+ *
+ * The two spans keep the letter sets they have always had, lower-case forms included, because both
+ * feed decisions that the archive records: the read span is what the SEQ payloads are measured
+ * against, and the reference span decides whether a record has a window to code against at all. They
+ * therefore disagree about exactly one letter - a lower-case 'x' counts towards the read span only -
+ * which is a difference to keep rather than to fix quietly, and the comment on each group says so.
+ */
+static void parseCigarImpl(const uint8_t* cigar, uint32_t cigarLength, uint32_t* refConsumedOut,
+                           uint32_t* seqConsumedOut, std::vector<CigarOp>* ops)
 {
     if (ops != nullptr) {
         ops->clear();
     }
+    if (refConsumedOut != nullptr) {
+        *refConsumedOut = 0;
+    }
+    if (seqConsumedOut != nullptr) {
+        *seqConsumedOut = 0;
+    }
     if (cigar == nullptr || cigarLength == 0) {
-        return 0;
+        return;
     }
     uint32_t refConsumed = 0;
+    uint32_t seqConsumed = 0;
     uint32_t currentNumber = 0;
     for (uint32_t i = 0; i < cigarLength; ++i) {
         const char ch = (char)cigar[i];
@@ -39,9 +56,15 @@ static uint32_t parseCigarImpl(const uint8_t* cigar, uint32_t cigarLength, std::
                 ops->push_back(CigarOp{ch, currentNumber});
             }
             switch (ch) {
-                case 'M': case 'D': case 'N': case '=': case 'X':
-                case 'm': case 'd': case 'n':
+                case 'M': case '=': case 'X': case 'm':   /* both spans claim these */
                     refConsumed += currentNumber;
+                    seqConsumed += currentNumber;
+                    break;
+                case 'D': case 'N': case 'd': case 'n':   /* reference only */
+                    refConsumed += currentNumber;
+                    break;
+                case 'I': case 'S': case 'i': case 's': case 'x':   /* read only */
+                    seqConsumed += currentNumber;
                     break;
                 default:
                     break;
@@ -49,17 +72,33 @@ static uint32_t parseCigarImpl(const uint8_t* cigar, uint32_t cigarLength, std::
             currentNumber = 0;
         }
     }
-    return refConsumed;
+    if (refConsumedOut != nullptr) {
+        *refConsumedOut = refConsumed;
+    }
+    if (seqConsumedOut != nullptr) {
+        *seqConsumedOut = seqConsumed;
+    }
 }
 
 uint32_t parseCigarOps(const uint8_t* cigar, uint32_t cigarLength, std::vector<CigarOp>& ops)
 {
-    return parseCigarImpl(cigar, cigarLength, &ops);
+    uint32_t refConsumed = 0;
+    parseCigarImpl(cigar, cigarLength, &refConsumed, nullptr, &ops);
+    return refConsumed;
+}
+
+uint32_t cigarSeqConsumed(const uint8_t* cigar, uint32_t cigarLength)
+{
+    uint32_t seqConsumed = 0;
+    parseCigarImpl(cigar, cigarLength, nullptr, &seqConsumed, nullptr);
+    return seqConsumed;
 }
 
 uint32_t cigarRefConsumed(const uint8_t* cigar, uint32_t cigarLength)
 {
-    return parseCigarImpl(cigar, cigarLength, nullptr);
+    uint32_t refConsumed = 0;
+    parseCigarImpl(cigar, cigarLength, &refConsumed, nullptr, nullptr);
+    return refConsumed;
 }
 
 /*
@@ -161,41 +200,23 @@ static bool seqCodedBasesWalk(const std::vector<CigarOp>& ops, const uint8_t* se
                               uint32_t seqLength, int64_t refPos, StretchFn stretch,
                               uint8_t* ref2bitScratch, uint8_t* out)
 {
-    uint32_t readPos = 0;
-    int64_t refPosLocal = refPos;
-    for (size_t oi = 0; oi < ops.size(); ++oi) {
-        const CigarOp& op = ops[oi];
-        switch (op.op) {
-            case 'M': case '=': case 'X':
-                if (readPos + op.len > seqLength) {
-                    return false;
-                }
-                stretch(ref2bitScratch, op.len, refPosLocal);
-                for (uint32_t i = 0; i < op.len; ++i) {
-                    const uint8_t read2 = (uint8_t)((seq[readPos + i] >> 1) & 0x3);
-                    out[readPos + i] = (uint8_t)(read2 ^ ref2bitScratch[i]);
-                }
-                readPos += op.len;
-                refPosLocal += op.len;
-                break;
-            case 'I': case 'S':
-                if (readPos + op.len > seqLength) {
-                    return false;
-                }
-                for (uint32_t i = 0; i < op.len; ++i) {
-                    out[readPos + i] = (uint8_t)((seq[readPos + i] >> 1) & 0x3);
-                }
-                readPos += op.len;
-                break;
-            case 'D': case 'N':
-                refPosLocal += op.len;
-                break;
-            case 'H': case 'P':
-            default:
-                break; // consume neither SEQ nor reference
-        }
-    }
-    return readPos == seqLength;
+    const SeqWalkEnd end = seqWalkCigar(ops, seqLength, refPos,
+        [&](uint32_t readPos, int64_t pos, uint32_t len) {
+            stretch(ref2bitScratch, len, pos);
+            for (uint32_t i = 0; i < len; ++i) {
+                const uint8_t read2 = (uint8_t)((seq[readPos + i] >> 1) & 0x3);
+                out[readPos + i] = (uint8_t)(read2 ^ ref2bitScratch[i]);
+            }
+            return SeqWalkAction::Continue;
+        },
+        [&](uint32_t readPos, uint32_t len) {
+            for (uint32_t i = 0; i < len; ++i) {
+                out[readPos + i] = (uint8_t)((seq[readPos + i] >> 1) & 0x3);
+            }
+            return SeqWalkAction::Continue;
+        },
+        [](uint32_t) { return SeqWalkAction::Continue; });
+    return end.complete;
 }
 
 bool buildSeqReferenceCodedBases(const std::vector<CigarOp>& ops, const uint8_t* seq,

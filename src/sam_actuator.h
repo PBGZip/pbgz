@@ -424,13 +424,10 @@ private:
     /* The file-level preprocessing result, or nullptr when there is no engine to hold one. */
     PreprocessInfo* preprocessInfoMut() const;
 
-    uint32_t parseCigar(uint8_t* cigarString, uint32_t cigarLength);
 
     /* Parses a CIGAR string into an ordered list of (op, len) operations. */
-    void parseCigarOps(uint8_t* cigarString, uint32_t cigarLength, std::vector<CigarOp>& ops);
 
     /* Only counts CIGAR operations that consume reference sequence (M/D/N/=/X); used for TLEN reconstruction. */
-    uint32_t parseCigarRefConsumed(uint8_t* cigarString, uint32_t cigarLength);
 
     /* PNEXT's exception stream: the (contentIdx, delta) pairs of the records that cannot be
        rebuilt from their mate. Returns the stream's encoded size and records in fieldMeta how

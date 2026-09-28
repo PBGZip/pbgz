@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <stdint.h>
 #include <string>
 #include <memory>
@@ -308,8 +309,14 @@ private:
     // Corresponding length of reference gene ACTG encoding buffer
     int64_t refGeneSquashlen;
 
-    // Buffer for matched bases after reference genome ACTG encoding
-    uint8_t* refGeneSquashMatched;
+    /*
+     * Buffer for matched bases after reference genome ACTG encoding: one byte per squash byte, set to
+     * 1 once some read covers it. It is accumulated while the data blocks are compressed, so several
+     * worker threads mark it at once - always with the same value, but that is still a data race
+     * unless the bytes are atomic. Sanitizing the reference happens in a later phase, after those
+     * threads have joined, so the reader only needs the loads below and not a barrier of its own.
+     */
+    std::atomic<uint8_t>* refGeneSquashMatched;
 
     // Corresponding length
     uint64_t refGeneSquashMatchedlen;

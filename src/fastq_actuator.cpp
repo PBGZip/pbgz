@@ -23,6 +23,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <memory>
 
 #include "fastq_actuator.h"
@@ -244,6 +245,8 @@ int32_t FastqCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bu
         char ch = pBuffer[i];
         if (idSplitDefault.find(ch) != std::string::npos) {
             idSplitSymbols.push_back(ch);
+            /* The positions travel as bytes in the split layouts, so they are kept to what a
+               byte holds; a QNAME longer than that is not something those layouts describe. */
             idSplitPos.push_back(static_cast<uint8_t>(i));
         }
     }
@@ -292,7 +295,7 @@ int32_t FastqCodecActuator::preAnalysisId(uint8_t* pBuffer, uint32_t bufferLen) 
         if (curLen > idSplitMaxLen[idx]) {
             idSplitMaxLen[idx] = curLen;
         }
-        idPositions.push_back(static_cast<uint8_t>(pos));
+        idPositions.push_back(static_cast<uint8_t>(pos));   /* same byte-wide bound as above */
         idPosLength++;
         lastPos = pos + 1;
         lastFindPos = pos;
@@ -474,7 +477,8 @@ int32_t FastqCodecActuator::initEncoder() {
         baseMappedPairBuffer = p;
         p += line4;
 
-        mapping = (isGen2) ? (&FastqCodecActuator::mappingFastqGen2) : (&FastqCodecActuator::mappingFastQGen3);
+        /* Gen3 has no mapper of its own: the base path routes it to compression without a
+           reference (see compressBase), so there is nothing here for it to point at. */
     }
 
     return 0;
@@ -742,10 +746,6 @@ void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLeng
     return;
 }
 
-void FastqCodecActuator::mappingFastQGen3(const uint8_t*, uint32_t, uint8_t*&, uint32_t&, uint64_t&, uint8_t&) {
-    LOG_ERROR("Not support FASTQ Gen3");
-    return;
-}
 
 /*
  * One ID sub-stream, fed line by line. The coder is the base class now: which one it is, is
@@ -917,10 +917,11 @@ int32_t FastqCodecActuator::compressBase() {
     if (pReference != nullptr && isGen2) {
         return compressBaseWithRef();
     } else {
-        static bool isPrint = false;
-        if (!isGen2 && pReference != nullptr && !isPrint) {
+        /* Once per run, not once per block - and atomically, since the blocks that reach this line
+           run on several threads at once. */
+        static std::atomic<bool> noticePrinted{false};
+        if (!isGen2 && pReference != nullptr && !noticePrinted.exchange(true)) {
             fprintf(stderr ,"This file is Gen3 FASTQ, compression will be performed without a reference genome.\n");
-            isPrint = true;
         }
         return compressBaseWithoutRef();
     }
@@ -1036,7 +1037,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
             literalReads++;
         } else {
             const auto map0 = pbgzprof::nowOrZero();
-            (this->*mapping)(baseStripNBuffer, strippedLen,
+            mappingFastqGen2(baseStripNBuffer, strippedLen,
                              baseMappedBuffer, outLen, baseMappedPosBuffer[offset], baseMappedPairBuffer[offset]);
             pbgzprof::addSince(pbgzprof::SEQ_MAP, map0);
             if (anyLiteral && baseMappedPairBuffer[offset] == 2) {
@@ -1632,15 +1633,15 @@ int32_t FastqCodecActuator::compressQuality() {
     std::shared_ptr<coder_io> qualityFreqIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL freq table");
     std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
     CoderFactory::applyLevel(qualityFreqIo.get(), CoderType::BWT_CM, engineCompressLevel());
-    std::shared_ptr<uint16_t[]> qualiltyFreqArray = std::make_unique<uint16_t[]>(qualityFreqTable.size()<< 1);
+    std::shared_ptr<uint16_t[]> qualityFreqArray = std::make_unique<uint16_t[]>(qualityFreqTable.size()<< 1);
     for (uint32_t i = 0; i < qualityFreqTable.size(); ++i) {
         int idx = i << 1;
-        qualiltyFreqArray[idx] = qualityFreqTable[i].first;
-        qualiltyFreqArray[idx + 1] = qualityFreqTable[i].second;
+        qualityFreqArray[idx] = qualityFreqTable[i].first;
+        qualityFreqArray[idx + 1] = qualityFreqTable[i].second;
     }
 
     uint32_t freqSrcLen = (qualityFreqTable.size() << 1) * sizeof(uint16_t);
-    qualityFreqCoder->encode_line((uint8_t*)qualiltyFreqArray.get(), freqSrcLen);
+    qualityFreqCoder->encode_line((uint8_t*)qualityFreqArray.get(), freqSrcLen);
 
     qualityFreqCoder->encode_flush();
     outBlockPtr->setDataLen(outBlockPtr->getDataLen() + qualityFreqIo->data_len);
@@ -1874,7 +1875,6 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             ps += srcLen;
             coder_io pairIo(temBuffer, dstLen, &ioErrSink, "SEQ mapped pair");
             pairIo.meta = metaStreams[id];
-            // pairIo.meta["tot_dstlen"] = metaStreams[id]["dstlen"]; // Compatible field, can be unified
             coder_fc pairFc(&pairIo);
             pairFc.decode_line(baseMappedPairBuffer, srcLen, UINT8_MAX, false);
         } else{
@@ -2081,8 +2081,10 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
          * which overflows the heap.
          */
         uint32_t qualFreqArrLen = qualFreqSrcLen / sizeof(uint16_t);
-        uint16_t* qualFreqArray = new uint16_t[qualFreqArrLen];
-        uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArray, qualFreqSrcLen, UINT8_MAX, false);
+        /* A vector rather than new[]/delete[]: the decoder below has a failure return of its own, and
+           an early return between an allocation and its delete is a leak. */
+        std::vector<uint16_t> qualFreqArray(qualFreqArrLen);
+        uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArray.data(), qualFreqSrcLen, UINT8_MAX, false);
         if (qualFreq != qualFreqSrcLen) {
             LOG_ERROR("Decode quality frequncy failed.");
             return -1;
@@ -2091,8 +2093,6 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         for (uint32_t idx = 0; idx < qualFreqArrLen ; idx += 2) {
             qualityFreqTable.push_back(std::make_pair(qualFreqArray[idx], qualFreqArray[idx + 1]));
         }
-
-        delete [] qualFreqArray;
 
         /*
          * The value stream's decoder is the one its magic names - the QUAL column is decided

@@ -21,6 +21,7 @@
  * SOFTWARE.
  */
 
+#include <atomic>
 #include <fstream>
 #include <utility>
 
@@ -205,7 +206,6 @@ bool Reference::initSquashFromFasta() {
 
     uint8_t cacheActg[4];
     uint32_t cacheLen = 0;
-    uint8_t squashBuf[1024];
     std::string line;
 
     /* Bases appended so far, i.e. the base offset the next record will start at. The squash
@@ -245,8 +245,16 @@ bool Reference::initSquashFromFasta() {
         uint32_t remaining = lineLen - pos;
         uint32_t aligned = remaining >> 2 << 2;
         if (aligned > 0) {
-            uint32_t out = actgSquash((const uint8_t*)(line.c_str() + pos), aligned, squashBuf);
-            squash.insert(squash.end(), squashBuf, squashBuf + out);
+            /*
+             * Straight into the squash's own tail. This used to go through a fixed 1024-byte stack
+             * buffer, which a FASTA line of more than 4 K bases - or a record written on a single
+             * line, which is legal - wrote past: aligned >> 2 is the byte count and nothing bounds
+             * the line length. actgSquash answers the same count for an aligned length, so the
+             * resize below is exact.
+             */
+            const size_t at = squash.size();
+            squash.resize(at + (aligned >> 2));
+            actgSquash((const uint8_t*)(line.c_str() + pos), aligned, squash.data() + at);
             pos += aligned;
         }
 
@@ -568,7 +576,8 @@ bool Reference::loadSquashAndMatched() {
     }
 
     refGeneSquashMatchedlen = refGeneSquashlen; /* One byte indicates whether a squash byte is matched */
-    refGeneSquashMatched = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashMatchedlen);
+    /* safeAlloc zeroes, which is what "nothing matched yet" is (see the note on the member). */
+    refGeneSquashMatched = MemoryUtil::safeAlloc<std::atomic<uint8_t>>(refGeneSquashMatchedlen);
     return true;
 }
 
@@ -965,9 +974,11 @@ void Reference::updateMatchedGene(uint64_t actgPos, uint32_t matchLength) {
     if (matchLength == 0) {
         return;
     }
-    uint64_t sposStart = actgPos >> 2;
-    uint64_t sposEnd = (actgPos + matchLength - 1) >> 2;
-    memset(refGeneSquashMatched + sposStart, 1, sposEnd - sposStart + 1);
+    const uint64_t sposStart = actgPos >> 2;
+    const uint64_t sposEnd = (actgPos + matchLength - 1) >> 2;
+    for (uint64_t n = sposStart; n <= sposEnd; ++n) {
+        refGeneSquashMatched[n].store(1, std::memory_order_relaxed);
+    }
 }
 
 /* Get reference squash buffer */
@@ -999,7 +1010,8 @@ const std::string& Reference::getFastaChecksum() const {
 void Reference::sanitizeRefSquash(int64_t startSquashPos, int64_t len) {
     uint64_t e = startSquashPos + len;
     for (uint64_t n = startSquashPos; n < e; n++) {
-        *(refGeneSquash + n) = (*(refGeneSquashMatched + n)) ? (*(refGeneSquash + n)) : 0;
+        *(refGeneSquash + n) = refGeneSquashMatched[n].load(std::memory_order_relaxed)
+                                   ? (*(refGeneSquash + n)) : 0;
     }
 }
 

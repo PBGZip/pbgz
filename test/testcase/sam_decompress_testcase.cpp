@@ -95,6 +95,7 @@ public:
         std::remove("test_field_missing.sam");
         std::remove("test_mixed.sam");
         std::remove("test_large.sam");
+        std::remove("test_reference_roundtrip.sam");
 
         SamInfo::getInstance().clearChromosomeInfo();
         SamInfo::getInstance().resetChrIdCounter();
@@ -782,4 +783,62 @@ TEST_F(SamDecompressTest, TestFieldMissing) {
     int32_t ret = compressor.preAnalysis();
     std::remove("test_field_missing.sam");
     EXPECT_EQ(ret, -1);
+}
+
+/*
+ * A roundtrip that keeps the reference in play and compares the text: compressAndDecompress above
+ * only asks whether the decompressor answered 0, which a reference applied to half the records - or
+ * to none of them - can still do. These records sit at the reference's own coordinates, so their SEQ
+ * column travels the reference-coded path (see sam_seq_payload), and what comes back has to be the
+ * bytes that went in.
+ */
+TEST_F(SamDecompressTest, TestReferenceRoundtripPreservesTheText) {
+    const std::string file = "test_reference_roundtrip.sam";
+    {
+        std::ofstream out(file);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:coordinate\n";
+        out << "@SQ\tSN:chr1\tLN:340\n";
+        for (int r = 0; r < 12; ++r) {
+            const int pos = 1 + r * 20;
+            std::string seq;
+            for (int i = 0; i < 50; ++i) {
+                seq += "ATCG"[(pos + i) % 4];
+            }
+            out << "read" << (r + 1) << "\t0\tchr1\t" << pos << "\t60\t50M\t*\t0\t0\t"
+                << seq << "\t" << std::string(50, 'I') << "\n";
+        }
+    }
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::ifstream in(file, std::ios::binary);
+    std::string expected;
+    {
+        char buf[4096];
+        while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+            expected.append(buf, (size_t)in.gcount());
+        }
+    }
+    const std::string got((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen());
+    EXPECT_EQ(got.size(), expected.size());
+    EXPECT_EQ(got, expected);
+    std::remove(file.c_str());
 }

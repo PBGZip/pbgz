@@ -64,6 +64,13 @@ uint32_t parseCigarOps(const uint8_t* cigar, uint32_t cigarLength, std::vector<C
 uint32_t cigarRefConsumed(const uint8_t* cigar, uint32_t cigarLength);
 
 /*
+ * The span the CIGAR claims of the read: M/I/S/=/X and their lower-case forms. It sits beside the
+ * reference span because one parse answers both, and a caller that wants one usually has to know the
+ * other - the SEQ column stores its payloads against this one and the reference window against that.
+ */
+uint32_t cigarSeqConsumed(const uint8_t* cigar, uint32_t cigarLength);
+
+/*
  * The two halves of a match stream split into runs and values (SeqRleSplit / splitSeqMatchStream)
  * sit in seq_stream_util.h: the shape is byte-level and both formats' SEQ columns use it.
  */
@@ -137,6 +144,75 @@ void warnReferenceNotUsableForSeq();
  * `ref2bitScratch` is the caller's scratch for the reference stretch (one op never exceeds the
  * read's length plus the coder's unaligned-write slack); `out` receives `seqLength` bytes.
  */
+/* What a callback tells the walk to do with it: keep going, or end it here (the reader's answer
+   when an op would run past the read, which leaves the positions where they stand). */
+enum class SeqWalkAction { Continue, Stop };
+
+/* Where a walk left off, and whether the ops described the read. */
+struct SeqWalkEnd {
+    uint32_t readPos = 0;      /* read bases consumed */
+    int64_t  refPos = 0;       /* reference bases consumed, from the walk's own starting point */
+    bool     complete = false; /* the ops consumed the read exactly, and asked for no stop */
+};
+
+/*
+ * Walk one record's ops in read order, handing each op that touches the read or the reference to the
+ * matching callback: onMatch(readPos, refPos, len) for M/=/X, onInsert(readPos, len) for I/S, and
+ * onDelete(len) for D/N. H/P consume neither and are not reported. An op that would run past
+ * seqLength ends the walk as incomplete rather than being handed over.
+ *
+ * The three callbacks are templates so the walk inlines into its callers: the SEQ column is walked
+ * once per read of every block, on both sides, and an indirect call per op is what it must not pay.
+ *
+ * The walk decides nothing about the coded form, which is the point of sharing it: the writer
+ * answers an incomplete walk by storing the read's bases as they stand, the reader by resolving the
+ * whole payload the same way. Both used to spell the walk out themselves, and that is how the reader
+ * came to clamp where the writer fails.
+ */
+template <class MatchFn, class InsertFn, class DeleteFn>
+static inline SeqWalkEnd seqWalkCigar(const std::vector<CigarOp>& ops, uint32_t seqLength,
+                                      int64_t refPos, MatchFn onMatch, InsertFn onInsert,
+                                      DeleteFn onDelete)
+{
+    SeqWalkEnd end;
+    end.refPos = refPos;
+    for (size_t oi = 0; oi < ops.size(); ++oi) {
+        const CigarOp& op = ops[oi];
+        switch (op.op) {
+            case 'M': case '=': case 'X':
+                if (end.readPos + op.len > seqLength) {
+                    return end;
+                }
+                if (onMatch(end.readPos, end.refPos, op.len) == SeqWalkAction::Stop) {
+                    return end;
+                }
+                end.readPos += op.len;
+                end.refPos += op.len;
+                break;
+            case 'I': case 'S':
+                if (end.readPos + op.len > seqLength) {
+                    return end;
+                }
+                if (onInsert(end.readPos, op.len) == SeqWalkAction::Stop) {
+                    return end;
+                }
+                end.readPos += op.len;
+                break;
+            case 'D': case 'N':
+                if (onDelete(op.len) == SeqWalkAction::Stop) {
+                    return end;
+                }
+                end.refPos += op.len;
+                break;
+            case 'H': case 'P':
+            default:
+                break; // consume neither SEQ nor reference
+        }
+    }
+    end.complete = (end.readPos == seqLength);
+    return end;
+}
+
 bool buildSeqReferenceCodedBases(const std::vector<CigarOp>& ops, const uint8_t* seq,
                                  uint32_t seqLength, int64_t refPos, Reference* reference,
                                  uint8_t* ref2bitScratch, uint8_t* out);
