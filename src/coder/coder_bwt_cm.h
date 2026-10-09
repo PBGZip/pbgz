@@ -537,9 +537,9 @@ private:
            out contiguously (a row of 17), so the [j] and [j+1] counts come out of one
            unaligned 4-byte load. Every value is identical to the 3-D indexing and the two
            2-byte loads it replaced. */
-        const _counter<4>* const row1_c1 = counter1[c1];
-        const _counter<4>* const row1_c2 = counter1[c2];
-        const _counter<6>* const plane2 = &counter2[f][0][0];
+        _counter<4>* const row1_c1 = counter1[c1];
+        _counter<4>* const row1_c2 = counter1[c2];
+        _counter<6>* const plane2 = &counter2[f][0][0];
 
         int32_t ctx = 1;
         for (int32_t i = 128; i > 0; i >>= 1) /* Get all bits of current byte c, starting from high bit */
@@ -551,7 +551,7 @@ private:
 
             /* Get probability of auxiliary symbols through linear interpolation */
             const int32_t j = p >> 12; /* j takes the highest 4 bits of mixed probability, uses SSE combined with ctx (i.e., current character c to be processed) to correct p_mixed, making another prediction on the probability itself using ctx */
-            const _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
+            _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
             uint32_t x12;
             memcpy(&x12, (const void*)(row2 + j), sizeof(uint32_t));
             const int32_t x1 = (int32_t)(uint16_t)x12;
@@ -587,9 +587,9 @@ private:
 
         /* Same factoring as put(): the c1/c2 rows and the counter2 plane for this run
            are fixed for the whole byte, and [j]/[j+1] load as one unaligned 4-byte. */
-        const _counter<4>* const row1_c1 = counter1[c1];
-        const _counter<4>* const row1_c2 = counter1[c2];
-        const _counter<6>* const plane2 = &counter2[f][0][0];
+        _counter<4>* const row1_c1 = counter1[c1];
+        _counter<4>* const row1_c2 = counter1[c2];
+        _counter<6>* const plane2 = &counter2[f][0][0];
 
         int32_t ctx = 1;
         while (ctx < 256)
@@ -601,7 +601,7 @@ private:
 
             /* Get probability of auxiliary symbols through linear interpolation */
             const int32_t j = p >> 12;
-            const _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
+            _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
             uint32_t x12;
             memcpy(&x12, (const void*)(row2 + j), sizeof(uint32_t));
             const int32_t x1 = (int32_t)(uint16_t)x12;

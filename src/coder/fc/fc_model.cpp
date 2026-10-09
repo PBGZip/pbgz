@@ -135,5 +135,5 @@ void fcinit_model(fcModel1 * model)
 void fcinit_model(fcModel2 * model)
 {
     std::shared_lock<std::shared_mutex> lock(model_mutex);
-    memcpy(model, &gfcModel2, sizeof(fcModel2));
+    *model = gfcModel2;
 }
