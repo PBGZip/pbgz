@@ -50,6 +50,8 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <pthread.h>   /* pthread_setname_np: the two thread roles below are visible in ps -L */
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -106,7 +108,7 @@ public:
         inflaters_.reserve(threads);
         try {
             for (int i = 0; i < threads; ++i)
-                inflaters_.emplace_back(&BgzfParallelDecoder::inflateLoop, this);
+                inflaters_.emplace_back(&BgzfParallelDecoder::inflateLoop, this, i);
             creator_ = std::thread(&BgzfParallelDecoder::creatorLoop, this);
         } catch (...) {
             stop();
@@ -328,6 +330,7 @@ private:
     /* ---- creator: cut members / fall back to serial inflate ---- */
     void creatorLoop()
     {
+        pthread_setname_np(pthread_self(), "bgzfcreator");
         std::vector<uint8_t> memberBuf;
         for (;;) {
             if (stopped_)
@@ -379,8 +382,10 @@ private:
         }
     }
 
-    void inflateLoop()
+    void inflateLoop(int idx)
     {
+        pthread_setname_np(pthread_self(),
+                           std::string("bgzfinflate_").append(std::to_string(idx)).c_str());
         z_stream zs;
         memset(&zs, 0, sizeof(zs));
         if (inflateInit2(&zs, 32 + MAX_WBITS) != Z_OK)

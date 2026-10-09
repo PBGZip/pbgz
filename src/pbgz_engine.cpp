@@ -401,7 +401,7 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     preDispatchBlock(blockPtr);
 
     updateInputStatics(blockPtr);
-    inputDataPool->push(blockPtr);
+    dispatchInputBlock(blockPtr);
     if (ret > 0) {
         blockCount++;
     }
@@ -441,7 +441,12 @@ int32_t PbgzEngine::startReadTask() {
     if (blockReader == nullptr) {
         return -1;
     }
+    engineReaderReady(blockReader);
     int64_t readRet = readBlocks(blockReader);
+    /* Drain any reader-side staging between the reader and the workers (the
+       archive-mode SAM render stage) before the coder end markers: every real
+       block must reach inputDataPool before the nullptr terminators. */
+    renderStageDrain();
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
         inputDataPool->push(nullptr);
     }

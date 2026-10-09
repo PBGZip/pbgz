@@ -98,6 +98,25 @@ const uint32_t MIN_SELECT_SAMPLE = 64u << 10;   /* 64 KB */
 const uint32_t kSeqRefSampleBytes = 4u << 20;   /* 4 MB of SEQ */
 
 /*
+ * Cap on the QUAL column's SAMPLE for the codec trial, in quality-value bytes.
+ *
+ * This is deliberately separate from QUAL_PRIOR_TRAIN_MAX (45 MB): that
+ * constant limits the cross-block accumulation that trains the fcv2 prior on
+ * real volumes, before it converges. The trial sample, by contrast, only has to
+ * let the ladder's ranking converge - it doubles from 64 KB and settles when the
+ * leader is 3% ahead - and for the trial it is the full first block up to this
+ * cap. The cap exists because the top of the ladder is where the cost lives: on
+ * a 45 MB first block the ladder walks to ~47 MB and pays ~9 s of bwt_cm
+ * trial-compression on the final rung alone. Dropping the top rung (32 MB top)
+ * cuts the trial wall about in half while the 33 MB rung below it still runs,
+ * so the l8 "fine" fcv2 preset - which only wins at ~27 MB and up (see
+ * levelVolumeTier / candidateFcv2Cfgs) - still competes. The verdicts are
+ * unchanged on the datasets measured (the ladder keeps the leader's ranking
+ * across the dropped rung); a full-archive byte comparison is the gate.
+ */
+const uint32_t QUAL_TRIAL_MAX = 32u << 20;   /* 32 MB of QUAL */
+
+/*
  * How many lines of the QNAME column the layout trial encodes with each candidate.
  *
  * The two layouts are whole-column encoders, so their comparison costs two real encodes; a read
@@ -1898,7 +1917,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
              * The quality-value column goes through dedicated evaluation: the
              * candidates are coder_qual and fcv2, not generic byte-stream
              * compressors. Its sample is the whole block (up to
-             * QUAL_PRIOR_TRAIN_MAX): fcv2 is an adaptive context mixer that is
+             * QUAL_TRIAL_MAX): fcv2 is an adaptive context mixer that is
              * underestimated before it converges, so it must compete at real
              * data volumes. This is also the single most expensive trial, so it
              * is the one that benefits most from running in parallel with the
@@ -1913,7 +1932,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
                 std::vector<uint32_t> qualFreq;
                 {
                     PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_QUAL_EXTRACT);
-                    extractQualSamples(block, qualRecs, qualFreq, qualBudget, QUAL_PRIOR_TRAIN_MAX);
+                    extractQualSamples(block, qualRecs, qualFreq, qualBudget, QUAL_TRIAL_MAX);
                 }
                 {
                     PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_QUAL_SELECT);

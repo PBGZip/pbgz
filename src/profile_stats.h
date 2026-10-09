@@ -43,6 +43,7 @@ enum Cat {
     READ_INFLATE,
     READ_PARSE,
     READ_HEADER,      /* SAM/BAM header block: pre-parse into the chromosome table */
+    READ_RENDER,      /* archive-mode raw BAM block -> SAM text + MD5 (conversion threads) */
 
     /* SEQ / QUAL internals: preparation vs coder construction vs encoding */
     SEQ_PREP = 20,
@@ -74,6 +75,12 @@ enum Cat {
     MAP_SQUASH,  /* per read: complement + the four alignments' squash setup */
     MAP_PAYLOAD, /* per read: building the mapped payload once a position is chosen */
     MAP_WINDOW,  /* per read: the sliding-window loop, as one sample */
+
+    /* archive-mode SEQ match-stream decomposition (temporary analysis categories) */
+    SEQ_MATCH_CONSENSUS = 56, /* per-block consensus build (buildBlockConsensus) */
+    SEQ_MATCH_BUILD,          /* per-read 2-bit payload build + exception scan */
+    SEQ_MATCH_SPLIT,          /* splitSeqMatchStream RLE/whole decision */
+    SEQ_MATCH_ENCODE,         /* writeSeqMatchStreams incl. the match coder encode */
 
     FIELD_BASE = 64,
     FIELD_HDR = 90,
@@ -194,12 +201,17 @@ inline const char* catName(int cat)
         case READ_INFLATE:        return "READ_bgzf(inflate+io)";
         case READ_PARSE:          return "READ_parseRec2Cols";
         case READ_HEADER:         return "READ_header(chromosome table)";
+        case READ_RENDER:         return "READ_render(BAM->SAM on conv thread)";
         case SEQ_PREP:            return "SEQ_prep(buf+collect)";
         case SEQ_CTOR:            return "SEQ_ctor";
         case SEQ_CODEC:           return "SEQ_encode+flush";
         case QUAL_PREP:           return "QUAL_prep";
         case QUAL_CTOR:           return "QUAL_ctor";
         case QUAL_CODEC:          return "QUAL_encode+flush";
+        case SEQ_MATCH_CONSENSUS: return "SEQ_match_consensus";
+        case SEQ_MATCH_BUILD:     return "SEQ_match_build";
+        case SEQ_MATCH_SPLIT:     return "SEQ_match_split";
+        case SEQ_MATCH_ENCODE:    return "SEQ_match_encode";
         case READ_TRIAL_QUAL_EXTRACT: return "TRIAL_qual_extract";
         case READ_TRIAL_QUAL_SELECT:  return "TRIAL_qual_select";
         case CODER_TOTAL:         return "CODER_total";

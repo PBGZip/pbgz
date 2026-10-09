@@ -28,6 +28,7 @@
 #include "sam_field_layout.h"
 #include "sam_field_rules.h"
 #include "bam_actuator.h"
+#include "block_wrapper.h"
 #include "coder/coder_io.h"
 #include "coder/coder_fc.h"
 #include "coder/coder_bwt_cm.h"
@@ -285,8 +286,8 @@ int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
  *
  * `qualityFrequnce` is the caller's 256-entry histogram, indexed by the quality byte.
  */
-int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
-                                      std::pair<uint8_t, uint32_t>* qualityFrequnce)
+int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, uint32_t idx,
+                                       std::pair<uint8_t, uint32_t>* qualityFrequnce)
 {
     /*
      * The line's tab positions. The storage is inside the entry, so having one per call costs
@@ -301,8 +302,8 @@ int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
      * reads through a raw pointer and a hoisted length: the checked access of std::string::at(), or
      * a size() call per iteration, is a branch per byte that the bound already makes unnecessary.
      */
-    const char* const src = line.data();
-    const uint32_t srcLen = (uint32_t)line.size();
+    const char* const src = (const char*)line;
+    const uint32_t srcLen = lineLen;
     for (uint32_t i = 0; i < srcLen; ++i) {
         if (src[i] == '\t' || src[i] == '\n') {
             // First tab before is ID column, need to split and analyze ID column
@@ -316,8 +317,12 @@ int32_t SamCodecActuator::scanDataLine(const std::string& line, uint32_t idx,
                 }
             } else if (linePos.size() == 2) {  // RNAME is the 3th field
                 uint32_t chrLen = i - (uint32_t)linePos[1] - 1;
-                std::string chrName = line.substr((size_t)linePos[1] + 1, chrLen);
-                if (chrName != "*" && chrName != "=") {
+                const char* chrBegin = src + (size_t)linePos[1] + 1;
+                const bool isStar = (chrLen == 1 && *chrBegin == '*');
+                const bool isEq = (chrLen == 1 && *chrBegin == '=');
+                if (!isStar && !isEq) {
+                    /* Mapped read: build the (rare) name only to look it up. */
+                    std::string chrName(chrBegin, chrLen);
                     if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
                         if (headEndLine >= 0) {
                             SamInfo::getInstance().clearChromosomeInfo();
@@ -405,6 +410,21 @@ int32_t SamCodecActuator::preAnalysis() {
     }
 
     /*
+     * Archive-mode reader offload: a raw-record BAM block (isRawBam) carries the
+     * [i32 size][record] stream, not SAM text. The reader streamed it to move the
+     * BAM->SAM cost off the single reader thread; this worker renders it into the
+     * identical text (same lines, same npos, same MD5) before the usual passes, so
+     * the compressed result is byte-identical to reader-rendered input.
+     */
+    if (inBlockPtr->isRawBam()) {
+        if (0 != bamRenderRawBlockToText(inBlockPtr)) {
+            LOG_ERROR("SAM block(%ld): failed to render raw BAM records to text.",
+                      (long)inBlockPtr->getBlockId());
+            return -1;
+        }
+    }
+
+    /*
      * A SAM block's line positions are recorded by the format's own reader (SamBlockReader /
      * BamGzBlockReader): they split the input on newlines and keep every record boundary, so a
      * non-empty block with no line position at all is not SAM/BAM text. The pbgz-input path is
@@ -461,13 +481,16 @@ int32_t SamCodecActuator::preAnalysis() {
         if (begin >= end) {
             return -1;
         }
-        line.assign((char*)buffer + begin, end - begin);
         if (buffer[begin] == '@') {
+            /* Header lines are few (split into their own block), so a copy here is fine. */
+            line.assign((char*)buffer + begin, end - begin);
             if (parseHeaderLine(line) != 0) {
                 return -1;
             }
         } else {
-            if (scanDataLine(line, idx, qualityFrequnce) != 0) {
+            /* Record line: scan it straight out of the block buffer; no per-line copy
+               (the previous std::string per data line cost a ~15KB memcpy per read). */
+            if (scanDataLine(buffer + begin, end - begin, idx, qualityFrequnce) != 0) {
                 return -1;
             }
         }
@@ -508,6 +531,17 @@ int32_t SamCodecActuator::compress() {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr) {
         LOG_ERROR("Invalid parameter, inBlockPtr or outBlockPtr is nullptr for SAM compression");
         return -1;
+    }
+
+    /* Same worker-side raw-record render as preAnalysis, for callers that
+       compress without running the pre-analysis first (idempotent: after the
+       render the block is not raw any more). */
+    if (inBlockPtr->isRawBam()) {
+        if (0 != bamRenderRawBlockToText(inBlockPtr)) {
+            LOG_ERROR("SAM block(%ld): failed to render raw BAM records to text.",
+                      (long)inBlockPtr->getBlockId());
+            return -1;
+        }
     }
 
     /*
@@ -2897,10 +2931,12 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
 int32_t SamCodecActuator::compressBaseSelfRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta)
 {
     BlockConsensus cons;
+    const auto consT0 = pbgzprof::nowOrZero();
     if (!buildBlockConsensus(fieldIdx, cons)) {
         /* Nothing to build a reference from: the plain path is what is left. */
         return compressBaseWithoutRef(fieldIdx, fieldSrcLen, fieldMeta);
     }
+    pbgzprof::addSince(pbgzprof::SEQ_MATCH_CONSENSUS, consT0);
     LOG_INFO("SEQ block %lld coded against a consensus built from its own reads: window %lld + %lld bases",
              (long long)inBlockPtr->getBlockId(), (long long)cons.windowStart,
              (long long)cons.windowBases);
@@ -2982,6 +3018,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     int64_t srcLen = 0;
     uint32_t totalBaseLength = 0;
 
+    const auto seqBuildT0 = pbgzprof::nowOrZero();
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
@@ -3138,7 +3175,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
      * whether the block's SEQ meta carries the "rle" member (see initDecoder / decompressBase), and
      * a stream written without the split is byte-for-byte the form used before the split existed.
      */
+    const auto seqSplitT0 = pbgzprof::nowOrZero();
     SeqRleSplit rle = splitSeqMatchStream(matchBuffer.get(), matchLen);
+    pbgzprof::addSince(pbgzprof::SEQ_MATCH_BUILD, seqBuildT0);
+    pbgzprof::addSince(pbgzprof::SEQ_MATCH_SPLIT, seqSplitT0);
 
     /*
      * Sub-stream "m": the run-length segment under RLE, otherwise the whole match
@@ -3158,11 +3198,12 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
      */
     /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
     {
-    /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
+    const auto seqEncT0 = pbgzprof::nowOrZero();
     if (writeSeqMatchStreams(rle, matchBuffer.get(), matchLen, srcLen, matchIo.get(), metaSubs,
                              metaStreams, totalDstLen) != 0) {
         return -1;
     }
+    pbgzprof::addSince(pbgzprof::SEQ_MATCH_ENCODE, seqEncT0);
     totalSrcLen += srcLen;
     }
 

@@ -532,18 +532,30 @@ private:
     {
         const int32_t f = (run > 2); /* run represents the number of consecutive repetitions of previous characters */
 
+        /* c1/c2 are fixed for the whole byte, so their counter1 rows and the counter2
+           plane for this run factor out of the per-bit loop; counter2[f][ctx][j] is laid
+           out contiguously (a row of 17), so the [j] and [j+1] counts come out of one
+           unaligned 4-byte load. Every value is identical to the 3-D indexing and the two
+           2-byte loads it replaced. */
+        const _counter<4>* const row1_c1 = counter1[c1];
+        const _counter<4>* const row1_c2 = counter1[c2];
+        const _counter<6>* const plane2 = &counter2[f][0][0];
+
         int32_t ctx = 1;
         for (int32_t i = 128; i > 0; i >>= 1) /* Get all bits of current byte c, starting from high bit */
         {
             const int32_t p0 = counter0[ctx].get();
-            const int32_t p1 = counter1[c1][ctx].get();
-            const int32_t p2 = counter1[c2][ctx].get();
+            const int32_t p1 = row1_c1[ctx].get();
+            const int32_t p2 = row1_c2[ctx].get();
             const int32_t p = (((p0 + p1) * 7) + p2 + p2) >> 4;
 
             /* Get probability of auxiliary symbols through linear interpolation */
             const int32_t j = p >> 12; /* j takes the highest 4 bits of mixed probability, uses SSE combined with ctx (i.e., current character c to be processed) to correct p_mixed, making another prediction on the probability itself using ctx */
-            const int32_t x1 = counter2[f][ctx][j].get();
-            const int32_t x2 = counter2[f][ctx][j + 1].get();
+            const _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
+            uint32_t x12;
+            memcpy(&x12, (const void*)(row2 + j), sizeof(uint32_t));
+            const int32_t x1 = (int32_t)(uint16_t)x12;
+            const int32_t x2 = (int32_t)(uint16_t)(x12 >> 16);
             const int32_t ssep = x1 + (((x2 - x1) * (p & 4095)) >> 12);
 
             /* p + ssep + ssep + ssep represents the probability of high probability symbols, i.e.,
@@ -553,9 +565,9 @@ private:
             coder->encode_bit<18>(bit, p + ssep + ssep + ssep);
 
             counter0[ctx].update(bit);
-            counter1[c1][ctx].update(bit);
-            counter2[f][ctx][j].update(bit);
-            counter2[f][ctx][j + 1].update(bit);
+            row1_c1[ctx].update(bit);
+            row2[j].update(bit);
+            row2[j + 1].update(bit);
 
             ctx += ctx + bit; /* ctx left shift by one bit (+1 when the bit was 1) */
         }
@@ -573,26 +585,35 @@ private:
     {
         const int32_t f = (run > 2);
 
+        /* Same factoring as put(): the c1/c2 rows and the counter2 plane for this run
+           are fixed for the whole byte, and [j]/[j+1] load as one unaligned 4-byte. */
+        const _counter<4>* const row1_c1 = counter1[c1];
+        const _counter<4>* const row1_c2 = counter1[c2];
+        const _counter<6>* const plane2 = &counter2[f][0][0];
+
         int32_t ctx = 1;
         while (ctx < 256)
         {
             const int32_t p0 = counter0[ctx].get();
-            const int32_t p1 = counter1[c1][ctx].get();
-            const int32_t p2 = counter1[c2][ctx].get();
+            const int32_t p1 = row1_c1[ctx].get();
+            const int32_t p2 = row1_c2[ctx].get();
             const int32_t p = (((p0 + p1) * 7) + p2 + p2) >> 4;
 
             /* Get probability of auxiliary symbols through linear interpolation */
             const int32_t j = p >> 12;
-            const int32_t x1 = counter2[f][ctx][j].get();
-            const int32_t x2 = counter2[f][ctx][j + 1].get();
+            const _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
+            uint32_t x12;
+            memcpy(&x12, (const void*)(row2 + j), sizeof(uint32_t));
+            const int32_t x1 = (int32_t)(uint16_t)x12;
+            const int32_t x2 = (int32_t)(uint16_t)(x12 >> 16);
             const int32_t ssep = x1 + (((x2 - x1) * (p & 0xFFF)) >> 12);
 
             /* Same as put(): the decoded bit drives the four counter updates without a branch. */
             const int32_t bit = coder->decode_bit<18>(p + ssep + ssep + ssep);
             counter0[ctx].update(bit);
-            counter1[c1][ctx].update(bit);
-            counter2[f][ctx][j].update(bit);
-            counter2[f][ctx][j + 1].update(bit);
+            row1_c1[ctx].update(bit);
+            row2[j].update(bit);
+            row2[j + 1].update(bit);
 
             ctx += ctx + bit; /* ctx left shift by one bit (+1 when the bit was 1) */
         }

@@ -37,6 +37,7 @@
 
 #if defined(__x86_64__)
 #include <immintrin.h>
+#include "utils/md5_util.h"
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -987,7 +988,8 @@ int32_t BamBlockReader::parseBamHeader() {
     return 0;
 }
 
-int32_t BamBlockReader::parseBamRecord(const uint8_t* data, int32_t size, std::string& line) {
+int32_t bamRecordToSamLine(const uint8_t* data, int32_t size,
+                           const std::vector<BamRef>& refs, std::string& line) {
     const uint8_t* p = data;
     const uint8_t* end = data + size;
 
@@ -1058,6 +1060,93 @@ int32_t BamBlockReader::parseBamRecord(const uint8_t* data, int32_t size, std::s
     return 0;
 }
 
+/*
+ * Worker-side render of a raw-record BAM block: [i32 size][record]... -> the
+ * identical SAM text (one line per record, each newline-terminated), with the
+ * newline positions (npos) and the block MD5 over that text recomputed. The
+ * conversion is deterministic and byte-identical to the reader's, so the block
+ * downstream is exactly what a text block would have been; only the thread that
+ * did the work changes (reader -> the worker that compresses this block).
+ * Runs once per block, guarded by isRawBam() at the call site.
+ */
+int32_t bamRenderRawBlockToText(RoughIOBlock* blockPtr) {
+    if (blockPtr == nullptr) {
+        return -1;
+    }
+    const std::shared_ptr<const std::vector<BamRef>> refs = blockPtr->getBamRefs();
+    if (refs == nullptr) {
+        LOG_ERROR("Raw BAM block(%ld) has no reference table for rendering.",
+                  (long)blockPtr->getBlockId());
+        return -1;
+    }
+
+    const uint8_t* src = blockPtr->getBuffer();
+    const size_t srcLen = (size_t)blockPtr->getDataLen();
+
+    /* Render into a fresh output that becomes the block content: the raw records
+       are smaller than the text, so render into a grow-on-demand buffer and swap. */
+    std::string text;
+    text.reserve(srcLen * 3 / 2 + 64);
+
+    std::vector<size_t> newNpos;
+    size_t pos = 0;
+    while (pos + 4 <= srcLen) {
+        int32_t size = 0;
+        memcpy(&size, src + pos, 4);
+        if (size <= 0 || (size_t)size > srcLen - pos - 4 || size > (1 << 30)) {
+            LOG_ERROR("Raw BAM block(%ld): bad record length %d at offset %zu "
+                      "(srcLen=%zu, first8=%02x %02x %02x %02x %02x %02x %02x %02x).",
+                      (long)blockPtr->getBlockId(), size, pos, srcLen,
+                      (unsigned)src[0], (unsigned)src[1], (unsigned)src[2], (unsigned)src[3],
+                      (unsigned)src[4], (unsigned)src[5], (unsigned)src[6], (unsigned)src[7]);
+            return -1;
+        }
+        std::string line;
+        if (0 != bamRecordToSamLine(src + pos + 4, size, *refs, line)) {
+            LOG_ERROR("Raw BAM block(%ld): failed to render record at offset %zu.",
+                      (long)blockPtr->getBlockId(), pos);
+            return -1;
+        }
+        const size_t lineStart = text.size();
+        text.append(line);
+        text.push_back('\n');
+        newNpos.push_back(lineStart + line.size());
+        pos += 4 + (size_t)size;
+    }
+    if (pos != srcLen) {
+        LOG_ERROR("Raw BAM block(%ld): trailing %zu bytes after the last record.",
+                  (long)blockPtr->getBlockId(), srcLen - pos);
+        return -1;
+    }
+
+    /* Replace the block payload with the rendered text. */
+    if (text.size() > (size_t)blockPtr->getBufferSize()) {
+        if (0 != blockPtr->ensureCapacity(text.size())) {
+            return -1;
+        }
+    }
+    memcpy(blockPtr->getBuffer(), text.data(), text.size());
+    blockPtr->setDataLen((int64_t)text.size());
+    blockPtr->getNpos().swap(newNpos);
+
+    /* MD5 of the raw block text (identical bytes to the reader-rendered block):
+       the reader thread skipped hashing raw blocks (see preDispatchBlock), so it
+       is computed here, on the worker that owns the block now. */
+    std::string md5;
+    calcMd5sum(md5, blockPtr->getBuffer(), (uint32_t)blockPtr->getDataLen());
+    blockPtr->setMd5(md5);
+    blockPtr->setRawBam(false);
+
+    /* Count the rendered (text) size for the file-level ratio: the reader only
+       knew the raw record bytes for this block (see CodecEngine::updateInputStatics). */
+    PbgzManager::getInstance().updateReadDataLen(blockPtr);
+    return 0;
+}
+
+int32_t BamBlockReader::parseBamRecord(const uint8_t* data, int32_t size, std::string& line) {
+    return bamRecordToSamLine(data, size, refs, line);
+}
+
 
 
 /*
@@ -1123,12 +1212,17 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
     // are filled or SAM_BLOCK_MAX_BASES sequenced bases are reached.
     uint32_t reads = 0;
     size_t blockBases = 0;   /* sequenced bases already kept in this block */
+    bool blockIsRaw = false; /* this block streamed raw records (worker renders) */
+    /* Whether the read threshold has crossed into raw-stream territory: the
+       trailing text blocks needed for the codec decision / QUAL pre-training end
+       once the (already-incremented) block id exceeds the text limit. */
+    const bool rawThisBlock = rawStreamMode && (int64_t)blockId > rawStreamTextLimit;
 
     /* A whole read that would push this data block over the base cap is parked
        in pendingSamLine and becomes the first line of the next block, so very
        long reads (e.g. Nanopore) can never accumulate into an unbounded block
        and reads are never split. */
-    if (!pendingSamLine.empty()) {
+    if (!pendingSamLine.empty() && !rawThisBlock) {
         if (outLen + pendingSamLine.size() + 1 > blockPtr->getBufferSize()) {
             if (0 != blockPtr->ensureCapacity(outLen + pendingSamLine.size() + 1)) {
                 return -1;
@@ -1163,6 +1257,37 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         outLen += 4;
         memcpy(out + outLen, pend.data(), pend.size());
         outLen += pend.size();
+        ++reads;
+        lastBlockHasData = true;
+    } else if (rawThisBlock && !pendingBamRecord.empty()) {
+        /* Same parked record, archive raw-stream mode: append it raw; the worker
+           that compresses this block renders it (see bamRenderRawBlockToText).
+           The parked record's bases count toward the base cap exactly as the
+           text-flush does (samRowSeqLength above), so block boundaries stay
+           identical to the reader-rendered (baseline) slicing. */
+        blockIsRaw = true;
+        std::vector<uint8_t> pend;
+        pend.swap(pendingBamRecord);
+        if (outLen + 4 + pend.size() > blockPtr->getBufferSize()) {
+            if (0 != blockPtr->ensureCapacity(outLen + 4 + pend.size())) {
+                return -1;
+            }
+            out = blockPtr->getBuffer();
+        }
+        int32_t pendSize = (int32_t)pend.size();
+        memcpy(out + outLen, &pendSize, 4);
+        outLen += 4;
+        memcpy(out + outLen, pend.data(), pend.size());
+        outLen += pend.size();
+        int32_t pendSeqLen = 0;
+        if (pend.size() >= 20) {
+            const uint8_t* pCore = pend.data() + 16;
+            pendSeqLen = bamI32(pCore);
+            if (pendSeqLen < 0) {
+                pendSeqLen = 0;
+            }
+        }
+        blockBases += (unsigned long)(pendSeqLen > 0 ? (unsigned long)pendSeqLen : 0);
         ++reads;
         lastBlockHasData = true;
     }
@@ -1213,6 +1338,35 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
             continue;
         }
 
+        if (rawThisBlock) {
+            /* Archive mode reader offload: after the leading text blocks (which
+               feed the codec decision and QUAL pre-training) every data block is
+               streamed as raw [i32 size][record] bytes, sliced by the same
+               read-count/base-count rules. The compressing worker renders the
+               records into byte-identical SAM text (bamRenderRawBlockToText),
+               taking the BAM->SAM cost off this single reader thread. */
+            if (reads > 0 && blockMaxBases > 0 &&
+                (uint64_t)blockBases + (uint64_t)(seqLen > 0 ? (uint32_t)seqLen : 0) > blockMaxBases) {
+                pendingBamRecord.assign(recBuf.begin(), recBuf.end());
+                break;
+            }
+            blockIsRaw = true;
+            if (outLen + 4 + (size_t)blockSize > blockPtr->getBufferSize()) {
+                if (0 != blockPtr->ensureCapacity(outLen + 4 + (size_t)blockSize)) {
+                    break;
+                }
+                out = blockPtr->getBuffer();
+            }
+            memcpy(out + outLen, &blockSize, 4);
+            outLen += 4;
+            memcpy(out + outLen, recBuf.data(), (size_t)blockSize);
+            outLen += (size_t)blockSize;
+            blockBases += (uint64_t)(seqLen > 0 ? (uint32_t)seqLen : 0);
+            ++reads;
+            lastBlockHasData = true;
+            continue;
+        }
+
         lineBuf.clear();
         if (0 != parseBamRecord(recBuf.data(), blockSize, lineBuf)) {
             break;
@@ -1221,7 +1375,15 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
            parked for the next block instead of overshooting the cap. reads > 0
            guarantees progress when a single read alone exceeds the cap. */
         if (reads > 0 && blockMaxBases > 0 && (uint64_t)blockBases + (uint64_t)seqLen > blockMaxBases) {
-            pendingSamLine.assign(lineBuf);   // copy keeps lineBuf capacity reusable
+            if (rawStreamMode && ((int64_t)blockId + 1 > rawStreamTextLimit)) {
+                /* The next block will be a raw-stream block: park the BAM record
+                   itself so raw framing stays intact (parking the rendered SAM
+                   line here would corrupt the first raw block's record stream at
+                   the text->raw switch). */
+                pendingBamRecord.assign(recBuf.begin(), recBuf.end());
+            } else {
+                pendingSamLine.assign(lineBuf);   // copy keeps lineBuf capacity reusable
+            }
             break;
         }
         if (outLen + lineBuf.size() + 1 > blockPtr->getBufferSize()) {
@@ -1246,6 +1408,17 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
 
     blockPtr->setDataLen((int64_t)outLen);
     blockPtr->setBlockType(BAM);
+    if (blockIsRaw) {
+        /* Raw records: npos stays empty (the worker renderer rebuilds line
+           positions from the rendered text) and the worker also hashes the text
+           after rendering, so the reader thread does neither (see
+           preDispatchBlock and bamRenderRawBlockToText). */
+        blockPtr->setRawBam(true);
+        if (!rawRefs) {
+            rawRefs = std::make_shared<const std::vector<BamRef>>(refs);
+        }
+        blockPtr->setBamRefs(rawRefs);
+    }
     if (structMode && colsCur != nullptr) {
         colsCur->nRecords = reads;   /* payload parsed later, by the worker */
         colsCur->columnsBuilt = false;

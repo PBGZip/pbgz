@@ -75,6 +75,13 @@ protected:
     }
 
     virtual void updateInputStatics(RoughIOBlock* inBlockPtr) override {
+        /* Raw-record blocks are counted by the worker that renders them (see
+           bamRenderRawBlockToText), where the original size is the rendered text
+           length - the reader here only knows the raw record bytes, which would
+           understate the denominator and inflate the reported ratio. */
+        if (inBlockPtr->isRawBam()) {
+            return;
+        }
         PbgzManager::getInstance().updateReadDataLen(inBlockPtr);
     }
 

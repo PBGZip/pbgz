@@ -33,6 +33,15 @@
 #include "utils/memory_util.h"
 #include "bam_columns.h"
 
+/* One BAM reference-sequence entry from the BAM header (name + length). The
+   reader thread lifts these out of the BAM header and hands them, via the
+   block, to whichever worker renders raw BAM records into SAM text, so the
+   RNAME/RNEXT columns can be resolved with no dependency on the reader. */
+struct BamRef {
+    std::string name;
+    int32_t len;
+};
+
 const size_t BLOCK_SIZE = 268435456;
 
 /* Number of bytes the Creator reads ahead to determine the file format. This data is later merged into the first block / first package header, so nothing is wasted. */
@@ -89,6 +98,8 @@ public:
         md5Ready = false;
         bamCols.reset();
         bamPrebuilt = false;
+        rawBam = false;
+        bamRefs.reset();
     }
 
     /*
@@ -306,7 +317,34 @@ public:
     void setBamPrebuilt(bool value) {
         bamPrebuilt = value;
     }
-    
+
+    /*
+     * Raw-record BAM block (archive mode, reader offload): the payload is the
+     * concatenated [i32 size][record] bytes of the block's reads, NOT SAM text.
+     * The reader thread only streams records (sliced by the same read-count /
+     * base-count rules as text blocks) and the compressing worker renders each
+     * record into the identical SAM line - so the whole BAM->SAM cost moves off
+     * the single reader thread. npos is empty until the worker renders.
+     */
+    bool isRawBam() const {
+        return rawBam;
+    }
+
+    void setRawBam(bool value) {
+        rawBam = value;
+    }
+
+    /* Reference-sequence table for rendering raw BAM records on a worker. Shared
+       read-only across every raw block of the file (the reader fills it once from
+       the BAM header). Empty for non-BAM and SAM-text blocks. */
+    std::shared_ptr<const std::vector<BamRef>> getBamRefs() const {
+        return bamRefs;
+    }
+
+    void setBamRefs(const std::shared_ptr<const std::vector<BamRef>>& refs) {
+        bamRefs = refs;
+    }
+
 private:
     uint8_t *buffer;
     size_t bufferSize;             /* Size of buffer */
@@ -324,4 +362,6 @@ private:
     bool md5Ready = false;
     std::shared_ptr<BamColumns> bamCols;
     bool bamPrebuilt = false;      /* payload already is a BAM byte stream (see setBamPrebuilt) */
+    bool rawBam = false;           /* archive-mode block carries raw BAM records, worker renders to SAM text */
+    std::shared_ptr<const std::vector<BamRef>> bamRefs; /* BAM ref table for worker-side rendering */
 };

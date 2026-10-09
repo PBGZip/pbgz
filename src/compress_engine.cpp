@@ -108,6 +108,28 @@ BlockReader* CompressEngine::createBlockReader() {
         ioReader, parameter.compressLevel, true, bamStruct, true, bamBgzfThreadNum(parameter.threadNum));
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
+        return nullptr;
+    }
+    /*
+     * Archive mode reader offload: for a (gz-)BAM input the reader renders every
+     * record to SAM text serially; that cost lands entirely on the single reader
+     * thread and, on many-core machines, becomes the dominant Amdahl factor. In
+     * archive mode only, switch the reader to stream raw BAM records after the
+     * leading text blocks (which feed the codec trial and QUAL pre-training). The
+     * BAM->SAM rendering plus the block MD5 then run on a small pool of conversion
+     * threads sized by the BGZF-stage budget (bamBgzfThreadNum) - off the reader
+     * and, crucially, off the compressing workers, which stay 100% busy on encode.
+     * Output stays byte-identical (rendering produces the same text the reader would
+     * have). (Structured/fast mode already streams records, so it is left as-is.)
+     */
+    if (!bamStruct) {
+        if (BamGzBlockReader* bam = dynamic_cast<BamGzBlockReader*>(blockReader)) {
+            const int64_t textLimit = (parameter.threadNum > 0) ? (int64_t)parameter.threadNum : 1;
+            bam->setRawStreamMode(true, textLimit);
+        } else if (BamBlockReader* bam = dynamic_cast<BamBlockReader*>(blockReader)) {
+            const int64_t textLimit = (parameter.threadNum > 0) ? (int64_t)parameter.threadNum : 1;
+            bam->setRawStreamMode(true, textLimit);
+        }
     }
     return blockReader;
 }
@@ -247,10 +269,106 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
            reader thread does not run a per-block md5 pass on top of inflate. */
         return;
     }
+    if (blockPtr->isRawBam()) {
+        /* Archive-mode raw-record block: its BAM->SAM render and MD5 are done by the
+           conversion thread pool (see engineReaderReady / dispatchInputBlock /
+           renderWorker), off both the reader and the compressing workers - so no
+           hash is taken here. */
+        return;
+    }
     PBGZ_PROF_SCOPE(pbgzprof::READ_MD5);
     std::string md5;
     calcMd5sum(md5, blockPtr->getBuffer(), (uint32_t)blockPtr->getDataLen());
     blockPtr->setMd5(md5);
+}
+
+/*
+ * Archive-mode BAM SAM render stage.
+ *
+ * The BAM->SAM conversion ("render") and the per-block MD5 both depend only on the
+ * input. Previously they ran on the compressing worker threads (bamRenderRawBlockToText
+ * at the top of preAnalysis) - the coders are the pipeline bottleneck, and every
+ * cycle spent rendering a block's records there is a cycle not spent compressing it.
+ * This stage runs them on a small pool of dedicated conversion threads sized by the
+ * same -t derived budget as the BGZF inflate stage (bamBgzfThreadNum), which is idle
+ * waiting on the coders in exactly the situations where the coders are the bottleneck.
+ *
+ * Flow: reader (raw record blocks) -> renderInputPool -> [render workers: BAM->SAM text
+ * + MD5, off the coder] -> inputDataPool -> coder threads (which only compress now).
+ * The leading text blocks (reader-rendered, bounded by rawStreamTextLimit) bypass the
+ * stage and keep the codec trial / QUAL pretraining feed unchanged.
+ */
+void CompressEngine::engineReaderReady(BlockReader* blockReader) {
+    if (renderStageEnabled) {
+        return;
+    }
+    if (parameter.mode == PBGZ_MODE_FAST) {
+        return;
+    }
+    const bool isBam =
+        dynamic_cast<BamGzBlockReader*>(blockReader) != nullptr ||
+        dynamic_cast<BamBlockReader*>(blockReader) != nullptr;
+    if (!isBam) {
+        return;
+    }
+    renderThreadNum = bamBgzfThreadNum(parameter.threadNum);
+    renderStageEnabled = true;
+    renderInputPool = std::make_unique<BlockingQueueType>();
+    renderInputPool->setCapility(parameter.threadNum + 1);
+    for (uint32_t i = 0; i < renderThreadNum; ++i) {
+        renderThreads.emplace_back(std::thread(&CompressEngine::renderWorker, this));
+    }
+    if (parameter.verbose) {
+        fprintf(stderr, "[pipeline] SAM render stage up (%u conversion thread(s))\n",
+                renderThreadNum);
+    }
+}
+
+void CompressEngine::dispatchInputBlock(RoughIOBlock* blockPtr) {
+    if (renderStageEnabled && blockPtr->isRawBam() && renderInputPool != nullptr) {
+        renderInputPool->push(blockPtr);
+        return;
+    }
+    inputDataPool->push(blockPtr);
+}
+
+void CompressEngine::renderStageDrain() {
+    if (!renderStageEnabled) {
+        return;
+    }
+    renderStageEnabled = false;
+    for (uint32_t i = 0; i < renderThreadNum; ++i) {
+        renderInputPool->push(nullptr);
+    }
+    for (auto& t : renderThreads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    renderThreads.clear();
+    renderInputPool.reset();
+}
+
+void CompressEngine::renderWorker() {
+    pthread_setname_np(pthread_self(), "samrender");
+    while (true) {
+        RoughIOBlock* inBlockPtr = renderInputPool->get();
+        if (inBlockPtr == nullptr) {
+            break;
+        }
+        PBGZ_PROF_SCOPE(pbgzprof::READ_RENDER);
+        if (0 != bamRenderRawBlockToText(inBlockPtr)) {
+            LOG_ERROR("Render raw BAM block(%ld) to SAM text failed.",
+                      (long)inBlockPtr->getBlockId());
+            /*
+             * The block is left raw and intact (bamRenderRawBlockToText only
+             * modifies it on success), so the worker's existing isRawBam()
+             * fallback in SamCodecActuator::preAnalysis retries the render and,
+             * failing that, downgrades this one block to the BINARY path.
+             */
+        }
+        inputDataPool->push(inBlockPtr);
+    }
 }
 
 void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {

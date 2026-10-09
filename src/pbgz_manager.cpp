@@ -118,7 +118,7 @@ void PbgzManager::updateDataInfo() {
      * output gets covered at the end of the line, producing garbled text like
      * "File type: SAM40/0]---".
      */
-    fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\r", totalReadLen, totalWriteLen);
+    fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\r", totalReadLen.load(), totalWriteLen);
 }
 
 void PbgzManager::printFileType(BlockType blockType) {
@@ -132,10 +132,10 @@ void PbgzManager::printHeadInfo(PbgzParameter& para) {
 }
 
 void PbgzManager::printTailInfo(Timer costTime, bool isPrintRatio) {
-    fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\033[0m\n", totalReadLen, totalWriteLen);
+    fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\033[0m\n", totalReadLen.load(), totalWriteLen);
     if (isPrintRatio) {
         fprintf(stderr, "\nCompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
-        fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%%\n", totalReadLen, totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen);
+        fprintf(stderr, "Total size_dest size %lu bytes, compressed to %lu bytes, ratio %0.2f%%\n", totalReadLen.load(), totalWriteLen, (totalWriteLen * 1.0) * 100 / totalReadLen.load());
     } else {
         fprintf(stderr, "\nDecompress finish, cost %um%us.\n", (costTime.elapsed() / 1000) / 60, (costTime.elapsed() / 1000) % 60);
     }

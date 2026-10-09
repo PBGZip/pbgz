@@ -27,6 +27,7 @@
 #include "actuator.h"
 #include <mutex>
 #include <condition_variable>
+#include <vector>
 #include "pbgz_stat.h"
 #include "block_wrapper.h"
 #include "preprocess_info.h"
@@ -57,7 +58,26 @@ public:
     /* Computes the block MD5 on the reader thread (see PbgzEngine::readOneBlock). */
     virtual void preDispatchBlock(RoughIOBlock* blockPtr) override;
 
+    /* Archive-mode BAM: launch the SAM render (conversion) thread pool. */
+    virtual void engineReaderReady(BlockReader* blockReader) override;
+
+    /* Archive-mode BAM: divert raw-record blocks into the render stage. */
+    virtual void dispatchInputBlock(RoughIOBlock* blockPtr) override;
+
+    /* Archive-mode BAM: flush + join the render stage before the coder end markers. */
+    virtual void renderStageDrain() override;
+
 protected:
+
+    /* Render worker: BAM records -> SAM text + block MD5 for one raw block (see bamRenderRawBlockToText). */
+    void renderWorker();
+
+    /* True while raw BAM blocks are routed to the render stage (set on the reader thread). */
+    bool renderStageEnabled = false;
+    uint32_t renderThreadNum = 0;
+    std::unique_ptr<BlockingQueueType> renderInputPool;
+    std::vector<std::thread> renderThreads;
+
     /*
      * The reader thread accumulates QUAL prior training samples block by block; once
      * the target block count (= concurrency) or the 45 MB cap is reached, the prior is

@@ -175,7 +175,18 @@ private:
             } else {
                 range = bound;
             }
-            while (range < (1u << 24)) {
+            /*
+             * Renormalize. The loop it replaces needs at most one shift: by
+             * construction range stays in [2^24, 2^32) between bits (the shift
+             * restores it there), and the worst bit halves it (p = 2048), so the
+             * post-bit range is at least 2^23; one << 8 put it back at or above
+             * 2^31. Shifting any value in [2^8, 2^24) left by 8 meanwhile always
+             * crosses 2^24, so a second guard can never fire. The unrolled single
+             * shift is exactly the loop's one legal iteration - an unpaired shift
+             * would desync the carry/top bytes from the decoder - so the stream
+             * is byte-for-byte what the loop produced, with no loop exit test.
+             */
+            if (range < (1u << 24)) {
                 range <<= 8;
                 shift_low();
             }
@@ -238,7 +249,8 @@ private:
                 code -= bound;
                 range -= bound;
             }
-            while (range < (1u << 24)) {
+            /* Renorm, unrolled to the single shift the encoder also performs. */
+            if (range < (1u << 24)) {
                 range <<= 8;
                 code = (code << 8) | (uint32_t)io->getc();
             }
@@ -274,6 +286,7 @@ private:
         std::vector<_pair> t0;
         std::vector<_pair> t1;
         std::vector<_pair> t2;
+        const uint32_t *recip = nullptr; /* reciprocal table, set once in init() */
 
         void init(int32_t alphabet)
         {
@@ -284,6 +297,7 @@ private:
             }
             nodes = 1 << bits;
             order2 = (k <= 128);
+            recip = recip_table();
             const _pair zero = {0, 0};
             t0.assign((size_t)nodes, zero);
             t1.assign((size_t)(k + 1) * (size_t)nodes, zero);
@@ -310,17 +324,27 @@ private:
         /*
          * Division by a small denominator is the hot operation - three per coded
          * bit, up to eight bits per symbol. Every denominator is bounded by
-         * QCM_CAP + QCM_THETA + 2, so they are turned into a reciprocal table
-         * once per process and the divisions become multiplies. Truncating is
-         * fine (and required) as long as both sides do exactly the same thing.
+         * QCM_CAP + QCM_THETA + 2, so they are turned into one reciprocal and the
+         * divisions become multiplies. Truncating is fine (and required) as long
+         * as both sides do exactly the same thing.
+         *
+         * With the caps in place the denominator can never reach k_recip_size:
+         * bump() halves a node as soon as a + b >= QCM_CAP, so n <= QCM_CAP (the
+         * halved sum is < QCM_CAP, one increment restores it to at most QCM_CAP),
+         * the order-0 denominator is n + 2, and the order-1/order-2 denominators
+         * are n + QCM_THETA - each strictly less than QCM_CAP + QCM_THETA + 8.
+         * The redundant bound test has therefore no table and no fallback division
+         * to guard: indexing is in range on both sides of the coder by
+         * construction, so the per-bit path is just the multiply.
+         *
+         * The reciprocal pointer is set once in init() rather than looked up per
+         * division: recip_table() guards a function-local static, and doing that
+         * guard three times a bit (twelve times a symbol) leaves a compare + taken
+         * branch in the hot loop that the arithmetic never needed.
          */
-        static inline uint32_t div_fixed(uint64_t num, uint32_t den)
+        inline uint32_t div_fixed(uint64_t num, uint32_t den) const
         {
-            const uint32_t *tab = recip_table();
-            if (den < k_recip_size) {
-                return (uint32_t)((num * (uint64_t)tab[den]) >> 32);
-            }
-            return (uint32_t)(num / den); /* unreachable with the caps in place */
+            return (uint32_t)((num * (uint64_t)recip[den]) >> 32);
         }
 
         /* P(bit == 1) in 1 << 16, interpolating order 2 towards order 1 towards
@@ -358,7 +382,9 @@ private:
                 bump(r0[node], bit);
                 bump(r1[node], bit);
                 if (order2) {
-                    bump(t2[(size_t)ctx2 * (size_t)nodes + node], bit);
+                    /* r2 already holds t2.data() + ctx2*nodes, so the per-bit bump reuses
+                       it instead of recomputing the ctx2*nodes+node index. */
+                    bump(r2[node], bit);
                 }
                 node = node * 2 + (uint32_t)bit;
             }
@@ -384,7 +410,8 @@ private:
                 bump(r0[node], bit);
                 bump(r1[node], bit);
                 if (order2) {
-                    bump(t2[(size_t)ctx2 * (size_t)nodes + node], bit);
+                    /* r2 already holds t2.data() + ctx2*nodes (see encode_symbol). */
+                    bump(r2[node], bit);
                 }
                 node = node * 2 + (uint32_t)bit;
                 sym = (sym << 1) | bit;

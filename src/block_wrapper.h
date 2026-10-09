@@ -246,6 +246,20 @@ public:
 
     void setStructMode(bool on) { structMode = on; }
 
+    /*
+     * Archive-mode reader offload: with rawStreamMode on, the reader renders the
+     * header and the first `textBlockLimit` data blocks as SAM text (those feed the
+     * reader-side codec decision and QUAL pre-training), then every later data block
+     * is streamed as raw [i32 size][record] bytes (block sliced by the same
+     * read-count/base-count rules). The compressing worker renders the raw records
+     * into the identical SAM text, moving the BAM->SAM cost off the single reader
+     * thread. Off by default (today's behaviour: everything rendered on the reader).
+     */
+    void setRawStreamMode(bool on, int64_t textBlockLimit) {
+        rawStreamMode = on;
+        rawStreamTextLimit = textBlockLimit;
+    }
+
 protected:
     /* Read the raw BAM byte stream (prefetched data + ioReader); BamGzBlockReader overrides this to inflate */
     virtual size_t readBamBytes(void* dst, size_t n);
@@ -264,7 +278,6 @@ protected:
      * out over the coder threads instead of serialising on the reader.
      */
 protected:
-    struct BamRef { std::string name; int32_t len; };
     std::vector<BamRef> refs;          /* BAM reference sequence list (name + length) */
     std::string headerText;            /* Generated SAM header text (including newlines) */
     bool headerParsed;
@@ -290,6 +303,9 @@ protected:
     bool structMode = false;
     std::shared_ptr<BamColumns> colsCur;      /* columns of the block being read */
     std::vector<uint8_t> pendingBamRecord;    /* a read parked to keep blocks inside the base cap */
+    bool rawStreamMode = false;               /* archive: stream raw records after the first blocks (see setRawStreamMode) */
+    int64_t rawStreamTextLimit = INT64_MAX;   /* blockId bound: blocks with id <= limit keep SAM-text rendering */
+    std::shared_ptr<const std::vector<BamRef>> rawRefs; /* shared ref table handed to raw blocks */
 };
 
 /* GZ-compressed BAM format: the inner layer is still a BGZF stream; inflate it to raw BAM first, then convert to SAM */
@@ -603,3 +619,22 @@ private:
 
     uint32_t maxThreads;   /* 0 = hardware_concurrency (see the constructor) */
 };
+
+/*
+ * BAM record rendering shared by the reader (text mode) and the worker-side
+ * raw-record render: convert one BAM alignment record into a SAM line. `refs`
+ * resolves the RNAME/RNEXT columns; on error returns non-zero and `line` is
+ * undefined. Deterministic: identical input record + refs always yield the
+ * identical line, on any thread.
+ */
+int32_t bamRecordToSamLine(const uint8_t* data, int32_t size,
+                           const std::vector<BamRef>& refs, std::string& line);
+
+/*
+ * Worker-side render of a raw-record BAM block (isRawBam()): rebuilds the
+ * identical SAM text into the block buffer, recomputes the newline positions
+ * (npos) and sets the block MD5 over that text, so the block handed to the
+ * SAM compressor is byte-identical to what the reader thread used to render.
+ * Returns 0 on success.
+ */
+int32_t bamRenderRawBlockToText(RoughIOBlock* blockPtr);

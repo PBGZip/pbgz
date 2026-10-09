@@ -188,6 +188,37 @@ protected:
      */
     virtual void preDispatchBlock(RoughIOBlock* /*blockPtr*/) { }
 
+    /*
+     * Called by the reader thread immediately after the block reader is created
+     * (startReadTask), before any data is read. Engines use it to wire up
+     * reader-side staging whose existence depends on the actual reader type - e.g.
+     * the archive-mode BAM->SAM render stage (CompressEngine routes raw BAM blocks
+     * to a small pool of conversion threads instead of compressing on the coder).
+     */
+    virtual void engineReaderReady(BlockReader* /*blockReader*/) { }
+
+    /*
+     * The reader thread's final hand-off of a block to the workers.
+     *
+     * The default implementation enqueues straight into inputDataPool. The
+     * compression engine overrides it to divert raw-record BAM blocks into the SAM
+     * render stage, so the BAM->SAM conversion + block MD5 (which both depend only
+     * on the input) happen off the compressing workers; the render stage then
+     * re-enqueues the finished text block via the same data-flow.
+     */
+    virtual void dispatchInputBlock(RoughIOBlock* blockPtr) {
+        inputDataPool->push(blockPtr);
+    }
+
+    /*
+     * Called once after the read loop ends (EOF or error), before the coder end
+     * markers are pushed into inputDataPool. The default is a no-op; the
+     * compression engine uses it to flush and join its SAM render stage so every
+     * rendered block reaches the workers before the end markers, preserving
+     * ordering (all real blocks first, then the terminators).
+     */
+    virtual void renderStageDrain() { }
+
     virtual void updateInputStatics(RoughIOBlock*) { }
 
     virtual void updateOutputStatics(RoughIOBlock*) { }

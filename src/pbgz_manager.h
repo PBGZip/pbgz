@@ -26,6 +26,7 @@
 #include <vector>
 #include <string>
 #include <string.h>
+#include <atomic>
 
 #include "log/logger.h"
 #include "io_block.h"
@@ -102,12 +103,14 @@ private:
 
     std::vector<std::pair<std::string, bool>> outfiles;
 
-    uint64_t totalReadLen;
+    /* Reader + (in archive raw-record mode) worker threads both accumulate the
+       total decompressed input size, so it is atomic. */
+    std::atomic<uint64_t> totalReadLen;
 
     uint64_t totalWriteLen;
 
 public:
-    uint64_t getTotalReadLen() const { return totalReadLen; }
+    uint64_t getTotalReadLen() const { return totalReadLen.load(); }
     uint64_t getTotalWriteLen() const { return totalWriteLen; }
 };
 

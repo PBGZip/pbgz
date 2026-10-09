@@ -236,9 +236,12 @@ public:
     virtual ~SamCodecActuator() override;
 
     /* preAnalysis' two passes over a block: the SAM header lines (via the caller's loop, which
-       hands them over one by one) and the record lines. */
+       hands them over one by one) and the record lines. The record-line pass walks a raw
+       (pointer, length) view of the line straight out of the block buffer - building a
+       std::string per data line means a memcpy of ~15KB per line (~1.5GB for this workload),
+       for data that the scan only reads. */
     int32_t parseHeaderLine(const std::string& line);
-    int32_t scanDataLine(const std::string& line, uint32_t idx,
+    int32_t scanDataLine(const uint8_t* line, uint32_t lineLen, uint32_t idx,
                          std::pair<uint8_t, uint32_t>* qualityFrequnce);
     int32_t preAnalysis();
 
