@@ -202,13 +202,20 @@ const int FCV2_PRESET_COUNT = 6;
  * 95 bp coarse therefore only spends trial time, hence its bound; above it the
  * preset is kept even where bwt_cm wins, because a 0.2-point margin is too small
  * to justify dropping fcv2 from the trial.
+ *
+ * maxMeanReadLen excludes a preset from long reads (mean length at or above the
+ * bound; the length rule's threshold is 500, see qualModelCountForMeanLen).
+ * coarse and fine carry that bound: on long reads coarse is beaten by ultra at
+ * every measured block volume and only "wins" its fcv2 tier on probes too small
+ * to have converged, and fine runs even with ultra-80 on the big probes without
+ * ever beating it - both would be pure trial cost on long reads.
  */
 const Fcv2Preset FCV2_PRESETS[FCV2_PRESET_COUNT] = {
     { "default",  0,     0, { 96, 16, 32,  8, 1, true, false, false, FCV2_MODEL_COUNT }, 0, false },
     { "ultra",    0,     0, { 96,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
     { "ultra-80", 0,     0, { 80,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
-    { "coarse",   0,    95, { 96,  8, 32,  4, 2, true, false, false, FCV2_MODEL_COUNT }, 0, false },
-    { "fine",     3,     0, { 96, 24, 32, 12, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
+    { "coarse",   0,    95, { 96,  8, 32,  4, 2, true, false, false, FCV2_MODEL_COUNT }, 500, false },
+    { "fine",     3,     0, { 96, 24, 32, 12, 0, true, false, false, FCV2_MODEL_COUNT }, 500, false },
     /*
      * Trained on 40k reads of 55-90 bytes with a 2 MB sample (test/fcv2_len_train.cpp):
      * 19.723% of QUAL against 19.987% for "default" and 20.516% for coder_bwt_cm on that sample.

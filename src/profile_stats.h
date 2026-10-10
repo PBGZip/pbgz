@@ -92,6 +92,10 @@ enum Cat {
     READ_TRIAL_QUAL_EXTRACT = 116,
     READ_TRIAL_QUAL_SELECT = 117,
 
+    /* One slot per fcv2 preset's trial-compression (READ_TRIAL_QUAL_FCV2_BASE + i,
+       i over FCV2_PRESETS). Only charged when the fcv2 ladder runs. */
+    READ_TRIAL_QUAL_FCV2_BASE = 118,
+
     CAT_MAX = 128
 };
 
@@ -214,6 +218,12 @@ inline const char* catName(int cat)
         case SEQ_MATCH_ENCODE:    return "SEQ_match_encode";
         case READ_TRIAL_QUAL_EXTRACT: return "TRIAL_qual_extract";
         case READ_TRIAL_QUAL_SELECT:  return "TRIAL_qual_select";
+        case READ_TRIAL_QUAL_FCV2_BASE + 0: return "TRIAL_fcv2_default";
+        case READ_TRIAL_QUAL_FCV2_BASE + 1: return "TRIAL_fcv2_ultra";
+        case READ_TRIAL_QUAL_FCV2_BASE + 2: return "TRIAL_fcv2_ultra-80";
+        case READ_TRIAL_QUAL_FCV2_BASE + 3: return "TRIAL_fcv2_coarse";
+        case READ_TRIAL_QUAL_FCV2_BASE + 4: return "TRIAL_fcv2_fine";
+        case READ_TRIAL_QUAL_FCV2_BASE + 5: return "TRIAL_fcv2_short-trained";
         case CODER_TOTAL:         return "CODER_total";
         case CODER_BARRIER:       return "CODER_startBarrier";
         case CODER_WAIT_INPUT:    return "CODER_waitInput";

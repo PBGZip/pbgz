@@ -24,8 +24,11 @@
 #include <algorithm>
 #include <chrono>
 #include <atomic>
+#include <cmath>
 #include <functional>
 #include <thread>
+
+#include "profile_stats.h"
 
 #include "coder/coder_io.h"
 #include "coder/coder_qual.h"
@@ -361,14 +364,19 @@ static int levelVolumeTier(uint8_t compressLevel)
  * length (FCV2_PRESETS[i].minMeanReadLen / maxMeanReadLen), so trial time is not
  * spent on presets that cannot win on this kind of data:
  *
- *   - default / ultra / ultra-80 / coarse: always kept. ultra is the coarse-binned
+ *   - default / ultra / ultra-80: always kept. ultra is the coarse-binned
  *     variant (cycleBucket=4, prevShift=0), which leads at every measured block
  *     volume by 0.4%-1.2% over coarse; ultra-80 is the same over a shorter cycle
- *     span, coarse is the coarse tier with quantized predecessors, and default is
- *     the conservative baseline.
+ *     span, and default is the conservative baseline.
+ *   - coarse (8/4/ps2): the coarse tier with quantized predecessors. Beaten by
+ *     ultra at every measured block volume, it is bounded to reads below 500 bp
+ *     (maxMeanReadLen): on shorter reads it still competes, and on long reads it
+ *     only ever leads its tier on probes too small to have converged.
  *   - fine (24/12/ps0): needs a per-block QUAL volume large enough for its fine
  *     buckets to stay populated (it only wins at ~27 MB and up), so it is tried
- *     only at -l 8/9 (100k reads/block).
+ *     only at -l 8/9 (100k reads/block) and, like coarse, excluded from long
+ *     reads, where it runs even with ultra-80 on the big probes without beating
+ *     it.
  *   - short-trained: bounded to its own read-length range (maxMeanReadLen), so
  *     trial time is not spent on 55-90 bp settings for a long-read block.
  *
@@ -665,6 +673,24 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     uint32_t settleProbe = sampleLen;
 
     /*
+     * Ratio-plateau early exit (see the walk below). The ladder otherwise walks
+     * to the full sample whenever the leader's margin never reaches SETTLE_MARGIN;
+     * but the adaptive coders being compared (bwt_cm, qcm, fcv2) settle their
+     * per-rung compression ratio after only a couple of MB, and once the top two
+     * candidates' ratios have both stopped moving across consecutive doubling
+     * rungs, more data cannot flip them without un-converging. Stop then, instead
+     * of paying for the full-sample re-compressions the verdict does not read.
+     */
+    const uint32_t MIN_PLATEAU_PROBE = 2u << 20;   /* 2 MB */
+    const double plPlateauBand = 0.002;            /* 0.2% absolute ratio movement */
+    const bool plateauEnabled = (getenv("PBGZ_QUAL_NO_PLATEAU") == nullptr);
+    QualRoundResult prevRound;
+    QualRoundResult prevPrevRound;
+    uint32_t prevProbe = 0;
+    bool havePrev = false;
+    bool havePrevPrev = false;
+
+    /*
      * Walk the ladder one rung at a time: a rung is trialled only if the rung before it did not
      * settle. Every rung used to be trialled up front, on the argument that they run concurrently
      * and therefore cost no wall time - but this phase is what saturates the cores, so the rungs the
@@ -690,6 +716,7 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
         }
         for (size_t c = 0; c < cfgs.size(); c++) {
             tasks.push_back([&records, &freqByByte, &slot, &cfgs, c, count]() {
+                PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_QUAL_FCV2_BASE + (int)c);
                 uint32_t len = 0;
                 uint32_t us = 0;
                 if (trialFcv2(records, count, freqByByte, cfgs[c], len, us)) {
@@ -719,10 +746,77 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
         sel.rounds++;
 
         if (getenv("PBGZ_QUAL_LADDER_TRACE") != nullptr) {
-            fprintf(stderr, "L rung=%zu probe=%u qual=%u/%u fcv2=%u/%u cm=%u/%u qcm=%u/%u best=%d\n",
+            fprintf(stderr, "L rung=%zu probe=%u qual=%u/%u fcv2=%u/%u cm=%u/%u qcm=%u/%u best=%d [fcv2s:",
                     i, probe, r.qualLen, r.qualUs, r.fcv2Len, r.fcv2Us, r.cmLen, r.cmUs,
                     r.qcmLen, r.qcmUs, (int)r.bestCoder);
+            for (size_t c = 0; c < cfgs.size(); ++c) {
+                const char* nm = fcv2PresetName(cfgs[c]);
+                fprintf(stderr, " %s=%u%s", (nm ? nm : "?"), (slot.fcv2Ok[c] ? slot.fcv2Len[c] : 0u),
+                        (r.bestCoder == CoderType::FCV2 && cfgs[c] == r.fcv2Cfg) ? "*" : "");
+            }
+            fprintf(stderr, "]\n");
         }
+
+        /* Top-two (by compressed length) of the candidates that actually encoded. */
+        struct TopTwo {
+            int  n;
+            uint32_t t[2];
+            double rat[2];
+        };
+        auto topTwo = [](const QualRoundResult& rr, uint32_t pb) {
+            struct Cand { uint32_t len; uint32_t type; double rat; };
+            Cand c[4];
+            int m = 0;
+            const auto add = [&](bool ok, uint32_t len, uint32_t type) {
+                if (ok) {
+                    c[m++] = { len, type, (double)len / (double)pb };
+                }
+            };
+            add(rr.qualOk, rr.qualLen, 0);
+            add(rr.fcv2Ok, rr.fcv2Len, 1);
+            add(rr.cmOk, rr.cmLen, 2);
+            add(rr.qcmOk, rr.qcmLen, 3);
+            for (int a = 1; a < m; ++a) {
+                Cand t = c[a];
+                int b = a - 1;
+                while (b >= 0 && c[b].len > t.len) {
+                    c[b + 1] = c[b];
+                    --b;
+                }
+                c[b + 1] = t;
+            }
+            TopTwo tt;
+            tt.n = m;
+            tt.t[0] = (m > 0) ? c[0].type : 0;
+            tt.t[1] = (m > 1) ? c[1].type : 0;
+            tt.rat[0] = (m > 0) ? c[0].rat : 0.0;
+            tt.rat[1] = (m > 1) ? c[1].rat : 0.0;
+            return tt;
+        };
+
+        if (plateauEnabled && havePrev && havePrevPrev &&
+            probe >= MIN_PLATEAU_PROBE &&
+            probe == prevProbe * 2) {
+            const TopTwo cur = topTwo(r, probe);
+            const TopTwo prev = topTwo(prevRound, prevProbe);
+            if (cur.n >= 2 && prev.n >= 2 &&
+                r.bestCoder == prevRound.bestCoder &&
+                prevRound.bestCoder == prevPrevRound.bestCoder &&
+                cur.t[0] == prev.t[0] && cur.t[1] == prev.t[1] &&
+                fabs(cur.rat[0] - prev.rat[0]) <= plPlateauBand &&
+                fabs(cur.rat[1] - prev.rat[1]) <= plPlateauBand) {
+                if (getenv("PBGZ_QUAL_LADDER_TRACE") != nullptr) {
+                    fprintf(stderr, "L plateau at probe=%u\n", probe);
+                }
+                break;
+            }
+        }
+
+        prevPrevRound = prevRound;
+        prevRound = r;
+        prevProbe = probe;
+        havePrevPrev = havePrev;
+        havePrev = true;
 
         if (!r.anyOk) {
             break;
