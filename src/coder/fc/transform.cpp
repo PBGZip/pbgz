@@ -32,7 +32,7 @@ See also the bsc and libbsc web site:
 #include <cstdlib>
 
 #include "fc_header.h"
-#include "libsais.h"
+#include "bsc_libsais_compat.h"
 #include "transform.h"
 
 int fc_transform(unsigned char * T, int n, unsigned char * num_indexes, int * indexes)

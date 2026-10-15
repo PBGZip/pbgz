@@ -36,11 +36,16 @@ This project uses the following open-source third-party components, and we hereb
 - **🔗 Source**: https://github.com/google/farmhash
 - **🔧 Modifications**: Unmodified, directly used for file integrity verification
 
-#### 3. 📊 SAIS (Suffix Array Induced Sorting)
-- **📜 License**: BSD License
-- **🎯 Purpose**: Suffix array sorting algorithm
-- **📂 Source**: Included in src/coder/bcm_libsais.cpp
-- **🔧 Modifications**: Integrated into the project encoder
+#### 3. 🧬 libsais (Suffix Array / Burrows-Wheeler Transform)
+- **📜 License**: Apache License, Version 2.0
+- **🎯 Purpose**: Linear-time suffix array, LCP array and Burrows-Wheeler transform construction
+- **🔗 Source**: https://github.com/IlyaGrebnov/libsais
+- **📂 Source in this project**:
+  - `src/coder/libsais/libsais.c` / `src/coder/libsais/libsais.h` — **upstream libsais 2.8.7, vendored verbatim**; this is the project's single libsais copy (built as the `pbgz_libsais` target), used both by the FC coder (SEQ field / match stream) and by the BWT-CM coder
+- **📜 License text**: the full Apache-2.0 text is included at [`src/coder/libsais/LICENSE`](src/coder/libsais/LICENSE)
+- **🔧 Modifications**:
+  - The vendored upstream sources are used unmodified. The bsc-style entry points required by the FC coder (`transform_do` / `untransform_do` / `untransform`) are provided by our own MIT-licensed wrapper `src/coder/fc/bsc_libsais_compat.cpp`.
+  - The BWT-CM coder calls upstream `libsais_bwt()` directly; its previously separate vendored copy (`src/coder/bcm_libsais.cpp`) was removed in favour of this single shared copy, so no source file needed to be symbol-renamed.
 
 #### 4. 🗜️ ZLIB (Version 1.3.1)
 - **📜 License**: zlib License
@@ -150,7 +155,7 @@ SOFTWARE.
 |------------|---------|---------|---------|--------|
 | HTSlib | 1.22 | BSD 3-Clause | HTS data formats | ✅ Integrated |
 | FarmHash | Latest | MIT | Hash functions | ✅ Used |
-| SAIS | Embedded | BSD | Sorting algorithm | ✅ Integrated |
+| libsais | 2.8.7 | Apache 2.0 | Suffix array + BWT | ✅ Integrated |
 | ZLIB | 1.3.1 | zlib | Compression | ✅ Supported |
 | BZIP2 | Latest | BSD | Compression | ✅ Supported |
 | LIBDEFLATE | 1.7 | MIT | DEFLATE | ✅ Supported |

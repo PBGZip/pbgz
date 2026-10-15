@@ -43,6 +43,7 @@ enum class CoderType : uint8_t {
     QUAL,         /* coder_qual:   quality-specific context model coder    */
     AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder, for regular SAM fields */
     ARITH,        /* coder_arith:  order-0 adaptive arithmetic byte-stream coder */
+    ARITH_K,      /* coder_arith_k: htscodecs order-1 rANS byte coder (see coder_arith_k.h) */
     RANS,         /* coder_rans:   static order-0 entropy coder, fast preset only (never a trial candidate) */
     QCM,          /* coder_qcm:    order-2 context model for the quality column (see coder_qcm.h) */
     QNAME,        /* coder_qname:  the QNAME column's own coder (single-stream layout); never a trial candidate */
@@ -60,6 +61,7 @@ static inline const char* coderTypeToMagic(CoderType type)
     case CoderType::QUAL:      return "coder_qual";
     case CoderType::AFFIX_MATCH: return "coder_affix_match";
     case CoderType::ARITH:     return "coder_arith";
+    case CoderType::ARITH_K:   return "coder_arith_k";
     case CoderType::RANS:      return "coder_rans";
     case CoderType::QCM:       return "coder_qcm";
     case CoderType::QNAME:     return "coder_qname";
@@ -78,8 +80,8 @@ enum class FieldStatus : uint8_t {
  * Context parameter tier for the fcv2 quality coder. QualSelector picks it by trial
  * compression among a candidate set, and the set is shaped by two data
  * characteristics: the block-volume tier that follows the compression level, and
- * the mean read length, which decides modelCount (see qualModelCountForMeanLen).
- * The quality alphabet size is not used to pick a tier, even though the tier
+ * the mean read length (which bounds which presets are worth trialling). The
+ * quality alphabet size is not used to pick a tier, even though the tier
  * rationale is stated in those terms - measurements do not support using it, see
  * candidateFcv2Cfgs. Once selected it travels with PreprocessInfo to the
  * compression side and prior training. The decoder reads the same parameter set
@@ -89,27 +91,13 @@ enum class FieldStatus : uint8_t {
 struct QualFcv2Params {
     int  cycleMax    = 96;
     int  cycleBucket = 16;
-    int  deltaMax    = 32;
-    int  deltaBucket = 8;
     int  prevShift   = 1;
-    bool useDelta    = true;
     bool useDedup    = false;
-    bool useQa       = false;
-    /*
-     * How many mixing models fcv2 uses. It must travel with the tier: the prior
-     * snapshot is sized by it, so training and compression have to agree (the
-     * decoder gets it from the stream header). The default mirrors Fcv2Cfg's,
-     * which is the measured best (see FCV2_MODEL_COUNT in coder_fcv2.h).
-     */
-    int  modelCount  = 6;
 
     bool operator==(const QualFcv2Params& o) const
     {
         return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
-               deltaMax == o.deltaMax && deltaBucket == o.deltaBucket &&
-               prevShift == o.prevShift && useDelta == o.useDelta &&
-               useDedup == o.useDedup && useQa == o.useQa &&
-               modelCount == o.modelCount;
+               prevShift == o.prevShift && useDedup == o.useDedup;
     }
     bool operator!=(const QualFcv2Params& o) const { return !(*this == o); }
 };

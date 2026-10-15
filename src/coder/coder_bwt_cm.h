@@ -31,7 +31,7 @@
 
 #include "coder_io.h"
 #include "coder.h"
-#include "bcm_libsais.h"
+#include "libsais.h"
 
 
 class coder_bwt_cm: public coder
@@ -323,7 +323,7 @@ public:
          * (which loops over multiple blocks) are both unaffected.
          */
         const auto emitBlock = [&](int32_t n) {
-            const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, n);
+            const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, n, 0, nullptr);
             check_exit(idx >= 1,  coder_ns::CODER_ERR_INNER, "coder transform failed: idx %d", idx);
 
             put32(n); /* Encode current length */
@@ -383,7 +383,7 @@ public:
         /* First compress all cached data */
         if (curr_incache > 0)
         {
-            const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, curr_incache);
+            const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, curr_incache, 0, nullptr);
             check_exit(idx >= 1,  coder_ns::CODER_ERR_INNER, "coder transform failed: idx %d", idx);
             put32(curr_incache); /* Encode current length */
             put32(idx);          /* Encode BWT index */

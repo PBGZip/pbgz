@@ -88,27 +88,25 @@ target_link_libraries(bwtcm_record_roundtrip PRIVATE
 # How many mixing models fcv2 should use for QUAL. The mixer's cost is one
 # counter update per model per coded bit, so the count sets its speed; this tool
 # measures size and throughput per count on real QUAL data (see its file header).
-add_executable(qual_model_scan qual_model_scan.cpp)
-target_link_libraries(qual_model_scan PRIVATE
-    pbgz_coder
-    ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
-)
+# NOTE: the model count is now fixed at FCV2_MODEL_COUNT (m0..m4), so this tool
+# is no longer built.
 
-# Which fcv2 context tier (cycleMax / cycleBucket / deltaMax / deltaBucket /
-# prevShift) is best for a given QUAL volume. The axis is selected on the command
-# line; see the file header for why cycleMax is the axis that had never been
-# swept, and for the bwt_cm reference row.
+# Which fcv2 context tier (cycleMax / cycleBucket / prevShift) is best for a
+# given QUAL volume. The axis is selected on the command line; see the file
+# header for why cycleMax is the axis that had never been swept, and for the
+# bwt_cm reference row. (The delta/QA axes are gone with the m5/m6 models.)
 add_executable(qual_tier_scan qual_tier_scan.cpp)
 target_link_libraries(qual_tier_scan PRIVATE
     pbgz_coder
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a
 )
 
-# Which fcv2 context parameters and mixing-model count are best for a given read-length range.
-# The product currently decides both by rule (one threshold at 500 bytes: 4 models above it, 6
-# below; five hand-picked presets trialled as they are), and this tool measures the real encoded
-# size per length bucket and descends to the configuration that wins inside each one. See its
-# file header for the search and for how to paste the result back as the per-length rule.
+# Which fcv2 context parameters are best for a given read-length range. The
+# product currently decides the parameters by hand-picked presets trialled as
+# they are, and the model count is fixed at FCV2_MODEL_COUNT (m0..m4); this tool
+# measures the real encoded size per length bucket and descends to the
+# configuration that wins inside each one. See its file header for the search
+# and for how to paste the result back as a per-length rule.
 add_executable(fcv2_len_train fcv2_len_train.cpp)
 target_link_libraries(fcv2_len_train PRIVATE
     pbgz_coder

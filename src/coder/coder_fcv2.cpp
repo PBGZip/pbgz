@@ -28,20 +28,17 @@
 namespace {
 
 /* Upper bound on the number of Huffman tree nodes; also limits the alphabet size. */
-const int TREE_CAP = 64;
+const int TREE_CAP = FCV2_TREE_CAP;
 
 /* Weight-update step size as a shift, equivalent to a learning rate of 1/4096. */
 const int WEIGHT_LR_SHIFT = 12;
 
 /*
- * How many models take part is a per-stream property: Fcv2Cfg::modelCount is
- * written into the stream header and read back by the decoder, and the arrays
- * below are sized by the compile-time maximum only. See coder_fcv2.h for why
- * the tail models (m5, m6) are the ones worth dropping.
+ * The mix is fixed at FCV2_MODEL_COUNT models (m0..m4, always all of them): it
+ * is not a per-stream property anymore, so neither Fcv2Cfg nor the stream header
+ * carries a count. The arrays below are sized by that constant. See coder_fcv2.h
+ * for why the tail models (m5, m6) were dropped.
  */
-
-/* Number of read average-quality bins for m6 (strategy 4). */
-const int QA_BINS = 4;
 
 /* Legal range of the context parameter tiers. When the decoder reads back the
    stream header it normalizes by the same rule, so that a corrupted stream
@@ -60,13 +57,10 @@ const int QA_BINS = 4;
 const int CFG_CYCLE_MAX_MIN = 32;
 const int CFG_CYCLE_MAX_MAX = 128;
 const int CFG_CYCLE_BUCKET_MAX = 32;
-const int CFG_DELTA_MAX_MAX = 255;
-const int CFG_DELTA_BUCKET_MAX = 16;
 const int CFG_PREV_SHIFT_MAX = 3;
 
 static_assert(CFG_CYCLE_MAX_MAX <= 255 && CFG_CYCLE_BUCKET_MAX <= 255 &&
-              CFG_DELTA_MAX_MAX <= 255 && CFG_DELTA_BUCKET_MAX <= 255 &&
-              CFG_PREV_SHIFT_MAX <= 255 && FCV2_MAX_MODEL_COUNT <= 255 &&
+              CFG_PREV_SHIFT_MAX <= 255 && FCV2_MODEL_COUNT <= 255 &&
               TREE_CAP <= 255,
               "the tier fields and the alphabet size are written into the stream header "
               "one byte each, so a maximum above 255 would be truncated on write and "
@@ -83,41 +77,9 @@ Fcv2Cfg normalizeCfg(Fcv2Cfg cfg)
     if (cfg.cycleMax > CFG_CYCLE_MAX_MAX) cfg.cycleMax = CFG_CYCLE_MAX_MAX;
     if (cfg.cycleBucket < 1) cfg.cycleBucket = 1;
     if (cfg.cycleBucket > CFG_CYCLE_BUCKET_MAX) cfg.cycleBucket = CFG_CYCLE_BUCKET_MAX;
-    if (cfg.deltaMax < 8) cfg.deltaMax = 8;
-    if (cfg.deltaMax > CFG_DELTA_MAX_MAX) cfg.deltaMax = CFG_DELTA_MAX_MAX;
-    if (cfg.deltaBucket < 1) cfg.deltaBucket = 1;
-    if (cfg.deltaBucket > CFG_DELTA_BUCKET_MAX) cfg.deltaBucket = CFG_DELTA_BUCKET_MAX;
     if (cfg.prevShift < 0) cfg.prevShift = 0;
     if (cfg.prevShift > CFG_PREV_SHIFT_MAX) cfg.prevShift = CFG_PREV_SHIFT_MAX;
-    if (cfg.modelCount < 1) cfg.modelCount = 1;
-    if (cfg.modelCount > FCV2_MAX_MODEL_COUNT) cfg.modelCount = FCV2_MAX_MODEL_COUNT;
-    if (!cfg.useDelta) {
-        /* When the delta context is disabled the bin count is normalized to 1,
-           the model degenerates to "position + tree node", and the array layout
-           is unchanged. */
-        cfg.deltaBucket = 1;
-    }
     return cfg;
-}
-
-/*
- * Computes the average-quality bin of a read (strategy 4, fqzcomp's do_qa).
- * The mean is independent of storage order (the sum runs over the whole quality
- * string); the phred mean is divided into 4 bins. Only the encoder uses it to
- * write the bin into the stream; the decoder reads it back directly, so these
- * thresholds only affect the compression ratio, not both-side consistency.
- */
-inline int qaBinOf(const uint8_t* qual, uint32_t len)
-{
-    uint64_t sum = 0;
-    for (uint32_t i = 0; i < len; i++) {
-        sum += qual[i];
-    }
-    int avg = (int)(sum / len);   /* raw byte value, about 33..74 (phred 0..41) */
-    if (avg < 63) return 0;       /* phred < 30 */
-    if (avg < 68) return 1;       /* 30..34 */
-    if (avg < 71) return 2;       /* 35..37 */
-    return 3;                     /* >= 38 */
 }
 
 /* Number of distinct base-context states: ACGTN + unknown (seq empty or a
@@ -137,7 +99,7 @@ uint8_t g_baseSym[256];
  * encode with probabilities that look usable but are actually wrong.
  */
 const uint8_t MODEL_MAGIC[] = { 'f', 'c', 'v', '2', 'p', 'r', 'i', 'o', 'r' };
-const uint16_t MODEL_FORMAT_VERSION = 7;  /* v7: read average-quality tier context m6 (useQa + QA_BINS) */
+const uint16_t MODEL_FORMAT_VERSION = 9;  /* v9: models m5/m6 and their config tiers (deltaMax, deltaBucket, useDelta, useQa) removed, model count fixed at FCV2_MODEL_COUNT */
 
 inline void appendU16(std::vector<uint8_t>& out, uint16_t value)
 {
@@ -368,7 +330,7 @@ private:
 };
 
 /*
- * Seven context models of increasing granularity.
+ * Five context models of increasing granularity.
  *
  *   m0  only the tree node; the coarsest, always has enough samples, acts as a
  *       floor/baseline
@@ -376,9 +338,13 @@ private:
  *   m2  previous symbol + position + tree node
  *   m3  previous two symbols + position bin + strand + tree node
  *   m4  current base + position + tree node
- *   m5  in-read quality-transition count bin + position + tree node
- *       (strategy 1)
- *   m6  read average-quality bin + position + tree node (strategy 4)
+ *
+ * The former m5 (in-read quality-transition count, strategy 1) and m6 (read
+ * average-quality bin, strategy 4) models are gone, with the configuration
+ * parameters that shaped them (deltaMax, deltaBucket, useDelta, useQa); see
+ * coder_fcv2.h for the rationale. Their per-bit cost was one mix-and-update
+ * each, so the remaining mix is both faster and, on most data, a little.
+ * smaller.
  *
  * The base used by m4 is the base of "the sequencing cycle that produced this
  * quality value": position i on the forward strand, len-1-i in storage order on
@@ -386,22 +352,6 @@ private:
  * (mismatch positions and low-complexity regions are systematically lower in
  * quality), and this context dimension is largely orthogonal to the others
  * (previous symbols, strand), so it does not overlap m3.
- *
- * m5's transition count is another description of quality monotonically
- * changing along a read (later sequencing cycles tend to have lower quality):
- * "how many times the quality has changed up to the current position" reflects
- * whether this read's quality is clean, does not overlap the local previous
- * symbols (m2/m3) or the position (m1), and accumulates only within a read,
- * resetting per record. fqzcomp uses the same dimension (state->delta) in its
- * context; here it is made an independent model handed to the mixer, and the
- * weights decide how much it is worth.
- *
- * m6 is the whole-read average-quality bin (strategy 4, fqzcomp's do_qa):
- * average quality varies widely across reads (empirically a long tail from
- * Q10 to Q40), so whether an entire read sits in the "high-quality bin" or the
- * "low-quality bin" is a strong prior on the symbol distribution. The bin is
- * computed by the encoder and written into the stream (2 bits per record); the
- * decoder reads it back directly, keeping both sides consistent.
  *
  * The sizes of the arrays are determined by Fcv2Cfg, see init().
  */
@@ -411,15 +361,12 @@ struct ContextModel {
     int prevQStates;         /* number of quantized predecessor values for m3 (>> prevShift) */
     int cycleMax;
     int cycleBucket;
-    int deltaMax;
-    int deltaBucket;
     int prevShift;
-    /* Active mix size (1..FCV2_MAX_MODEL_COUNT), taken from Fcv2Cfg. It is the
-       stride of the weight array and the bound of the mix loops. */
-    int modelCount;
-    std::vector<Counter> m0, m1, m2, m3, m4, m5, m6;
+    std::vector<Counter> m0, m1, m2, m3, m4;
     /*
-     * The seven tables as an array of base pointers.
+     * The five tables as an array of base pointers. The mix is fixed at
+     * FCV2_MODEL_COUNT models, so table is always fully populated and the mix
+     * loops run over all five.
      *
      * The mix loop runs once per model per coded bit and needs each table's base; going through the
      * switch in counterAt() made that a branch (and an unpredictable one at the point of use, since
@@ -427,7 +374,7 @@ struct ContextModel {
      * once in init(), after the vectors are sized, and no table is ever reallocated afterwards, so
      * they stay valid for the coder's lifetime.
      */
-    Counter* table[FCV2_MAX_MODEL_COUNT] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+    Counter* table[FCV2_MODEL_COUNT] = { nullptr, nullptr, nullptr, nullptr, nullptr };
 
     /*
      * Points `table` at the current buffers. Called by init(), and again by whoever moves a
@@ -444,8 +391,6 @@ struct ContextModel {
         table[2] = m2.data();
         table[3] = m3.data();
         table[4] = m4.data();
-        table[5] = m5.data();
-        table[6] = m6.data();
     }
 
     ContextModel() = default;
@@ -463,8 +408,6 @@ struct ContextModel {
         prevStates = alpha + 1;
         cycleMax = cfg.cycleMax;
         cycleBucket = cfg.cycleBucket;
-        deltaMax = cfg.deltaMax;
-        deltaBucket = cfg.deltaBucket;
         prevShift = cfg.prevShift;
         /*
          * Using all symbol values for m3 is too sparse (39x39x16x2x64 = about
@@ -482,14 +425,11 @@ struct ContextModel {
         m2.assign((size_t)prevStates * cycleMax * TREE_CAP, COUNTER_INIT);
         m3.assign((size_t)prevQStates * prevQStates * cycleBucket * 2 * TREE_CAP, COUNTER_INIT);
         m4.assign((size_t)BASE_STATES * cycleMax * TREE_CAP, COUNTER_INIT);
-        m5.assign((size_t)deltaBucket * cycleMax * TREE_CAP, COUNTER_INIT);
-        m6.assign((size_t)QA_BINS * cycleMax * TREE_CAP, COUNTER_INIT);
         /* The mix loop's fast path: see the note on `table`. */
         rebindTables();
-        /* Initial weights are 1<<14, i.e. fixed-point 0.25, so the active models
+        /* Initial weights are 1<<14, i.e. fixed-point 0.25, so the five models
            together start close to a simple average. */
-        modelCount = cfg.modelCount;
-        weight.assign((size_t)cycleBucket * TREE_CAP * modelCount, 1 << 14);
+        weight.assign((size_t)cycleBucket * TREE_CAP * FCV2_MODEL_COUNT, 1 << 14);
         /*
          * Precomputed cycle-index -> position-bin map. The bin is a pure
          * function of the cycle index and the tier parameters, and the hot loop
@@ -506,7 +446,7 @@ struct ContextModel {
     }
 
     inline void slotBases(int prev, int prev2, int cyc, int rev, int baseSym,
-                          int delta, int qa, size_t* base, int& wBucket) const
+                          size_t* base, int& wBucket) const
     {
         int bucket = cycBucketTab[cyc];
         wBucket = bucket;   /* handed back to the caller: the weight row shares it */
@@ -514,19 +454,16 @@ struct ContextModel {
         int qp2 = (prev2 >> prevShift);
         if (qp >= prevQStates) qp = prevQStates - 1;
         if (qp2 >= prevQStates) qp2 = prevQStates - 1;
-        int dlt = delta >= deltaMax ? deltaBucket - 1 : delta * deltaBucket / deltaMax;
         base[0] = 0;
         base[1] = (size_t)cyc * TREE_CAP;
         base[2] = ((size_t)prev * cycleMax + cyc) * TREE_CAP;
         base[3] = ((((size_t)qp2 * prevQStates + qp) * cycleBucket + bucket) * 2 + rev) * TREE_CAP;
         base[4] = ((size_t)baseSym * cycleMax + cyc) * TREE_CAP;
-        base[5] = ((size_t)dlt * cycleMax + cyc) * TREE_CAP;
-        base[6] = ((size_t)qa * cycleMax + cyc) * TREE_CAP;
     }
 
     inline int* weightAt(int bucket, int node)
     {
-        return &weight[((size_t)bucket * TREE_CAP + node) * modelCount];
+        return &weight[((size_t)bucket * TREE_CAP + node) * FCV2_MODEL_COUNT];
     }
 
     inline Counter* counterAt(int model, size_t base, int node)
@@ -622,7 +559,7 @@ public:
     {
         wp = cm.weightAt(wBucket, node);
         long dot = 0;
-        for (int i = 0; i < cm.modelCount; i++) {
+        for (int i = 0; i < FCV2_MODEL_COUNT; i++) {
             slot[i] = cm.counterAt(i, base[i], node);
             stretched[i] = g_stretch[counterProb(*slot[i])];
             dot += (long)wp[i] * stretched[i];
@@ -646,7 +583,7 @@ public:
     inline void update(Counter** slot, const int* stretched, int* wp, int p, int isZero)
     {
         int err = (isZero ? 4095 : 0) - p;
-        for (int i = 0; i < cm.modelCount; i++) {
+        for (int i = 0; i < FCV2_MODEL_COUNT; i++) {
             wp[i] += (err * stretched[i]) >> WEIGHT_LR_SHIFT;
             counterUpdate(*slot[i], isZero);
         }
@@ -673,22 +610,15 @@ public:
             appendU16(snapshot, MODEL_FORMAT_VERSION);
             appendU16(snapshot, (uint16_t)cfg.cycleMax);
             appendU16(snapshot, (uint16_t)cfg.cycleBucket);
-            appendU16(snapshot, (uint16_t)cfg.deltaMax);
-            appendU16(snapshot, (uint16_t)cfg.deltaBucket);
             appendU16(snapshot, (uint16_t)cfg.prevShift);
-            appendU16(snapshot, (uint16_t)(cfg.useDelta ? 1 : 0));
             appendU16(snapshot, (uint16_t)(cfg.useDedup ? 1 : 0));
-            appendU16(snapshot, (uint16_t)(cfg.useQa ? 1 : 0));
             appendU16(snapshot, (uint16_t)TREE_CAP);
-            appendU16(snapshot, (uint16_t)cm.modelCount);
             appendU16(snapshot, (uint16_t)alphaSize);
             appendU32(snapshot, (uint32_t)cm.m0.size());
             appendU32(snapshot, (uint32_t)cm.m1.size());
             appendU32(snapshot, (uint32_t)cm.m2.size());
             appendU32(snapshot, (uint32_t)cm.m3.size());
             appendU32(snapshot, (uint32_t)cm.m4.size());
-            appendU32(snapshot, (uint32_t)cm.m5.size());
-            appendU32(snapshot, (uint32_t)cm.m6.size());
             appendU32(snapshot, (uint32_t)cm.weight.size());
             for (int s = 0; s < alphaSize; s++) appendU8(snapshot, (uint8_t)byteOf[s]);
             for (int s = 0; s < alphaSize; s++) appendU16(snapshot, quantFreq[s]);
@@ -699,8 +629,6 @@ public:
             appendCounters(snapshot, cm.m2);
             appendCounters(snapshot, cm.m3);
             appendCounters(snapshot, cm.m4);
-            appendCounters(snapshot, cm.m5);
-            appendCounters(snapshot, cm.m6);
             for (size_t i = 0; i < cm.weight.size(); i++) appendI32(snapshot, cm.weight[i]);
         } catch (...) {
             return false;
@@ -717,38 +645,28 @@ public:
             if (!reader.readU8(byte) || byte != MODEL_MAGIC[i]) return false;
         }
 
-        uint16_t version = 0, cycleMax = 0, cycleBucket = 0, deltaMax = 0, deltaBucket = 0;
-        uint16_t prevShift = 0, useDelta = 0, useDedup = 0, useQa = 0, treeCap = 0, modelCount = 0, storedAlpha = 0;
+        uint16_t version = 0, cycleMax = 0, cycleBucket = 0;
+        uint16_t prevShift = 0, useDedup = 0, treeCap = 0, storedAlpha = 0;
         uint32_t m0Length = 0, m1Length = 0, m2Length = 0, m3Length = 0, m4Length = 0;
-        uint32_t m5Length = 0, m6Length = 0, weightLength = 0;
+        uint32_t weightLength = 0;
         if (!reader.readU16(version) || !reader.readU16(cycleMax) ||
-            !reader.readU16(cycleBucket) || !reader.readU16(deltaMax) ||
-            !reader.readU16(deltaBucket) || !reader.readU16(prevShift) ||
-            !reader.readU16(useDelta) || !reader.readU16(useDedup) ||
-            !reader.readU16(useQa) ||
-            !reader.readU16(treeCap) || !reader.readU16(modelCount) ||
+            !reader.readU16(cycleBucket) || !reader.readU16(prevShift) ||
+            !reader.readU16(useDedup) || !reader.readU16(treeCap) ||
             !reader.readU16(storedAlpha) ||
             !reader.readU32(m0Length) || !reader.readU32(m1Length) ||
             !reader.readU32(m2Length) || !reader.readU32(m3Length) ||
-            !reader.readU32(m4Length) || !reader.readU32(m5Length) ||
-            !reader.readU32(m6Length) || !reader.readU32(weightLength)) {
+            !reader.readU32(m4Length) || !reader.readU32(weightLength)) {
             return false;
         }
         if (version != MODEL_FORMAT_VERSION || treeCap != TREE_CAP ||
-            modelCount < 1 || modelCount > (uint16_t)FCV2_MAX_MODEL_COUNT ||
             storedAlpha == 0 || storedAlpha > TREE_CAP) {
             return false;
         }
-        if (useDelta > 1 || useDedup > 1 || useQa > 1 || prevShift > CFG_PREV_SHIFT_MAX) {
+        if (useDedup > 1 || prevShift > CFG_PREV_SHIFT_MAX) {
             return false;
         }
 
-        Fcv2Cfg storedCfg = { (int)cycleMax, (int)cycleBucket, (int)deltaMax,
-                              (int)deltaBucket, (int)prevShift, useDelta == 1,
-                              useDedup == 1, useQa == 1 };
-        /* The mix size is stored separately, above the tier list; it decides the
-           weight stride, so the restored model must be sized from it. */
-        storedCfg.modelCount = (int)modelCount;
+        Fcv2Cfg storedCfg = { (int)cycleMax, (int)cycleBucket, (int)prevShift, useDedup == 1 };
         storedCfg = normalizeCfg(storedCfg);
         /*
          * The prior is a cross-block training product, so its counter arrays
@@ -772,8 +690,7 @@ public:
         }
         if (m0Length != restored.m0.size() || m1Length != restored.m1.size() ||
             m2Length != restored.m2.size() || m3Length != restored.m3.size() ||
-            m4Length != restored.m4.size() || m5Length != restored.m5.size() ||
-            m6Length != restored.m6.size() || weightLength != restored.weight.size()) {
+            m4Length != restored.m4.size() || weightLength != restored.weight.size()) {
             return false;
         }
 
@@ -801,8 +718,7 @@ public:
             !reader.readU16(restoredDupCounter) ||
             !readCounters(reader, restored.m0) || !readCounters(reader, restored.m1) ||
             !readCounters(reader, restored.m2) || !readCounters(reader, restored.m3) ||
-            !readCounters(reader, restored.m4) || !readCounters(reader, restored.m5) ||
-            !readCounters(reader, restored.m6) ||
+            !readCounters(reader, restored.m4) ||
             !readWeights(reader, restored.weight) || !reader.atEnd()) {
             return false;
         }
@@ -864,12 +780,12 @@ private:
             (size_t)cfg.cycleMax * TREE_CAP +
             prevStates * cfg.cycleMax * TREE_CAP +
             prevQStates * prevQStates * cfg.cycleBucket * 2 * TREE_CAP +
-            (size_t)BASE_STATES * cfg.cycleMax * TREE_CAP +
-            (size_t)cfg.deltaBucket * cfg.cycleMax * TREE_CAP +
-            (size_t)QA_BINS * cfg.cycleMax * TREE_CAP;
-        return sizeof(MODEL_MAGIC) + 12 * 2 + 8 * 4 + (size_t)alpha +
+            (size_t)BASE_STATES * cfg.cycleMax * TREE_CAP;
+        /* header: 9 magic + 7 x u16 (version, cycleMax, cycleBucket, prevShift, useDedup,
+           treeCap, alpha) + 6 x u32 (m0..m4 and weight lengths) */
+        return sizeof(MODEL_MAGIC) + 7 * 2 + 6 * 4 + (size_t)alpha +
             (size_t)alpha * 2 + 2 + 2 + counters * 2 +
-            (size_t)cfg.cycleBucket * TREE_CAP * cfg.modelCount * 4;
+            (size_t)cfg.cycleBucket * TREE_CAP * FCV2_MODEL_COUNT * 4;
     }
 };
 
@@ -984,16 +900,8 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
          */
         d->rc.EncodeByte((unsigned)d->cfg.cycleMax);
         d->rc.EncodeByte((unsigned)d->cfg.cycleBucket);
-        d->rc.EncodeByte((unsigned)d->cfg.deltaMax);
-        d->rc.EncodeByte((unsigned)d->cfg.deltaBucket);
         d->rc.EncodeByte((unsigned)d->cfg.prevShift);
-        d->rc.EncodeByte((unsigned)(d->cfg.useDelta ? 1 : 0));
         d->rc.EncodeByte((unsigned)(d->cfg.useDedup ? 1 : 0));
-        d->rc.EncodeByte((unsigned)(d->cfg.useQa ? 1 : 0));
-        /* How many models the mix uses. It fixes the weight stride, so it is
-           part of the layout the decoder must reproduce; unlike the tiers it
-           cannot be inferred from the data, hence it travels in the stream. */
-        d->rc.EncodeByte((unsigned)d->cfg.modelCount);
         /*
          * The alphabet is written into the stream together with each symbol's
          * quantized frequency.
@@ -1033,7 +941,7 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
      * Adjacent duplicate read dedup (strategy 3, fqzcomp's do_dedup): compare
      * byte-by-byte with the previous record; if identical, write 1 bit and skip
      * the whole quality string. When a duplicate is hit, this record's context
-     * state is not updated (prev/prev2/delta are all reset at the start of each
+     * state is not updated (prev/prev2 are all reset at the start of each
      * record), so the next record starts from zero as usual on both sides.
      */
     if (d->cfg.useDedup) {
@@ -1058,29 +966,8 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         }
     }
 
-    /*
-     * read average-quality bin (strategy 4): the bin is written into the stream
-     * as the m6 context. Fixed 2 bits/record; the decoder reads back the same
-     * bin.
-     */
-    int qa = 0;
-    if (d->cfg.useQa) {
-        qa = qaBinOf(qual, len);
-        if (qa & 2) {
-            d->rc.EncodeBit1<12>(2048);
-        } else {
-            d->rc.EncodeBit0<12>(2048);
-        }
-        if (qa & 1) {
-            d->rc.EncodeBit1<12>(2048);
-        } else {
-            d->rc.EncodeBit0<12>(2048);
-        }
-    }
-
     int prev = d->alphaSize;
     int prev2 = d->alphaSize;
-    int delta = 0;   /* in-read quality-transition count, reset per record */
 
     for (uint32_t i = 0; i < len; i++) {
         int sym = d->symbolOf[qual[i]];
@@ -1109,16 +996,16 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         uint32_t mapped = rev ? (len - 1 - i) : i;
         int cyc = d->cycleOf(i, len, rev);
         int baseSym = (seq != nullptr && mapped < seqLen) ? g_baseSym[seq[mapped]] : (BASE_STATES - 1);
-        size_t base[FCV2_MAX_MODEL_COUNT];
+        size_t base[FCV2_MODEL_COUNT];
         int wBucket = 0;
-        d->cm.slotBases(prev, prev2, cyc, rv, baseSym, delta, qa, base, wBucket);
+        d->cm.slotBases(prev, prev2, cyc, rv, baseSym, base, wBucket);
 
         int pathLen = d->tree.pathLen[sym];
         for (int step = 0; step < pathLen; step++) {
             int node = d->tree.pathNode[sym][step];
             int bit  = d->tree.pathBit[sym][step];
-            Counter* slot[FCV2_MAX_MODEL_COUNT];
-            int stretched[FCV2_MAX_MODEL_COUNT];
+            Counter* slot[FCV2_MODEL_COUNT];
+            int stretched[FCV2_MODEL_COUNT];
             int* wp = nullptr;
             int p0 = d->predict(base, node, wBucket, slot, stretched, wp);
             if (bit) {
@@ -1127,15 +1014,6 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
                 d->rc.EncodeBit0<12>(p0);
             }
             d->update(slot, stretched, wp, p0, !bit);
-        }
-        /*
-         * The transition count is updated only after the symbol is coded, so
-         * the m5 context counts the changes "before the current symbol",
-         * matching fqzcomp's use of delta. The first symbol has no predecessor
-         * and does not count as a transition.
-         */
-        if (prev != d->alphaSize && sym != prev) {
-            delta++;
         }
         prev2 = prev;
         prev = sym;
@@ -1165,21 +1043,19 @@ int32_t coder_fcv2::encode_flush()
  * Reads one stream header layout from data, rewinding the range decoder first, and reports
  * whether the bytes fit it.
  *
- * `withVersion` selects which layout is tried: this build's (version byte, alphabet size, the
- * eight context tiers, model count) or the one written before the version byte existed (the
- * alphabet size, the same eight tiers, no model count - that layout's mix always used every model
- * the coder had, MODEL_COUNT = 7 at the time). Neither layout is marked in the stream, so
- * begin_decode tries them in turn; their parameter ranges are tight enough to tell them apart
- * (alphabet <= TREE_CAP, cycleBucket <= CFG_CYCLE_BUCKET_MAX, deltaBucket <= CFG_DELTA_BUCKET_MAX,
- * prevShift <= CFG_PREV_SHIFT_MAX, the three flags boolean), and the versionless layout can only
- * be mistaken for the current one when its alphabet size is the version byte - an alphabet of a
- * single symbol - which the alphabet and model parse rejects later on.
+ * The layout of this build is: version byte (FCV2_STREAM_VERSION), alphabet size, cycleMax,
+ * cycleBucket, prevShift, useDedup. The model count is not in the header because it is fixed at
+ * FCV2_MODEL_COUNT on both sides. Old layouts (deltaMax/deltaBucket/useDelta/useQa tiers, a
+ * carried model count, or the pre-version layout) are deliberately not supported: compatibility
+ * was dropped, so anything that does not fit this layout is refused with
+ * CODER_ERR_UNSUPPORTED_VERSION rather than parsed on a guess. The parameter ranges are tight
+ * enough to catch a misdirected stream (alphabet <= TREE_CAP, cycleBucket <= CFG_CYCLE_BUCKET_MAX,
+ * prevShift <= CFG_PREV_SHIFT_MAX, useDedup boolean).
  */
-static bool readStreamHeader(RangeCoder& rc, const uint8_t* data, bool withVersion,
-                             int& alpha, Fcv2Cfg& cfg)
+static bool readStreamHeader(RangeCoder& rc, const uint8_t* data, int& alpha, Fcv2Cfg& cfg)
 {
     rc.InitDecoder(data);
-    if (withVersion && (int)rc.DecodeByte() != (int)FCV2_STREAM_VERSION) {
+    if ((int)rc.DecodeByte() != (int)FCV2_STREAM_VERSION) {
         return false;
     }
     alpha = (int)rc.DecodeByte();
@@ -1188,28 +1064,13 @@ static bool readStreamHeader(RangeCoder& rc, const uint8_t* data, bool withVersi
     }
     cfg.cycleMax = (int)rc.DecodeByte();
     cfg.cycleBucket = (int)rc.DecodeByte();
-    cfg.deltaMax = (int)rc.DecodeByte();
-    cfg.deltaBucket = (int)rc.DecodeByte();
     cfg.prevShift = (int)rc.DecodeByte();
-    const int useDelta = (int)rc.DecodeByte();
     const int useDedup = (int)rc.DecodeByte();
-    const int useQa = (int)rc.DecodeByte();
     if (cfg.prevShift > CFG_PREV_SHIFT_MAX || cfg.cycleBucket > CFG_CYCLE_BUCKET_MAX ||
-        cfg.deltaBucket > CFG_DELTA_BUCKET_MAX ||
-        useDelta > 1 || useDedup > 1 || useQa > 1) {
-        return false;   /* not this layout: a parameter lies outside its legal range */
+        useDedup > 1) {
+        return false;   /* a parameter lies outside its legal range */
     }
-    cfg.useDelta = (useDelta != 0);
     cfg.useDedup = (useDedup != 0);
-    cfg.useQa = (useQa != 0);
-    if (withVersion) {
-        cfg.modelCount = (int)rc.DecodeByte();
-        if (cfg.modelCount < 1 || cfg.modelCount > FCV2_MAX_MODEL_COUNT) {
-            return false;
-        }
-    } else {
-        cfg.modelCount = FCV2_MAX_MODEL_COUNT;
-    }
     return true;
 }
 
@@ -1217,15 +1078,14 @@ int32_t coder_fcv2::begin_decode()
 {
     fcv2_impl* d = impl.get();
     /*
-     * Read the header in whichever layout fits it: this build's, or the one from before the
-     * header carried a version (see readStreamHeader). What fits neither is refused as an
+     * Read the header. A stream that does not fit this build's layout is refused as an
      * unsupported version rather than parsed on a guess - that is what an archive from an unknown
-     * layout looks like from here, and saying so is more use than reporting it as corruption.
+     * layout looks like from here (old fcv2 layouts wrote extra tiers), and saying so is more use
+     * than reporting it as corruption.
      */
     int alpha = 0;
     Fcv2Cfg streamCfg;
-    if (!readStreamHeader(d->rc, d->io->data, true, alpha, streamCfg) &&
-        !readStreamHeader(d->rc, d->io->data, false, alpha, streamCfg)) {
+    if (!readStreamHeader(d->rc, d->io->data, alpha, streamCfg)) {
         return coder_ns::CODER_ERR_UNSUPPORTED_VERSION;
     }
     streamCfg = normalizeCfg(streamCfg);
@@ -1332,28 +1192,20 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
 
     int prev = d->alphaSize;
     int prev2 = d->alphaSize;
-    int delta = 0;   /* in-read quality-transition count, maintained in the same order as the encoder */
-
-    /* read average-quality bin: read back the 2 bits written by the encoder,
-       as the m6 context. */
-    int qa = 0;
-    if (d->cfg.useQa) {
-        qa = (d->rc.DecodeBit<12>(2048) << 1) | d->rc.DecodeBit<12>(2048);
-    }
 
     for (uint32_t i = 0; i < len; i++) {
         uint32_t mapped = rev ? (len - 1 - i) : i;
         int cyc = d->cycleOf(i, len, rev);
         int baseSym = (seq != nullptr && mapped < seqLen) ? g_baseSym[seq[mapped]] : (BASE_STATES - 1);
-        size_t base[FCV2_MAX_MODEL_COUNT];
+        size_t base[FCV2_MODEL_COUNT];
         int wBucket = 0;
-        d->cm.slotBases(prev, prev2, cyc, rv, baseSym, delta, qa, base, wBucket);
+        d->cm.slotBases(prev, prev2, cyc, rv, baseSym, base, wBucket);
 
         int cur = d->tree.root;
         while (cur >= d->alphaSize) {
             int node = cur - d->alphaSize;
-            Counter* slot[FCV2_MAX_MODEL_COUNT];
-            int stretched[FCV2_MAX_MODEL_COUNT];
+            Counter* slot[FCV2_MODEL_COUNT];
+            int stretched[FCV2_MODEL_COUNT];
             int* wp = nullptr;
             int p0 = d->predict(base, node, wBucket, slot, stretched, wp);
             int bit = d->rc.DecodeBit<12>(p0);
@@ -1361,9 +1213,6 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
             cur = d->tree.child[node][bit];
         }
         dst[i] = (uint8_t)d->byteOf[cur];
-        if (prev != d->alphaSize && cur != prev) {
-            delta++;
-        }
         prev2 = prev;
         prev = cur;
     }

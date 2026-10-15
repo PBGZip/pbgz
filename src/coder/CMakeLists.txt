@@ -3,18 +3,14 @@
 # Source files
 set(CODER_SOURCES
     coder_json.cpp
-    bcm_libsais.cpp
     coder.cpp
     coder_fcv2.cpp
 )
 
 # Add subdirectories
 add_subdirectory(ppmd)
+add_subdirectory(libsais)
 add_subdirectory(fc)
-
-# bcm_libsais.cpp is vendored third-party (libsais); suppress warnings that
-# come from upstream code we don't maintain.
-set_source_files_properties(bcm_libsais.cpp PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter")
 
 # Create coder library
 add_library(pbgz_coder STATIC ${CODER_SOURCES})
@@ -30,4 +26,5 @@ target_include_directories(pbgz_coder PUBLIC
 target_link_libraries(pbgz_coder
     pbgz_coder_ppmd
     pbgz_coder_fc
+    pbgz_libsais
 )

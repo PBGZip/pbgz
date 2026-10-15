@@ -38,19 +38,12 @@ struct QualSampleRecord {
 
 /*
  * Mean record length, in bytes of quality value, at which a file counts as
- * long-read. It decides fcv2's model count (see qualModelCountForMeanLen); the
- * measured short- and long-read files sit at ~90 and ~14000 bytes per record, so
- * the exact value only has to land inside that gap.
+ * long-read. QualSelector drops the whole fcv2 coder from the QUAL candidate set
+ * at or above it (see the prune in QualSelector::select); the measured short- and
+ * long-read files sit at ~90 and ~14000 bytes per record, so the exact value only
+ * has to land inside that gap.
  */
 extern const uint32_t QUAL_LONG_READ_LEN;
-
-/*
- * How many mixing models fcv2 should use for a sample with this mean record
- * length: the default mix for short reads, a trimmed one for long reads. Exposed
- * rather than kept private because the choice ends up in the stream header and
- * therefore has to stay under test even when no dataset at hand exercises it.
- */
-int qualModelCountForMeanLen(uint64_t meanLen);
 
 class QualSelector {
 public:

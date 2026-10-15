@@ -684,9 +684,6 @@ void printUsage(const std::string& subCommandName = "") {
         fprintf(fp, "  pbgz compress human.fq.gz -o /path/human.fq.gz.pbgz -r /path/ucsc.hg19.fa\n");
         fprintf(fp, "  pbgz decompress human.fq.gz.pbgz\n");
         fprintf(fp, "  pbgz index human.sam.gz.pbgz\n\n");
-
-        fprintf(fp, "Environment:\n");
-        fprintf(fp, "  PBGZ_PROF=1   time the pipeline phases (reader/worker/writer) and print them to stderr when the run ends\n\n");
     } else {
         // Display specific subcommand help information
         SubCommand* targetCmd = nullptr;

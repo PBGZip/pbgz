@@ -44,62 +44,56 @@
 class fcv2_impl;
 
 /*
- * Mixing models available to fcv2: m0..m6. Fcv2Cfg::modelCount selects how many
- * of them actually take part, in order, so a trimmed configuration drops the
- * tail models.
+ * Mixing models available to fcv2: m0..m4, always all five. The model count is
+ * fixed - there is no per-file or per-read-length variation - so neither
+ * Fcv2Cfg nor the stream header carries a count: encoder and decoder agree on
+ * the mix by construction.
  *
- * The tail is the less valuable end: m6 duplicates m1 while useQa is off (its
- * context index degenerates to m1's), and m5's transition-count context overlaps
- * what m2/m3 already carry. Each model costs a mix-and-update per bit, which is
- * the hot loop, so a smaller mix is faster; it can also compress better, because
- * fewer weights are easier to fit. Which of the two dominates for a given trim is
- * a property of the data rather than of the model.
- *
- * modelCount travels in the stream header, so the decoder builds the same mix
- * without depending on a compile-time agreement (see encode_record /
- * begin_decode).
- *
- * This value is the default for a caller that does not state a count, overridable
- * at compile time (-DFCV2_MODEL_COUNT=n). The default is 6 rather than the maximum
- * 7: dropping m6 makes aligned QUAL 0.04% smaller and 12% faster on short reads,
- * 0.01% smaller and 10% faster on long reads. Dropping m5 as well is another
- * ~15%/~12% faster, but its effect on the ratio depends on the file (-0.01% on
- * long reads against +0.08%-0.46% on short ones), so 5 is deliberately not the
- * default. 4 (dropping m3 too) buys ~1.45x throughput for ~0.4% (short reads) to
- * ~0.1% (long reads) of size.
- *
- * A file's count does not have to be this value: QualSelector picks it from the
- * mean read length of its sample (see qualModelCountForMeanLen in
- * qual_selector.h) - 6 for short reads, 4 for long ones - and it travels inside
- * the tier, so the decoder reads it back with the rest of the parameters. Long
- * reads get 4 because their value selection is dominated by the per-bit
- * mix-and-update, which makes the count close to a pure speed lever there.
+ * The two models beyond m4 are intentionally gone: m6 (read average-quality
+ * bin, strategy 4) duplicates m1 while its switch is off - its context index
+ * degenerates to m1's - and m5 (in-read quality-transition count, strategy 1)
+ * overlaps what m2/m3 already carry. Each model costs a mix-and-update per bit,
+ * which is the hot loop, so a smaller mix is faster; it can also compress
+ * better, because fewer weights are easier to fit. The configuration parameters
+ * that shaped m5/m6 (deltaMax, deltaBucket, useDelta, useQa) are removed along
+ * with them, and the model count is pinned at 5 (m0..m4), which measured
+ * against the old 6-model mix is another ~15%/~12% faster and compresses about
+ * the same or a little better on short reads.
  */
-const int FCV2_MAX_MODEL_COUNT = 7;
-#ifndef FCV2_MODEL_COUNT
-#define FCV2_MODEL_COUNT 6
-#endif
+const int FCV2_MODEL_COUNT = 5;
+
+/*
+ * Huffman tree cap of the value alphabet. A block with more distinct quality
+ * values than this cannot be coded by fcv2 at all (the constructor leaves go
+ * unused), so a caller can tell from the sample's alphabet size whether the coder
+ * is applicable. The coder itself uses it as its internal TREE_CAP.
+ */
+const int FCV2_TREE_CAP = 64;
 
 /*
  * Version of the fcv2 stream header (see encode_record / begin_decode), written as the stream's
  * first symbol.
  *
- * The header carries the context tiers and the model count, which together fix the model layout,
- * so a reader that assumes a different layout misparses the rest of the stream instead of
- * failing at the header. Before this byte existed there was no way to tell an older stream from a
- * corrupted one: an archive written then (alpha followed by the eight tier bytes) reports nothing
- * more specific than "begin_decode failed". Bump this whenever the parameter set, their order or
- * the model state layout changes, and readStreamHeader reads the previous layout back so that
- * archives from before the change keep decoding; what fits neither is answered with
- * CODER_ERR_UNSUPPORTED_VERSION rather than a guess.
+ * The header carries the context tiers, which fix the model layout (the mix is
+ * always all FCV2_MODEL_COUNT models, so its count is implied), so a reader that
+ * assumes a different layout misparses the rest of the stream instead of failing
+ * at the header. Bump this whenever the parameter set, their order or the model
+ * state layout changes. Compatibility with old layouts is deliberately not
+ * maintained: the decoder reads back whatever this build wrote, and anything
+ * else is answered with CODER_ERR_UNSUPPORTED_VERSION rather than a guess.
  *
  * History:
  *   none   alpha, then cycleMax, cycleBucket, deltaMax, deltaBucket, prevShift, useDelta,
- *          useDedup, useQa, with the mix always using every model (MODEL_COUNT = 7 then). Still
- *          read: see readStreamHeader.
- *   1      this byte, then alpha, then the same eight tiers, then modelCount.
+ *          useDedup, useQa, with the mix always using every model (MODEL_COUNT = 7 then).
+ *   1      version byte, then alpha, then the same eight tiers, then modelCount.
+ *   2      version byte, then alpha, then cycleMax, cycleBucket, prevShift, useDedup,
+ *          then modelCount. The m5 transition-count tiers (deltaMax, deltaBucket, useDelta) and
+ *          the m6 read-average-quality switch (useQa) are gone with their models.
+ *   3      current: version byte, then alpha, then cycleMax, cycleBucket, prevShift, useDedup.
+ *          The model count no longer travels in the header because it is fixed at
+ *          FCV2_MODEL_COUNT.
  */
-const uint8_t FCV2_STREAM_VERSION = 1;
+const uint8_t FCV2_STREAM_VERSION = 3;
 
 /*
  * Parameter tiers of the fcv2 context model. The default values are the
@@ -112,42 +106,26 @@ const uint8_t FCV2_STREAM_VERSION = 1;
  * Meaning:
  *   cycleMax   / cycleBucket  upper bound and bin count for the in-record
  *                             position (sequencing-cycle index)
- *   deltaMax   / deltaBucket  upper bound and bin count for the in-read
- *                             quality-transition count (strategy 1)
  *   prevShift  right shift used to quantize the predecessor quality value in
  *              m3; larger is coarser (context is sparser with a large alphabet)
- *   useDelta   whether the m5 transition-count context is enabled; when false,
- *              deltaBucket normalizes to 1
  *   useDedup   whether adjacent duplicate read dedup is enabled (strategy 3,
  *              fqzcomp's do_dedup): each record is first compared with the
  *              previous one; if identical, only 1 bit is written and the whole
  *              quality string is skipped.
- *   useQa      whether the read average-quality bin context is enabled
- *              (strategy 4, fqzcomp's do_qa): each record first computes its
- *              average quality, quantizes it to 4 tiers written into the
- *              stream, and the tier serves as the m6 context.
- *   modelCount how many of m0..m6 the mix uses (1..FCV2_MAX_MODEL_COUNT).
- *              Appended last so the aggregate initializers that list the eight
- *              tier fields keep their meaning.
+ *
+ * The mixing-model count is deliberately not a tier: it is fixed at
+ * FCV2_MODEL_COUNT (m0..m4), same on both sides, so it appears nowhere here.
  */
 struct Fcv2Cfg {
     int  cycleMax    = 96;
     int  cycleBucket = 16;
-    int  deltaMax    = 32;
-    int  deltaBucket = 8;
     int  prevShift   = 1;
-    bool useDelta    = true;
     bool useDedup    = false;
-    bool useQa       = false;
-    int  modelCount  = FCV2_MODEL_COUNT;
 
     bool operator==(const Fcv2Cfg& o) const
     {
         return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
-               deltaMax == o.deltaMax && deltaBucket == o.deltaBucket &&
-               prevShift == o.prevShift && useDelta == o.useDelta &&
-               useDedup == o.useDedup && useQa == o.useQa &&
-               modelCount == o.modelCount;
+               prevShift == o.prevShift && useDedup == o.useDedup;
     }
     bool operator!=(const Fcv2Cfg& o) const { return !(*this == o); }
 };
@@ -164,7 +142,6 @@ struct Fcv2Cfg {
  *                into one slot, and it also sets the bucket width (cycleMax /
  *                cycleBucket cycles per bin)
  *   cycleBucket  position bins for m3 and for the mixing-weight rows
- *   deltaBucket  bins of m5's transition-count context
  *   prevShift    quantization of m3's predecessor quality values (0 = none)
  *
  * minVolumeTier is the levelVolumeTier() value from which trial-compressing this
@@ -172,64 +149,51 @@ struct Fcv2Cfg {
  * The fine preset needs enough per-block QUAL for its fine buckets to stay
  * populated, and below that it only spends trial time.
  *
- * modelCount is not part of a preset: it follows the mean read length and is
- * applied to whichever preset is used (see qualModelCountForMeanLen).
+ * The mixing-model count is not part of a preset: it is fixed at FCV2_MODEL_COUNT
+ * on every one of them.
  */
 struct Fcv2Preset {
     const char* name;
     int         minVolumeTier;
-    int         minMeanReadLen;   /* 0 = usable at any read length */
     Fcv2Cfg     cfg;
-    /*
-     * Extras for rows that came out of training rather than from hand-picking (see
-     * test/fcv2_len_train.cpp). Zero on the shipped rows - "no upper bound" and "take the model
-     * count from the read-length rule" - which is the old behaviour.
-     */
-    int         maxMeanReadLen;   /* 0 = no upper bound */
-    bool        ownModelCount;    /* keep cfg.modelCount instead of the length rule's */
 };
 
-const int FCV2_PRESET_COUNT = 6;
+const int FCV2_PRESET_COUNT = 3;
 
 /*
  * Naming is by what the preset changes, not by a ranking: they are alternatives.
  *
- * minMeanReadLen bounds a preset to the read lengths at which trialling it is
- * worth the time. Read length is what separates those cases, not the alphabet
- * size (the 90 bp files have alphabets 38 and 46, the 101-103 bp files 47 and 51):
- * at 90 bp the best preset is 1.7-3.4 points ahead of bwt_cm, while at 101-103 bp
- * coarse is already 0.23-0.25 points behind it at the same block volume. Below
- * 95 bp coarse therefore only spends trial time, hence its bound; above it the
- * preset is kept even where bwt_cm wins, because a 0.2-point margin is too small
- * to justify dropping fcv2 from the trial.
+ * These are the three measured to be worth trialling; the other two former rows
+ * were dropped because they never win on the data that reaches the trial:
  *
- * maxMeanReadLen excludes a preset from long reads (mean length at or above the
- * bound; the length rule's threshold is 500, see qualModelCountForMeanLen).
- * coarse and fine carry that bound: on long reads coarse is beaten by ultra at
- * every measured block volume and only "wins" its fcv2 tier on probes too small
- * to have converged, and fine runs even with ultra-80 on the big probes without
- * ever beating it - both would be pure trial cost on long reads.
+ *   - "coarse" (96/8/ps2) is beaten by ultra at every measured block volume and
+ *     read length, so trialling it only spent time.
+ *   - "default" (96/16/ps1, the Fcv2Cfg fallback) trails the three below at
+ *     every measured volume (its best showing is still a couple of points
+ *     worse), so it too never wins.
+ *
+ * The remaining rows span the ranked set on short reads, which is where fcv2 is
+ * used at all (QualSelector drops the whole coder on long reads and on a quality
+ * alphabet wider than its tree cap):
+ *
+ *   - ultra (4/ps0) leads at every measured small to medium block volume (0.4%-
+ *     1.2% over the next tier).
+ *   - ultra-80 (80/4/ps0) is the same bins over a shorter cycle span; it is
+ *     second or third across volumes and costs almost nothing to keep.
+ *   - fine (24/ps0) needs a per-block QUAL volume large enough for its fine
+ *     buckets to stay populated (it leads from a few MB of QUAL per block up), so
+ *     it is tried only at -l 8/9 (minVolumeTier 3, the 100k reads/block tier).
+ *
+ * The former "short-trained" row is gone: its entire point was an eight-times
+ * finer m5 transition-count context (deltaMax 64, deltaBucket 16) and its own
+ * model count of 6. With m5 and the delta tiers removed, and the model count
+ * fixed at FCV2_MODEL_COUNT, it collapses to a duplicate of ultra-80, so
+ * trialling it would only spend time.
  */
 const Fcv2Preset FCV2_PRESETS[FCV2_PRESET_COUNT] = {
-    { "default",  0,     0, { 96, 16, 32,  8, 1, true, false, false, FCV2_MODEL_COUNT }, 0, false },
-    { "ultra",    0,     0, { 96,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
-    { "ultra-80", 0,     0, { 80,  4, 32,  2, 0, true, false, false, FCV2_MODEL_COUNT }, 0, false },
-    { "coarse",   0,    95, { 96,  8, 32,  4, 2, true, false, false, FCV2_MODEL_COUNT }, 500, false },
-    { "fine",     3,     0, { 96, 24, 32, 12, 0, true, false, false, FCV2_MODEL_COUNT }, 500, false },
-    /*
-     * Trained on 40k reads of 55-90 bytes with a 2 MB sample (test/fcv2_len_train.cpp):
-     * 19.723% of QUAL against 19.987% for "default" and 20.516% for coder_bwt_cm on that sample.
-     * What it changes against ultra-80 - same cycle span, same cycle bins, same predecessor
-     * quantization - is the delta context: deltaMax 64 and deltaBucket 16 instead of 32 and 2, i.e.
-     * eight times finer transition-count bins. Both knobs and the model count were searched
-     * together, so the row carries its own count (6, which is also what the length rule gives short
-     * reads today, kept explicit so a change to that rule cannot silently alter this row).
-     *
-     * The sample size matters more than it looks: fcv2 is adaptive, so a 26 KB bucket (the first
-     * run) picked a different and worse configuration than a 2 MB one. Rows from this tool are only
-     * worth wiring in at samples of roughly a block's worth of QUAL.
-     */
-    { "short-trained", 0, 0, { 80, 4, 64, 16, 0, true, false, false, 6 }, 500, true },
+    { "ultra",    0, {   96,  4, 0, false } },
+    { "ultra-80", 0, {   80,  4, 0, false } },
+    { "fine",     3, {   96, 24, 0, false } },
 };
 
 /* The name of a configuration, or nullptr when it is not one of the presets. */
@@ -238,9 +202,7 @@ inline const char* fcv2PresetName(const Fcv2Cfg& cfg)
     for (int i = 0; i < FCV2_PRESET_COUNT; ++i) {
         const Fcv2Cfg& p = FCV2_PRESETS[i].cfg;
         if (cfg.cycleMax == p.cycleMax && cfg.cycleBucket == p.cycleBucket &&
-            cfg.deltaMax == p.deltaMax && cfg.deltaBucket == p.deltaBucket &&
-            cfg.prevShift == p.prevShift && cfg.useDelta == p.useDelta &&
-            cfg.useDedup == p.useDedup && cfg.useQa == p.useQa) {
+            cfg.prevShift == p.prevShift && cfg.useDedup == p.useDedup) {
             return FCV2_PRESETS[i].name;
         }
     }
@@ -254,7 +216,7 @@ inline const char* fcv2PresetName(const Fcv2Cfg& cfg)
  * from - a byte outside the alphabet is skipped by encode_record, not rejected -
  * so a coder is only ever used on the data it was built for.
  *
- * The tree cap (TREE_CAP in coder_fcv2.cpp) is a real ceiling in practice.
+ * The tree cap (FCV2_TREE_CAP) is a real ceiling in practice.
  * Measured quality-byte ranges fall into two conventions, which matters when
  * reasoning about how close a file is to that ceiling:
  *

@@ -986,8 +986,10 @@ PreprocessInfo* SamCodecActuator::preprocessInfoMut() const
 }
 
 /*
- * Which coder codes the SEQ match stream: BWT_CM or FC, and the smallest encoded sample wins
- * (see CodecSelector::trialSeqMatchCoder).
+ * Which coder codes the SEQ match stream: coder_fc, the sole candidate (see
+ * CodecSelector::seqMatchCoderChoice - the candidate list holds one coder, so no
+ * trial runs; coder_bwt_cm still carries the payload outside coder_fc's length
+ * window and always carries the "mval" sub-stream).
  *
  * The question is a file-level one, asked once by the codec pre-selection before any block is
  * dispatched and only read here. There is no per-block trial: that existed for coder_lzma, whose
@@ -998,7 +1000,7 @@ PreprocessInfo* SamCodecActuator::preprocessInfoMut() const
  *
  * A caller driving the actuator without an engine has no verdict to read, and a run without a
  * reference never got one (the column is not written as the match stream then): both fall back to
- * coder_bwt_cm, which is what this stream was coded with before the trial existed.
+ * coder_bwt_cm, the stream's historical coder.
  */
 CoderType SamCodecActuator::seqMatchCoderFor()
 {
@@ -2675,7 +2677,21 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
         const uint32_t payLen = rle.useRle ? rle.runLength : matchLen;
         const uint8_t* payBuf = rle.useRle ? rle.run.get() : matchBuffer;
 
+        /*
+         * The whole (non-RLE) match stream of an unaligned block is plain ASCII
+         * A/C/G/T bases. Coding it with coder_arith_k (htscodecs rANS order-1 on
+         * the bases packed four per byte) instead of coder_fc's LZP+BWT+CM is
+         * ~1.5x faster on the long-read files at -l8 for ~2.5pt more bytes, and
+         * still below CRAM 3.1 archive. The coder maps/packs only an all-ACGT
+         * stream and falls back to its plain path otherwise, so a reference-coded
+         * whole match stream (2-bit codes, not ASCII) still decodes with it; a
+         * reference-heavy block takes the RLE split instead and never reaches
+         * this path.
+         */
         CoderType payType = seqMatchCoderFor();
+        if (!rle.useRle) {
+            payType = CoderType::ARITH_K;
+        }
         /* A pinned verdict, or one measured on a sample coder_fc could carry, can still
            name a segment too short for it (FC_MIN_LEN bytes or less). */
         if (payType == CoderType::FC &&
@@ -2704,8 +2720,10 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
     metaSubs["sname"] = "m";
     if (rle.useRle) {
         /*
-         * orgrawlen = 展开后的原始长度（= 总碱基数），解压端据此分配并还原；
-         * rlelen    = 本子流（游程段）的解码输出长度，等于上面写入的 srclen。
+         * orgrawlen = the expanded original length (the base count); the decoder
+         *             allocates and reconstructs from it.
+         * rlelen    = this sub-stream's (run segment's) decode output length, equal
+         *             to the srclen written above.
          */
         metaSubs["rle"] = (Json::Value::UInt)1;
         metaSubs["orgrawlen"] = (Json::Value::UInt)srcLen;
@@ -3006,12 +3024,16 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     // Second pass: compress with reference
     std::shared_ptr<coder_io> matchIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match");
     /*
-     * SEQ match 流（逐碱基 2bit：M/=/X 段为与参考的 XOR，I/S 段为原值）。
+     * The SEQ match stream (per-base 2-bit: M/=/X segments are the XOR against the
+     * reference, I/S segments are the raw value).
      *
-     * 对齐 FastqCodecActuator::compressBaseWithRef 的做法（src/fastq_actuator.cpp:954）：
-     *   1) 先把整块的 2bit 结果累积到 matchBuffer，拿到总长度 matchLen；
-     *   2) 先攒够再整体编码（见下面对 matchCoderType 的说明），因为 coder_fc 的
-     *      decode_line 只支持整块解压（"only support block decompress"），不能逐行。
+     * Mirrors FastqCodecActuator::compressBaseWithRef (src/fastq_actuator.cpp:954):
+     *   1) accumulate the whole block's 2-bit result into matchBuffer first, to get
+     *      the total length matchLen;
+     *   2) encode it as one block once it is complete (see the note on
+     *      matchCoderType below), because coder_fc's decode_line only supports
+     *      whole-block decompression ("only support block decompress"), not line by
+     *      line.
      */
     std::unique_ptr<uint8_t[]> matchBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen() + 1);
     uint32_t matchLen = 0;

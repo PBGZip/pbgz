@@ -99,13 +99,8 @@ std::shared_ptr<qual_record_encoder> CoderFactory::makeQualEncoder(CoderType pic
         if (args.fcv2Params != nullptr) {
             cfg.cycleMax = args.fcv2Params->cycleMax;
             cfg.cycleBucket = args.fcv2Params->cycleBucket;
-            cfg.deltaMax = args.fcv2Params->deltaMax;
-            cfg.deltaBucket = args.fcv2Params->deltaBucket;
             cfg.prevShift = args.fcv2Params->prevShift;
-            cfg.useDelta = args.fcv2Params->useDelta;
             cfg.useDedup = args.fcv2Params->useDedup;
-            cfg.useQa = args.fcv2Params->useQa;
-            cfg.modelCount = args.fcv2Params->modelCount;
         }
         /*
          * coder_fcv2 keeps no counts of its own: the table only shapes its Huffman tree, so

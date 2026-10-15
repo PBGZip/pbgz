@@ -241,7 +241,11 @@ TEST_F(CodecSelectorTest, NullDataIsSkipped)
 TEST_F(CodecSelectorTest, QualitySampleIsSelectedAndCompresses)
 {
     std::vector<uint8_t> data = makeQualityData(256 << 10, 42);
-    FieldCodecSelection sel = CodecSelector::selectCoder(data.data(), (uint32_t)data.size());
+    /* coder_bwt_cm is opted in so the list holds two coders: a one-entry list is now
+     * taken without a trial (see ExplicitCandidateListDrivesSelection), and this test
+     * is about the measuring path. */
+    FieldCodecSelection sel = CodecSelector::selectCoder(data.data(), (uint32_t)data.size(),
+                                                         false, nullptr, /*allowBwtCm=*/true);
     EXPECT_EQ(sel.status, FieldStatus::SELECTED);
     EXPECT_GT(sel.bestCompLen, 0u);
     EXPECT_LT(sel.bestCompLen, sel.sampleLen);
@@ -320,12 +324,29 @@ TEST_F(CodecSelectorTest, AffixTrialMechanism)
     ASSERT_EQ(withAffix.status, FieldStatus::SELECTED);
     EXPECT_GT(withAffix.bestCompLen, 0u);
 
+    /* coder_fc was measured inside the same trial; the winner (fc or affix) can only
+     * be smaller, which is the point of adding the candidate. */
+    uint32_t fcLen = 0;
+    for (uint32_t i = 0; i < withAffix.trialCount; ++i) {
+        if (withAffix.trialCoder[i] == CoderType::FC) {
+            fcLen = withAffix.trialLen[i];
+        }
+    }
+    EXPECT_GT(fcLen, 0u);
+    EXPECT_LE(withAffix.bestCompLen, fcLen)
+        << "Adding the affix candidate must not make the selected result worse";
+
+    /*
+     * selectCoder(..., trialAffix=false) builds the one-entry list {coder_fc}, which is
+     * taken directly: no trial runs, so nothing is measured (bestCompLen 0) and no coder
+     * other than fc can be named.
+     */
     FieldCodecSelection withoutAffix = CodecSelector::selectCoder(
         (const uint8_t*)column.data(), (uint32_t)column.size(), false);
     ASSERT_EQ(withoutAffix.status, FieldStatus::SELECTED);
     EXPECT_NE(withoutAffix.selectedCoder, CoderType::AFFIX_MATCH);
-    EXPECT_LE(withAffix.bestCompLen, withoutAffix.bestCompLen)
-        << "Adding the affix candidate must not make the selected result worse";
+    EXPECT_EQ(withoutAffix.selectedCoder, CoderType::FC);
+    EXPECT_EQ(withoutAffix.bestCompLen, 0u);
 }
 
 /*
@@ -545,10 +566,13 @@ TEST_F(CodecSelectorTest, SamFieldCoderConfigTable)
     /* QUAL is the one field whose candidates are consumed by a dedicated path
      * (QualSelector) instead of the generic trial, so they are asserted through
      * the qualCoderCandidate accessor the selector itself uses. AFFIX_MATCH must
-     * stay out of the row: it would drag QUAL into the generic affix trial. */
+     * stay out of the row: it would drag QUAL into the generic affix trial.
+     * BWT_CM is deliberately not a QUAL candidate: it is by far the most
+     * expensive per-candidate trial on large QUAL blocks and it loses to fcv2 on
+     * the short reads where fcv2 applies, so it was removed from the set. */
     ASSERT_TRUE(qualCoderCandidate(CoderType::QUAL));
     ASSERT_TRUE(qualCoderCandidate(CoderType::FCV2));
-    ASSERT_TRUE(qualCoderCandidate(CoderType::BWT_CM));
+    ASSERT_FALSE(qualCoderCandidate(CoderType::BWT_CM));
     ASSERT_FALSE(qualCoderCandidate(CoderType::FC));
     ASSERT_FALSE(samFieldCandidate(SAM_QUAL, CoderType::AFFIX_MATCH));
     ASSERT_EQ(samFieldCoderConfig(SAM_SEQ)->fallback, CoderType::FC);
@@ -566,7 +590,9 @@ TEST_F(CodecSelectorTest, SamFieldCoderConfigTable)
 TEST_F(CodecSelectorTest, CandidateListsAreProfileSpecific)
 {
     const std::vector<CoderType>& archive = samFieldCandidates(SAM_SEQ, PBGZ_MODE_ARCHIVE);
-    EXPECT_NE(std::find(archive.begin(), archive.end(), CoderType::BWT_CM), archive.end());
+    /* SEQ's candidate list no longer offers bwt_cm (removed like QUAL's); it
+     * stays only as the payload's length fallback and the mval sub-stream. */
+    EXPECT_EQ(std::find(archive.begin(), archive.end(), CoderType::BWT_CM), archive.end());
     EXPECT_NE(std::find(archive.begin(), archive.end(), CoderType::FC), archive.end());
 
     const std::vector<CoderType>& fast = samFieldCandidates(SAM_SEQ, PBGZ_MODE_FAST);
@@ -615,7 +641,9 @@ TEST_F(CodecSelectorTest, CoderRegistryGatesByProfileAndLevel)
 /*
  * The generic trial walks an explicit candidate list, so a coder added to the
  * config competes without touching any actuator. Restricting the list to a
- * single coder makes that one the verdict.
+ * single coder makes that one the verdict without a trial: there is nothing to
+ * compare, so the (expensive) sample compression is skipped and no size is
+ * measured.
  */
 TEST_F(CodecSelectorTest, ExplicitCandidateListDrivesSelection)
 {
@@ -625,5 +653,6 @@ TEST_F(CodecSelectorTest, ExplicitCandidateListDrivesSelection)
                                                          nullptr, onlyRans);
     ASSERT_EQ(sel.status, FieldStatus::SELECTED);
     EXPECT_EQ(sel.selectedCoder, CoderType::RANS);
-    EXPECT_GT(sel.bestCompLen, 0u);
+    EXPECT_EQ(sel.bestCompLen, 0u);   /* not measured: one-entry list */
+    EXPECT_EQ(sel.trialCount, 0u);    /* no trial record either */
 }

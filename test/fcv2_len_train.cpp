@@ -4,13 +4,12 @@
  * Why this exists
  * ---------------
  * fcv2 is the QUAL coder built for short reads; on long reads it currently loses to coder_bwt_cm,
- * which is what makes QUAL the one column where pbgz trails CRAM on ONT data. Two decisions are
- * behind that, and both are rules rather than measurements:
+ * which is what makes QUAL the one column where pbgz trails CRAM on ONT data. The decision behind
+ * that is a rule rather than a measurement:
  *
- *   - the mixing-model count follows the mean read length, one threshold at 500 bytes: 4 models
- *     above it, 6 below (qualModelCountForMeanLen in qual_selector.cpp);
- *   - the context parameters come from five hand-picked presets (FCV2_PRESETS in coder_fcv2.h),
- *     trialled as they are.
+ *   - the context parameters come from hand-picked presets (FCV2_PRESETS in coder_fcv2.h),
+ *     trialled as they are. The mixing-model count is no longer part of the decision: it is
+ *     fixed at FCV2_MODEL_COUNT (m0..m4).
  *
  * Read length is the variable that separates the regimes, so the honest way to replace those rules
  * is to measure the encoded size of real records *per read-length bucket* and pick the
@@ -22,10 +21,9 @@
  * The objective is a black box - one full fcv2 encode of the bucket's sample, measured in bytes -
  * so the search is a coordinate descent over the discrete knobs (each coordinate is stepped
  * through a ladder of candidate values, the best value is kept, and the sweep repeats until
- * nothing improves) plus a sweep over the model count, started from several points (every shipped
- * preset and the current per-length rule) so a local minimum of one start does not decide the
- * answer on its own. A time weight can be added to the objective when the point is speed rather
- * than size.
+ * nothing improves), started from several points (every shipped preset) so a local minimum of one
+ * start does not decide the answer on its own. A time weight can be added to the objective when
+ * the point is speed rather than size.
  *
  * Note where gradient descent really happens: fcv2's mixing weights are trained by gradient
  * descent inside the coder, at encode time, on every stream. What is trained here is the
@@ -322,9 +320,8 @@ bool encodePpmd(const std::vector<Rec>& recs, uint32_t& dstLen, bool verify)
 std::string nameOf(const Fcv2Cfg& c)
 {
     char buf[128];
-    snprintf(buf, sizeof(buf), "cm%3d cb%2d dm%3d db%2d ps%d delta%d dedup%d qa%d mc%d",
-             c.cycleMax, c.cycleBucket, c.deltaMax, c.deltaBucket, c.prevShift,
-             (int)c.useDelta, (int)c.useDedup, (int)c.useQa, c.modelCount);
+    snprintf(buf, sizeof(buf), "cm%3d cb%2d ps%d dedup%d",
+             c.cycleMax, c.cycleBucket, c.prevShift, (int)c.useDedup);
     return buf;
 }
 
@@ -334,9 +331,7 @@ std::string presetNameOf(const Fcv2Cfg& c)
     for (int i = 0; i < FCV2_PRESET_COUNT; ++i) {
         const Fcv2Cfg& p = FCV2_PRESETS[i].cfg;
         if (c.cycleMax == p.cycleMax && c.cycleBucket == p.cycleBucket &&
-            c.deltaMax == p.deltaMax && c.deltaBucket == p.deltaBucket &&
-            c.prevShift == p.prevShift && c.useDelta == p.useDelta &&
-            c.useDedup == p.useDedup && c.useQa == p.useQa && c.modelCount == p.modelCount) {
+            c.prevShift == p.prevShift && c.useDedup == p.useDedup) {
             return FCV2_PRESETS[i].name;
         }
     }
@@ -362,15 +357,12 @@ Score evaluate(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq, 
 }
 
 /* Ladders of the values each coordinate is stepped through. The ranges come from the shipped
-   presets (cycleMax 80/96, cycleBucket 4/8/16/24, deltaBucket 2/4/8/12, prevShift 0/1/2) widened
-   one step past both ends, so the search can leave the hand-picked set but stays inside what the
-   coder's tables are sized for. */
+   presets (cycleMax 80/96, cycleBucket 4/8/16/24, prevShift 0/1/2) widened one step past both
+   ends, so the search can leave the hand-picked set but stays inside what the coder's tables are
+   sized for. The mixing-model count is fixed at FCV2_MODEL_COUNT and is not searched. */
 const int kCycleMaxValues[]     = {32, 48, 64, 80, 96, 128, 160, 256};
 const int kCycleBucketValues[]  = {2, 3, 4, 6, 8, 12, 16, 24, 32};
-const int kDeltaMaxValues[]     = {16, 24, 32, 48, 64};
-const int kDeltaBucketValues[]  = {1, 2, 3, 4, 6, 8, 12, 16};
 const int kPrevShiftValues[]    = {0, 1, 2, 3};
-const int kModelCountValues[]   = {4, 5, 6, 7};
 
 bool stepCoordinate(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq, Fcv2Cfg& cfg,
                     double timeUsWeight, double& bestValue, const char* what,
@@ -426,23 +418,11 @@ bool descend(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq, Fc
     moved |= stepCoordinate(recs, freq, cfg, timeUsWeight, bestValue, "cycleBucket",
                             kCycleBucketValues, sizeof(kCycleBucketValues) / sizeof(int),
                             &Fcv2Cfg::cycleBucket, quiet);
-    moved |= stepCoordinate(recs, freq, cfg, timeUsWeight, bestValue, "deltaMax",
-                            kDeltaMaxValues, sizeof(kDeltaMaxValues) / sizeof(int),
-                            &Fcv2Cfg::deltaMax, quiet);
-    moved |= stepCoordinate(recs, freq, cfg, timeUsWeight, bestValue, "deltaBucket",
-                            kDeltaBucketValues, sizeof(kDeltaBucketValues) / sizeof(int),
-                            &Fcv2Cfg::deltaBucket, quiet);
     moved |= stepCoordinate(recs, freq, cfg, timeUsWeight, bestValue, "prevShift",
                             kPrevShiftValues, sizeof(kPrevShiftValues) / sizeof(int),
                             &Fcv2Cfg::prevShift, quiet);
-    moved |= stepCoordinate(recs, freq, cfg, timeUsWeight, bestValue, "modelCount",
-                            kModelCountValues, sizeof(kModelCountValues) / sizeof(int),
-                            &Fcv2Cfg::modelCount, quiet);
-    moved |= stepBool(recs, freq, cfg, timeUsWeight, bestValue, "useDelta", &Fcv2Cfg::useDelta,
-                      quiet);
     moved |= stepBool(recs, freq, cfg, timeUsWeight, bestValue, "useDedup", &Fcv2Cfg::useDedup,
                       quiet);
-    moved |= stepBool(recs, freq, cfg, timeUsWeight, bestValue, "useQa", &Fcv2Cfg::useQa, quiet);
     return moved;
 }
 
@@ -624,18 +604,15 @@ int main(int argc, char** argv)
             continue;
         }
 
-        /* Multi-start descent: every shipped preset (with both model-count regimes) plus the
-           current rule's combination, so the sweep cannot be decided by one unlucky start. */
+        /* Multi-start descent: every shipped preset, so the sweep cannot be
+           decided by one unlucky start. The model count is fixed, so starts do
+           not vary in it. */
         Fcv2Cfg best;
         double bestValue = 1e30;
         bool haveBest = false;
         std::vector<Fcv2Cfg> starts;
         for (int p = 0; p < FCV2_PRESET_COUNT; ++p) {
-            Fcv2Cfg c = FCV2_PRESETS[p].cfg;
-            c.modelCount = FCV2_MODEL_COUNT;
-            starts.push_back(c);
-            c.modelCount = 4;
-            starts.push_back(c);
+            starts.push_back(FCV2_PRESETS[p].cfg);
         }
         const size_t nStarts = (startsLimit > 0 && (size_t)startsLimit < starts.size())
                                ? (size_t)startsLimit : starts.size();
@@ -719,11 +696,9 @@ int main(int argc, char** argv)
         if (r.bytes == 0) {
             continue;
         }
-        printf("      { %9u, { %3d, %2d, %3d, %2d, %d, %s, %s, %s, %d } },   /* %s, preset=%s */\n",
+        printf("      { %9u, { %3d, %2d, %d, %s } },   /* %s, preset=%s */\n",
                (r.hiBytes ? r.hiBytes - 1 : 0xFFFFFFFFu), r.cfg.cycleMax, r.cfg.cycleBucket,
-               r.cfg.deltaMax, r.cfg.deltaBucket, r.cfg.prevShift,
-               r.cfg.useDelta ? "true" : "false", r.cfg.useDedup ? "true" : "false",
-               r.cfg.useQa ? "true" : "false", r.cfg.modelCount,
+               r.cfg.prevShift, r.cfg.useDedup ? "true" : "false",
                (std::to_string(r.loBytes) + ".." +
                 (r.hiBytes ? std::to_string(r.hiBytes) : "inf")).c_str(),
                presetNameOf(r.cfg).c_str());

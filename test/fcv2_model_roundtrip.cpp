@@ -19,15 +19,15 @@ namespace {
 
 /*
  * Matches the exportModel layout in coder_fcv2.cpp field by field:
- *   magic 9 + 12 x u16 (version/cycle cap/position bucket/delta cap/delta bucket/prev shift/
- *   delta switch/dedup switch/QA switch/tree capacity/model count/alphabet) + 8 x u32
- *   (m0..m6, weight-array length)
+ *   magic 9 + 7 x u16 (version/cycle cap/position bucket/prev shift/dedup switch/tree capacity/
+ *   alphabet) + 6 x u32 (m0..m4, weight-array length)
  *   followed by the alphabet bytes, per-symbol quantized frequencies, revCounter, dupCounter,
- *   seven counter arrays, and the weight array.
+ *   five counter arrays, and the weight array. The model count is fixed at FCV2_MODEL_COUNT, so
+ *   it is not carried in the snapshot.
  * Any change to a size constant or the model count must be mirrored here, or the length assertion
  * in 6a will drift.
  */
-const size_t kHeaderBytes = 9 + 12 * 2 + 8 * 4;
+const size_t kHeaderBytes = 9 + 7 * 2 + 6 * 4;
 
 size_t expectedBlobSize(int alpha)
 {
@@ -35,11 +35,9 @@ size_t expectedBlobSize(int alpha)
     size_t prevQStates = (size_t)(alpha >> 1) + 2;   /* m3 quantized predecessor (default preset prevShift=1) */
     size_t counters = 64 + 96 * 64 + prevStates * 96 * 64 +
         prevQStates * prevQStates * 16 * 2 * 64 +     /* m0..m3 */
-        6 * 96 * 64 +                                  /* m4 base context */
-        8 * 96 * 64 +                                  /* m5 delta context (default deltaBucket=8) */
-        4 * 96 * 64;                                   /* m6 average-quality bucket (QA_BINS=4) */
+        6 * 96 * 64;                                  /* m4 base context */
     return kHeaderBytes + (size_t)alpha + (size_t)alpha * 2 + 2 + 2 + counters * 2 +
-           16 * 64 * FCV2_MODEL_COUNT * 4;             /* weights: position buckets x tree nodes x active models x 4 bytes */
+           16 * 64 * FCV2_MODEL_COUNT * 4;            /* weights: position buckets x tree nodes x active models x 4 bytes */
 }
 
 std::vector<uint8_t> makeQualityData()

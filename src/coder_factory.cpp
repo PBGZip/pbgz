@@ -37,6 +37,7 @@
 #include "coder/coder_fc.h"
 #include "coder/coder_affix_match.h"
 #include "coder/coder_arith.h"
+#include "coder/coder_arith_k.h"
 #include "coder/coder_rans.h"
 #include "coder/coder_qcm.h"
 #include "coder/coder_qname.h"
@@ -52,6 +53,11 @@ std::shared_ptr<coder> createBwtCm(coder_io* io)     { return std::make_shared<c
 std::shared_ptr<coder> createFc(coder_io* io)        { return std::make_shared<coder_fc>(io); }
 std::shared_ptr<coder> createAffix(coder_io* io)     { return std::make_shared<coder_affix_match>(io); }
 std::shared_ptr<coder> createArith(coder_io* io)     { return std::make_shared<coder_arith>(io); }
+std::shared_ptr<coder> createArithK(coder_io* io)    {
+    /* htscodecs rANS order-1 on the A/C/G/T bases packed four per byte. */
+    return std::make_shared<coder_arith_k>(io, /*order=*/1, /*mapBases=*/true,
+                                           /*useRans=*/true, /*ransPack=*/true);
+}
 std::shared_ptr<coder> createRans(coder_io* io)      { return std::make_shared<coder_rans>(io); }
 std::shared_ptr<coder> createQcm(coder_io* io)       { return std::make_shared<coder_qcm>(io); }
 std::shared_ptr<coder> createQname(coder_io* io)     { return std::make_shared<coder_qname>(io); }
@@ -115,6 +121,7 @@ const CoderDescriptor kCoderDescriptors[] = {
     {CoderType::FC,           CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        10,       CoderLevelPolicy::NONE,      createFc,     supportsAny,  false, true},
     {CoderType::AFFIX_MATCH,  CODER_PROFILE_ARCHIVE,  true,           true,           false,          1,        20,       CoderLevelPolicy::NONE,      createAffix,  supportsAffix, true, false},
     {CoderType::ARITH,        CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        40,       CoderLevelPolicy::SET_LEVEL, createArith,  supportsAny,  false, false},
+    {CoderType::ARITH_K,      CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        41,       CoderLevelPolicy::NONE,      createArithK, supportsAny,  false, true},
     {CoderType::RANS,         CODER_PROFILE_FAST,     false,          true,           false,          1,        50,       CoderLevelPolicy::NONE,      createRans,   supportsAny,  false, false},
 
     /*

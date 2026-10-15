@@ -6,8 +6,8 @@
  * atomic counters, so instrumentation is thread safe and cheap: only a couple
  * of clock reads per block, never per line.
  *
- * Enabled at run time with PBGZ_PROF=1; when disabled the scope objects do not
- * read the clock at all, so a profiled build behaves like a normal one.
+ * Enabled at build time with -DPBGZ_PROFILE; when disabled the scope objects
+ * do not read the clock at all, so a production build behaves like a normal one.
  *
  * Categories:
  *   READ_*   reader thread      (raw read/split, codec pre-selection, QUAL
@@ -131,13 +131,15 @@ inline Slot* slots()
     return s;
 }
 
-inline bool enabled()
+inline constexpr bool enabled()
 {
-    static const bool on = []() -> bool {
-        const char* env = getenv("PBGZ_PROF");
-        return (env != nullptr && (strcmp(env, "1") == 0 || strcmp(env, "on") == 0));
-    }();
-    return on;
+    /* Phase profiling is a development aid: it is compiled in only with
+       -DPBGZ_PROFILE, so a production build carries none of its overhead. */
+#ifdef PBGZ_PROFILE
+    return true;
+#else
+    return false;
+#endif
 }
 
 inline std::chrono::steady_clock::time_point nowOrZero()
@@ -218,12 +220,10 @@ inline const char* catName(int cat)
         case SEQ_MATCH_ENCODE:    return "SEQ_match_encode";
         case READ_TRIAL_QUAL_EXTRACT: return "TRIAL_qual_extract";
         case READ_TRIAL_QUAL_SELECT:  return "TRIAL_qual_select";
-        case READ_TRIAL_QUAL_FCV2_BASE + 0: return "TRIAL_fcv2_default";
-        case READ_TRIAL_QUAL_FCV2_BASE + 1: return "TRIAL_fcv2_ultra";
-        case READ_TRIAL_QUAL_FCV2_BASE + 2: return "TRIAL_fcv2_ultra-80";
-        case READ_TRIAL_QUAL_FCV2_BASE + 3: return "TRIAL_fcv2_coarse";
-        case READ_TRIAL_QUAL_FCV2_BASE + 4: return "TRIAL_fcv2_fine";
-        case READ_TRIAL_QUAL_FCV2_BASE + 5: return "TRIAL_fcv2_short-trained";
+        /* Order must match FCV2_PRESETS in coder_fcv2.h. */
+        case READ_TRIAL_QUAL_FCV2_BASE + 0: return "TRIAL_fcv2_ultra";
+        case READ_TRIAL_QUAL_FCV2_BASE + 1: return "TRIAL_fcv2_ultra-80";
+        case READ_TRIAL_QUAL_FCV2_BASE + 2: return "TRIAL_fcv2_fine";
         case CODER_TOTAL:         return "CODER_total";
         case CODER_BARRIER:       return "CODER_startBarrier";
         case CODER_WAIT_INPUT:    return "CODER_waitInput";
@@ -289,7 +289,7 @@ inline void dump(FILE* f, double wallSec)
 
     std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.us > b.us; });
 
-    fprintf(f, "\n===== PBGZ pipeline profile (PBGZ_PROF) =====\n");
+    fprintf(f, "\n===== PBGZ pipeline profile (PBGZ_PROFILE) =====\n");
     fprintf(f, "wall = %.3f s\n", wallSec);
     fprintf(f, "%-34s %12s %10s %8s %12s\n", "category", "total_ms", "count", "%wall", "avg_us");
     fprintf(f, "--------------------------------------------------------------------------------\n");

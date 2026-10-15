@@ -12,10 +12,10 @@
  *
  *   axis 0  cycleMax sweep. cycleMax is the hard bound of the positional context
  *           - cycleOf() clamps every cycle at or beyond it to cycleMax-1, and
- *           m1/m2/m4/m5/m6 all index by it - so a file whose reads are longer
- *           than cycleMax collapses all of its tail positions into one context
- *           slot. 151 bp reads therefore have 56 positions sharing a slot, and
- *           14 kb reads are almost entirely collapsed.
+ *           m1/m2/m4 all index by it - so a file whose reads are longer than
+ *           cycleMax collapses all of its tail positions into one context slot.
+ *           151 bp reads therefore have 56 positions sharing a slot, and 14 kb
+ *           reads are almost entirely collapsed.
  *
  *   axis 1  cycleMax x cycleBucket. The two are coupled: cycleMax is how far
  *           the position context reaches, cycleBucket is how finely the reach
@@ -23,14 +23,14 @@
  *           resolution). Widening one without the other moves the sparsity
  *           somewhere else.
  *
- *   axis 2  deltaMax x deltaBucket, the same question for m5's transition-count
- *           context, whose reach is the number of transitions inside one read
- *           (32 by default).
+ *   axis 4  the shipped preset table (FCV2_PRESETS), unpruned.
  *
- *   axis 5  the shipped preset table (FCV2_PRESETS), unpruned.
+ *   axis 2  the full grid: cycleMax x cycleBucket x prevShift. Expensive; use
+ *           it once the narrower sweeps have picked a region.
  *
- *   axis 3  the full grid: cycleMax x (cycleBucket, deltaBucket) x prevShift.
- *           Expensive; use it once the narrower sweeps have picked a region.
+ * (The former axes 2/6/7, which swept the m5 transition-count (deltaMax /
+ * deltaBucket / useDelta) and m6 average-quality (useQa) contexts, are gone
+ * with those models.)
  *
  * The coder clamps cycleMax to [32, 128] (CFG_CYCLE_MAX_MIN/MAX in
  * coder_fcv2.cpp) because the model arrays are sized by it, so this tool cannot
@@ -41,7 +41,7 @@
  * use, so "could fcv2 win here at all" is answerable on the spot - on long reads
  * bwt_cm beats fcv2 in the real selection.
  *
- * Usage: qual_tier_scan <input.sam> <max_lines> [axis 0..6]
+ * Usage: qual_tier_scan <input.sam> <max_lines> [axis 0..4]
  */
 
 #include <stdint.h>
@@ -200,8 +200,8 @@ bool encodeBwtCm(const std::vector<Rec>& recs, uint32_t& dstLen)
 std::string nameOf(const Fcv2Cfg& c)
 {
     char buf[96];
-    snprintf(buf, sizeof(buf), "cm%3d cb%2d dm%3d db%2d ps%d",
-             c.cycleMax, c.cycleBucket, c.deltaMax, c.deltaBucket, c.prevShift);
+    snprintf(buf, sizeof(buf), "cm%3d cb%2d ps%d",
+             c.cycleMax, c.cycleBucket, c.prevShift);
     return buf;
 }
 
@@ -212,8 +212,7 @@ const char* labelFor(const Fcv2Cfg& c)
     for (int i = 0; i < FCV2_PRESET_COUNT; ++i) {
         const Fcv2Cfg& p = FCV2_PRESETS[i].cfg;
         if (c.cycleMax == p.cycleMax && c.cycleBucket == p.cycleBucket &&
-            c.deltaMax == p.deltaMax && c.deltaBucket == p.deltaBucket &&
-            c.prevShift == p.prevShift) {
+            c.prevShift == p.prevShift && c.useDedup == p.useDedup) {
             return FCV2_PRESETS[i].name;
         }
     }
@@ -271,20 +270,17 @@ struct Result {
 /* The tiers the project ships today, as anchors in every run. */
 void pushShippedTiers(std::vector<Fcv2Cfg>& grid)
 {
-    grid.push_back(Fcv2Cfg());                        /* default */
-    Fcv2Cfg ultra;                                    /* ultra 4/2/ps0 */
+    Fcv2Cfg ultra;                                    /* ultra 4/ps0 */
     ultra.cycleBucket = 4;
-    ultra.deltaBucket = 2;
     ultra.prevShift = 0;
     grid.push_back(ultra);
-    Fcv2Cfg coarse;                                   /* coarse 8/4/ps2 */
-    coarse.cycleBucket = 8;
-    coarse.deltaBucket = 4;
-    coarse.prevShift = 2;
-    grid.push_back(coarse);
-    Fcv2Cfg fine;                                     /* fine 24/12/ps0 */
+    Fcv2Cfg ultra80;                                  /* ultra-80 4/ps0, shorter cycle span */
+    ultra80.cycleMax = 80;
+    ultra80.cycleBucket = 4;
+    ultra80.prevShift = 0;
+    grid.push_back(ultra80);
+    Fcv2Cfg fine;                                     /* fine 24/ps0 */
     fine.cycleBucket = 24;
-    fine.deltaBucket = 12;
     fine.prevShift = 0;
     grid.push_back(fine);
 }
@@ -310,88 +306,7 @@ std::vector<Fcv2Cfg> buildGrid(int axis)
                 grid.push_back(c);
             }
         }
-    } else if (axis == 2) {
-        /* 255 is the largest representable deltaMax: the field is one byte in the
-         * stream header, so 256 would be truncated on write. */
-        const int kDeltaMax[] = {8, 16, 32, 64, 128, 255};
-        const int kDeltaBucket[] = {4, 8, 16};
-        for (int dm : kDeltaMax) {
-            for (int db : kDeltaBucket) {
-                Fcv2Cfg c;
-                c.deltaMax = dm;
-                c.deltaBucket = db;
-                grid.push_back(c);
-            }
-        }
-    } else if (axis == 6) {
-        /*
-         * Long-read hypotheses, on the observation that on long-read QUAL the
-         * best cycleMax is the *smallest* tried (32) and the whole cycleMax plane
-         * only moves 0.05%: the positional context is not what limits fcv2 there,
-         * so refining it is not the lever. Two other contexts degenerate on a
-         * 14 kb record and are what this axis probes:
-         *
-         *   m5 (delta = transitions so far). Its bucket is
-         *   delta * deltaBucket / deltaMax, so with the default deltaMax=32 a
-         *   read with thousands of transitions sits in the last bucket from very
-         *   early on and the model carries no information. Raising deltaMax (up
-         *   to the 256 cap) is the only way to give it range.
-         *
-         *   m6 (read mean quality, QA_BINS=4). It is degenerate while useQa is
-         *   off - its context equals m1's - and no shipped candidate ever turns
-         *   it on. On long reads the per-read mean quality varies much more than
-         *   on a short-read flowcell, so it is worth measuring rather than
-         *   assuming, which is what the qa variant here does.
-         *
-         * Crossed with the small cycleMax values that measured best there.
-         */
-        const int kLongCycleMax[] = {16, 24, 32, 48, 64};
-        const int kLongDeltaMax[] = {32, 64, 128, 255};
-        const bool kQa[] = {false, true};
-        for (int cm : kLongCycleMax) {
-            for (int dm : kLongDeltaMax) {
-                for (bool qa : kQa) {
-                    Fcv2Cfg c;
-                    c.cycleMax = cm;
-                    c.cycleBucket = 8;
-                    c.deltaMax = dm;
-                    c.deltaBucket = 16;
-                    c.prevShift = 0;
-                    c.useQa = qa;
-                    grid.push_back(c);
-                }
-            }
-        }
-    } else if (axis == 7) {
-        /*
-         * The order-2 question. A second-order context is already in the mix (m3 uses the previous
-         * two quality values), but it is quantized by prevShift and crossed with the cycle bucket,
-         * so the axes above measure it diluted. The conditional entropy of this data says the
-         * second and third predecessors still carry ~0.02 and ~0.06 bit/symbol - about 0.5% to
-         * 1.5% of the QUAL column - so the question is whether the models that exist can reach it
-         * when nothing is quantized away: prevShift 0 with a coarse cycle context, a combination no
-         * other axis tries (axis 1 sweeps cycleBucket at prevShift 1, axis 6 fixes it at 8).
-         */
-        const int kOrder2CycleBucket[] = {2, 3, 4, 6, 8};
-        const int kOrder2DeltaBucket[] = {4, 8, 16};
-        const int kOrder2CycleMax[] = {32, 48};
-        for (int cm : kOrder2CycleMax) {
-            for (int cb : kOrder2CycleBucket) {
-                for (int db : kOrder2DeltaBucket) {
-                    Fcv2Cfg c;
-                    c.cycleMax = cm;
-                    c.cycleBucket = cb;
-                    c.deltaMax = 32;
-                    c.deltaBucket = db;
-                    c.prevShift = 0;
-                    c.useDelta = true;
-                    c.useDedup = false;
-                    c.useQa = false;
-                    grid.push_back(c);
-                }
-            }
-        }
-    } else if (axis == 5) {
+    } else if (axis == 4) {
         /*
          * Exactly the shipped preset table (FCV2_PRESETS), without the
          * volume-tier pruning the selector applies: the point is to rank the
@@ -401,47 +316,43 @@ std::vector<Fcv2Cfg> buildGrid(int axis)
         for (int i = 0; i < FCV2_PRESET_COUNT; ++i) {
             grid.push_back(FCV2_PRESETS[i].cfg);
         }
-    } else if (axis == 4) {
+    } else if (axis == 3) {
         /*
-         * Finalists: the winners of axes 0-3 plus the shipped ultra tier, at
+         * Finalists: the winners of axes 0-2 plus the shipped ultra tier, at
          * several prevShift values. Cheap enough to re-run at every block volume,
          * which is what decides whether a winner found on one sample is the
          * actual optimum or an artifact of that sample size.
          */
         Fcv2Cfg ultra;
         ultra.cycleBucket = 4;
-        ultra.deltaBucket = 2;
         ultra.prevShift = 0;
         grid.push_back(ultra);                       /* shipped ultra, cm96 */
         for (int ps = 0; ps <= 2; ++ps) {
-            Fcv2Cfg a;                               /* cm80 cb4 db2 */
+            Fcv2Cfg a;                               /* cm80 cb4 */
             a.cycleMax = 80;
             a.cycleBucket = 4;
-            a.deltaBucket = 2;
             a.prevShift = ps;
             grid.push_back(a);
-            Fcv2Cfg b;                               /* cm80 cb8 db4 */
+            Fcv2Cfg b;                               /* cm80 cb8 */
             b.cycleMax = 80;
             b.cycleBucket = 8;
-            b.deltaBucket = 4;
             b.prevShift = ps;
             grid.push_back(b);
             Fcv2Cfg c;                               /* long-read region: small cycleMax */
             c.cycleMax = 32;
             c.cycleBucket = 8;
-            c.deltaBucket = 8;
             c.prevShift = ps;
             grid.push_back(c);
         }
     } else {
-        const int kBucketPairs[][2] = {{4, 2}, {8, 4}, {16, 8}, {24, 12}};
+        /* Full grid: cycleMax x cycleBucket x prevShift. */
+        const int kBuckets[] = {4, 8, 16, 24};
         for (int cm : kCycleMax) {
-            for (const int* p : kBucketPairs) {
+            for (int cb : kBuckets) {
                 for (int ps = 0; ps <= 2; ++ps) {
                     Fcv2Cfg c;
                     c.cycleMax = cm;
-                    c.cycleBucket = p[0];
-                    c.deltaBucket = p[1];
+                    c.cycleBucket = cb;
                     c.prevShift = ps;
                     grid.push_back(c);
                 }
@@ -454,14 +365,11 @@ std::vector<Fcv2Cfg> buildGrid(int axis)
 const char* axisName(int axis)
 {
     switch (axis) {
-    case 0: return "cycleMax sweep (cycleBucket/deltaBuckets/prevShift at the shipped defaults)";
+    case 0: return "cycleMax sweep (cycleBucket/prevShift at the shipped defaults)";
     case 1: return "cycleMax x cycleBucket";
-    case 2: return "deltaMax x deltaBucket";
-    case 4: return "finalists from axes 0-3, per prevShift (for every block volume)";
-    case 5: return "the shipped preset table (FCV2_PRESETS), unpruned";
-    case 6: return "long-read hypotheses: small cycleMax x deltaMax x useQa";
-    case 7: return "order-2 focus: prevShift 0 with coarse cycle buckets";
-    default: return "full grid: cycleMax x (cycleBucket, deltaBucket) x prevShift";
+    case 3: return "finalists from axes 0-2, per prevShift (for every block volume)";
+    case 4: return "the shipped preset table (FCV2_PRESETS), unpruned";
+    default: return "full grid: cycleMax x cycleBucket x prevShift";
     }
 }
 
@@ -470,7 +378,7 @@ const char* axisName(int axis)
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <input.sam> <max_lines> [axis 0..6]\n", argv[0]);
+        fprintf(stderr, "usage: %s <input.sam> <max_lines> [axis 0..4]\n", argv[0]);
         return 2;
     }
     const uint64_t maxLines = strtoull(argv[2], NULL, 10);

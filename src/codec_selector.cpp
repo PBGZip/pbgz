@@ -62,19 +62,13 @@ namespace {
 const uint32_t SAMPLE_TARGET = 4u << 20;   /* 4 MB */
 
 /*
- * The two sizes the field trials are made of, overridable from the environment for measurement
- * (PBGZ_TRIAL_SAMPLE for the raw bytes scanned into the field samples, PBGZ_TRIAL_PROBE for the
- * number of sample bytes each candidate is actually measured on). Both are read once per process;
- * with neither set the constants above and PROBE_START below apply.
+ * The two sizes the field trials are made of: SAMPLE_TARGET raw bytes are
+ * scanned into the field samples, then each candidate is measured on
+ * PROBE_START of them (see trialProbeStart).
  */
 static uint32_t trialSampleTarget()
 {
-    static const uint32_t v = []() -> uint32_t {
-        const char* e = getenv("PBGZ_TRIAL_SAMPLE");
-        const int n = (e != nullptr) ? atoi(e) : 0;
-        return (n > 0) ? (uint32_t)n : SAMPLE_TARGET;
-    }();
-    return v;
+    return SAMPLE_TARGET;
 }
 
 /*
@@ -377,12 +371,7 @@ const uint32_t PROBE_START = 256u << 10;
  */
 static uint32_t trialProbeStart()
 {
-    static const uint32_t v = []() -> uint32_t {
-        const char* e = getenv("PBGZ_TRIAL_PROBE");
-        const int n = (e != nullptr) ? atoi(e) : 0;
-        return (n > 0) ? (uint32_t)n : PROBE_START;
-    }();
-    return v;
+    return PROBE_START;
 }
 
 /*
@@ -393,8 +382,7 @@ static uint32_t trialProbeStart()
  * under a point in ratio, as coder_lzma did before it was dropped from the SEQ payload's candidate
  * set (it won by 0.4% and cost 17x). The trial time is one measurement on a few hundred KB, so it
  * is only evidence of an order-of-magnitude difference: hence a large speed factor against a small
- * size penalty, and no effect at all when no candidate clears both. PBGZ_SPEED_TRADE=0 restores the
- * pure size verdict, and the two margins are overridable for measurement.
+ * size penalty, and no effect at all when no candidate clears both.
  */
 struct SpeedTrade {
     bool   enabled;
@@ -404,25 +392,7 @@ struct SpeedTrade {
 
 static const SpeedTrade& speedTrade()
 {
-    static const SpeedTrade t = []() -> SpeedTrade {
-        SpeedTrade v;
-        v.enabled = true;
-        v.maxPenaltyPct = 1.0;
-        v.minFactor = 2.0;
-        const char* off = getenv("PBGZ_SPEED_TRADE");
-        if (off != nullptr && atoi(off) == 0) {
-            v.enabled = false;
-        }
-        const char* pct = getenv("PBGZ_SPEED_TRADE_PCT");
-        if (pct != nullptr && atof(pct) > 0.0) {
-            v.maxPenaltyPct = atof(pct);
-        }
-        const char* fac = getenv("PBGZ_SPEED_TRADE_FACTOR");
-        if (fac != nullptr && atof(fac) > 1.0) {
-            v.minFactor = atof(fac);
-        }
-        return v;
-    }();
+    static const SpeedTrade t = { true, 1.0, 2.0 };
     return t;
 }
 
@@ -538,27 +508,48 @@ FieldCodecSelection CodecSelector::selectCoder(const uint8_t* data, uint32_t len
     sel.rounds = 1;
     sel.decidedLen = probe;
 
-    uint32_t bestLen = UINT32_MAX;
-    bool haveBest = false;
-
+    /*
+     * The coders that can actually be trialled, in priority order: creatable, a
+     * generic trial candidate, and - for a line-based coder - sample lines present
+     * (without them its measurement would not be trustworthy, so it abstains).
+     */
+    std::vector<CoderType> eligible;
+    eligible.reserve(ordered.size());
     for (size_t i = 0; i < ordered.size(); ++i) {
         const CoderType type = ordered[i];
         const CoderDescriptor* d = CoderFactory::descriptor(type);
-        /* Skip types this build cannot create, and the special-path coders
-         * (QUAL/FCV2) that are not generic trial candidates. */
         if (d == nullptr || !d->trialCandidate || !CoderFactory::canMake(type)) {
             continue;
         }
+        if (d->trialLineBased && (lines == nullptr || lines->empty())) {
+            continue;
+        }
+        eligible.push_back(type);
+    }
 
+    /*
+     * If only one coder can be chosen there is nothing to compare, so the
+     * trial-compression - the most expensive part of pre-selection - is skipped and
+     * that coder is taken directly. The size is left unmeasured (bestCompLen 0,
+     * trialCount 0); a caller that needs to know whether the trial found anything
+     * tests trialCount, not bestCompLen == 0.
+     */
+    if (eligible.size() == 1) {
+        sel.status = FieldStatus::SELECTED;
+        sel.selectedCoder = eligible[0];
+        return sel;
+    }
+
+    uint32_t bestLen = UINT32_MAX;
+    bool haveBest = false;
+
+    for (size_t i = 0; i < eligible.size(); ++i) {
+        const CoderType type = eligible[i];
+        const CoderDescriptor* d = CoderFactory::descriptor(type);
         bool ok = false;
         uint32_t outLen = 0;
         uint32_t outUs = 0;
         if (d->trialLineBased) {
-            /* Line-based coders need line boundaries; without samples the
-             * measurement would not be trustworthy, so the coder abstains. */
-            if (lines == nullptr || lines->empty()) {
-                continue;
-            }
             ok = trialLines(type, *lines, outLen, outUs);
         } else {
             /* trialUsesLevel: the coder's internal block level is chosen to hold
@@ -948,13 +939,8 @@ std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& ac
         Fcv2Cfg cfg;
         cfg.cycleMax = params.cycleMax;
         cfg.cycleBucket = params.cycleBucket;
-        cfg.deltaMax = params.deltaMax;
-        cfg.deltaBucket = params.deltaBucket;
         cfg.prevShift = params.prevShift;
-        cfg.useDelta = params.useDelta;
         cfg.useDedup = params.useDedup;
-        cfg.useQa = params.useQa;
-        cfg.modelCount = params.modelCount;
         coder_fcv2 coder(&io, acc.freqByByte, cfg);
         for (const QualSampleRecord& r : acc.records) {
             coder.encode_record((const uint8_t*)r.qual.data(),
@@ -1208,23 +1194,6 @@ static bool qualPriorPaysOff(uint64_t qualSampleBytes, uint64_t scannedBytes, ui
      */
     const uint64_t QUAL_PRIOR_MIN_TOTAL = 150ull * 1024ull * 1024ull;
 
-    /*
-     * Measurement override, PBGZ_QUAL_PRIOR=0 never writes the prior and =1 always does, so the two
-     * sides of the trade-off below can be measured on one input; unset keeps the rule.
-     */
-    static const int forced = []() -> int {
-        const char* e = getenv("PBGZ_QUAL_PRIOR");
-        return (e != nullptr) ? atoi(e) : -1;
-    }();
-    if (forced == 0) {
-        LOG_INFO("QUAL prior forced off (PBGZ_QUAL_PRIOR=0).");
-        return false;
-    }
-    if (forced == 1) {
-        LOG_INFO("QUAL prior forced on (PBGZ_QUAL_PRIOR=1).");
-        return true;
-    }
-
     if (inputTotalBytes == 0 || scannedBytes == 0) {
         LOG_INFO("Input size unknown, keep QUAL prior.");
         return true;
@@ -1370,64 +1339,26 @@ static uint16_t chrIndexOf(const LineSample& field)
 }
 
 /*
- * The candidates on the SEQ match payload: coder_bwt_cm and coder_fc, whichever codes the payload
- * smaller. segmentLen is the length of the stream the choice applies to, which is what coder_fc's
- * own length limits are about.
+ * The coder for the SEQ match payload is coder_fc. coder_bwt_cm used to compete
+ * here (whichever coded the payload smaller); it was removed from the candidate
+ * list, so the list holds a single coder and - by the same rule the generic
+ * selectCoder applies to any one-entry list - no trial runs: the coder is taken
+ * directly. coder_bwt_cm still carries the payload when it falls outside
+ * coder_fc's length window and always carries the "mval" sub-stream (see
+ * writeSeqMatchStreams), so it is not gone from the stream, only from this choice.
  *
- * coder_lzma was the third candidate and is not missed: it won on size (1.7519 bits/base against
- * coder_bwt_cm's 1.7590 on ERR11436629 SEQ) but cost ~17x the time to do it, and no setting of its
- * own changed that. See the note in coder_factory.cpp where its row was.
- *
- * The result is a FieldCodecSelection so the per-field table reports this trial like any other:
- * decidedLen is the measured segment, so the ratio it prints is the one the payload really got.
+ * The result is a FieldCodecSelection so the per-field table reports this choice
+ * like any other; nothing was measured, so bestCompLen and trialCount stay 0, and
+ * sampleLen/decidedLen are the segment length the choice applies to.
  */
-static FieldCodecSelection trialSeqMatchCoder(const uint8_t* sample, uint32_t sampleLen,
-                                              uint32_t segmentLen, uint8_t level)
+static FieldCodecSelection seqMatchCoderChoice(uint32_t segmentLen)
 {
-    const CoderType kCandidates[2] = {CoderType::BWT_CM, CoderType::FC};
-
     FieldCodecSelection sel;
     sel.status = FieldStatus::SELECTED;
-    sel.selectedCoder = CoderType::BWT_CM;
+    sel.selectedCoder = CoderType::FC;
     sel.sampleLen = segmentLen;
     sel.decidedLen = segmentLen;
     sel.rounds = 1;
-    std::vector<uint8_t> scratch((size_t)sampleLen * 2 + 65536);
-    for (int i = 0; i < 2; ++i) {
-        const CoderType type = kCandidates[i];
-        /*
-         * coder_fc refuses inputs of FC_MIN_LEN bytes or less. It is fed the whole segment in
-         * production, so the guard is on the segment length; the sample must also be able to
-         * carry it, or the trial would be measuring a refusal.
-         */
-        if (type == CoderType::FC &&
-            (segmentLen <= FC_MIN_LEN || segmentLen >= (uint32_t)FC_MAX_LEN ||
-             sampleLen <= FC_MIN_LEN)) {
-            continue;
-        }
-        coder_io trialIo(scratch.data(), (int32_t)scratch.size());
-        CoderFactory::applyLevel(&trialIo, type, level);
-        std::shared_ptr<coder> trialCoder = CoderFactory::makeEncoder(type, &trialIo);
-        const auto started = std::chrono::steady_clock::now();
-        trialCoder->encode_line(sample, sampleLen);
-        trialCoder->encode_flush();
-        const uint32_t usec = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
-                                  std::chrono::steady_clock::now() - started).count();
-        if (trialIo.err != coder_io::IO_OK || trialIo.data_len <= 0) {
-            continue;   /* this coder cannot carry the segment at all */
-        }
-        sel.addTrial(type, (uint32_t)trialIo.data_len, usec);
-    }
-
-    /*
-     * Same rule as the generic fields: smallest output, with a clearly faster coder taken when it
-     * stays within the size tolerance (see pickTrialWinner). It is what the note above is about -
-     * coder_lzma used to win here by 0.4% while costing 17x the time, and coder_fc against
-     * coder_bwt_cm is the same shape of trade at a much smaller factor.
-     */
-    uint32_t chosenLen = 0;
-    sel.selectedCoder = pickTrialWinner(sel, chosenLen);
-    sel.bestCompLen = chosenLen;
     return sel;
 }
 
@@ -1624,20 +1555,16 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
     }
 
     /*
-     * The same RLE decision the block pass applies, and the trial runs on the "m" segment - the
-     * one the coder it picks will really encode.
+     * The same RLE decision the block pass applies, so the segment the choice is
+     * reported for is the one the coder will really encode.
      */
     const SeqRleSplit rle = splitSeqMatchStream(match.data(), (uint32_t)match.size());
-    const uint8_t* payload = rle.useRle ? rle.run.get() : match.data();
     const uint32_t payloadLen = rle.useRle ? rle.runLength : (uint32_t)match.size();
     if (payloadLen == 0) {
         return false;
     }
 
-    const FieldCodecSelection verdict = trialSeqMatchCoder(payload, payloadLen, payloadLen, level);
-    if (verdict.bestCompLen == 0) {
-        return false;   /* neither candidate could carry the segment: leave the column its default */
-    }
+    const FieldCodecSelection verdict = seqMatchCoderChoice(payloadLen);
     info.fields[SAM_SEQ] = verdict;
 
     /*
@@ -1667,10 +1594,10 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
         info.setNposForm(pickSeqExcForm(exc, level));
     }
 
-    LOG_DEBUG("SEQ trial: %u of %u records reference-coded, payload %u -> %s %u (match %u), "
+    LOG_DEBUG("SEQ payload: %u of %u records reference-coded, payload %u -> %s (match %u), "
               "npos form %d",
-              refCoded, (unsigned)records.size(), payloadLen, coderTypeToMagic(verdict.selectedCoder),
-              verdict.bestCompLen, (uint32_t)match.size(),
+              refCoded, (unsigned)records.size(), payloadLen,
+              coderTypeToMagic(verdict.selectedCoder), (uint32_t)match.size(),
               info.nposForm.load(std::memory_order_relaxed));
     return true;
 }

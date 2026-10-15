@@ -2,8 +2,7 @@
  * fcv2_cfg_testcase.cpp - Unit tests for the fcv2 context parameter presets (strategies 1/2).
  *
  * Covers three things:
- *   1) encode/decode round-trip consistency under non-default presets (fine/coarse/delta context
- *      disabled);
+ *   1) encode/decode round-trip consistency under non-default presets (fine/coarse tiers, dedup);
  *   2) the prior snapshot carries the preset: loading under the same preset round-trips, and a
  *      prior trained under a different preset is correctly adopted (the prior decides the preset);
  *   3) when QualSelector picks fcv2, the winning preset is written into
@@ -184,7 +183,6 @@ Fcv2Cfg fineCfg()
 {
     Fcv2Cfg cfg;
     cfg.cycleBucket = 24;
-    cfg.deltaBucket = 12;
     cfg.prevShift = 0;
     return cfg;
 }
@@ -193,15 +191,7 @@ Fcv2Cfg coarseCfg()
 {
     Fcv2Cfg cfg;
     cfg.cycleBucket = 8;
-    cfg.deltaBucket = 4;
     cfg.prevShift = 2;
-    return cfg;
-}
-
-Fcv2Cfg noDeltaCfg()
-{
-    Fcv2Cfg cfg;
-    cfg.useDelta = false;
     return cfg;
 }
 
@@ -209,27 +199,6 @@ Fcv2Cfg dedupCfg()
 {
     Fcv2Cfg cfg;
     cfg.useDedup = true;
-    return cfg;
-}
-
-/*
- * The average-quality context lives in m6, the last model of the mix, and the
- * default model count trims that tail (see FCV2_MODEL_COUNT). A test of the
- * strategy itself therefore has to ask for the full mix: with a trimmed count
- * useQa has no model to act on and both sides of a comparison are the same
- * coder.
- */
-Fcv2Cfg fullMixCfg()
-{
-    Fcv2Cfg cfg;
-    cfg.modelCount = FCV2_MAX_MODEL_COUNT;
-    return cfg;
-}
-
-Fcv2Cfg qaCfg()
-{
-    Fcv2Cfg cfg = fullMixCfg();
-    cfg.useQa = true;
     return cfg;
 }
 
@@ -265,39 +234,29 @@ protected:
 TEST_F(Fcv2CfgTest, RoundTripUnderNonDefaultConfigs)
 {
     std::vector<Rec> recs = makeRecords(4000, 151, 7);
-    EXPECT_TRUE(roundtripWithCfg(recs, Fcv2Cfg()));        /* default preset */
-    EXPECT_TRUE(roundtripWithCfg(recs, fineCfg()));        /* fine preset */
-    EXPECT_TRUE(roundtripWithCfg(recs, coarseCfg()));      /* coarse preset */
-    EXPECT_TRUE(roundtripWithCfg(recs, noDeltaCfg()));     /* delta context disabled */
+    EXPECT_TRUE(roundtripWithCfg(recs, Fcv2Cfg()));        /* the default cfg */
+    EXPECT_TRUE(roundtripWithCfg(recs, fineCfg()));        /* the fine shipped preset */
+    EXPECT_TRUE(roundtripWithCfg(recs, coarseCfg()));      /* a coarse tier (not a shipped preset) */
     EXPECT_TRUE(roundtripWithCfg(recs, dedupCfg()));       /* dedup (no duplicate data) */
-    EXPECT_TRUE(roundtripWithCfg(recs, qaCfg()));          /* average-quality preset */
 }
 
 /*
  * Tier values at and above their maxima must survive the stream header, which
  * writes every one of them as a single byte.
  *
- * The above-maximum case is the one that discriminates. deltaMax can be set to
- * 256, which normalizeCfg accepts, but the header can only carry a byte: 256 is
- * written as 0 and read back as the 8 that normalizeCfg clamps it to, so the two
- * sides disagree on the context layout and the stream decodes into garbage with
- * nothing reported (the header carries no checksum, and the model-layout
- * comparison only runs when a prior is loaded). The preset round trips above all
- * sit on moderate values and never reach this.
- *
- * A literal 255 cannot catch it: 255 is representable, so it round-trips either
- * way. Only a value above the maximum does, because that is what makes the
- * encoder depend on the header carrying its clamped result.
+ * The above-maximum case is the one that discriminates: a value above the
+ * maximum makes the encoder depend on the header carrying its clamped result,
+ * so the two sides would disagree on the context layout if the header could not
+ * carry it. The delta tiers that used to exercise this are gone with m5; the
+ * remaining tiers are cycleMax (which round-trips via normalizeCfg), cycleBucket
+ * and prevShift.
  */
 TEST_F(Fcv2CfgTest, OverMaximalTierRoundTrip)
 {
     Fcv2Cfg over;              /* every field above its maximum */
     over.cycleMax = 4096;      /* clamps to 128 */
     over.cycleBucket = 512;    /* clamps to 32 */
-    over.deltaMax = 256;       /* would truncate to 0 in the header */
-    over.deltaBucket = 64;     /* clamps to 16 */
     over.prevShift = 9;        /* clamps to 3 */
-    over.modelCount = 99;      /* clamps to FCV2_MAX_MODEL_COUNT */
 
     std::vector<Rec> recs = makeCycleRecords(1200, 4000, 23);
     EXPECT_TRUE(roundtripWithCfg(recs, over));
@@ -309,10 +268,7 @@ TEST_F(Fcv2CfgTest, MaximalTierRoundTrip)
     Fcv2Cfg cfg;
     cfg.cycleMax = 128;
     cfg.cycleBucket = 32;
-    cfg.deltaMax = 255;
-    cfg.deltaBucket = 16;
     cfg.prevShift = 3;
-    cfg.modelCount = FCV2_MAX_MODEL_COUNT;
 
     std::vector<Rec> recs = makeCycleRecords(1200, 4000, 23);
     EXPECT_TRUE(roundtripWithCfg(recs, cfg));
@@ -362,36 +318,10 @@ TEST_F(Fcv2CfgTest, DedupPriorRoundTrip)
     ASSERT_TRUE(decodeAll(dec, recs));
 }
 
-/* Average-quality preset (strategy 4): when the mean quality differs widely between reads, the quality preset should save more than not bucketing by quality. */
-TEST_F(Fcv2CfgTest, QaSavesBytesOnVariedQuality)
-{
-    /* Mix two batches of reads: one high-quality (Q38~40) and one low-quality (Q15~20), with large mean-quality differences. */
-    std::vector<Rec> high = makeRecords(3000, 151, 21);
-    std::vector<Rec> low = makeRecords(3000, 151, 22);
-    for (Rec& r : low) {
-        for (char& c : r.qual) c = (char)('!' + 12 + (c - '!') % 6);
-    }
-    std::vector<Rec> recs;
-    recs.reserve(high.size() + low.size());
-    for (size_t i = 0; i < high.size() || i < low.size(); i++) {
-        if (i < high.size()) recs.push_back(high[i]);
-        if (i < low.size()) recs.push_back(low[i]);
-    }
-    EXPECT_TRUE(roundtripWithCfg(recs, qaCfg()));
-
-    std::vector<uint32_t> freq = frequencies(recs);
-    size_t total = 0;
-    for (const Rec& r : recs) total += r.qual.size();
-    std::vector<uint8_t> c1(total * 2 + (1u << 16), 0), c2(total * 2 + (1u << 16), 0);
-    coder_io io1(c1.data(), (int32_t)c1.size());
-    coder_fcv2 e1(&io1, freq, fullMixCfg());   /* the baseline differs only in useQa */
-    ASSERT_TRUE(encodeAll(e1, recs));
-    coder_io io2(c2.data(), (int32_t)c2.size());
-    coder_fcv2 e2(&io2, freq, qaCfg());
-    ASSERT_TRUE(encodeAll(e2, recs));
-    int32_t n1 = e1.encode_flush(), n2 = e2.encode_flush();
-    EXPECT_LT((size_t)n2, (size_t)n1) << "Data with widely differing mean quality must compress fewer bytes with the quality tier";
-}
+/* The average-quality preset (strategy 4) is gone with its m6 model (useQa +
+ * QA_BINS were removed along with it), so QaSavesBytesOnVariedQuality is gone
+ * too: there is no per-read average-quality tier left to test.
+ */
 
 TEST_F(Fcv2CfgTest, PriorCarriesConfigAndAdoptsIt)
 {
@@ -413,8 +343,7 @@ TEST_F(Fcv2CfgTest, PriorCarriesConfigAndAdoptsIt)
     coder_io io(comp.data(), (int32_t)comp.size());
     bool loaded = false;
     coder_fcv2 enc(&io, freq, coarseCfg(), blob, &loaded);
-    ASSERT_TRUE(loaded) << "A prior with the same tier layout must be loaded (the prior determines the tier)";
-    ASSERT_TRUE(encodeAll(enc, recs));
+    ASSERT_TRUE(loaded) << "A prior with the same tier layout must be loaded (the prior determines the tier)";    ASSERT_TRUE(encodeAll(enc, recs));
     int32_t packed = enc.encode_flush();
 
     coder_io dio(comp.data(), packed);
@@ -451,41 +380,18 @@ TEST_F(Fcv2CfgTest, StreamHeaderCarriesConfigSelfDescribe)
 }
 
 /*
- * The model count follows the read length, and this is the only place that
- * decides it: with the datasets at hand fcv2 is only ever selected on short
- * reads, so the long-read branch would otherwise never run in any test or in
- * production, and a silent regression in it would go unnoticed until some future
- * file happened to select fcv2 there.
+ * The fcv2 model count is fixed at FCV2_MODEL_COUNT (m0..m4) for every file;
+ * there is no per-read-length rule anymore (qualModelCountForMeanLen is gone),
+ * so the mix is the same on short and long reads.
  */
-TEST_F(Fcv2CfgTest, ModelCountFollowsReadLength)
+TEST_F(Fcv2CfgTest, ModelCountIsFixed)
 {
-    /* Short reads, on both sides of anything an Illumina run produces. */
-    EXPECT_EQ(qualModelCountForMeanLen(35), FCV2_MODEL_COUNT);
-    EXPECT_EQ(qualModelCountForMeanLen(90), FCV2_MODEL_COUNT);      /* con_sorted */
-    EXPECT_EQ(qualModelCountForMeanLen(151), FCV2_MODEL_COUNT);
-    EXPECT_EQ(qualModelCountForMeanLen(QUAL_LONG_READ_LEN - 1), FCV2_MODEL_COUNT);
-
-    /* Long reads start at the threshold itself, and stay there however long. */
-    EXPECT_EQ(qualModelCountForMeanLen(QUAL_LONG_READ_LEN), 4);
-    EXPECT_EQ(qualModelCountForMeanLen(14044), 4);                 /* ERR11436629 */
-    EXPECT_EQ(qualModelCountForMeanLen(100000), 4);
-
-    /* A trimmed long-read count must still be a usable mix (1..max). */
-    EXPECT_GE(qualModelCountForMeanLen(14044), 1);
-    EXPECT_LE(qualModelCountForMeanLen(14044), FCV2_MAX_MODEL_COUNT);
+    /* The compile-time constant is exactly the shipped count. */
+    EXPECT_EQ(FCV2_MODEL_COUNT, 5);
+    /* A default coder mixes every model: the mix does not vary with anything. */
+    EXPECT_TRUE(roundtripWithCfg(makeRecords(1500, 151, 33), Fcv2Cfg()));
 }
 
-/* The trimmed count must produce a stream that decodes under its own count. */
-TEST_F(Fcv2CfgTest, LongReadCountRoundTrip)
-{
-    Fcv2Cfg cfg;
-    cfg.modelCount = qualModelCountForMeanLen(14044);
-    ASSERT_EQ(cfg.modelCount, 4);
-    std::vector<Rec> recs = makeCycleRecords(1500, 4000, 17);   /* long-read shaped */
-    EXPECT_TRUE(roundtripWithCfg(recs, cfg));
-}
-
-/* With a large enough sample, QualSelector should select a candidate and bring back the winning preset. */
 TEST_F(Fcv2CfgTest, QualSelectorCarriesWinningConfig)
 {
     RoughIOBlock block(8 << 20);
@@ -519,14 +425,14 @@ TEST_F(Fcv2CfgTest, QualSelectorCarriesWinningConfig)
         GTEST_SKIP() << "This synthetic sample did not select fcv2 (selected " << coderTypeToMagic(qualSel.selectedCoder)
                      << ", " << buf << "), so tier feedback cannot be verified";
     }
-    /* The preset must be one of the known candidates (default / fine / coarse /
-     * ultra 4-2-ps0 / ultra-80), and it must round-trip with the preset applied. */
+    /* The preset must be one of the known candidates (fine / ultra / ultra-80;
+     * default and coarse are no longer in the table), and it must round-trip
+     * with the preset applied. */
     const QualFcv2Params& p = qualSel.fcv2Params;
-    bool isKnownPreset = (p == QualFcv2Params()) ||
-        (p.cycleBucket == 24 && p.deltaBucket == 12 && p.prevShift == 0 && p.useDelta) ||
-        (p.cycleBucket == 8 && p.deltaBucket == 4 && p.prevShift == 2 && p.useDelta) ||
-        (p.cycleBucket == 4 && p.deltaBucket == 2 && p.prevShift == 0 && p.useDelta) ||
-        (p.cycleMax == 80 && p.cycleBucket == 4 && p.deltaBucket == 2 && p.prevShift == 0 && p.useDelta);
+    bool isKnownPreset =
+        (p.cycleBucket == 24 && p.prevShift == 0) ||
+        (p.cycleBucket == 4 && p.cycleMax == 96 && p.prevShift == 0) ||
+        (p.cycleBucket == 4 && p.cycleMax == 80 && p.prevShift == 0);
     EXPECT_TRUE(isKnownPreset) << "fcv2Params is not one of the known candidate tiers";
 }
 
