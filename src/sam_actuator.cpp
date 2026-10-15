@@ -4936,10 +4936,11 @@ int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnP
     fieldCache.clear();
     fieldCache.reserve(samLine);
 
-    /* Per-line decode buffer, sized from the column's source length. */
+    /* Per-line decode buffer, sized from the column's source length; left uninitialized (a
+       vector would zero-fill it, and the buffer is overwritten by every decode_line). */
     const uint32_t decodeCap = std::max<uint32_t>(1024, pre.srcLen + 1);
-    std::vector<uint8_t> tmpStore(decodeCap);
-    uint8_t* tmpBuf = tmpStore.data();
+    std::unique_ptr<uint8_t[]> tmpStore(new uint8_t[decodeCap]);
+    uint8_t* tmpBuf = tmpStore.get();
     /* Delta chain of pos_delta mode: the absolute POS reconstructed from the previous line. */
     int64_t posPrev = 0;
     for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
