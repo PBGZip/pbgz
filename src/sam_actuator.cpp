@@ -1786,8 +1786,7 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
                 ok = false;
                 break;
             }
-            /* need2hold: texts are temporary, so coder_affix_match holds its own context copy. */
-            c->encode_line(texts[i]->data(), (uint32_t)texts[i]->size(), true);
+            c->encode_line(texts[i]->data(), (uint32_t)texts[i]->size());
             c->encode_flush();
             if (io->err != coder_io::IO_OK) {
                 ok = false;

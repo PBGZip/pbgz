@@ -159,8 +159,7 @@ static void encodeIdSegmentText(const std::vector<std::string>& texts, coder_io*
         if (texts[k].empty()) {
             continue;
         }
-        /* need2hold: the segment texts are temporary, so the coder holds its own context copy. */
-        coder->encode_line((uint8_t*)texts[k].data(), (uint32_t)texts[k].size(), true);
+        coder->encode_line((uint8_t*)texts[k].data(), (uint32_t)texts[k].size());
     }
     coder->encode_flush();
 }
