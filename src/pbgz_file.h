@@ -28,7 +28,7 @@
 
 #include "pbgz_types.h"
 
-/// @brief Magic value for block in PBGZ file format, used to identify block type
+/// @brief PBGZ block type
 typedef enum {
     INVALID = 0,  // unknown
     FILE_HEADER =  1, // File header information
@@ -133,10 +133,7 @@ typedef enum {
 /// @brief PBGZ file meta information
 class PbgzFileMeta {
 public:
-    /**
-     * @brief Check if the meta data checksum is valid.
-     * @return True if checksum is valid, false otherwise.
-     */
+    /// @brief Get the meta data checksum.
     uint64_t getMetaChecksum() const{
         return metaChecksum;
     }

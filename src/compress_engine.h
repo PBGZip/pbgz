@@ -78,20 +78,17 @@ protected:
     std::unique_ptr<BlockingQueueType> renderInputPool;
     std::vector<std::thread> renderThreads;
 
-    /*
-     * The reader thread accumulates QUAL prior training samples block by block; once
-     * the target block count (= concurrency) or the 45 MB cap is reached, the prior is
-     * trained and published in one pass.
-     */
+    /* Reader thread accumulates QUAL prior samples block by block until the target block
+       count or the 45 MB cap is reached. */
     virtual void pretrainBlockProc(RoughIOBlock* blockPtr) override;
 
     /* Finalize any incomplete pretraining when the read loop ends (EOF/error). */
     virtual void readLoopPostProc() override;
 
-    /* coder thread startup latch: starts pulling and compressing blocks only after being notified that the prior is published (or decided absent). */
+    /* Coder thread startup latch: waits until the prior is published or decided absent. */
     virtual void workStartBarrier() override;
 
-    /* Train on the accumulated QUAL, publish the prior auxiliary block, set DONE, and notify the waiting coder threads. */
+    /* Train on the accumulated QUAL, publish the prior, and notify waiting coder threads. */
     void finalizePretrain();
     virtual BlockReader* createBlockReader() override;
 
@@ -110,20 +107,8 @@ protected:
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
 
-    /*
-     * Emit the trained QUAL prior as a QUAL_PRIOR auxiliary block and record the
-     * absolute offset of its container header.
-     *
-     * The call site is finalizePretrain (after cross-block pretraining completes), not
-     * file end: because data blocks reference the prior, the prior must be fully
-     * compressed before any data block. Since coder threads are held at the latch
-     * until the prior is published, it is safe to write the prior to disk before
-     * releasing them — even block 0 can use the prior, with no special case needed for
-     * it.
-     *
-     * The actual write to disk is done by the writer thread via emitSyncAuxBlock; this
-     * function only builds the block and records the metadata.
-     */
+    /* Build the QUAL_PRIOR auxiliary block and record its header offset. The writer
+       thread performs the actual write via emitSyncAuxBlock. */
     void emitQualPrior();
 
     virtual void writeFilePostProc(BlockWriter* blockWriter) override;
@@ -161,7 +146,7 @@ private:
 
     uint32_t calcPackRefeBlockSize();
 
-    /* Whether the reference genome is packed with the file header: true when output goes to a pipe and an external reference is not requested. */
+    /* Whether the reference genome is packed with the file header (stdout output, unpacked reference not requested). */
     bool isPackRefeInHeader() const {
         return !parameter.isUnpackRef && parameter.outputFile == STDOUT;
     }
@@ -176,36 +161,22 @@ private:
 
     PreprocessInfo preprocessInfo;
 
-    /*
-     * Absolute file offset of the QUAL prior block's container header; -1 means this
-     * compression has no usable prior. It is written by the reader thread before the
-     * first block is dispatched and then read by all worker threads. The queue's
-     * enqueue/dequeue already establish happens-before; the atomic is used only to
-     * make this publication relationship self-documenting at the type level.
-     */
+    /* Absolute offset of the QUAL prior block header; -1 means no prior. Written by the
+       reader thread before the first block is dispatched, then read by all workers. */
     std::atomic<int64_t> qualPriorOffset{-1};
 
-    /* The trained prior snapshot; copied once when building the block, then shared read-only so all worker threads can use it with zero copies. */
+    /* Trained prior snapshot, shared read-only by all worker threads. */
     AuxPayloadPtr qualPriorBlob;
 
-    /*
-     * Cross-block pretraining state (accessed only by the reader thread): the
-     * accumulator, the count of blocks fed, the target block count, and whether
-     * pretraining is active. The target block count is the concurrency; the 45 MB cap
-     * is enforced by the accumulator itself.
-     */
+    /* Cross-block pretraining state (reader thread only); the 45 MB cap lives in the
+       accumulator. */
     CodecSelector::QualPriorAccum qualPriorAccum;
     uint32_t pretrainBlockCount = 0;
     uint32_t pretrainTarget = 0;
     bool pretraining = false;
 
-    /*
-     * Publication latch for coder threads: set and signaled by the reader thread after
-     * it trains and publishes the prior; coder threads wait in workStartBarrier. For
-     * files without a prior it is set immediately in fileDecisionProc, so no non-prior
-     * path is slowed down; for empty files it is set as a fallback in
-     * readLoopPostProc.
-     */
+    /* Publication latch: signaled once the prior is published or decided absent; coder
+       threads wait in workStartBarrier. */
     std::mutex priorMutex;
     std::condition_variable priorCv;
     bool priorSettled = false;
@@ -223,7 +194,7 @@ public:
     }
 
     AuxPayloadPtr getQualPrior(int64_t /*packageIndex*/) override {
-        /* Written before the first block is dispatched, then read-only; the acquire load of the address atomic also establishes its visibility. */
+        /* Written before the first block is dispatched, then read-only. */
         return (getQualPriorAddress() < 0) ? AuxPayloadPtr() : qualPriorBlob;
     }
 };

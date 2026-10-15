@@ -81,14 +81,8 @@ public:
     virtual ~IOWriter() {}
 
     /*
-     * Sticky write error. closeIO() returns void and the writes happen in a
-     * separate thread, so a failure has no return value to propagate up the call
-     * stack; therefore, like rc->err in the fqz range coder, the error is
-     * latched onto the object and picked up by the writer thread before it
-     * exits, then handed to the engine's taskFailed for final handling.
-     *
-     * Only the first error is recorded: later failures are usually its knock-on
-     * effects; the first one is the scene of the incident.
+     * Sticky write error: writes run on a separate thread and closeIO() returns
+     * void, so the first error is latched here for the writer thread to pick up.
      */
     void latchWriteError(int32_t e) { if (writeErr == 0) writeErr = e; }
 

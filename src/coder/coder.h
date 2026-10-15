@@ -58,13 +58,11 @@ namespace coder_ns {
         CODER_ERR_MEM_ALLOC_FAIL = (CODER_ERR_BAD_ARGS) - 1,
         CODER_ERR_INNER = (CODER_ERR_MEM_ALLOC_FAIL) -1,
         CODER_ERR_INVALID_STATE = CODER_ERR_INNER - 1,
-        /* Output buffer too small: writes were stopped by the capacity check (io->err = IO_BUF_FULL), and the data was not fully written. */
+        /* Output buffer too small: not all data was written. */
         CODER_ERR_BUF_SMALL = CODER_ERR_INVALID_STATE - 1,
-        /* Input stream exhausted early: the end was reached with data still missing (io->err = IO_READ_EMPTY); the stream is corrupt or the length metadata is wrong. */
+        /* Input stream exhausted early: stream is corrupt or length metadata is wrong. */
         CODER_ERR_STREAM_END = CODER_ERR_BUF_SMALL - 1,
-        /* The stream states a format version this build does not implement: it was written by an
-           incompatible version whose layout cannot be recovered from the bytes (see
-           FCV2_STREAM_VERSION). Reported apart from corruption so the caller can say which it is. */
+        /* Format version not supported by this build. */
         CODER_ERR_UNSUPPORTED_VERSION = CODER_ERR_STREAM_END - 1,
 
     };
@@ -92,18 +90,7 @@ void safe_free(void** ptr) ;
 
 void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...);
 
-/*
- * Error exit path for the coder layer.
- *
- * coder_exit/check_exit throw an exception rather than calling _Exit(): killing
- * the process deep inside a library function would bypass LOG_ERROR and the
- * engine's taskFailed aggregation, leaving the caller a bare exit code (253 in
- * practice). The 69 check_exit sites all live in template/hot paths, and
- * converting each one to a return value would thread through the entire
- * encode/decode chain, whereas throwing leaves them untouched: the error
- * propagates up the stack and is caught at PbgzEngine's single-block processing
- * boundary, where it is turned into an ordinary failed return value.
- */
+/* Error exit path for the coder layer: throws coder_exception. */
 class coder_exception : public std::exception {
 public:
     coder_exception(int16_t errCode, std::string errMsg)
@@ -129,17 +116,7 @@ class coder
 public:
     virtual ~coder() {}
 
-    /*
-     * Encode a piece of data.
-     *
-     * A unified three-parameter form is used so that every coder can be called
-     * through a base-class pointer; coder_bwt_cm does not use need2hold
-     * internally. The third parameter has a default value, so two-argument
-     * callers are unaffected.
-     *
-     * Default empty implementation: subclasses that only decode and never encode
-     * need not override it.
-     */
+    /* Encode a piece of data. Default empty implementation. */
     virtual void encode_line([[maybe_unused]] const uint8_t *in,
                              [[maybe_unused]] const uint32_t in_len,
                              [[maybe_unused]] bool need2hold = false) {}
@@ -147,42 +124,10 @@ public:
     /* Encoding finish: flush all data left in the internal buffer. Default empty implementation. */
     virtual void encode_flush() {}
 
-    /*
-     * Whether this codec can be used in "line-by-line accumulation" mode, i.e.,
-     * calling encode_line repeatedly on the same coder_io and finishing with a
-     * single encode_flush.
-     *
-     * This is not an optional preference but a hard constraint. Some codecs
-     * (e.g., coder_fc) do preprocessing, transform and entropy coding in one shot
-     * internally; a second encode_line call fails immediately, and input that is
-     * too short also errors out. Field usage inside the executor is not uniform:
-     * QNAME, RNAME and CIGAR are fed in a per-line loop, while SEQ is first
-     * assembled into a temporary buffer and fed once as a whole block.
-     *
-     * The pre-processing phase measures compression on a whole-block basis, so
-     * its results cannot be unconditionally applied to line-mode fields; codecs
-     * that do not support line mode must first be filtered out with this
-     * function.
-     */
+    /* Whether this codec supports line-by-line accumulation mode. */
     virtual bool supportsLineMode() const { return true; }
 
-    /*
-     * Declares which field of which file type this codec is suitable for.
-     *
-     * Most codecs are general-purpose byte-stream compressors and work on any
-     * field, so the default returns true. A few codecs have extra
-     * prerequisites—for example, the quality-value context mixer codec needs
-     * each record's read length and strand direction, which only the QUAL column
-     * of SAM can provide. Such codecs override this function to state their
-     * applicability clearly; the pre-processing phase asks this question during
-     * trial compression and simply skips codecs that do not apply, so they are
-     * never mis-selected.
-     *
-     * fileType takes a BlockType value; uint32_t is used here to avoid the coder
-     * layer depending back on io_block.h. The meaning of fieldIdx depends on
-     * fileType: SAM uses SamField, FASTQ uses FastqField; the two numbering
-     * schemes are independent.
-     */
+    /* Whether this codec is suitable for the given file type and field. */
     virtual bool supports([[maybe_unused]] uint32_t fileType,
                           [[maybe_unused]] uint32_t fieldIdx) const { return true; }
 

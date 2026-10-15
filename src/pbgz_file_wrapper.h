@@ -43,65 +43,23 @@ public:
 
     PbgzFileMeta& getDynamicFileMeta();
 
-    /*
-     * Prefetched format-probing data (bytes BlockFactory read from ioReader before
-     * creating the reader).
-     *
-     * Pipe input is not seekable, so the bytes consumed by probing must be handed back
-     * to the reader through this interface or the file header would be lost. These
-     * bytes are consumed in order ahead of regular reads; seek scenarios (dynamic meta
-     * reread) read ioReader directly, bypassing the prefetch buffer, and the prefetch
-     * buffer remains in effect once the seek position is restored.
-     */
+    /* Prefetched format-probing bytes, consumed in order before regular reads. */
     void setPreReadData(const uint8_t* data, size_t len);
 
-    /*
-     * Start byte position, in the whole input stream, of the pbgz package currently
-     * being read.
-     *
-     * It exists because of cat concatenation: once several independently compressed
-     * packages are joined end-to-end into one file, from the second package onward no
-     * offset recorded inside a package equals its real position in the concatenated
-     * file. During compression output always starts writing at 0, so an offset stored
-     * in a package is essentially "the distance from its own header"; when reading a
-     * single package the start happens to be 0, relative and absolute values coincide,
-     * and the problem is masked - only concatenation exposes it.
-     *
-     * The read side simply takes this start and reconstructs the real position as
-     * "package start + in-package offset"; the written format needs no byte changed,
-     * and compatibility with existing files is unaffected.
-     */
+    /* Start byte offset of the currently read pbgz package in the input stream. */
     uint64_t getCurrentFileStart() const;
 
-    /*
-     * Absolute start of the block most recently read by readDataBlock (the byte where
-     * the magic number sits).
-     *
-     * An auxiliary block's identity is its absolute address: the package start only
-     * suffices while "exactly one of each kind per package" holds, and breaks once
-     * priors are sharded. The cache keys on this address, so re-encountering the same
-     * block hits directly without re-reading.
-     */
+    /* Absolute start of the block most recently read by readDataBlock. */
     uint64_t getCurrentBlockStart() const { return currentBlockStart; }
 
-    /*
-     * Which pbgz package is currently being read (increments in order after cat
-     * concatenation). Unlike getCurrentFileStart, this sequence number works under
-     * pipe input too - it depends only on the number of package headers parsed, not on
-     * any file position.
-     */
+    /* Index of the pbgz package currently being read. */
     int32_t getCurrentFileIndex() const { return currentFileIndex; }
 
-    /*
-     * Read one data block. When dst is non-null, the block data is first resized into
-     * dst to dataLength (the input block buffer is preallocated at the parameter-level
-     * block_size, but a file's block may be larger, e.g. a -l 9 512MB block still
-     * reaches ~72MB compressed), then the data is read into dst's buffer.
-     */
+    /* Read one data block; if dst is non-null, resize it and read the data into it. */
     int32_t readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* dst = nullptr);
 
     PbgzFileReader(IOReader* pReader) : ioReader(pReader) {
-        currentFileIndex = -1;  // Initialize file index to -1, indicating no file has been read yet
+        currentFileIndex = -1;  // -1 indicates no file has been read yet
         currentBlockStart = 0;
         preReadSize = 0;
         preReadPos = 0;
@@ -120,21 +78,21 @@ private:
 
     int32_t readFileMeta(PbgzFileMeta& fileMeta, bool isCheckMagic = true, bool usePreRead = true);
 
-    /* Consume the prefetch buffer first, then read ioReader; dynamic meta rereads (already seeked) go through direct ioReader reads */
+    /* Consume the prefetch buffer first, then read directly from ioReader. */
     size_t readFromSource(void* pBuffer, size_t n);
 
 private:
-    std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers, a file may consist of multiple compressed packages concatenated together
+    std::map<int32_t, PbgzFileHeader> fileHeaderMap;  // File headers; a file may hold several concatenated packages
     std::map<int32_t, PbgzFileMeta> baseFileMetaMap;      // Base file metadata
-    std::map<int32_t, PbgzFileMeta> dynamicFileMetaMap;   // Dynamic file meta data, only exits in file reader
-    std::map<int32_t, uint64_t> fileStartMap;             // start position of each concatenated package in the input stream, used to translate in-package relative offsets back into real positions
-    int32_t currentFileIndex; // Current file sequence number, indicating which file is currently being read
+    std::map<int32_t, PbgzFileMeta> dynamicFileMetaMap;   // Dynamic file metadata (reader side only)
+    std::map<int32_t, uint64_t> fileStartMap;             // Start position of each concatenated package, for offset translation
+    int32_t currentFileIndex; // Current file sequence number
     IOReader* ioReader;
 
-    /* Prefetched format-probing data: bytes already consumed from ioReader by the Creator; consumed in order first when reading back */
+    /* Prefetched format-probing bytes, consumed in order first when reading back */
     uint8_t preReadBuf[BLOCK_TYPE_DETECT_SIZE];
     size_t preReadSize;   // prefetch bytes not yet consumed
-    size_t preReadPos;    // consumption position within the prefetch buffer
+    size_t preReadPos;    // Position within the prefetch buffer
 };
 
 /// @brief Writer for pbgz format files

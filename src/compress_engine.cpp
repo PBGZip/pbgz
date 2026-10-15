@@ -95,33 +95,16 @@ CompressEngine::~CompressEngine() {
 
 BlockReader* CompressEngine::createBlockReader() {
     const bool bamStruct = (parameter.mode == PBGZ_MODE_FAST);
-    /*
-     * pbgzAsOpaque=true: on this side a pbgz file is not an input format. It is read as opaque
-     * binary so its bytes are stored instead of being decoded as if they were the original data
-     * (see the note on BlockFactory::createBlockReader).
-     *
-     * bgzfThreads: a BAM input is inflated to raw BAM by the reader, in parallel; -t decides how
-     * many workers that stage gets (a quarter of it, see bamBgzfThreadNum) instead of the fixed
-     * count it used to keep to itself.
-     */
+    /* pbgzAsOpaque: read a pbgz file as opaque binary instead of decoding it. bgzfThreads
+       sizes the parallel BAM inflate stage (a quarter of -t, see bamBgzfThreadNum). */
     BlockReader* blockReader = BlockFactory::createBlockReader(
         ioReader, parameter.compressLevel, true, bamStruct, true, bamBgzfThreadNum(parameter.threadNum));
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
         return nullptr;
     }
-    /*
-     * Archive mode reader offload: for a (gz-)BAM input the reader renders every
-     * record to SAM text serially; that cost lands entirely on the single reader
-     * thread and, on many-core machines, becomes the dominant Amdahl factor. In
-     * archive mode only, switch the reader to stream raw BAM records after the
-     * leading text blocks (which feed the codec trial and QUAL pre-training). The
-     * BAM->SAM rendering plus the block MD5 then run on a small pool of conversion
-     * threads sized by the BGZF-stage budget (bamBgzfThreadNum) - off the reader
-     * and, crucially, off the compressing workers, which stay 100% busy on encode.
-     * Output stays byte-identical (rendering produces the same text the reader would
-     * have). (Structured/fast mode already streams records, so it is left as-is.)
-     */
+    /* Archive mode: stream raw BAM records after the leading text blocks so BAM->SAM
+       rendering and MD5 run on the render thread pool instead of the reader. */
     if (!bamStruct) {
         if (BamGzBlockReader* bam = dynamic_cast<BamGzBlockReader*>(blockReader)) {
             const int64_t textLimit = (parameter.threadNum > 0) ? (int64_t)parameter.threadNum : 1;
@@ -154,7 +137,7 @@ void CompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
 }
 
 Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) {
-    /* Pre-analysis is done on the coder side: state (idSplitSymbols/contentPos/qualFreqTable etc.) stays in the actuator for use during compression */
+    /* Pre-analysis runs on the coder side; state stays in the actuator for compression. */
     FastqCompressActuator* fastqActuator = dynamic_cast<FastqCompressActuator*>(actuator);
     if (fastqActuator != nullptr) {
         FastqCodecActuator* fastqCodecActuator = fastqActuator->getCodecActuator();
@@ -191,56 +174,12 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
 }
 
 /*
- * Codec trial compression/selection and QUAL prior decision, run only once over the
- * entire file lifetime.
- *
- * Called by the reader thread before dispatching block 0 (PbgzEngine::readOneBlock).
- * It is pinned to this position for three reasons:
- *
- * First, the decision must precede the compression of any block. Placing it before
- * the block is enqueued guarantees this ordering through the data-flow position,
- * rather than relying on a timing coincidence such as "the remaining worker threads
- * are still waiting on a condition variable".
- * Second, the decision must be deterministic and reproducible. The reader thread is
- * the sole source of data, so the sampled bytes are always the same segment of block 0;
- * the trial-compression signal for every field is identical, the coder selected for
- * all subsequent blocks is stable across the file, and the compressed output is
- * reproducible at the byte level. If preAnalysis of the first block fails, this
- * function must not be left to some parallel worker thread on its own block: the
- * sampled content would then drift with scheduling.
- * Third, only the reader thread holds file-level information (total input length,
- * whether the input is seekable), which grounds whole-file judgments such as whether
- * a prior is worthwhile.
- *
- * Note: only the decision is made here. QUAL prior training and publication are
- * deferred until cross-block pretraining completes (finalizePretrain) — the first
- * block usually carries only ~9 MB of QUAL, and accumulating across blocks up to
- * 45 MB is needed to approach the convergence point of the prior's benefit. While the
- * prior is being published, coder threads wait at the workStartBarrier latch.
- *
- * tryClaim (an IDLE→RUNNING lock-free CAS) is now purely a safety net: the only
- * caller is the reader thread, and it is invoked only on block 0, so re-entrancy
- * cannot occur.
- *
- * Preprocessing has another orthogonal concurrency dimension internally:
- * "trial-compressing the same sample with different coders in parallel" (each coder
- * is independent and side-effect free), which is not the same as the pipeline's
- * "different data blocks on different worker threads".
+ * Codec trial / QUAL prior decision, run once per file by the reader thread before
+ * block 0 is dispatched. Prior training is deferred to finalizePretrain.
  */
 /*
- * Per-block work that depends only on the input, done before the block is queued.
- *
- * Checksum of the raw block text: the actuators used to hash the block at the end of
- * compression, i.e. on the worker threads, which are the pipeline's bottleneck
- * (measured: 24.5 s of CPU over 636 blocks, ~3 s of wall time at 8 threads). The
- * checksum depends only on the input, and the reader thread has spare capacity (it was
- * idle ~32% of the time waiting for a free block), so it is computed here instead.
- *
- * Header pre-parse: a SAM/BAM header block puts its @SQ lines into the process-wide
- * chromosome table (see SamUtil::prefetchHeaderChromosomes), which is the table every
- * later block resolves its RNAME against. This is the only stage that sees the header
- * before any coder thread has started, so doing it here is what keeps the table from
- * being built concurrently with the blocks that read it.
+ * Per-block input-only work done before the block is queued: block MD5 and SAM header
+ * chromosome pre-parse.
  */
 void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
     if (blockPtr == nullptr) {
@@ -251,29 +190,18 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
         return;
     }
     if (BlockUtil::isSAMBlock(type)) {
-        /*
-         * Header block: this is the block the chromosome table has to come from, and it is here,
-         * on the reader thread and before the block is queued, that the table is built - so every
-         * coder thread finds it ready instead of racing the first block's pre-analysis, which is
-         * what the first-block serialization exists to prevent. See
-         * SamUtil::prefetchHeaderChromosomes; a block that does not open with header lines (an
-         * ordinary data block, or a header merged into one) simply answers 0 here.
-         */
+        /* Build the chromosome table on the reader thread before the block is queued,
+           so coder threads find it ready (see SamUtil::prefetchHeaderChromosomes). */
         PBGZ_PROF_SCOPE(pbgzprof::READ_HEADER);
         SamUtil::prefetchHeaderChromosomes(blockPtr->getBuffer(), blockPtr->getDataLen(),
                                            blockPtr->getNpos());
     }
     if (blockPtr->getBamColumns() != nullptr) {
-        /* Structured BAM block: hashing is deferred to the worker that parses
-           and compresses it (BamCodecActuator has a hasMd5 fallback), so the
-           reader thread does not run a per-block md5 pass on top of inflate. */
+        /* Structured BAM: hashing is deferred to the compressing worker. */
         return;
     }
     if (blockPtr->isRawBam()) {
-        /* Archive-mode raw-record block: its BAM->SAM render and MD5 are done by the
-           conversion thread pool (see engineReaderReady / dispatchInputBlock /
-           renderWorker), off both the reader and the compressing workers - so no
-           hash is taken here. */
+        /* Archive-mode raw-record block: render and MD5 are done by the render pool. */
         return;
     }
     PBGZ_PROF_SCOPE(pbgzprof::READ_MD5);
@@ -282,22 +210,8 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
     blockPtr->setMd5(md5);
 }
 
-/*
- * Archive-mode BAM SAM render stage.
- *
- * The BAM->SAM conversion ("render") and the per-block MD5 both depend only on the
- * input. Previously they ran on the compressing worker threads (bamRenderRawBlockToText
- * at the top of preAnalysis) - the coders are the pipeline bottleneck, and every
- * cycle spent rendering a block's records there is a cycle not spent compressing it.
- * This stage runs them on a small pool of dedicated conversion threads sized by the
- * same -t derived budget as the BGZF inflate stage (bamBgzfThreadNum), which is idle
- * waiting on the coders in exactly the situations where the coders are the bottleneck.
- *
- * Flow: reader (raw record blocks) -> renderInputPool -> [render workers: BAM->SAM text
- * + MD5, off the coder] -> inputDataPool -> coder threads (which only compress now).
- * The leading text blocks (reader-rendered, bounded by rawStreamTextLimit) bypass the
- * stage and keep the codec trial / QUAL pretraining feed unchanged.
- */
+/* Archive-mode BAM render stage: BAM->SAM conversion and per-block MD5 run on a
+   dedicated thread pool, off the reader and the compressing workers. */
 void CompressEngine::engineReaderReady(BlockReader* blockReader) {
     if (renderStageEnabled) {
         return;
@@ -360,12 +274,8 @@ void CompressEngine::renderWorker() {
         if (0 != bamRenderRawBlockToText(inBlockPtr)) {
             LOG_ERROR("Render raw BAM block(%ld) to SAM text failed.",
                       (long)inBlockPtr->getBlockId());
-            /*
-             * The block is left raw and intact (bamRenderRawBlockToText only
-             * modifies it on success), so the worker's existing isRawBam()
-             * fallback in SamCodecActuator::preAnalysis retries the render and,
-             * failing that, downgrades this one block to the BINARY path.
-             */
+            /* Block is left raw on failure, so the worker's isRawBam() fallback
+               retries the render or downgrades it to BINARY. */
         }
         inputDataPool->push(inBlockPtr);
     }
@@ -381,22 +291,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         return;
     }
 
-    /*
-     * Only the reader thread knows the total file length, and only here does it make
-     * sense to ask "is it worth amortizing across the whole file". Piped input has no
-     * length available; returning 0 means unknown, and the decision logic decides how
-     * to handle it.
-     *
-     * The length wanted is the one the samples were taken in: codec selection reads the
-     * block buffers, which for a gz input hold decompressed bytes, so the figure has to be
-     * the file's uncompressed length, not the size of the .gz on disk. A FileReader answers
-     * with the size of its file - right for a plain input, and for BAM the block reader
-     * inflates while the samples are taken from inflated text, which understates the volume
-     * the same way. Transparent gz input reaches neither: its reader is not a FileReader at
-     * all, so the length has to come from the gzip trailer (see
-     * PathUtil::getGzUncompressedSize), and without that every gz input looks as if its
-     * length were unknown, which is the one case the prior is always written for.
-     */
+    /* Total input length in the units the samples were taken in (uncompressed); 0 means
+       unknown (piped input). Only the reader thread knows it. */
     uint64_t inputTotalBytes = 0;
     FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
     if (fileReader != nullptr && fileReader->getFileSize() > 0) {
@@ -409,25 +305,14 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         }
     }
 
-    /*
-     * The -m mode picks which candidate list each field trials (see
-     * field_coder_config.h); the coder registry additionally gates each
-     * candidate by profile and by the engine level (coder_bwt_cm, for one, only
-     * competes at -l 8/9 in archive mode). Pass the mode through and let
-     * CodecSelector::analyze apply the intersection.
-     */
+    /* -m selects the per-field candidate lists; CoderFactory additionally gates them
+       by profile/level (see CodecSelector::analyze). */
     const int32_t analyzeRet = CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo,
                                                       parameter.compressLevel, parameter.mode,
                                                       getReference());
 
-    /*
-     * The reference is passed down so the SEQ column can be trialled on the payload it will really
-     * be written as. It works from here because the block's @SQ names are already in the process
-     * table by the time this runs - the reader thread put them there before dispatching the header
-     * block (see preDispatchBlock) - so the reference walk can resolve RNAME at this stage. The
-     * verdicts are pinned in preprocessInfo, so every later block only reads them. See
-     * CodecSelector::selectSeqReferenceCoder.
-     */
+    /* Reference is passed down so SEQ is trialled on the payload it will be written as
+       (see CodecSelector::selectSeqReferenceCoder). */
 
     if (0 != analyzeRet) {
         LOG_INFO("File preprocessing (codec selection) failed, using default coders");
@@ -452,12 +337,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
             const char* status = (sel.status == FieldStatus::SELECTED) ? "selected" :
                                  (sel.status == FieldStatus::SKIPPED) ? "skipped" : "failed";
             if (sel.status == FieldStatus::SELECTED) {
-                /*
-                 * The candidate coders are declared by FieldCodecSelection itself; here
-                 * we simply echo them, which is what keeps the printout correct for any
-                 * number of candidates. Throughput is derived as sample bytes /
-                 * trial-compression time, in MB/s.
-                 */
+                /* Echo the candidates recorded by FieldCodecSelection; throughput is
+                   sample bytes / trial time, in MB/s. */
                 std::string trials;
                 for (uint32_t t = 0; t < sel.trialCount; ++t) {
                     char one[128];
@@ -484,12 +365,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         fprintf(stderr, "\n");
     }
 
-    /*
-     * For piped input the source type cannot be detected in prepareFileMeta, so
-     * baseFileMeta has no srcFileType. By this point the type of the first data block
-     * is known, so it is recorded in the dynamic metadata; the decompressor then does
-     * not need to build the read-mapping index.
-     */
+    /* Piped input has no source type in baseFileMeta; record the first block's type in
+       the dynamic metadata instead. */
     if (parameter.inputFile == STDIN) {
         const BlockType t = preprocessInfo.fileType;
         if (t == SAM || t == BAM || t == FASTQ_GEN2 || t == FASTQ_GEN3 || t == BINARY) {
@@ -498,12 +375,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         }
     }
 
-    /*
-     * POS delta prior: already produced by analyze (no cross-block training
-     * needed), so write it into the file-level meta right away; the decoding
-     * side reads it before any data block. It is only ~512 bytes, hex-encoded,
-     * so unlike the QUAL prior it does not need an auxiliary block.
-     */
+    /* POS delta prior: produced by analyze, written hex-encoded into the file meta
+       (only ~512 bytes, so no auxiliary block needed). */
     {
         const std::vector<uint8_t>& posPrior = preprocessInfo.posPrior();
         if (!posPrior.empty()) {
@@ -523,13 +396,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         }
     }
 
-    /*
-     * The prior is worth training: enter cross-block pretraining. Block 0 accumulates
-     * QUAL via the subsequent pretrainBlockProc; once the target block count
-     * (= concurrency) or the 45 MB cap is reached, finalizePretrain trains and
-     * publishes it, and only then notifies the coder threads to start compressing.
-     * Nothing is emitted or marked done here.
-     */
+    /* Prior is worth training: enter cross-block pretraining; finalizePretrain later
+       trains and publishes it and releases the coder threads. */
     if (preprocessInfo.wantQualPrior()) {
         pretrainTarget = (parameter.threadNum > 0) ? parameter.threadNum : 1;
         pretraining = true;
@@ -537,7 +405,7 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         return;
     }
 
-    /* No prior: keep the original behavior — emit (a no-op when the prior is empty), mark done, and release the coder threads. */
+    /* No prior: emit (no-op when empty), mark done, release the coder threads. */
     emitQualPrior();
     preprocessInfo.markDone();
     signalPriorSettled();
@@ -547,12 +415,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     }
 }
 
-/*
- * Accumulate QUAL prior training samples block by block. The block-0 decision is
- * already made in fileDecisionProc; here QUAL is appended for every pretraining block
- * (including block 0), and once the target block count or the 45 MB cap is reached the
- * prior is trained and published.
- */
+/* Append a pretraining block's QUAL to the prior accumulator; train and publish once
+   the target block count or the 45 MB cap is reached. */
 void CompressEngine::pretrainBlockProc(RoughIOBlock* blockPtr) {
     if (!pretraining) {
         return;
@@ -564,14 +428,8 @@ void CompressEngine::pretrainBlockProc(RoughIOBlock* blockPtr) {
     }
 }
 
-/*
- * Train on the accumulated QUAL, publish the prior to disk as an auxiliary block,
- * set DONE, and notify the waiting coder threads.
- * Call sites: once the pretraining block count is reached / 45 MB is full (in the read
- * loop), or when the file ends before enough blocks were read (readLoopPostProc).
- * Because data blocks reference the prior, the prior must be fully compressed before
- * any data block; publication completes synchronously within this function.
- */
+/* Train on the accumulated QUAL, publish the prior, and notify waiting coder threads.
+   Runs from the read loop or readLoopPostProc; publication completes synchronously. */
 void CompressEngine::finalizePretrain() {
     PBGZ_PROF_SCOPE(pbgzprof::READ_PRETRAIN_TRAIN);
     if (!pretraining) {
@@ -581,18 +439,14 @@ void CompressEngine::finalizePretrain() {
 
     uint64_t trainedBytes = 0;
     QualFcv2Params qualParams;
-    /*
-     * Which field's verdict carries the fcv2 tier depends on the format: SAM's QUAL column for
-     * an aligned file, FASTQ's for a FASTQ. The two are indexed by their own field enums, so
-     * this is the one place that has to know both.
-     */
+    /* The fcv2 tier comes from SAM_QUAL or FQ_QUAL depending on the format. */
     const uint32_t qualFieldIdx = BlockUtil::isFastqBlock(preprocessInfo.fileType)
                                       ? (uint32_t)FQ_QUAL : (uint32_t)SAM_QUAL;
     const FieldCodecSelection* qualSel =
         (preprocessInfo.fields.size() > (size_t)qualFieldIdx)
             ? &preprocessInfo.fields[qualFieldIdx] : nullptr;
     if (qualSel != nullptr && qualSel->selectedCoder == CoderType::FCV2) {
-        qualParams = qualSel->fcv2Params;   /* train with the same parameter tier as the compression side, otherwise the prior is unusable */
+        qualParams = qualSel->fcv2Params;   /* same tier as the compression side, or the prior is unusable */
     }
     std::vector<uint8_t> snapshot =
         CodecSelector::trainQualPriorModel(qualPriorAccum, qualParams, &trainedBytes);
@@ -616,7 +470,7 @@ void CompressEngine::finalizePretrain() {
     }
 }
 
-/* Read-loop fallback at end: finalize if pretraining did not complete (fewer blocks than target in the file); files without a prior / empty files are also released. */
+/* End-of-read fallback: finalize incomplete pretraining, then release coder threads. */
 void CompressEngine::readLoopPostProc() {
     if (pretraining) {
         finalizePretrain();
@@ -624,7 +478,7 @@ void CompressEngine::readLoopPostProc() {
     signalPriorSettled();
 }
 
-/* coder thread startup latch: waits for the reader thread's notification that the prior is published (or decided absent). */
+/* Coder thread startup latch: waits until the prior is published or decided absent. */
 void CompressEngine::workStartBarrier() {
     std::unique_lock<std::mutex> lk(priorMutex);
     priorCv.wait(lk, [this] { return priorSettled; });
@@ -636,13 +490,13 @@ void CompressEngine::emitQualPrior() {
         return;
     }
 
-    /* Piped output cannot be seeked, so the decompressor could never retrieve the prior; writing it would be a net loss. */
+    /* Piped output is not seekable, so the prior could never be retrieved. */
     FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
     if (fileWriter == nullptr) {
         return;
     }
 
-    /* bzip2's worst-case expansion is 1% + 600 bytes; the official API requires callers to size the buffer accordingly. */
+    /* bzip2 worst-case expansion is 1% + 600 bytes. */
     unsigned int dstLen = (unsigned int)(prior.size() + prior.size() / 100 + 600);
     std::vector<uint8_t> comp(dstLen);
     int rc = BZ2_bzBuffToBuffCompress((char*)comp.data(), &dstLen,
@@ -680,21 +534,16 @@ void CompressEngine::emitQualPrior() {
     memcpy(outBlock->getCurrent(), metaString.c_str(), metaString.length());
     outBlock->setMetaLen(metaString.length());
     outBlock->setBlockType(QUAL_PRIOR);
-    /*
-     * The auxiliary block gets no data-block id: it is addressed by position, and the
-     * writer thread writes it as soon as it is seen. Taking an id from the writer
-     * thread's cursor instead would overwrite the position of block 0 when the
-     * auxiliary block is emitted before any data block has been written.
-     */
+    /* Auxiliary block gets no data-block id; it is addressed by position. */
     outBlock->setBlockId(-1);
 
-    /* Both the write-to-disk and the address retrieval happen on the writer thread; after this returns, outBlock has been returned to the pool and must not be touched. */
+    /* After this returns, outBlock is back in the pool and must not be touched. */
     const int64_t offset = emitSyncAuxBlock(outBlock);
     if (offset < 0) {
         LOG_ERROR("Emit qual prior block failed");
         return;
     }
-    /* Publish the content before the address: consumers use the acquire load of the address atomic as the visibility barrier for both. */
+    /* Publish content before address; consumers acquire-load the address as the barrier. */
     qualPriorBlob = std::make_shared<const std::vector<uint8_t> >(prior);
     qualPriorOffset.store(offset, std::memory_order_release);
 
@@ -741,14 +590,8 @@ bool CompressEngine::initReference() {
     }
     if (pRefGene) {
         pRefGene->setNiFile(parameter.niIndexFile);
-        /*
-         * SAM/BAM carry their own alignment positions (RNAME/POS); compressing SEQ only
-         * needs the reference base sequence, so the read-mapping hash table from
-         * makeIndex (useful only for locating FASTQ reads) is unnecessary. Piped input
-         * has no type available, so it falls back to the conservative index-building
-         * path. If an explicitly specified reference cannot be loaded, compression must
-         * abort, otherwise it would produce data that does not match expectations.
-         */
+        /* SAM/BAM need only the reference base sequence, so skip the read-mapping
+           index; piped input falls back to the conservative makeIndex path. */
         const bool needIndex =
             (parameter.inputFile == STDIN) ||
             !BlockUtil::isSAMBlock(BlockUtil::detectInputFileType(parameter.inputFile));
@@ -911,41 +754,15 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     return;
  }
 
- /*
-  * This only fills the reference genome description into the base file metadata; it
-  * performs no I/O.
-  *
-  * It has to run before the writer thread starts. The writer thread writes baseFileMeta
-  * to disk as soon as it starts, so filling refe in from startWorkPreProc (which runs
-  * later, once the writer is ready) would leave the two racing over the same JSON, and
-  * whether the file header carries refe would depend on who wins: compressing the same
-  * input twice could produce different bytes, shifting everything downstream. Both
-  * variants decompress correctly, because the decompressor tolerates a missing refe (see
-  * the note in decompress_engine.cpp about refe possibly living in baseFileMeta or
-  * dynamicFileMeta).
-  *
-  * So this pure metadata is built here, before the writer thread starts, while
-  * packReference - which genuinely needs the writer thread to be ready - stays in
-  * startWorkPreProc.
-  */
+ /* Fill the reference genome description into base file metadata (no I/O); must run
+    before the writer thread starts to avoid a metadata race. */
  int32_t CompressEngine::prepareFileMeta() {
-    /*
-     * The block size is the upper bound for splitting the input during compression; it
-     * is written into the file header so the decompressor can pre-allocate a
-     * block_size*2 output buffer. This is a definite upper bound, not an estimate,
-     * unaffected by field count / read length. It is the primary defense against every
-     * field overflowing its buffer; coder_io's putc checks and the decode error-return
-     * chain act as fallbacks.
-     */
+    /* Block size: definite upper bound on a compressed block, written to the header so
+       the decompressor can pre-allocate its output buffer. */
     baseFileMeta.setMetaData("block_size", getBlockSize());
 
-    /*
-     * The source file type is written into the file header so the decompressor can
-     * decide whether the reference only needs to load its squash (SAM/BAM) or must
-     * build the read-mapping index (FASTQ). Piped input has no type available and it
-     * is not written (the decompressor then treats the type as unknown,
-     * conservatively).
-     */
+    /* Source file type: lets the decompressor decide between loading the reference
+       squash (SAM/BAM) and building the read-mapping index (FASTQ). */
     if (parameter.inputFile != STDIN) {
         const BlockType srcType = BlockUtil::detectInputFileType(parameter.inputFile);
         if (srcType == BINARY || srcType == FASTQ_GEN2 || srcType == FASTQ_GEN3 ||
@@ -975,15 +792,8 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     return 0;
  }
 
- /*
-  * In the scenario where the reference genome is packed in the file header, push the
-  * reference blocks downstream.
-  *
-  * This step must stay after the writer thread starts, because packReference pushes
-  * reference blocks into the output queue. The metadata itself is already filled in by
-  * prepareFileMeta; baseFileMeta must not be touched here — modifying it here would
-  * reintroduce the race described above.
-  */
+ /* When the reference is packed in the header, push its blocks downstream. Must stay
+    after the writer thread starts (packReference fills the output queue). */
  int32_t CompressEngine::startWorkPreProc() {
     if (pRefGene == nullptr || !isPackRefeInHeader()) {
         return 0;
@@ -1014,7 +824,7 @@ Actuator* CompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock*
     }
 
     if (pActuator == nullptr) {
-        /* On failure, never release any block here; cleanup is uniformly handled by startWorkTask to avoid each block being returned twice. */
+        /* Don't release blocks here; cleanup is handled uniformly by startWorkTask. */
         LOG_ERROR("Not support block type: %d, blockId=%ld", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
         return nullptr;
     }

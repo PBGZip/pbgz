@@ -45,67 +45,33 @@ public:
         outBlockPtr = nullptr;
     }
 
-    /* See Actuator::ioError(); the aggregation point for out-of-bounds errors
-     * of this block's processing */
+    /* Aggregation point for this block's out-of-bounds errors; see Actuator::ioError(). */
     const coder_err_sink& ioError() const { return ioErrSink; }
 
 protected:
-    /*
-     * The compression level from the engine parameters; returns 0 when there is
-     * no engine (decompression/test engine), in which case the caller skips the
-     * level setting and each encoder keeps its own default level.
-     */
+    /* Compression level from engine parameters; 0 when there is no engine, so each
+       encoder keeps its own default. */
     uint8_t engineCompressLevel() const {
         return (pbgzEngine != nullptr) ? pbgzEngine->getParameter().compressLevel : 0;
     }
 
-    /*
-     * Create an encoder for a field, with the type taken from the
-     * trial-compression result of the preprocessing phase.
-     *
-     * fallback is the field's fixed encoder (the one its row in
-     * kSamFieldCoderConfig registers as the default). All three of the following
-     * cases fall back to it, so there is always something to compress with:
-     *   1. The engine provides no preprocessing info (both decompression and
-     *      test engines return a null pointer)
-     *   2. Preprocessing has not finished yet, or it failed
-     *   3. The field's sample is too small and was skipped, so there is no
-     *      trustworthy trial-compression result
-     *
-     * In other words, this path can only make the encoder better; a
-     * preprocessing problem can never leave nothing to compress with. The level
-     * comes from the engine parameters (engineCompressLevel), is converted
-     * according to the finally used encoder type, and is written into coder_io
-     * for the encoder to read at construction / first encoding.
-     */
+    /* Create a SAM field encoder, type taken from preprocessing's trial result and
+       falling back to the field's registered default when there is no usable result.
+       Level comes from engineCompressLevel. */
     std::shared_ptr<coder> makeFieldEncoder(uint32_t fieldIdx, CoderType fallback,
                                             coder_io* io, bool lineMode)
     {
         const uint8_t mode = (pbgzEngine != nullptr) ? pbgzEngine->getParameter().mode
                                                     : (uint8_t)PBGZ_MODE_ARCHIVE;
 
-        /*
-         * The -m mode picks the field's default coder from the config table:
-         * archive uses the ratio-oriented fallback, fast the speed-oriented one.
-         * The caller's fallback only applies to fields the table does not cover.
-         *
-         * For fast, the fast fallback is coder_rans for every field, which is
-         * what the fast path has always used for generic fields - deterministic
-         * and quick (per-symbol O(1), no BWT/context model). The block format is
-         * self-describing (the magic travels in meta), so the decoding side
-         * needs no preset information.
-         */
+        /* -m mode picks the field default from the config table; the caller's
+           fallback applies only to fields the table does not cover. */
         const CoderType modeFallback = samFieldDefaultCoder(fieldIdx, mode, fallback);
         return buildFieldEncoder(modeFallback, fieldIdx, io, lineMode, mode);
     }
 
-    /*
-     * The FASTQ counterpart: identical, but the field's default comes from
-     * kFastqFieldCoderConfig and the field indices are FastqField's. The two
-     * tables are keyed by their own field enums and their indices overlap
-     * (FQ_ID is 0, and so is SAM_QNAME), so a FASTQ field must never be looked
-     * up in the SAM row - which is what a single shared entry point would do.
-     */
+    /* FASTQ counterpart of makeFieldEncoder; uses kFastqFieldCoderConfig and
+       FastqField indices (which overlap SAM's, so the tables must stay separate). */
     std::shared_ptr<coder> makeFastqFieldEncoder(uint32_t fieldIdx, CoderType fallback,
                                                  coder_io* io, bool lineMode)
     {
@@ -115,13 +81,8 @@ protected:
         return buildFieldEncoder(modeFallback, fieldIdx, io, lineMode, mode);
     }
 
-    /*
-     * The FASTQ field's decided coder, without building it.
-     *
-     * Exposed because a FASTQ column is not always fed the same way: the SEQ column is handed to
-     * coder_fc as one block and to every other coder line by line, so its caller has to know
-     * which coder won before it can choose how to feed it.
-     */
+    /* FASTQ field's decided coder without building it; callers need it to choose how
+       to feed the column (SEQ goes whole-block to coder_fc, line by line otherwise). */
     CoderType pickedFastqCoder(uint32_t fieldIdx, CoderType fallback)
     {
         const uint8_t mode = (pbgzEngine != nullptr) ? pbgzEngine->getParameter().mode
@@ -129,12 +90,9 @@ protected:
         return pickedCoder(fieldIdx, fastqFieldDefaultCoder(fieldIdx, mode, fallback), mode);
     }
 
-    /*
-     * Build the encoder of a type that has already been decided: apply the level, make it, and
-     * replace it when the field must be fed line by line and this type cannot be (lineModeFallback
-     * is the type to use then). The level is applied again for the replacement, because the two
-     * types accept different level ranges.
-     */
+    /* Build an encoder of an already-decided type, applying the level. In lineMode, a
+       type that cannot be fed line by line is replaced by lineModeFallback (level
+       reapplied, since the two types accept different ranges). */
     std::shared_ptr<coder> makeEncoderOfType(CoderType type, coder_io* io, bool lineMode,
                                              CoderType lineModeFallback)
     {
@@ -148,32 +106,18 @@ protected:
         return enc;
     }
 
-    /*
-     * Shared body of the two field-encoder entries above, so the two formats'
-     * encoders cannot drift apart: apply the preprocessing verdict to the mode's
-     * default, and build the encoder.
-     *
-     * The verdict wins when preprocessing is done and selected a coder, subject to
-     * two guards. First the profile gate - a verdict left over from another -m mode
-     * is ignored (see eligibleProfile). Second, the encoder has to be usable the
-     * way this field is fed: trial compression always measures a whole block, so a
-     * picked encoder that cannot be fed line by line is replaced by the default,
-     * whose line-mode usage is verified. A slightly worse ratio is better than data
-     * that cannot be decompressed. The level is applied for the type finally used,
-     * and reapplied whenever that type changes, because the two encoder types
-     * accept different level ranges.
-     */
+    /* Shared body of the field-encoder entries: pick the coder (mode default, or
+       preprocessing's verdict when usable) and build it. A verdict from another -m
+       mode is ignored (see eligibleProfile); a picked coder that cannot be fed line
+       by line is replaced by modeFallback. */
     std::shared_ptr<coder> buildFieldEncoder(CoderType modeFallback, uint32_t fieldIdx,
                                              coder_io* io, bool lineMode, uint8_t mode)
     {
         return makeEncoderOfType(pickedCoder(fieldIdx, modeFallback, mode), io, lineMode, modeFallback);
     }
 
-    /*
-     * The coder preprocessing decided for a field, or the mode's default when it did not decide
-     * anything usable - no preprocessing info at all (decompression and test engines), not
-     * finished or failed, a skipped sample, or a verdict left over from another -m mode.
-     */
+    /* Coder preprocessing decided for a field, or modeFallback when it decided nothing
+       usable (no info, not finished, failed, skipped sample, or wrong -m mode). */
     CoderType pickedCoder(uint32_t fieldIdx, CoderType modeFallback, uint8_t mode)
     {
         CoderType picked = modeFallback;
@@ -187,14 +131,8 @@ protected:
         return picked;
     }
 
-    /*
-     * The only entry point for constructing coder_io. Views created here carry
-     * the aggregation sink, so any out-of-bounds access is guaranteed to be seen
-     * by the engine; a direct make_shared<coder_io> does not, and that is
-     * reserved for trial compression and unit tests, where running out of
-     * capacity is only evidence that "this encoder is unsuitable", not a
-     * failure, and should not fail the whole block.
-     */
+    /* Sole entry point for constructing coder_io; views carry the aggregation sink.
+       Direct make_shared<coder_io> is reserved for trial compression and unit tests. */
     std::shared_ptr<coder_io> makeCoderIo(const uint8_t* buff, int32_t len, const char* name) {
         return std::make_shared<coder_io>(buff, len, &ioErrSink, name);
     }

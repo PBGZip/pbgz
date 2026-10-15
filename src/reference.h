@@ -47,67 +47,37 @@ public:
 
     virtual ~Reference();
 
-    /// @brief Create index table
-    /// @return  bool true for success / false for failure
+    /// @brief Create the index table.
     bool makeIndex();
 
-    /// @brief Load reference squash (NI or FASTA) without building the read-mapping
-    /// hash table.
-    /// SAM/BAM already carry their own alignment positions (RNAME/POS); compressing SEQ
-    /// only needs the reference base sequence, not makeIndex's hash table (which is
-    /// useful only for locating reads in FASTQ). FASTQ still goes through makeIndex.
-    /// @return  bool true for success / false for failure
+    /// @brief Load the reference squash without building the hash table.
     bool makeSquashIndex();
 
-    /// @brief Query position information in reference genome based on hash value
-    /// @param hash Input hash value
-    /// @param length Output parameter, returns the number of position information in this hash bucket
-    /// @return Pointer to position information array, array contains length uint32_t values
+    /// @brief Query reference position info for a hash value.
     const uint32_t* queryPosition(const uint32_t &hash, uint32_t &length);
 
-    /// @brief Get base group length used when building index
-    /// @return Base group length, fixed to 31
+    /// @brief Get the base group length.
     uint32_t getBaseGroupLength() const;
 
-    /// @brief Get base group step used when building index
-    /// @return Base group step, fixed to 32
+    /// @brief Get the base group step.
     uint32_t getBaseGroupStep() const;
 
-    /// @brief Get compressed data buffer of reference genome
-    /// @return Pointer to compressed data buffer, each byte contains 2-bit encoding of 4 bases
+    /// @brief Get the compressed reference genome buffer.
     const uint8_t* getSquash() const;
 
-    /// @brief Get length of reference genome compressed data
-    /// @return Byte length of compressed data
+    /// @brief Get the compressed reference data length.
     int64_t getSquashLength() const;
 
-    /// @brief Get FASTA reference genome file name
-    /// @return String reference of FASTA file name
+    /// @brief Get the FASTA file name.
     const std::string& getFastaFileName() const;
 
-    /// @brief Get content length of FASTA reference genome file
-    /// @return Byte length of FASTA file
+    /// @brief Get the FASTA file length.
     int64_t getFastaLength() const;
 
-    /// @brief Get MD5 checksum of FASTA reference genome file
-    /// @return MD5 checksum string
+    /// @brief Get the FASTA file MD5 checksum.
     const std::string& getFastaChecksum() const;
 
-    /*
-     * One FASTA record's place in the reference: its name (the first whitespace-delimited token
-     * of the header line) and the base offset that record starts at in the concatenated
-     * reference. The offsets count bases, not squash bytes - a sequence does not start on a
-     * squash byte boundary unless its predecessors' lengths sum to a multiple of four - which is
-     * the same domain getStretch2Bits1Char takes.
-     *
-     * The SAM/BAM SEQ path addresses the reference by *header order*: it turns each @SQ entry's
-     * cumulative length into a base offset, which is only the sequence's real offset if the
-     * FASTA lists exactly those sequences in that order. This list is what lets a caller check
-     * that (see referenceLinesUpWithHeader) instead of silently reading the wrong bases.
-     *
-     * Empty when the squash came from an NI index rather than the FASTA, whose layout carries no
-     * names; a caller must then keep trusting the layout, as it did before this list existed.
-     */
+    /* One FASTA record's name and base offset in the concatenated reference. */
     struct SequenceSpan {
         std::string name;
         uint64_t offset;
@@ -115,159 +85,85 @@ public:
         SequenceSpan(const std::string& n, uint64_t o) : name(n), offset(o) {}
     };
 
-    /// @brief Per-record names and base offsets of the FASTA this reference was built from
+    /// @brief Per-record names and base offsets of the FASTA.
     const std::vector<SequenceSpan>& getSequences() const { return refSequences; }
 
-    /// @brief Clean up unmatched regions in reference genome
-    /// Set unmatched squash bytes to 0 within specified range
-    /// @param startPos Starting squash position (byte index)
-    /// @param length Length to be cleaned (in bytes)
+    /// @brief Zero unmatched squash bytes in the given range.
     void sanitizeRefSquash(int64_t startPos, int64_t length);
 
-    /// @brief Update matched gene region information
-    /// Mark specified position range of reference genome as matched
-    /// @param actgPos Starting ACTG base position
-    /// @param matchLength Matched base length
+    /// @brief Mark the given base range of the reference as matched.
     void updateMatchedGene(uint64_t actgPos, uint32_t matchLength);
 
-    /// @brief Build a NI index file from the FASTA reference at an explicit path
-    /// Only ever invoked on explicit user request; nothing is cached implicitly.
-    /// @param niFile NI file path to create
-    /// @return true for success, false for failure
+    /// @brief Build an NI index file from the FASTA at the given path.
     bool makeNiFile(const std::string& niFile);
 
-    /// @brief Point at a prebuilt NI index to load instead of re-reading the FASTA
-    /// Purely an accelerator: the FASTA passed to the constructor stays authoritative,
-    /// and an index that fails verification is dropped in favour of it.
-    /// @param niFile NI file path supplied by the user
+    /// @brief Set a prebuilt NI index to load instead of re-reading the FASTA.
     void setNiFile(const std::string& niFile) { niIndexFile = niFile; }
 
-    /// @brief Load reference genome compressed data from a user-specified NI file
-    /// The payload is verified against the checksum recorded inside the file, so a
-    /// damaged or tampered index is rejected rather than silently trusted.
-    /// @param niFile NI file path supplied by the user
-    /// @return true for success, false for failure
+    /// @brief Load compressed reference data from an NI file.
     bool loadFromNiFile(const std::string& niFile);
 
-    /// @brief Tell whether a path holds a pbgz NI index, by content rather than by suffix
-    /// @param file Path to probe
-    /// @return true when the file carries the NI magic header
+    /// @brief Return true when a path holds a pbgz NI index.
     static bool isNiFile(const std::string& file);
 
-    /// @brief Build squash buffer in-memory directly from FASTA file
-    /// No disk cache, no files written to user space.
-    /// @return true for success, false for failure
+    /// @brief Build the squash buffer in memory from the FASTA file.
     bool initSquashFromFasta();
 
-    /// @brief Initialize reference genome compressed data through streaming
-    /// Allocate buffer of specified size for storing compressed data
-    /// @param squashLength Expected length of compressed data
-    /// @return Pointer to allocated compressed data buffer
+    /// @brief Allocate the compressed-data buffer of the given length.
     uint8_t* initSquashByStream(int64_t squashLength);
 
-    /// @brief Get ACTG base sequence of specified position range
-    /// Extract ACTG base sequence of specified position and length from reference genome
-    /// @param out Output buffer for storing ACTG characters
-    /// @param outLength Length of output buffer
-    /// @param actgPos Starting ACTG base position
+    /// @brief Get ACTG bases for the given position range.
     void getStretchActg(uint8_t* out, uint32_t outLength, uint64_t actgPos);
 
-    /// @brief Get 2-bit encoding sequence of specified position range
-    /// Extract 2-bit encoding sequence of specified position and length from reference genome (each character stores 2 bits)
-    /// @param out Output buffer for storing 2-bit encoding
-    /// @param outLength Length of output buffer
-    /// @param actgPos Starting ACTG base position
+    /// @brief Get 2-bit encoded bases for the given position range.
     void getStretch2Bits1Char(uint8_t* out, uint32_t outLength, uint64_t actgPos);
 
-    /// @brief Convert 2-bit encoding to ACTG character sequence
-    /// Convert input 2-bit encoding data to corresponding ACTG characters
-    /// @param src2Bit Input 2-bit encoding data
-    /// @param src2BitsLen Length of input data
-    /// @param dstActg Output buffer for storing ACTG characters
+    /// @brief Convert 2-bit encoded data to ACTG characters.
     void getActgFrom2Bits(const uint8_t* src2Bit, uint32_t src2BitsLen, uint8_t* dstActg);
 
-    /// @brief Debug function: export hash table content to file
-    /// Write hash table content to "hash_table" file for debugging and analysis
+    /// @brief Debug: dump the hash table to the "hash_table" file.
     void dumpHashTable();
 
     void dumpSquash();
 
-    /// @brief Detect if file is in gzip format
-    /// @param fileName File path to check
-    /// @return true if gzip file, false otherwise
+    /// @brief Return true if the file is in gzip format.
     bool isGzipFile(const std::string& fileName);
 
-    /// @brief Create appropriate IOReader based on file type and hardware support
-    /// @param fileName File path to read
-    /// @return Unique pointer to IOReader instance
+    /// @brief Create an IOReader for the file based on type and hardware support.
     std::unique_ptr<IOReader> createIOReader(const std::string& fileName);
 
 private:
-    /// @brief Check validity of reference genome parameters
-    /// Verify key parameters like baseGroupStep and baseGroupLen meet requirements
-    /// @return PBGZ_ERR_OK for success, error code for failure
+    /// @brief Validate the reference parameters.
     int32_t referencCheck();
 
-    /// @brief Load reference squash (NI first, then FASTA) and allocate the matched
-    /// tracking buffer, printing the supported size.
-    /// Shared by makeIndex() and makeSquashIndex(); does not touch the hash table.
-    /// @return true for success, false for failure
+    /// @brief Load the reference squash and allocate the matched buffer.
     bool loadSquashAndMatched();
 
-    /// @brief Extract base groups from reference genome and calculate hash values
-    /// Multi-threaded processing, split reference genome into base groups of baseGroupLen length with baseGroupStep step,
-    /// calculate hash value for each base group and store in bgHash array
-    /// @param bgHash Output parameter, pointer to array storing base group hash information
+    /// @brief Extract base groups and compute their hashes.
     void makeIndexFetchBaseGroup(BaseGroupHash *&bgHash);
 
-    /// @brief Calculate hash table size and element count for each bucket
-    /// Count elements in each hash bucket and allocate memory space for hash table
-    /// @param hashTable Output parameter, vector containing hash table size information
+    /// @brief Compute hash table size and per-bucket element counts.
     void makeIndexCalcHashTableSize(HashTable &hashTable);
 
-    /// @brief Initialize hash table structure
-    /// Initialize hash table memory layout based on calculated hash table size information,
-    /// set starting position and conflict handling mechanism for each bucket
-    /// @param hashTable Hash table size information
-    /// @param hashBucketCurPos Output parameter, current position pointer array for each bucket
+    /// @brief Initialize the hash table layout.
     void makeIndexInitHashTable(const HashTable& hashTable, uint32_t* &hashBucketCurPos);
 
-    /// @brief Build hash table content
-    /// Fill hash table with base group position information and handle hash conflicts
-    /// @param bgHash Base group hash information array
-    /// @param hashBucketCurPos Current position pointer array for each bucket
+    /// @brief Fill the hash table with base group positions.
     void makeIndexBuildHashTable(const BaseGroupHash* bgHash, uint32_t* &hashBucketCurPos);
 
-    /// @brief Sort hash table
-    /// Sort position information in each bucket to optimize query performance
+    /// @brief Sort positions within each bucket.
     void makeIndexSortHashTable();
 
 private:
-    /// @brief Calculate MD5 checksum of reference genome file
-    /// @param refGeneFile Reference genome file path
-    /// @param refGeneMd5 Output MD5 string
-    /// @param refGeneLen Output file length
+    /// @brief Compute the FASTA MD5 checksum and length.
     void calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen);
 
-    /// @brief Write NI file header
-    /// @param niWriter File writer for NI file
-    /// @param offset Output offset for data section
-    /// @return true for success, false for failure
+    /// @brief Write the NI file header.
     bool writeNiFileHeader(FileWriter& niWriter, int64_t& offset);
 
-    /// @brief Process FASTA file and write compressed data
-    /// @param refGeneFile Reference genome file path
-    /// @param niWriter File writer for NI file
-    /// @param md5 MD5 context for checksum calculation
-    /// @param wlen Output written data length
-    /// @return true for success, false for failure
+    /// @brief Process the FASTA and write compressed data to the NI file.
     bool writeNiFile(const std::string& niFile);
-    /// @brief Generate and write metadata to NI file
-    /// @param niWriter File writer for NI file
-    /// @param refGeneMd5 Reference genome MD5
-    /// @param refGeneLen Reference genome length
-    /// @param md5 MD5 context for data checksum
-    /// @return true for success, false for failure
+    /// @brief Generate and write metadata to the NI file.
     bool writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5);
 
 private:
@@ -276,15 +172,13 @@ private:
     int64_t gbCurrent;
     int64_t gbTotal;
 
-    // FASTA file checksum, currently using MD5
+    // FASTA MD5 checksum
     std::string fastaChecksum;
     // FASTA file content length
     int64_t fastaLength;
-    // Per-record names and base offsets, filled when the squash is parsed from the FASTA (see
-    // getSequences); empty when it came from an NI index.
+    // Per-record names and base offsets; empty when built from an NI index.
     std::vector<SequenceSpan> refSequences;
-    // Length of bases used as key when building index table, must be odd. Compile-time constant: it
-    // sizes the base-group scratch buffers in buildIndex, and referencCheck rejects any other value.
+    // Base-group key length; must be odd.
     static constexpr uint32_t baseGroupLen = 31;
     // Base step when building index table
     const uint32_t baseGroupStep = 32;
@@ -295,28 +189,22 @@ private:
     // Element count for each hash bucket
     uint32_t* hashBucketCnt;
 
-    // Hash table buffer recording reference genome base position information
+    // Buffer of reference genome base positions
     uint32_t* hashTableBuffer;
 
     // Reference genome file
     std::string refGeneFile;
 
-    // Optional prebuilt index; empty means always parse refGeneFile
+    // Optional prebuilt index; empty means parse refGeneFile
     std::string niIndexFile;
 
     // Buffer for reference gene ACTG encoding
     uint8_t* refGeneSquash;
 
-    // Corresponding length of reference gene ACTG encoding buffer
+    // Length of the reference encoding buffer
     int64_t refGeneSquashlen;
 
-    /*
-     * Buffer for matched bases after reference genome ACTG encoding: one byte per squash byte, set to
-     * 1 once some read covers it. It is accumulated while the data blocks are compressed, so several
-     * worker threads mark it at once - always with the same value, but that is still a data race
-     * unless the bytes are atomic. Sanitizing the reference happens in a later phase, after those
-     * threads have joined, so the reader only needs the loads below and not a barrier of its own.
-     */
+    // One byte per squash byte, set to 1 once covered by a read; written by worker threads.
     std::atomic<uint8_t>* refGeneSquashMatched;
 
     // Corresponding length

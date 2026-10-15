@@ -33,7 +33,6 @@
 #define MIN(a, b) ((a)<(b)?(a):(b))
 #define MAX(a, b) ((a)>(b)?(a):(b))
 
-// Shrinking this to 1<<10 gives 2-3% smaller qualities, but 50% longer
 #define QUAL_MAX_FREQ (1 << 16) - 32
 
 typedef std::vector<std::pair<uint16_t, uint16_t>> SYMFREQ;
@@ -42,12 +41,7 @@ struct QUAL_MODEL
 {
     enum
     {
-        /* Frequency increment added to a symbol on every update, i.e. the
-           adaptation rate of the model. The running total is renormalized once it
-           passes QUAL_MAX_FREQ, so STEP only sets how fast the model tracks the
-           data. Tuning notes: 12/16/18/20/24 were measured, with 18 better than
-           16, 20 the best of them and 24 worse; the value below is 8. Open work:
-           pick it per data type. */
+        /* Frequency increment per update; renormalized once the total passes QUAL_MAX_FREQ. */
         STEP = 8,
     };
 
@@ -137,8 +131,7 @@ inline void QUAL_MODEL::encodeSymbol(RangeCoder *rc, uint16_t sym)
     if (TotFreq > QUAL_MAX_FREQ)
         normalize();
 
-    /* Keep approx sorted */ 
-    // If the model is initialized with custom symbols (not in order like 1,2,3...) and frequencies, we can't sort, or decompression will fail. In practice, sorting has minimal impact on compression speed.
+    /* Keeping approx sorted is disabled: custom symbols cannot be reordered. */
     // if (((++BubCnt & 15) == 0) && s[0].Freq > s[-1].Freq)
     // {
     //     SymFreqs t = s[0];
@@ -164,8 +157,7 @@ inline uint16_t QUAL_MODEL::decodeSymbol(RangeCoder *rc)
     if (TotFreq > QUAL_MAX_FREQ)
         normalize();
 
-    /* Keep approx sorted */ 
-    // If the model is initialized with custom symbols (not in order like 1,2,3...) and frequencies, we can't sort, or decompression will fail. In practice, sorting has minimal impact on compression speed.
+    /* Keeping approx sorted is disabled: custom symbols cannot be reordered. */
     // if (((++BubCnt & 15) == 0) && s[0].Freq > s[-1].Freq)
     // {
     //     SymFreqs t = s[0];

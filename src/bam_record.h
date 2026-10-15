@@ -1,24 +1,29 @@
 /*
  * bam_record.h - SAM text line -> BAM binary record
  *
- * The single place that turns one SAM alignment line into the byte stream a
- * BAM file stores for that record. It sits outside BamWriter, the only
- * writer-thread component allowed to touch the output, so the conversion can run
- * in the decompression workers (in parallel across blocks) instead of every
- * block travelling as SAM text to the writer thread to be re-parsed there, which
- * would serialise text->binary conversion on a single thread.
+ * Turns one SAM alignment line into the BAM byte stream for that record, appending
+ * a complete record (leading u32 block_size included) to a caller-owned buffer. Free
+ * of BGZF framing and writer state so decompression workers can run it in parallel.
+ * BamRecordScratch holds the per-record temporaries, reused across a block.
+ * Copyright (C) 2025 PBGZip
  *
- * The builder is deliberately free of BGZF framing and of any writer state:
- * it appends a complete record (the leading u32 block_size included) to a
- * caller-owned buffer. Two callers use it:
- *   - BamCodecActuator::decompress builds the records inside the decompression
- *     workers, in parallel across blocks, and marks the block as already-BAM;
- *   - BamWriter keeps using it when it receives SAM text (the historical
- *     path, and the unit tests), so both paths produce identical bytes.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * BamRecordScratch carries the per-record temporaries so a caller that walks a
- * whole block reuses the same allocations instead of churning one set of
- * vectors per record.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -156,11 +161,7 @@ inline uint16_t samReg2Bin(int64_t beg, int64_t end) {
     return 0;
 }
 
-/*
- * Convert one SAM optional field "TAG:TYPE:VALUE" into BAM aux bytes (including TAG and
- * type); returns -1 on failure (the caller skips that field). Named differently from the
- * read-side appendBamAux (BAM->SAM).
- */
+/* Convert one SAM optional field "TAG:TYPE:VALUE" into BAM aux bytes; -1 on failure. */
 inline int appendSamAuxToBam(const char* opt, size_t n, std::vector<uint8_t>& out) {
     size_t p = 0;
     while (p < n && opt[p] != ':') {
@@ -194,19 +195,9 @@ inline int appendSamAuxToBam(const char* opt, size_t n, std::vector<uint8_t>& ou
         } catch (...) {
             return -1;
         }
-        /*
-         * The narrowest width that holds the value, in the signedness order htslib uses in
-         * sam_parse1: a non-negative value goes to the unsigned letter ('C', 'S', 'I') and a
-         * negative one to the signed ('c', 's', 'i'). Taking the signed letter first for small
-         * non-negative values (which is what this did) is not what samtools writes for the same
-         * SAM line: NM:i:1 becomes NM:c:1 instead of NM:C:1. The value is identical either way -
-         * a SAM integer always prints as 'i' - so only a byte-for-byte comparison of the BAM
-         * shows it, which is exactly what comparing a round-tripped file against its original
-         * does.
-         *
-         * A value outside the SAM integer range cannot come from a well-formed line; it keeps
-         * the previous behaviour and is truncated to the low 32 bits.
-         */
+        /* Narrowest width holding the value: non-negative -> unsigned letter
+           ('C','S','I'), negative -> signed ('c','s','i'). Out-of-range values are
+           truncated to the low 32 bits. */
         if (v >= 0) {
             if (v <= UINT8_MAX) {
                 putU8(out, (uint8_t)'C');
@@ -326,13 +317,9 @@ struct BamRecordScratch {
 };
 
 /*
- * Build one BAM record from a SAM alignment line. refIndex maps RNAME/RNEXT
- * names to reference ids (built from the @SQ header list).
- *
- * Returns 1 when a record was produced in scratch.rec; 0 when the line was
- * skipped (empty, too few fields, empty QNAME - a warning is logged); -1 on an
- * internal error. The record length in scratch.rec is variable, so callers
- * must read scratch.rec rather than assume a size.
+ * Build one BAM record from a SAM alignment line; refIndex maps RNAME/RNEXT names
+ * to reference ids. Returns 1 if scratch.rec holds a record, 0 if the line was
+ * skipped, -1 on internal error. The record length is variable.
  */
 inline int buildBamRecordFromSamLine(const uint8_t* line, size_t len,
                                      const std::map<std::string, int32_t>& refIndex,
@@ -428,13 +415,8 @@ inline int buildBamRecordFromSamLine(const uint8_t* line, size_t len,
     }
     const uint16_t nCigar = (uint16_t)cigarOps.size();
 
-    /*
-     * bin: the classic reg2bin of the read's reference span. A read with no coordinate - RNAME
-     * '*'/'=' that resolved to nothing, or a zero POS - lands in the region-0 leaf instead of
-     * the 0 this used to leave behind. 0 is not a bin any lookup can return, so an indexed file
-     * built from this output would disagree with one built from the same reads by samtools, which
-     * is what htslib writes there (bam_reg2bin(-1, 0) == 4680; see kUnmappedBin).
-     */
+    /* bin: classic reg2bin of the read's reference span; reads with no coordinate
+       use kUnmappedBin (matches htslib's bam_reg2bin(-1, 0)). */
     uint16_t bin = kUnmappedBin;
     if (bpos >= 0) {
         const int64_t end = (int64_t)bpos + (refSpan > 0 ? refSpan : 1);
@@ -503,7 +485,7 @@ inline int buildBamRecordFromSamLine(const uint8_t* line, size_t len,
         putU32(rec, cigarOps[i]);
     }
     rec.insert(rec.end(), packedSeq.begin(), packedSeq.end());
-    /* QUAL: append per byte when present; pad with 0xFF when missing (*) or shorter than SEQ, keeping the record length consistent with the BAM layout */
+    /* QUAL: append when present, pad with 0xFF when missing or shorter than SEQ */
     if (!quals.empty()) {
         rec.insert(rec.end(), quals.begin(), quals.end());
     }

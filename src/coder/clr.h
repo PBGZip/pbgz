@@ -21,13 +21,8 @@
  * SOFTWARE.
  */
 
-/*
- * Note it is up to the calling code to ensure that no overruns on input and
- * output buffers occur.
- *
- * Call the input() and output() functions to set and query the current
- * buffer locations.
- */
+/* Call input()/output() to set and query the buffer locations; the caller must
+   ensure no buffer overruns. */
 #ifndef _CLR_H_
 #define _CLR_H_
 
@@ -41,19 +36,8 @@
 
 typedef unsigned char uc;
 
-/*
- * Boundary and error handling follow htscodecs/c_range_coder.h: this class
- * shares its origin (Shelwien's original), but that one was hardened by
- * Bonfield while this one has always been the unhardened version—no end markers,
- * no error flag, reads and writes go straight past the boundary.
- *
- * Three disciplines: the endpoints live on the coder itself, not as a verbal
- * convention for the caller; overflow sets a sticky err and immediately stops
- * advancing; errors are picked up at exactly one place, FinishEncode/
- * FinishDecode. Because err, once latched, stops all further progress, checking
- * once at the end is equivalent to checking every symbol, so the hot path needs
- * no checks at all.
- */
+/* Boundary/error handling: overflow sets a sticky err and stops advancing;
+   errors are checked once in FinishEncode/FinishDecode. */
 class RangeCoder {
     uint64_t low;
     uint range, code;
@@ -114,29 +98,14 @@ public:
     void Encode(uint cumFreq, uint freq, uint totFreq) {
         if (err) return;
 
-        /*
-         * A contradictory model means the data or state is already corrupt, so this
-         * sets an error instead of aborting: killing the process deep inside a library
-         * function would bypass the engine's error aggregation and leave no log, while
-         * the error lets the surrounding code decide.
-         */
+        /* A contradictory model means corrupt state; set the error instead of aborting. */
         if (!totFreq || cumFreq + freq > totFreq) { err = -1; return; }
 
         low += cumFreq * (range /= totFreq);
         range *= freq;
 
         while (range < TOP) {
-            // range = 0x00ffffff..
-            // low/high may be matching
-            //       eg 88332211/88342211 (range 00010000)
-            // or differing
-            //       eg 88ff2211/89002211 (range 00010000)
-            //
-            // If the latter, we need to reduce range down
-            // such that high=88ffffff.
-            // Eg. top-1      == 00ffffff
-            //     low|top-1  == 88ffffff
-            //     ...-low    == 0000ddee
+            /* Bring high down to 88ffffff when low and low+range differ in the top byte. */
             if (uc((low ^ (low + range)) >> 56))
                 range = ((uint(low) | (TOP - 1)) - uint(low));
             if (out_buf >= out_end) { err = -1; return; }

@@ -49,7 +49,7 @@ public:
 
     void exitProc(int errorCode, const char* errorMessage);
 
-    /* Register an output file so exitProc can uniformly clean it up on abnormal exit. */
+    /* Register an output file for cleanup on abnormal exit. */
     void addOutputFile(const std::string& fileName);
 
     static PbgzManager& getInstance();
@@ -103,8 +103,7 @@ private:
 
     std::vector<std::pair<std::string, bool>> outfiles;
 
-    /* Reader + (in archive raw-record mode) worker threads both accumulate the
-       total decompressed input size, so it is atomic. */
+    /* Total decompressed input size; updated by multiple threads, so atomic. */
     std::atomic<uint64_t> totalReadLen;
 
     uint64_t totalWriteLen;

@@ -26,22 +26,22 @@
 #include "log/logger.h"
 #include "coder_json.h"
 
-// Buffer as temporary storage for parsing meta and other information, no need to be too large
+// Temporary buffer for parsing meta; a fixed moderate size suffices
 const uint32_t PBGZ_FILE_READ_BUFFER_LENGTH = 16 * 1024 * 1024;
 
 uint8_t* PbgzFileReader::getFileReadBuffer(){
-	// Thread-local smart pointer: automatically manages memory, destructs and releases when thread exits
+	// Thread-local buffer, freed on thread exit
     thread_local static std::unique_ptr<uint8_t[]> pReadBuffer;
     
     if (!pReadBuffer) {
-        // Allocate memory with unique_ptr (no need for manual delete)
+        // Allocate the buffer
         pReadBuffer = std::make_unique<uint8_t[]>(PBGZ_FILE_READ_BUFFER_LENGTH);
-        if (!pReadBuffer) { // make_unique returns null pointer when it fails (C++17+)
+        if (!pReadBuffer) { // make_unique returns null on failure
             LOG_ERROR("Failed to allocate memory for write buffer.");
         }
     }
 
-    // Return the raw buffer address pointed by the smart pointer (for business use)
+    // Return the raw buffer
     return pReadBuffer.get();
 }
 
@@ -55,12 +55,7 @@ void PbgzFileReader::setPreReadData(const uint8_t* data, size_t len) {
     }
 }
 
-/*
- * Regular read entry: first consume the prefetch buffer (bytes the Creator read away
- * during format probing), then read from ioReader. Pipe input is not seekable, so the
- * probed bytes must be handed back through here; seek scenarios (dynamic meta
- * reread) do not go through this path.
- */
+/* Regular read entry: consume the prefetch buffer first, then read ioReader. */
 size_t PbgzFileReader::readFromSource(void* pBuffer, size_t n) {
     size_t got = 0;
     if (pBuffer == nullptr) {
@@ -80,7 +75,7 @@ size_t PbgzFileReader::readFromSource(void* pBuffer, size_t n) {
 }
 
 int32_t PbgzFileReader::open() {
-     // Implement the read logic for PBGZ file format
+     // Read the PBGZ file header and meta
     if (0 != initFileHeadAndMeta()) {
         LOG_ERROR("Create PbgzFileReader, load head and meta failed");
         return -1;
@@ -94,20 +89,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return -1;
     }
 
-    /*
-     * Record the start position of this package in the input stream first; later it is
-     * used to translate in-package relative offsets back into real positions.
-     *
-     * When isCheckMagic is true, the caller has already consumed the 4-byte file magic
-     * (see the branch in readDataBlock that detects a new package header), so the
-     * current position has already moved past the header and must be rewound by the
-     * magic length to reach the true start.
-     *
-     * Positions are always computed as "true source positions": ioReader may have had
-     * preReadSize bytes consumed from it by the Creator's prefetch, making
-     * ioReader->getCurrentPos() appear too large; subtracting the unconsumed prefetch
-     * length yields the true position.
-     */
+    /* Record the start position of this package in the input stream. */
     uint64_t fileStartPos = 0;
     FileReader* posReader = dynamic_cast<FileReader*>(ioReader);
     if (posReader != nullptr) {
@@ -125,7 +107,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     }
 
     PbgzFileHeader fileHeader;
-    // Read the magic value, 4 byte
+    // Read the 4-byte magic value
     size_t readLen = 0;
     // If isCheckMagic is true, we will not read the magic value again
     if (!isCheckMagic) {
@@ -135,14 +117,14 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
             return -1; // File read error
         }
         if (memcmp(pReadBuffer, PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH) != 0) {
-            // Print in hexadecimal format, parse manually
+            // Log the unexpected magic
             LOG_ERROR("IO is not a valid pbgz format, magic no is %X", (uint32_t)(*(uint32_t*)pReadBuffer));
             return -1; // Invalid magic
         }
     }
     fileHeader.setBlockType(FILE_HEADER);
 
-    // Read the version number, 3 byte
+    // Read the 3-byte version
     readLen = readFromSource(pReadBuffer, PBGZ_FILE_VERSION_LENGTH);
     if (readLen != PBGZ_FILE_VERSION_LENGTH) {
         LOG_ERROR("Failed to read file version from IO");
@@ -173,7 +155,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         LOG_ERROR("Read base file meta failed.");
         return -1;
     }
-    // Keep the same serial number as header
+    // Keyed by the same index as the header
     baseFileMetaMap[currentFileIndex] = baseFileMeta;
 
     if (fileHeader.getDynamicMetaOffset() == 0) {
@@ -186,17 +168,12 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
     }
 
     size_t readOffset = fileReader->getCurrentPos(); // Backup current read position
-    /*
-     * The package stores distances relative to its own header; adding the package
-     * start yields the real position in the concatenated file. For a single package
-     * the start is 0 and behavior is identical to before the change; the correction
-     * only matters for the second and later packages when concatenating.
-     */
+    /* Package offsets are relative; add the package start to get the real position. */
     fileReader->seekIO((int64_t)(fileStartPos + dynamicOffset));
 
     PbgzFileMeta dyncFileMeta;
     dyncFileMeta.setMetaType(DYNAMIC_FILE_META);
-    /* Already seeked to the dynamic meta, read ioReader directly, bypassing the prefetch buffer */
+    /* Already seeked, so read ioReader directly, bypassing the prefetch buffer */
     if (0 != readFileMeta(dyncFileMeta, true, false)) {
         LOG_ERROR("Read dynamic file meta failed. offset = %llu", dynamicOffset);
         return -1;
@@ -339,7 +316,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
         currentBlockStart = 0;
     }
 
-    // Read the data block magic value, 4byte
+    // Read the 4-byte block magic
     size_t readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_MAGIC_LENGTH);
     if (readLen == 0) { // Indicates read completion
         return 0;
@@ -352,10 +329,10 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
 
     if (memcmp(pReadBuffer, &PBGZ_DATA_BLOCK_MAGIC, PBGZ_DATA_BLOCK_MAGIC_LENGTH) != 0) {
         LOG_DEBUG("Not a magic value for PBGZ data block. %X", (uint32_t)(*(uint32_t*)pReadBuffer));
-        // It maybe a new file, try to parse the file header and meta information
+        // Possibly a new concatenated file; parse its header and meta
         if (memcmp(pReadBuffer, &PBGZ_FILE_MAGIC, PBGZ_FILE_MAGIC_LENGTH) == 0) {
             LOG_INFO("Detected a new PBGZ file format, reinitializing file header and meta.");
-            // Since the file Magic value has already been read, no need to read again
+            // The file magic is already read
             if (0 != initFileHeadAndMeta(true)) {
                 LOG_ERROR("Failed to initialize file header and meta.");
                 return -1; // Initialization error
@@ -370,12 +347,12 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
             }
             return readDataBlock(dataBlock, dst);
         }
-        return -1; // Unexpect block, maybe meta, should ignore
+        return -1; // Unknown block; ignore
     }
 
     dataBlock.setBlockType(FILE_DATA);
 
-    // Read the meta length, 4byte
+    // Read the 4-byte meta length
     readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_META_SIZE_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_META_SIZE_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block meta size.");
@@ -395,7 +372,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     coder_json blockMetaCoder;
     blockMetaCoder.decoder(pReadBuffer, metaLength, dataBlock.getMetaData());
    
-    // Read the meta checksum, 8byte
+    // Read the 8-byte meta checksum
     readLen = readFromSource(pReadBuffer , PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_META_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block meta checksum.");
@@ -403,7 +380,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     }
     dataBlock.setMetaCheckSum(*(uint64_t*)pReadBuffer);
 
-    // Read the data length, 4byte
+    // Read the 4-byte data length
     readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_DATA_SIZE_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block data length.");
@@ -416,13 +393,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
     }
     dataBlock.setDataLength(dataLength);
 
-    /*
-     * Block data is read into dst's buffer: the input block is preallocated at the
-     * parameter-level block_size, but a block in the file may be larger (a -l 9 512MB
-     * block still compresses to ~72MB, exceeding the 64MB input buffer), so it must be
-     * resized before reading or readIO writes out of bounds. Same mechanism as the
-     * ensureCapacity(block_size*2) on the decompression side's output blocks.
-     */
+    /* Resize dst before reading: the file's block may exceed the input buffer. */
     if (dst != nullptr) {
         if (0 != dst->ensureCapacity(dataLength)) {
             LOG_ERROR("Failed to ensure input block capacity %u", dataLength);
@@ -431,15 +402,14 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
         dataBlock.setDataPtr(dst->getBuffer());   // the pointer may have changed after realloc
     }
 
-    // Read the block data
-    // PbgzDataBlock data storage is not memory allocated by itself, the address is passed in from external, reducing copying
+    // Read the block data into the externally supplied buffer
     readLen = readFromSource(dataBlock.getDataPtr(), dataLength);
     if (readLen != dataLength) {
         LOG_ERROR("Failed to read PBGZ data block data. expect %d, actual %d", dataLength, readLen);
         return -1; // File read error
     }
 
-    // Read the data block checksum, 8byte
+    // Read the 8-byte block checksum
     readLen = readFromSource(pReadBuffer, PBGZ_DATA_BLOCK_CHECKSUM_LENGTH);
     if (readLen != PBGZ_DATA_BLOCK_CHECKSUM_LENGTH) {
         LOG_ERROR("Failed to read PBGZ data block checksum.");
@@ -451,18 +421,18 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
 
 
 uint8_t* PbgzFileWriter::getFileWriteBuffer() {
-    // Thread-local smart pointer: automatically manages memory, destructs and releases when thread exits
+    // Thread-local buffer, freed on thread exit
     thread_local static std::unique_ptr<uint8_t[]> pWriteBuffer;
     
     if (!pWriteBuffer) {
-        // Allocate memory with unique_ptr (no need for manual delete)
+        // Allocate the buffer
         pWriteBuffer = std::make_unique<uint8_t[]>(PBGZ_FILE_READ_BUFFER_LENGTH);
-        if (!pWriteBuffer) { // make_unique returns null pointer when it fails (C++17+)
+        if (!pWriteBuffer) { // make_unique returns null on failure
             LOG_ERROR("Failed to allocate memory for write buffer.");
         }
     }
 
-    // Return the raw buffer address pointed by the smart pointer (for business use)
+    // Return the raw buffer
     return pWriteBuffer.get();
 }
 
@@ -487,7 +457,7 @@ int32_t PbgzFileWriter::initFileHead() {
     }
 
     uint32_t writeLen = 0;
-    // Serialize block type, 4 byte without '\0'
+    // Serialize the 4-byte block type
     writeLen += ioWriter->writeIO(PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC_LENGTH);
     // Serialize version
     writeLen += ioWriter->writeIO(fileHeader.getVerion(), PBGZ_FILE_VERSION_LENGTH);

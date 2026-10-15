@@ -33,10 +33,7 @@
 #include "utils/memory_util.h"
 #include "bam_columns.h"
 
-/* One BAM reference-sequence entry from the BAM header (name + length). The
-   reader thread lifts these out of the BAM header and hands them, via the
-   block, to whichever worker renders raw BAM records into SAM text, so the
-   RNAME/RNEXT columns can be resolved with no dependency on the reader. */
+/* One BAM reference-sequence entry (name + length) from the BAM header. */
 struct BamRef {
     std::string name;
     int32_t len;
@@ -44,10 +41,10 @@ struct BamRef {
 
 const size_t BLOCK_SIZE = 268435456;
 
-/* Number of bytes the Creator reads ahead to determine the file format. This data is later merged into the first block / first package header, so nothing is wasted. */
+/* Bytes read ahead to detect the file format. */
 const size_t BLOCK_TYPE_DETECT_SIZE = 1 << 20;
 
-/* Initial allocation size for an input block: the buffer is not sized for the whole input up front; it starts at a fixed 1MB and grows on demand with realloc while reading. */
+/* Initial input block allocation size. */
 const size_t FIXED_INPUT_BLOCK_SIZE = 1 << 20;
 
 typedef enum
@@ -102,30 +99,7 @@ public:
         bamRefs.reset();
     }
 
-    /*
-     * Grows the buffer on demand. Returns 0 on success, -1 on failure (realloc
-     * failed).
-     *
-     * Primary defense: the actuator's block entry pre-allocates block_size (the
-     * upper bound determined at compression time) * 2, plugging all field
-     * overflows. coder_io's putc check and the decode error return chain serve
-     * as a fallback.
-     *
-     * Abnormal warning: when the target size exceeds the usual upper bound (2GB)
-     * or growing to 16x the current size is still not enough—the former usually
-     * means block_size is anomalous, the latter usually means a coder keeps
-     * overflowing (the fallback chain also calls this)—both indicate a deeper
-     * problem. It logs a warning but does not abort: the data may simply be
-     * large, and the decision is left to the caller based on the error code.
-     *
-     * Called after reset() and before any data is written: at this point
-     * dataLen == 0, the buffer holds no valid data, and there are no dangling
-     * pointers into the buffer, so realloc is safe. After growing, bufferSize is
-     * updated, and later getRemain/getCurrent/getBufferSize all see the new
-     * value. When a block is returned to the freeOutputPool and reused, it
-     * carries the larger buffer, and subsequent blocks keep using it without a
-     * per-block realloc.
-     */
+    /* Grow the buffer on demand; returns 0 on success, -1 on realloc failure. */
     int32_t ensureCapacity(size_t neededSize) {
         if (bufferSize >= neededSize) {
             return 0;
@@ -148,11 +122,7 @@ public:
         return 0;
     }
 
-    /*
-     * Which pbgz package this block belongs to. It is also used as the identity
-     * of an auxiliary block—under pipe input an absolute file offset degenerates
-     * to 0 and is meaningless, so it cannot serve as identity.
-     */
+    /* Which pbgz package this block belongs to; also the identity of an auxiliary block. */
     int64_t getPackageIndex() const {
         return packageIndex;
     }
@@ -161,17 +131,7 @@ public:
         packageIndex = index;
     }
 
-    /*
-     * Start position of this block's pbgz package in the file.
-     *
-     * The auxiliary-block addresses recorded in the block meta are **relative to
-     * the package**—at compression time it is impossible to know where the file
-     * will later be cat'ed to. The decompression side must add the start position
-     * of the package this block belongs to in order to reconstruct absolute
-     * addresses; this is the same semantics as getCurrentFileStart() + offset
-     * used for the reference genome. In the single-package case this value is 0,
-     * so relative degenerates to absolute.
-     */
+    /* Start position of this block's pbgz package in the file. */
     int64_t getPackageStart() const {
         return packageStart;
     }
@@ -180,15 +140,7 @@ public:
         packageStart = start;
     }
 
-    /*
-     * Position-addressing flag: this block is a "synchronously emitted auxiliary
-     * block"; the writer thread writes it immediately on sight, it does not take
-     * part in blockId reordering, and it does not consume the data block id
-     * sequence. Blocks come from a shared pool and are reused repeatedly, so this
-     * flag must be cleared in reset(); otherwise a stale flag from the previous
-     * round would cause an ordinary data block to be written out early as an
-     * auxiliary block.
-     */
+    /* True for synchronously emitted auxiliary blocks; cleared by reset(). */
     bool isSyncAux() const {
         return syncAux;
     }
@@ -269,13 +221,7 @@ public:
         return blockSize;
     }
 
-    /*
-     * MD5 of the raw block text. It is a pure function of the input, so the
-     * reader thread computes it before dispatching the block and the actuator
-     * only copies it into the meta, so the worker threads (the busiest resource in
-     * the pipeline) do not hash the block themselves. setMd5/hasMd5 are only
-     * touched by the thread that owns the block at that moment.
-     */
+    /* MD5 of the raw block text, computed by the reader thread. */
     bool hasMd5() const {
         return md5Ready;
     }
@@ -289,12 +235,7 @@ public:
         md5Ready = true;
     }
 
-    /*
-     * Structured BAM columns carried alongside the raw record bytes. Set by
-     * BamBlockReader in structured mode and consumed by BamCodecActuator; empty
-     * for every other block. reset() drops it so a recycled block never sees
-     * the previous one's columns.
-     */
+    /* Structured BAM columns carried alongside the raw record bytes. */
     std::shared_ptr<BamColumns> getBamColumns() const {
         return bamCols;
     }
@@ -303,13 +244,7 @@ public:
         bamCols = c;
     }
 
-    /*
-     * Set when the block's payload already is the BAM byte stream of its records
-     * (BamCodecActuator::decompress built it on a decompression worker when `-b`
-     * asked for BAM). BamWriter then frames the bytes into BGZF blocks directly
-     * instead of re-parsing SAM text on the single writer thread, which is what
-     * made `-b` output the slowest part of decompression.
-     */
+    /* True when the payload already is the BAM byte stream of its records. */
     bool isBamPrebuilt() const {
         return bamPrebuilt;
     }
@@ -318,14 +253,7 @@ public:
         bamPrebuilt = value;
     }
 
-    /*
-     * Raw-record BAM block (archive mode, reader offload): the payload is the
-     * concatenated [i32 size][record] bytes of the block's reads, NOT SAM text.
-     * The reader thread only streams records (sliced by the same read-count /
-     * base-count rules as text blocks) and the compressing worker renders each
-     * record into the identical SAM line - so the whole BAM->SAM cost moves off
-     * the single reader thread. npos is empty until the worker renders.
-     */
+    /* Archive-mode BAM block: payload is raw records, worker renders to SAM text. */
     bool isRawBam() const {
         return rawBam;
     }
@@ -334,9 +262,7 @@ public:
         rawBam = value;
     }
 
-    /* Reference-sequence table for rendering raw BAM records on a worker. Shared
-       read-only across every raw block of the file (the reader fills it once from
-       the BAM header). Empty for non-BAM and SAM-text blocks. */
+    /* Shared read-only BAM reference-sequence table for worker-side rendering. */
     std::shared_ptr<const std::vector<BamRef>> getBamRefs() const {
         return bamRefs;
     }

@@ -184,12 +184,8 @@ namespace PathUtil {
         const uint32_t isize = (uint32_t)trailer[0] | ((uint32_t)trailer[1] << 8) |
                                ((uint32_t)trailer[2] << 16) | ((uint32_t)trailer[3] << 24);
 
-        /*
-         * A gzip stream that holds anything but already-compressed data expands, so a length that
-         * does not even reach the compressed size is not this file's length: either the real length
-         * wrapped past 4 GiB or the file is a chain of members and ISIZE covers the last one only.
-         * Both are cases to report as unknown rather than to guess at.
-         */
+        /* A length that does not even reach the compressed size is untrustworthy (wrapped past
+           4 GiB, or a multi-member file where ISIZE covers the last member only): report unknown. */
         if ((int64_t)isize < fileSize) {
             return 0;
         }

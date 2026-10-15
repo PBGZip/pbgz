@@ -83,11 +83,8 @@ void md5_to_hex(const uint8_t digest[16], char output[33]);
 #endif
 
 /*
- * Convert 16-byte binary digest to string object.
- *
- * C++ linkage on purpose: it returns std::string, which a C-linkage function
- * cannot (and C callers could not use anyway), so it sits outside the
- * extern "C" block above along with the rest of the C++-only helpers.
+ * Convert 16-byte binary digest to string object. C++ linkage on purpose (returns
+ * std::string, which a C-linkage function cannot).
  *
  * @param digest 16-byte binary digest
  * @return std::string

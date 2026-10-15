@@ -1,40 +1,29 @@
 /*
  * bgzf_parallel.h - parallel BGZF decoder for the BAM read path
  *
- * A BAM file is a BGZF stream: a concatenation of independent gzip members,
- * each compressing exactly one 64 KiB (uncompressed) block, terminated by a
- * 28-byte empty EOF member. Every member carries its total compressed length
- * in the BSIZE field of its gzip extra ("BC" subfield), so members can be cut
- * out of the raw stream *without inflating* and decompressed in parallel -
- * unlike a plain single-stream gzip, where member boundaries are only known
- * after inflating.
+ * Cuts BGZF gzip members out of the raw stream by their BC/BSIZE field and inflates
+ * them in parallel (a creator thread plus N inflate workers), serving inflated bytes
+ * to the reader in member order. Falls back to serial inflate for plain gzip. A
+ * corrupt member makes read() return 0 after logging.
+ * Copyright (C) 2025 PBGZip
  *
- * Layout / thread model:
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *   creator thread  (this decoder's own thread)
- *     reads the raw compressed stream through a caller-supplied callback,
- *     cuts one member at a time by its gzip header (BC/BSIZE), and enqueues
- *     the member (compressed bytes + sequence number) into the ring. Raw EOF
- *     ends the job stream. If the first member has no BC extra field (plain
- *     gzip, not BGZF) the decoder runs in a serial fallback: one long
- *     inflate stream is fed into output chunks and served to the reader in
- *     order, matching the old single-threaded behaviour byte for byte.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- *   inflate workers (N threads)
- *     pop members and inflate each into a 64 KiB slot of the ring; a member
- *     whose slot has been consumed by the reader is reused by the creator,
- *     bounding memory to ring_size members in flight.
- *
- *   reader thread (the caller of read())
- *     pulls inflated bytes strictly in member order from the ring and copies
- *     them into the destination. read() returns 0 on end of stream.
- *
- * The whole inflate stream is byte-identical to the sequential inflate
- * (gzip members are independent), so the caller produces identical output;
- * only latency and throughput change.
- *
- * Errors: a corrupt member makes read() return 0 (EOF) after logging, so the
- * caller's short-read handling treats it as end of data.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef _BGZF_PARALLEL_H_
@@ -72,13 +61,9 @@ public:
     BgzfParallelDecoder(const BgzfParallelDecoder&) = delete;
     BgzfParallelDecoder& operator=(const BgzfParallelDecoder&) = delete;
 
-    /*
-     * Probe the stream head and, if it is BGZF, start the creator + workers.
-     * `head` must be the first bytes of the stream (may be the whole stream if
-     * it is shorter). Returns false when the stream is not cuttable BGZF, in
-     * which case nothing was consumed yet and the caller must fall back to its
-     * own serial inflate using head + the raw callback.
-     */
+    /* Probe the stream head and, if it is BGZF, start the creator + workers.
+       Returns false if the stream is not cuttable BGZF (nothing consumed); the
+       caller then falls back to serial inflate. */
     bool start(void* ctx, RawRead rr, const uint8_t* head, size_t headLen, int threads)
     {
         ctx_ = ctx;

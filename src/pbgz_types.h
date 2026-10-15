@@ -23,13 +23,12 @@
 
 #pragma once
 
-#include <cstdint>   /* uint8_t/uint32_t: this header used to get them through <chrono> */
+#include <cstdint>   /* uint8_t/uint32_t */
 #include <string>
 #include <unistd.h>
 
-/* Compression mode, mirroring CRAM's archive/fast split: archive (default) uses
- * the high-ratio textual SAM/BAM path; fast uses the structured column path,
- * which is quicker on BAM but trades a little ratio (and is experimental). */
+/* Compression mode: archive (default) uses the high-ratio textual SAM/BAM path; fast
+   uses the structured column path, quicker on BAM but trading a little ratio. */
 enum {
     PBGZ_MODE_ARCHIVE = 0,
     PBGZ_MODE_FAST    = 1
@@ -43,7 +42,7 @@ typedef struct PbgzParameter{
     std::string outputDir;   // 
     bool isOverwriteOutFile;         // Whether to force overwrite output file
     std::string referenceGenic;      // Reference genome
-    std::string niIndexFile;         // Prebuilt index; it is only an acceleration aid, the reference genome is always authoritative via referenceGenic
+    std::string niIndexFile;         // Prebuilt index, an acceleration aid only
     bool isUnpackRef;  
     uint8_t mode;              /* PBGZ_MODE_ARCHIVE or PBGZ_MODE_FAST */
     uint32_t threadNum; 

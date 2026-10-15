@@ -1,22 +1,25 @@
-/*--
-
-base_pack.h - map A/C/G/T bases to 2-bit codes and pack four per byte.
-
-Single fused pass (the previous coder_arith_k code scanned the input three times:
-an ACGT check, a map, then a pack). The ACGT check is folded into the packing,
-and the packing is vectorised:
-
-  x86_64 : SSSE3 + SSE4.1 intrinsics (16 bases -> 4 packed bytes per step)
-  aarch64: NEON intrinsics         (16 bases -> 4 packed bytes per step)
-  else   : portable scalar
-
-pbgz_pack_bases() returns false, leaving *out undefined, as soon as a byte that is
-not 'A','C','G' or 'T' is seen, so the caller can fall back to coding the raw
-bytes. It is a small, self-contained helper: no allocation, no state.
-
-SPDX-License-Identifier: MIT
-
---*/
+/*
+ * base_pack.h - map A/C/G/T bases to 2-bit codes and pack four per byte.
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
 #pragma once
 

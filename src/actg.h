@@ -110,7 +110,7 @@ static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t
     return len - zcnt;
 }
 
-/* Count the number of different ACTG bases after squash, e.g., count between 01001011 and 01101110 is 3 */
+/* Count differing ACTG bases after squash. */
 static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len) {
     // Add safety checks
     if (s1 == nullptr || s2 == nullptr) {
@@ -154,7 +154,7 @@ static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, u
     return cnt;
 }
 
-/* Calculate mapping relationship between base and reference after squash, 2bits placed at end of byte, store 0 if content is same, otherwise store original 2bits of base */
+/* Map base to reference after squash; 2 bits at end of byte, 0 if same, else original base bits. */
 static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst) {
     if (squashBase == nullptr || squashRefe == nullptr || squashLen == 0 || dst == nullptr) {
         return 0;
@@ -212,7 +212,7 @@ static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8
     return offset;
 }
 
-/* Calculate mapping relationship between base and reference after squash, 2bits placed at end of byte */
+/* Map base to reference after squash; 2 bits placed at end of byte. */
 static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst) {
     uint32_t n, offset = 0, x32, next;
     uint64_t x64, x64_1, x64_2;
@@ -317,7 +317,7 @@ static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const ui
     return offset;
 }
 
-/* Encode ACTG, each base still occupies 1 byte after encoding, but only the last 2 bits are valid */
+/* Encode ACTG: 1 byte per base, only the last 2 bits are valid. */
 static inline void actgEncode(const uint8_t *src, uint8_t *dst, uint32_t len) {
     uint32_t n, align8 = len >> 3 << 3;
 

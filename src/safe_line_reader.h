@@ -28,17 +28,9 @@
 
 #include "io_block.h"
 
-/*
- * SafeLineReader
- *
- * Iterates the newline-delimited lines of a RoughIOBlock in a single place,
- * clamping every offset against the block's data length.  A corrupt or
- * out-of-order npos table can never drive an out-of-bounds read through this
- * API -- malformed lines are silently skipped.
- *
- * Every field extractor iterates through this class, so the bounds guarantee
- * lives in exactly one location.
- */
+/* Iterates the newline-delimited lines of a RoughIOBlock in one place, clamping every
+   offset against the block's data length, so a corrupt npos table can never drive an
+   out-of-bounds read. Malformed lines are silently skipped. */
 class SafeLineReader {
 public:
     explicit SafeLineReader(RoughIOBlock* block)
@@ -55,11 +47,8 @@ public:
         }
     }
 
-    /*
-     * Advance to the next line.  On success returns true and sets line/len
-     * to a view of the line content (excluding the trailing newline).
-     * Returns false when lines are exhausted.
-     */
+    /* Advance to the next line; on success sets line/len (newline excluded) and returns
+       true, false when exhausted. */
     bool nextLine(const uint8_t*& line, uint32_t& len)
     {
         while (lineIdx_ < lineCount_) {

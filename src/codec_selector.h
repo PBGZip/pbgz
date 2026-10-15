@@ -34,133 +34,61 @@
 class RoughIOBlock;
 class Reference;
 
-/*
- * A per-field sample split into lines. coder_affix_match is a line-based
- * encoder whose prefix/suffix matching gains come from adjacent lines, so it
- * must be fed line by line during trial compression (including the trailing
- * tab); joining the whole column into one byte stream loses line boundaries,
- * and the measured numbers would have nothing in common with real compression.
- */
+/* A per-field sample split into lines, fed line by line to line-based coders
+   (coder_affix_match); the trailing tab is included. */
 struct LineSample {
     const uint8_t* data;
     uint32_t len;
 };
 
 /*
- * CodecSelector
+ * CodecSelector: codec pre-selection step of file preprocessing. It samples the first
+ * data block, splits it into per-field byte streams, trial-compresses each with every
+ * candidate coder, and records the best in a PreprocessInfo.
  *
- * Codec pre-selection step of the file preprocessing module. It scans a sample
- * of the first data block, splits it into per-field byte streams (SAM columns
- * or FASTQ lines), trial-compresses each stream with every candidate coder and
- * records the best one into a PreprocessInfo.
- *
- * The selector is self-contained: it parses the block itself and does not rely
- * on any actuator state, which keeps it independently unit-testable.
- *
- * Failure policy: any field that is too small to give a reliable comparison, or
- * whose trial compression fails, is marked SKIPPED / FAILED. Actuators then fall
- * back to their built-in default coder, so a preprocessing failure never breaks
- * compression.
+ * Self-contained (parses the block itself) and failure-safe: fields too small or whose
+ * trial fails are marked SKIPPED/FAILED and actuators fall back to defaults.
  */
 class CodecSelector {
 public:
-    /* Prior training uses at most 45 MB of QUAL. The gain at this point is about
-     * 1.84 percentage points; going to 90 MB adds only about 0.10 points, while
-     * the extra time falls in the serial phase before parallel compression kicks
-     * in and directly delays worker-thread startup, so training is cut off
-     * there. */
+    /* Cap on QUAL bytes used to train the prior; the gain past this point is
+       negligible and the extra time delays worker startup. */
     static constexpr uint32_t QUAL_PRIOR_TRAIN_MAX = 45u * 1024u * 1024u; // TEMP
 
     /*
-     * Analyze a sample of the given block and fill info.
-     * Returns 0 on success (including the "some fields skipped" case),
-     * -1 only on a fatal error such as a null block.
-     *
-     * inputTotalBytes is the byte count of the entire input; 0 means unknown
-     * (piped input). It is only used for decisions that pay off when amortized
-     * over the whole file — currently whether the QUAL prior should be trained
-     * and written. It is a parameter rather than part of PreprocessInfo: the
-     * latter is the product of the decision and should not double as an input.
-     *
-     * mode selects the candidate list per field (see field_coder_config.h) and
-     * is intersected with the coder registry's profile/level gate, so a fast run
-     * only ever trials fast coders and an archive run only ratio coders.
-     *
-     * reference is the loaded reference genome, or nullptr when the run has none. With one, the
-     * SEQ column is trialled on the payload it will really be written as - the per-base 2-bit
-     * codes XORed against the reference - instead of on its raw text, and the verdict is the
-     * match-stream coder and the form the N positions travel in (see
-     * selectSeqReferenceCoder). The chromosome names that resolve the reference come from the
-     * file's @SQ lines, which the reader thread puts into SamInfo before the first data block is
-     * dispatched (see CompressEngine::preDispatchBlock); a block that carries its own header is
-     * parsed here as well, so the trial does not depend on that ordering.
+     * Analyze a sample of block and fill info. Returns 0 on success (including skipped
+     * fields), -1 only on a fatal error. inputTotalBytes is the whole input size (0 when
+     * unknown); mode selects per-field candidate lists; reference enables the SEQ trial.
      */
     static int32_t analyze(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
                            uint8_t compressLevel = 5, uint8_t mode = PBGZ_MODE_ARCHIVE,
                            Reference* reference = nullptr);
 
     /*
-     * Trial-compress one byte stream with every candidate coder and return the
-     * selection result. This is the generic, fully data-driven path: it holds no
-     * knowledge of any concrete coder, only walks the candidate list through
-     * CoderFactory. Adding a coder to a field's list is therefore enough for it
-     * to compete here.
-     *
-     * Candidates are tried in the registry's trialPriority order (coder_fc
-     * first, then affix, then bwt_cm), and a later coder only takes the lead on
-     * a strictly smaller result - that keeps the tie-breaking behavior stable
-     * regardless of how a list happens to be written.
-     *
-     * lines supplies the per-line sample for line-based coders (see LineSample).
-     * A coder whose descriptor says it is line-based is fed line by line when
-     * lines is available; otherwise it is fed the whole stream in one
-     * encode_line call. When lines is empty a line-based coder is skipped.
+     * Trial-compress one byte stream with every candidate coder and return the result.
+     * Candidates are tried in registry trialPriority order, later ties losing. lines
+     * supplies per-line samples for line-based coders (empty means they are skipped).
      */
     static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len,
                                            const std::vector<LineSample>* lines,
                                            const std::vector<CoderType>& candidates);
 
-    /*
-     * Convenience overload kept for the historical call sites and unit tests:
-     * rebuilds the historical candidate set (coder_fc always; coder_affix_match
-     * when trialAffix; coder_bwt_cm when allowBwtCm) and delegates to the
-     * candidate-list form above.
-     */
+    /* Convenience overload: rebuilds the historical candidate set (coder_fc; plus
+       coder_affix_match when trialAffix; plus coder_bwt_cm when allowBwtCm). */
     static FieldCodecSelection selectCoder(const uint8_t* data, uint32_t len,
                                            bool trialAffix = false,
                                            const std::vector<LineSample>* lines = nullptr,
                                            bool allowBwtCm = false);
 
-    /*
-     * Trial-compress the POS delta-varint stream (the actual byte stream fed to
-     * the POS coder, see compressPosFieldDelta) with coder_bwt_cm and
-     * coder_arith, and return the better one. The raw column text must not be
-     * used for this comparison: the varint delta stream has a very different
-     * distribution from the decimal POS text.
-     *
-     * posLines / chrLines are the per-line POS and RNAME samples (LineSample
-     * views including the trailing tab). The delta baseline resets at every
-     * RNAME change, mirroring compressPosFieldDelta's chromosome-switch logic.
-     * Returns SKIPPED when the rebuilt varint stream is too small to compare
-     * reliably; the actuator then falls back to bwt_cm.
-     */
+    /* Compare coder_bwt_cm and coder_arith on the rebuilt POS delta-varint stream (not
+       the raw text). posLines/chrLines supply the per-line samples; returns SKIPPED when
+       the stream is too small. */
     static FieldCodecSelection selectPosDeltaCoder(const std::vector<LineSample>& posLines,
                                                    const std::vector<LineSample>& chrLines,
                                                    std::vector<uint64_t>* varintCounts = nullptr);
 
-    /*
-     * Cross-block training sample accumulator for the QUAL prior. Held by
-     * CompressEngine on the read thread: QUAL of the first N blocks is
-     * accumulated record by record (each block is scanned to its end, but
-     * collection stops once QUAL_PRIOR_TRAIN_MAX is reached); after the target
-     * number of blocks is read or the accumulator is full, trainQualPriorModel
-     * trains once and exports a snapshot.
-     *
-     * Why across blocks: the first block usually holds only ~9 MB of QUAL, while
-     * the prior's gain roughly converges at 45 MB (see QUAL_PRIOR_TRAIN_MAX).
-     * Accumulating across multiple blocks lets small blocks approach that
-     * training volume too.
-     */
+    /* Cross-block QUAL accumulator for prior training, held by CompressEngine on the
+       read thread; collection stops at QUAL_PRIOR_TRAIN_MAX. */
     struct QualPriorAccum {
         std::vector<QualSampleRecord> records;
         std::vector<uint32_t> freqByByte;
@@ -169,16 +97,11 @@ public:
         bool full() const { return collectedBytes >= QUAL_PRIOR_TRAIN_MAX; }
     };
 
-    /* Append one block's QUAL records to the accumulator (cap
-     * QUAL_PRIOR_TRAIN_MAX; anything beyond it is dropped). */
+    /* Append one block's QUAL records to the accumulator (capped at QUAL_PRIOR_TRAIN_MAX). */
     static void accumulateQualPrior(RoughIOBlock* block, QualPriorAccum& acc);
 
-    /* Train fcv2 on the accumulated samples and export a model snapshot;
-     * trainedBytes reports the actual number of bytes trained. params is the
-     * context parameter tier selected by QualSelector (meaningful only when
-     * fcv2 wins) and must match the tier used for real compression, otherwise
-     * loading the prior snapshot fails wholesale due to a layout mismatch.
-     * Returns an empty vector on failure or when the samples are empty. */
+    /* Train fcv2 on the accumulated samples and export a snapshot; trainedBytes reports
+       the bytes trained. params must match the compression-side tier. Empty on failure. */
     static std::vector<uint8_t> trainQualPriorModel(const QualPriorAccum& acc,
                                                     const QualFcv2Params& params,
                                                     uint64_t* trainedBytes);
@@ -187,25 +110,13 @@ private:
     static int32_t analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
                               uint8_t compressLevel, uint8_t mode, Reference* reference);
 
-    /*
-     * FASTQ: ID / SEQ / QUAL / comment, trialled with the FASTQ table's candidate
-     * lists (see field_coder_config.h) under this run's -m mode and level. QUAL
-     * goes through QualSelector with the FASTQ QUAL row, the same dedicated path
-     * SAM's QUAL column takes: the coders are record-level (coder_qual codes
-     * against the read's bases, fcv2 against its cycle), so the column cannot be
-     * trialled as a plain byte stream.
-     *
-     * inputTotalBytes only decides whether a QUAL prior is worth training and
-     * writing, exactly as on the SAM side.
-     */
+    /* FASTQ: ID / SEQ / QUAL / comment, trialled with the FASTQ candidate lists under
+       the run's mode and level. QUAL uses QualSelector's dedicated record-level path. */
     static int32_t analyzeFastq(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
                                 uint8_t compressLevel, uint8_t mode);
 
-    /*
-     * One record of the SEQ reference trial: its SEQ inside the sample's concatenated bases, and
-     * the columns the reference walk reads (FLAG, RNAME, POS, CIGAR). The views point into the
-     * block, so the trial re-reads them without copying the line.
-     */
+    /* One record of the SEQ reference trial: its SEQ range in the sample plus views of
+       FLAG/RNAME/POS/CIGAR into the block. */
     struct SeqRefRecord {
         uint32_t seqBeg = 0;
         uint32_t seqEnd = 0;
@@ -215,59 +126,28 @@ private:
         LineSample cigar;
     };
 
-    /*
-     * The SEQ reference trial: build the match payload the block pass will write - per record the
-     * 2-bit codes XORed against the reference over the CIGAR segments that consume it, or the
-     * record's own characters when it cannot use the reference at all - then apply the same RLE
-     * split the block pass applies and trial the candidates on the "m" segment the verdict is for.
-     *
-     * Answers false when the sample holds no reference-coded record, leaving `info` untouched: no
-     * payload exists then (the base path, compressBaseWithoutRef, writes the bytes as they are), so
-     * the column's coder has to be decided on the raw text after all, and no form verdict is
-     * needed. On success it fills info.fields[SAM_SEQ] with the trial that decided it and pins
-     * PreprocessInfo::seqMatchCoder / nposForm for every later block.
-     */
+    /* Build the SEQ match payload, apply the same RLE split as the block pass, and trial
+       the candidates; on success fills info.fields[SAM_SEQ] and pins
+       seqMatchCoder/nposForm. False when no record can use the reference. */
     static bool selectSeqReferenceCoder(RoughIOBlock* block, Reference* reference, uint8_t level,
                                         PreprocessInfo& info);
 
-    /*
-     * Collect SeqRefRecord's records from a block, stopping once `sampleBudget` bases of SEQ have
-     * been taken (a record that would overshoot is truncated, so the sample is one whole record
-     * short of the budget at most), and the N offsets over that same sample - counted from SEQ
-     * alone, so a record that cannot use the reference contributes its N too, and the positions
-     * are the record's offsets inside the concatenated sample.
-     */
+    /* Collect SEQ reference records up to sampleBudget bases, plus the N offsets over
+       the same sample. */
     static uint32_t extractSeqReferenceSamples(RoughIOBlock* block,
                                                std::vector<SeqRefRecord>& records,
                                                std::vector<uint8_t>& seq,
                                                std::vector<uint32_t>& nPositions,
                                                uint32_t sampleBudget);
 
-    /*
-     * The QNAME column's layout: the affix segmentation against coder_qname's cross-line
-     * deduplication. Both are encoders, so the only faithful way to choose between them is to run
-     * them - on the first QNAME_TRIAL_LINES of the deciding block, exactly as the block pass
-     * would, through the same module (sam_qname_column.h) - and the choice belongs here, before
-     * any block is written.
-     *
-     * Answers false when there is nothing to choose: a column with no separators, or one whose
-     * split turns out to be unavailable, is written whole (SamCodecActuator::compressIdFieldInAll)
-     * and no layout is involved. On success it fills info.fields[SAM_QNAME] with the trial and
-     * pins PreprocessInfo::qnameUseAffix.
-     */
+    /* Choose between affix segmentation and coder_qname for the QNAME column by running
+       both. Fills info.fields[SAM_QNAME] and pins qnameUseAffix; false when there is
+       nothing to choose. */
     static bool selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info);
 
     /* Extract per-field concatenated samples from a block. */
-    /*
-     * Collect samples for the quality-value column only.
-     *
-     * Generic sampling concatenates the whole column into contiguous bytes,
-     * losing record boundaries; but both quality-value candidates need
-     * record-level information — fcv2 needs each record's length to recover the
-     * sequencing cycle index, and coder_qual needs the corresponding base
-     * sequence as context, while the strand direction is taken from bit 0x10 of
-     * FLAG. So records are collected here individually, without concatenation.
-     */
+    /* Collect QUAL record samples (not a concatenated column) because the quality
+       coders need record boundaries, each record's bases, and the FLAG strand bit. */
     static void extractQualSamples(RoughIOBlock* block,
                                    std::vector<QualSampleRecord>& records,
                                    std::vector<uint32_t>& freqByByte,
@@ -280,36 +160,14 @@ private:
                                        uint32_t sampleBudget,
                                        uint8_t mode);
 
-    /*
-     * RNAME+POS line views collected by line count instead of the shared byte
-     * budget, for the POS delta-varint trial. Only pointers into the block
-     * buffer are stored, so sampling a whole block is almost free, and the
-     * trial then measures the coders at the volume real compression feeds them
-     * (a small sample overstates the cost of a coder that pays a model cold
-     * start once per block).
-     */
+    /* RNAME+POS line views for the POS delta trial, collected by line count so the
+       trial sees block-like volume; only pointers are stored. */
     static uint32_t extractPosDeltaSamples(RoughIOBlock* block,
                                            std::vector<LineSample>& posLines,
                                            std::vector<LineSample>& chrLines,
                                            uint32_t maxLines);
-    /*
-     * FASTQ sampling: the per-field concatenated bytes, the per-line views a
-     * line-based coder has to be fed with (see LineSample), and the QUAL column's
-     * per-record sample with its alphabet counts - the quality coders need record
-     * boundaries, so they cannot be measured from the concatenated stream.
-     *
-     * One pass produces all three: a record is four lines, so walking it once is
-     * what keeps the line views, the concatenated bytes and the QUAL records
-     * describing the same sample.
-     *
-     * The line views are the block's own bytes including the line's trailing
-     * newline, which is the layout a line-based coder is fed (the ID and comment
-     * columns are split at their separators, a variable-length SEQ line carries its
-     * newline); the concatenated bytes are the field contents without the leading
-     * '@'/'+' and without the newline, which is what the whole-stream coders are
-     * measured on. QUAL is not trialled from either - it goes to QualSelector as
-     * records - so its line views are built but unused.
-     */
+    /* FASTQ sampling in one pass: per-field concatenated bytes, per-line views, and the
+       QUAL per-record sample with alphabet counts. */
     static uint32_t extractFastqFieldSamples(RoughIOBlock* block,
                                          std::vector<std::string>& fieldBufs,
                                          std::vector<std::vector<LineSample>>& fieldLines,

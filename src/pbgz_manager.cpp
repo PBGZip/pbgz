@@ -55,7 +55,7 @@ void PbgzManager::exitProc(int errorCode, const char* errorMessage){
 }
 
 void PbgzManager::addOutputFile(const std::string& fileName) {
-    /* second is set to false: delete this output file on abnormal exit (errorCode < 0). */
+    /* Registered for deletion on abnormal exit (errorCode < 0). */
     outfiles.push_back(std::make_pair(fileName, false));
 }
 
@@ -110,19 +110,12 @@ void PbgzManager::updateWriteDataLen(RoughIOBlock* blockPtr) {
 }   
 
 void PbgzManager::updateDataInfo() {
-    /*
-     * Refresh the progress bar in place: clear the line (\033[K) first, then write the
-     * content, with a trailing \r to return to the start of the line. Without clearing
-     * the line, leftover bytes of the previous (longer) content persist, and when
-     * interleaved with other stderr output (such as "File type"), the tail of the other
-     * output gets covered at the end of the line, producing garbled text like
-     * "File type: SAM40/0]---".
-     */
+    /* Refresh the progress bar in place: clear the line, then write with a trailing \r. */
     fprintf(stderr, "\r\033[K\033[37mfrom/to ---[%ld/%ld]---\r", totalReadLen.load(), totalWriteLen);
 }
 
 void PbgzManager::printFileType(BlockType blockType) {
-    /* May print right after the progress bar: return to the start of the line and clear it first, to avoid covering leftover progress-bar output */
+    /* Return to line start and clear before printing, to avoid overwriting the progress bar. */
     fprintf(stderr, "\r\033[KFile type: %s\n", BlockUtil::getBlockTypeName(blockType).c_str());
 }
 

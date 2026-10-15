@@ -33,14 +33,9 @@
 #include "coder.h"
 
 /*
- * Tuning constants. They are macros so a measurement build can sweep them
- * without editing the file (the archive build uses these defaults):
- *   QCM_THETA  weight of the lower-order estimate in the interpolation; a
- *              larger value pulls a sparse high-order context back towards the
- *              order-1/order-0 statistics behind it. Zero disables smoothing,
- *              which is a useful A/B switch but is not a sane default.
- *   QCM_CAP    per-node count cap: a node whose two counts reach it is halved,
- *              which is what keeps the model adaptive on a moving stream.
+ * Tuning constants, macros so a measurement build can sweep them.
+ *   QCM_THETA  weight of the lower-order estimate in the interpolation.
+ *   QCM_CAP    per-node count cap; a node reaching it is halved.
  */
 #ifndef QCM_THETA
 #define QCM_THETA 64
@@ -52,106 +47,25 @@
 /*
  * coder_qcm - an order-2 context model for the quality-value column.
  *
- * Contract: the same external contract as coder_bwt_cm / coder_rans. The caller
- * accumulates a whole column with encode_line calls and commits it with one
- * encode_flush, which produces a single independent block; the decoder replays
- * that block through decode_line calls. It is a plain byte-stream coder, so it
- * carries no assumption about how the caller splits its encode_line calls and
- * needs neither record boundaries nor strand (unlike coder_fcv2 / coder_qual,
- * which take a per-record interface). That is deliberate - see the note on
- * position contexts below.
+ * Same external contract as the other byte-stream coders: encode_line
+ * accumulates a column and encode_flush commits one independent block. It needs
+ * no per-record input (no record boundaries or strand).
  *
- * Why it exists. QUAL is the field where pbgz and CRAM are closest, and the
- * measured numbers on ERR11436629 (ONT, one 28.09 MB block of quality values,
- * 58 distinct values in 34..93) say something specific about where the
- * remaining space is:
+ * A bit tree over the alphabet index, with three nested orders (global,
+ * previous value, previous two values) combined by interpolated PPM smoothing.
+ * Order 2 is enabled only for small alphabets (<=128); the block carries the
+ * sorted list of distinct values and codes symbols as indices into it.
  *
- *   ideal order-1 model (P(q | previous value))                        3.8902
- *   ideal order-2 model (P(q | previous two values))                   3.8760
- *   ideal order-3 model                                                3.8930
- *   coder_bwt_cm (current QUAL winner)                                 3.8896
- *   coder_fcv2, tuned                                                  ~3.896
- *   coder_cmix (bitwise CM, removed after measurement)                  3.8998
- *
- * bits per value, perfect-model figures from a train/test split (counts from
- * the first half, log-loss on the second). Two things follow. First,
- * coder_bwt_cm is on this data exactly as good as an ideal order-1 model, so
- * the BWT is not buying anything here that a direct order-1 model would not:
- * quality values have very little long-range structure, and the BWT is paying
- * for a transform whose benefit is not there. Second, the space that is left is
- * in order 2 - about 0.35% - and it is only reachable if the model is cheap
- * enough not to spend that gain on its own cost.
- *
- * That second point is what shapes the design, and it is why this coder is
- * *not* another context mixer. Measured earlier on the same column, a bitwise
- * CM with an order-1..4 chain, a match model and logistic mixing (coder_cmix)
- * landed at 3.8998 - worse than the BWT - because on a 58-symbol alphabet its
- * eight-bit decisions, hashed contexts and mixer each added more model cost than
- * the structure they captured. What is left is the opposite approach: a small,
- * fixed, exactly-enumerated context set (58^2 = 3364 order-2 contexts, no
- * hashing, no collisions), counts that interpolate downwards instead of a mixer
- * that learns weights, and a direct model of the value rather than of its bits
- * in isolation.
- *
- * Model. A bit tree over the alphabet index (6 bits for the 58-value alphabet,
- * ceil(log2 K) in general and at most 8), and three nested orders of the same
- * tree - global, previous value, previous two values. The three are combined by
- * interpolated smoothing, the standard PPM recursion, evaluated per node:
- *
- *     p0 = (n0_1 + 1) / (n0 + 2)
- *     p1 = (n1_1 + th * p0) / (n1 + th)
- *     p2 = (n2_1 + th * p1) / (n2 + th)
- *
- * where nX_y is the count of bit y at that order's node. An unseen context
- * falls back to the order below it by construction - (0 + th*p)/(0 + th) = p -
- * so there is no escape mechanism, no exclusion set and no branch: the
- * recursion is three integer divisions per bit. Counts are capped and halved
- * (QCM_CAP) so the model follows the data rather than averaging over the whole
- * block, and a count-based estimator is used rather than an adaptive-rate
- * state machine because it degrades gracefully when a context has only a few
- * observations, which is what the trial round (a few hundred reads) sees.
- *
- * What is deliberately absent. No position context and no reverse-strand
- * reversal: fqzcomp (CRAM's quality coder, and the design this one follows)
- * uses both, but both need per-record input, and on this data neither pays - a
- * position context measured worse than no position context at all (+1.4% for
- * the relative-position variant, and coder_fcv2's position slot collapses to
- * "off" being optimal), and a strand flip is the same kind of positional
- * transform. Leaving them out is what keeps this coder on the generic
- * interface, where every field can feed it and the trial machinery needs no
- * special case beyond the one QUAL already has.
- *
- * Alphabet. The block carries the sorted list of distinct values that occur in
- * it (at most 256), and symbols are coded as their index in that list. For a
- * quality column this is 58 values in a 6-bit tree instead of 8 bits of mostly
- * unreachable nodes; the list itself costs 58 bytes per block, which is
- * nothing at block granularity. Order 2 is only enabled when the alphabet is
- * small (<= 128, i.e. quality-like); above that the model drops to order 1, so
- * an arbitrary binary column cannot make it allocate a 64 MB table.
- *
- * Memory: the order-2 table is K*K nodes of two uint16 counts, 861 KB for the
- * 58-value alphabet, and it is per coder instance, i.e. per block in flight.
- *
- * Block format (each block is independent; the stream starts with the coder
- * magic written by the constructor):
- *   [u8]      format version (1)
- *   [u16 LE]  alphabet size K
- *   [K bytes] alphabet, ascending
- *   [u32 LE]  number of values in the block
- *   [bytes]   range-coded symbols
- *
- * Error convention matches the other coders: decode_line returns < 0 on a
- * corrupt/truncated stream, 0 on clean EOF and > 0 on the number of bytes
- * served.
+ * Block format: [u8 version][u16 LE alphabet size K][K bytes alphabet]
+ * [u32 LE value count][range-coded symbols]. Error convention matches the other
+ * coders.
  */
 class coder_qcm : public coder
 {
 private:
     /*
-     * Range coder: 32-bit range, 64-bit low with a delayed carry byte. The
-     * split value is P(bit == 1) scaled to 1 << 12; bit 0 takes the lower part
-     * of the interval and bit 1 the upper. Encode and decode call the same
-     * model code before updating it, so both sides compute the same split.
+     * Range coder: 32-bit range, 64-bit low with a delayed carry byte. The split
+     * is P(bit == 1) scaled to 1 << 12.
      */
     class _range_enc
     {
@@ -175,17 +89,7 @@ private:
             } else {
                 range = bound;
             }
-            /*
-             * Renormalize. The loop it replaces needs at most one shift: by
-             * construction range stays in [2^24, 2^32) between bits (the shift
-             * restores it there), and the worst bit halves it (p = 2048), so the
-             * post-bit range is at least 2^23; one << 8 put it back at or above
-             * 2^31. Shifting any value in [2^8, 2^24) left by 8 meanwhile always
-             * crosses 2^24, so a second guard can never fire. The unrolled single
-             * shift is exactly the loop's one legal iteration - an unpaired shift
-             * would desync the carry/top bytes from the decoder - so the stream
-             * is byte-for-byte what the loop produced, with no loop exit test.
-             */
+            /* Renormalize once: range stays in [2^24, 2^32), so one shift suffices. */
             if (range < (1u << 24)) {
                 range <<= 8;
                 shift_low();
@@ -271,11 +175,9 @@ private:
     };
 
     /*
-     * The model: three nested orders over one bit tree.
-     *   t0[node]                  order 0
-     *   t1[ctx1 * nodes + node]   order 1, ctx1 = previous value
-     *   t2[ctx2 * nodes + node]   order 2, ctx2 = previous two values packed
-     * ctx1 and ctx2 each carry one extra slot for "not enough history yet".
+     * Three nested orders over one bit tree: t0 (order 0),
+     * t1[ctx1*nodes+node] (order 1), t2[ctx2*nodes+node] (order 2). ctx1/ctx2
+     * each have one extra slot for "not enough history yet".
      */
     struct _model
     {
@@ -322,25 +224,8 @@ private:
         }
 
         /*
-         * Division by a small denominator is the hot operation - three per coded
-         * bit, up to eight bits per symbol. Every denominator is bounded by
-         * QCM_CAP + QCM_THETA + 2, so they are turned into one reciprocal and the
-         * divisions become multiplies. Truncating is fine (and required) as long
-         * as both sides do exactly the same thing.
-         *
-         * With the caps in place the denominator can never reach k_recip_size:
-         * bump() halves a node as soon as a + b >= QCM_CAP, so n <= QCM_CAP (the
-         * halved sum is < QCM_CAP, one increment restores it to at most QCM_CAP),
-         * the order-0 denominator is n + 2, and the order-1/order-2 denominators
-         * are n + QCM_THETA - each strictly less than QCM_CAP + QCM_THETA + 8.
-         * The redundant bound test has therefore no table and no fallback division
-         * to guard: indexing is in range on both sides of the coder by
-         * construction, so the per-bit path is just the multiply.
-         *
-         * The reciprocal pointer is set once in init() rather than looked up per
-         * division: recip_table() guards a function-local static, and doing that
-         * guard three times a bit (twelve times a symbol) leaves a compare + taken
-         * branch in the hot loop that the arithmetic never needed.
+         * Division by a small denominator (bounded by QCM_CAP + QCM_THETA + 2) is
+         * the hot operation; denominators become multiplies by a reciprocal.
          */
         inline uint32_t div_fixed(uint64_t num, uint32_t den) const
         {

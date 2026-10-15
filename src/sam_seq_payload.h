@@ -1,32 +1,25 @@
 /*
- * sam_seq_payload.h - the reference-coded SEQ payload: how it is built, how it is split, and the
- * three forms its N positions can travel in.
+ * sam_seq_payload.h - the reference-coded SEQ payload: how it is built, split, and how its N
+ * positions travel. The encoder-side counterpart of sam_field_layout.h.
+ * Copyright (C) 2025 PBGZip
  *
- * This is the encoder-side counterpart of sam_field_layout.h (which holds the readers), with two
- * deliberate exceptions that both sides need - the consensus stretch helper and the predicates that
- * decide whether a record can be coded against a reference at all: a reader has to make the same
- * decision on the same record, so they live with the encoder rather than being written twice. It
- * exists because two stages need the same machinery and neither owns it:
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *   - the codec pre-selection trials the SEQ match stream on a sample of the first block, to pick
- *     the coder the column will be written with and the form its N positions will travel in;
- *   - the block pass walks the CIGAR and writes that payload, block by block.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- * A trial measured on a different payload than the one written is worthless, so the payload's
- * construction is here rather than in either caller: what one record contributes
- * (buildSeqRecordPayload), how the stream splits (splitSeqMatchStream) and what the N positions'
- * three forms look like (SeqExceptionClass, buildRunForm) are single implementations. What stays
- * with the callers is only what genuinely differs - where each gets its record's columns and CIGAR
- * from (the block pass has the field decoders' parsed tables, the trial parses the block's text),
- * and what each does with the result (the block pass updates the reference's match statistics and
- * collects the exception characters; the trial only measures).
- *
- * Nothing here measures anything: choosing between candidates is the codec pre-selection's job,
- * and it is the only stage that runs a trial at all. What the block pass needs is here, what a
- * trial needs to build a comparable payload is here, and nothing else is.
- *
- * Nothing here knows about an actuator, a block or the meta: every function is a pure walk over
- * buffers, the reference and the CIGAR it is given.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -36,63 +29,25 @@
 
 #include "reference.h"
 
-/*
- * One CIGAR operation: the op character and its length. The SEQ reference walk iterates these, and
- * the CIGAR column's own parse produces them.
- */
+/* One CIGAR operation: the op character and its length. */
 struct CigarOp {
     char op;
     uint32_t len;
 };
 
-/*
- * Split a CIGAR string into operations, and answer the reference span it consumes.
- *
- * Only the operations SAM defines are recorded (MIDNSHP=X); anything else in the field is skipped,
- * which is what the column parse has always done. The span adds up M/D/N/=/X - the operations that
- * consume reference sequence - and, defensively, their lower-case spellings, which the span has
- * always counted even though no valid CIGAR uses them.
- *
- * This is the one CIGAR parser: the CIGAR column's span and operation list, and the SEQ reference
- * walk's copy of them, all come through here. Only the span is wanted on some paths (the span goes
- * into the field decoders' tables whether or not anything walks the operations), so it has an entry
- * of its own rather than forcing a list to be built and thrown away. Both share one loop.
- */
+/* Split a CIGAR string into operations and answer the reference span it consumes (M/D/N/=/X).
+   The one CIGAR parser: the span-only entry shares the loop with the operation-list one. */
 uint32_t parseCigarOps(const uint8_t* cigar, uint32_t cigarLength, std::vector<CigarOp>& ops);
 uint32_t cigarRefConsumed(const uint8_t* cigar, uint32_t cigarLength);
 
-/*
- * The span the CIGAR claims of the read: M/I/S/=/X and their lower-case forms. It sits beside the
- * reference span because one parse answers both, and a caller that wants one usually has to know the
- * other - the SEQ column stores its payloads against this one and the reference window against that.
- */
+/* The span the CIGAR claims of the read: M/I/S/=/X and lower-case forms. */
 uint32_t cigarSeqConsumed(const uint8_t* cigar, uint32_t cigarLength);
 
-/*
- * The two halves of a match stream split into runs and values (SeqRleSplit / splitSeqMatchStream)
- * sit in seq_stream_util.h: the shape is byte-level and both formats' SEQ columns use it.
- */
+/* The run/value split (SeqRleSplit / splitSeqMatchStream) lives in seq_stream_util.h. */
 
-/*
- * Whether this record's bases can be coded against the reference at all, and where its first base
- * sits in it.
- *
- * Three things have to hold: the record is mapped to a chromosome (0xFFFF and 0xFFFE are the SAM
- * sentinels for "none" and "not in the dictionary"), it is not flagged unmapped, and the span it
- * would consume stays inside the reference - an alignment running past the end would read squashed
- * bytes that are not there. `refConsumed` is the reference span of the record's CIGAR (M/D/N/=/X),
- * which the caller has from the CIGAR parsing.
- *
- * The chromosome's offset in the reference comes from the process-wide table (SamInfo), which is
- * filled from the file's @SQ lines - in the preprocessing stage by the reader thread, and again by
- * whichever actuator pass sees the header.
- */
-/*
- * What "this record has no reference to address" looks like: SAM's two placeholder chromosome ids -
- * 0xFFFF for the '*' that stands in for a name, 0xFFFE for an index that does not know the name -
- * and the FLAG bit that marks a record unmapped. Writers and reader both test for them, and a
- * placeholder spelled out at each test is one that can drift.
- */
+/* Whether this record's bases can be coded against the reference, and where its first base sits
+   in it. Requires a mapped chromosome, no unmapped flag, and a span inside the reference. */
+/* SAM's placeholder chromosome ids (0xFFFF "*", 0xFFFE unknown) and the FLAG unmapped bit. */
 inline constexpr uint16_t SEQ_CHR_ID_NONE = 0xFFFF;
 inline constexpr uint16_t SEQ_CHR_ID_UNKNOWN = 0xFFFE;
 inline constexpr uint8_t SEQ_FLAG_UNMAPPED = 0x04;
@@ -100,50 +55,18 @@ inline constexpr uint8_t SEQ_FLAG_UNMAPPED = 0x04;
 bool seqRecordUsesReference(uint16_t chrId, uint16_t flag, uint64_t startPos, uint32_t refConsumed,
                             Reference* reference, int64_t& refPos);
 
-/*
- * Whether the loaded reference is laid out the way the @SQ list addresses it, i.e. whether
- * seqRecordUsesReference's offset (the running sum of the @SQ lengths) really names that
- * chromosome's first base in the reference.
- *
- * It does only if the FASTA lists exactly those sequences in that order. A FASTA of another
- * assembly, of the same assembly under other names (NCBI accessions against FlyBase arm names,
- * say), or with sequences in another order all break it - and break it *silently*: the offset
- * still exists, it just points into a different sequence, so the per-base XOR against the
- * reference is mostly non-zero and the SEQ column comes out barely better than raw text, or
- * worse. That is what this check exists to catch.
- *
- * Returns true when the correspondence holds, and also when it cannot be checked at all: a
- * reference loaded from an NI index carries no names, and callers have always trusted its
- * layout, so nothing may change for them. A nullptr reference is reported as unusable.
- */
+/* Whether the loaded reference is laid out the way the @SQ list addresses it. Returns true when
+   the correspondence holds or cannot be checked (an NI-loaded reference carries no names). */
 bool referenceLinesUpWithHeader(const Reference* reference);
 
-/*
- * Tell the user, once per run, that the reference cannot be used for SEQ (see
- * referenceLinesUpWithHeader). Both actuators call it when their check fails, so the message
- * lives here rather than being spelled out - and printed - twice.
- *
- * Only the first caller prints: the reason is a property of the run, not of the block, and a
- * block-based encoder would otherwise repeat it once per block.
- */
+/* Tell the user, once per run, that the reference cannot be used for SEQ. */
 void warnReferenceNotUsableForSeq();
 
 
-/*
- * Walk the CIGAR and write the record's per-base 2-bit payload: XOR against the reference on the
- * operations that consume it (M/=/X), the base's own 2-bit value on the ones that consume SEQ only
- * (I/S), nothing at all on reference-only (D/N) and on clipping. Walking the CIGAR is what keeps an
- * indel from being compared against a reference window the read never aligned to, and the decoder
- * mirrors this same walk.
- *
- * Answers false when the walk did not consume exactly `seqLength` bases - SEQ and CIGAR disagree, or
- * the CIGAR runs past the SEQ - which the caller answers by encoding the bases as they are.
- *
- * `ref2bitScratch` is the caller's scratch for the reference stretch (one op never exceeds the
- * read's length plus the coder's unaligned-write slack); `out` receives `seqLength` bytes.
- */
-/* What a callback tells the walk to do with it: keep going, or end it here (the reader's answer
-   when an op would run past the read, which leaves the positions where they stand). */
+/* Walk the CIGAR writing the record's per-base 2-bit payload: XOR against the reference on
+   M/=/X, the base's own code on I/S, nothing on D/N and clipping. `out` receives `seqLength`
+   bytes; false when the walk did not consume the read exactly. */
+/* What a callback tells the walk: keep going, or stop here. */
 enum class SeqWalkAction { Continue, Stop };
 
 /* Where a walk left off, and whether the ops described the read. */
@@ -153,20 +76,10 @@ struct SeqWalkEnd {
     bool     complete = false; /* the ops consumed the read exactly, and asked for no stop */
 };
 
-/*
- * Walk one record's ops in read order, handing each op that touches the read or the reference to the
- * matching callback: onMatch(readPos, refPos, len) for M/=/X, onInsert(readPos, len) for I/S, and
- * onDelete(len) for D/N. H/P consume neither and are not reported. An op that would run past
- * seqLength ends the walk as incomplete rather than being handed over.
- *
- * The three callbacks are templates so the walk inlines into its callers: the SEQ column is walked
- * once per read of every block, on both sides, and an indirect call per op is what it must not pay.
- *
- * The walk decides nothing about the coded form, which is the point of sharing it: the writer
- * answers an incomplete walk by storing the read's bases as they stand, the reader by resolving the
- * whole payload the same way. Both used to spell the walk out themselves, and that is how the reader
- * came to clamp where the writer fails.
- */
+/* Walk one record's ops in read order, handing each to onMatch(readPos, refPos, len) for M/=/X,
+   onInsert(readPos, len) for I/S, onDelete(len) for D/N. H/P consume neither. An op running past
+   seqLength ends the walk as incomplete. */
+
 template <class MatchFn, class InsertFn, class DeleteFn>
 static inline SeqWalkEnd seqWalkCigar(const std::vector<CigarOp>& ops, uint32_t seqLength,
                                       int64_t refPos, MatchFn onMatch, InsertFn onInsert,
@@ -215,32 +128,16 @@ bool buildSeqReferenceCodedBases(const std::vector<CigarOp>& ops, const uint8_t*
                                  uint32_t seqLength, int64_t refPos, Reference* reference,
                                  uint8_t* ref2bitScratch, uint8_t* out);
 
-/*
- * The same walk against a squash buffer the caller owns rather than the file's reference, with
- * `baseStart` the base offset that squash[0] stands for.
- *
- * This is what lets a block whose file reference cannot be addressed be coded against a reference
- * the block builds from its own alignments (see SamCodecActuator::buildBlockConsensus): that
- * consensus only covers the window its records span, so the walk needs to be told where the buffer
- * starts rather than being handed a Reference. Reading the squash directly is a scalar loop where
- * Reference::getStretch2Bits1Char uses a table, which is fine here: this path only ever runs where
- * the alternative is storing every base as a character.
- */
+/* The same walk against a caller-owned squash buffer instead of the file's reference, where
+   squash[0] stands for base offset `refPos`. */
+
 bool buildSeqSquashCodedBases(const std::vector<CigarOp>& ops, const uint8_t* seq,
                               uint32_t seqLength, int64_t refPos, const uint8_t* squash,
                               uint8_t* ref2bitScratch, uint8_t* out);
 
-/*
- * Where a record's first base sits in a squash buffer that covers the base window
- * [windowStart, windowStart + windowBases) of the file's coordinate space, or false when the
- * record cannot be coded against it at all.
- *
- * The windowed twin of seqRecordUsesReference, and the same three conditions hold; what changes is
- * that the offset is returned rebased on the window and the bound is the window's end rather than
- * the reference's. The two are deliberately separate functions rather than one parameterised by a
- * window: the mode is recorded in the block's meta, so the file-reference path and this one never
- * have to agree with each other, and the former is what every existing archive was written with.
- */
+/* The windowed twin of seqRecordUsesReference: the first base is rebased on [windowStart,
+   windowStart + windowBases), or false when the record cannot be coded against it. */
+
 bool seqRecordUsesSquashWindow(uint16_t chrId, uint16_t flag, uint64_t startPos,
                                uint32_t refConsumed, int64_t windowStart, int64_t windowBases,
                                int64_t& refPos);
@@ -271,32 +168,16 @@ struct SeqRecordPayload {
     int64_t refPos = 0;               /* where its first base sits, for that update */
 };
 
-/*
- * Code one record's bases into `coded`, the payload slot they occupy.
- *
- * This is the decision the trial and the block pass both have to make identically: a trial
- * measured on a different payload than the one the block pass writes is worthless, so the branch
- * itself lives here rather than in each caller. What differs between the two is only what they
- * bring in (the block pass has the field decoders' parsed columns, the trial parses the block's
- * text) and what they do with the result (the block pass updates the reference's statistics and
- * collects the exception characters; the trial only measures).
- *
- * A record that can consult the reference (mapped, with CIGAR operations to walk) gets one 2-bit
- * code per base, the XOR against the reference over those operations; one that cannot writes its
- * own characters instead. `coded` must hold `seqLength` bytes and `ref2bit` the record's length
- * plus the coder's unaligned-write slack.
- */
+/* Code one record's bases into `coded`. A record that can consult the reference gets one 2-bit
+   code per base (the XOR against the reference over its ops); one that cannot writes its own
+   characters. `coded` must hold `seqLength` bytes. */
 SeqRecordPayload buildSeqRecordPayload(uint16_t chrId, uint16_t flag, uint64_t startPos,
                                        uint32_t refConsumed, const std::vector<CigarOp>& ops,
                                        const uint8_t* seq, uint32_t seqLength,
                                        Reference* reference, uint8_t* coded, uint8_t* ref2bit);
 
-/*
- * The same decision against a block-local squash window instead of the file's reference (see
- * buildSeqSquashCodedBases / seqRecordUsesSquashWindow). `refPos` in the result stays absolute, in
- * the file's coordinate space, so it reads the same as buildSeqRecordPayload's; nothing updates
- * the reference's match statistics for such a record, there being no file reference involved.
- */
+/* The same decision against a block-local squash window. `refPos` in the result stays absolute in
+   the file's coordinate space; no reference match statistics are updated. */
 SeqRecordPayload buildSeqSquashRecordPayload(uint16_t chrId, uint16_t flag, uint64_t startPos,
                                              uint32_t refConsumed, const std::vector<CigarOp>& ops,
                                              const uint8_t* seq, uint32_t seqLength,
@@ -304,32 +185,16 @@ SeqRecordPayload buildSeqSquashRecordPayload(uint16_t chrId, uint16_t flag, uint
                                              int64_t windowBases, uint8_t* coded,
                                              uint8_t* ref2bit);
 
-/*
- * Encoder-side accumulator for one exception character: a strictly increasing list of its positions
- * in the variable-length delta form above, plus - for the one class whose form is a file-level
- * decision - the absolute form and the runs of consecutive positions.
- *
- * The positions are written in one of three forms, and the stream name says which one:
- *   "nposd" - forward deltas, varint (every character; the default)
- *   "npos"  - absolute 4-byte block offsets
- *   "nposr" - runs: one gap and one length per run of consecutive positions
- * Only the 'N' class keeps more than one of them, because which one is written is the file-level
- * verdict PreprocessInfo::nposForm: the accumulator keeps all three so that any of them can be
- * produced, whichever way the pre-selection's trial came out (see
- * SamCodecActuator::writeSeqExceptionStreams). A lone "npos" with no "ch" is the first layout's
- * single list, which held 'N' and 'n' together and is still read; see the decoder in
- * sam_field_layout.h, where the names themselves live too.
- */
+/* Encoder-side accumulator for one exception character: positions as varint deltas, plus - for
+   the class the form verdict may ask for - the absolute form and the runs of consecutive
+   positions. Stream names: "nposd" (forward varint deltas, default), "npos" (absolute 4-byte),
+   "nposr" (runs). */
 struct SeqExceptionClass {
-    /* Set on the class the verdict may ask for a form of; positions and runs are kept for it and
-       nothing else, since no other class ever needs them. */
+    /* Set on the class the form verdict may ask for; positions and runs are kept for it. */
     bool keepForms = false;
     std::vector<uint32_t> abs;
     std::vector<uint8_t> varint;
-    /* Runs of consecutive positions: one gap (from the end of the previous run) and one length
-       each. The N positions of ERR14949932 arrive in runs of 34.3 on average, 98% of them
-       exactly 35 long, so describing them as runs makes the source ~1% of the size of the
-       one-varint-per-position form before the coder sees either. */
+    /* Runs of consecutive positions: one gap and one length each. */
     std::vector<uint32_t> runGaps;
     std::vector<uint32_t> runLens;
     uint32_t runStart = 0;

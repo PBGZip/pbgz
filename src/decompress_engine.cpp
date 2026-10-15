@@ -38,7 +38,7 @@ BlockReader* DecompressEngine::createBlockReader() {
     PbgzBlockReader* pbgzReader = MemoryUtil::safeNewClass<PbgzBlockReader>(ioReader);
     pbgzReader->init();
     baseFileMeta = pbgzReader->getBaseFileMeta();
-    // Read back the block-size upper bound written during compression, for the actuator to pre-allocate its output buffer (see PbgzEngine::fileBlockSize)
+    // Block-size upper bound written during compression, for the actuator's output buffer
     if (baseFileMeta.getMetaData().isMember("block_size")) {
         fileBlockSize = baseFileMeta.getMetaData("block_size").asUInt();
     }
@@ -46,9 +46,7 @@ BlockReader* DecompressEngine::createBlockReader() {
     if (dynamicFileMeta.getMetaData().isMember("qual_prior")) {
         (void)unpackQualPrior(pbgzReader, dynamicFileMeta.getMetaData("qual_prior"));
     }
-    /* POS delta prior: hex-encoded in the file meta (512 bytes -> 1024 hex
-     * chars). Parse it once here; the actuator applies it to every coder_arith
-     * instance it builds. */
+    /* POS delta prior: hex-encoded in the file meta, parsed once here. */
     if (dynamicFileMeta.getMetaData().isMember("pos_prior")) {
         const std::string& hex = dynamicFileMeta.getMetaData("pos_prior").asString();
         auto nib = [](char c) -> int {
@@ -87,7 +85,7 @@ BlockReader* DecompressEngine::createBlockReader() {
                 break;
             }
 
-            // Parse the p parameter, format like chr1:100-200, convert the part before : to chrID, the part before and after - for the reference gene start position
+            // Parse refeGenePos (chr1:100-200) into refPosChrName/refPosBegin/refPosEnd
             size_t colonPos = parameter.refeGenePos.find(':');
             if (colonPos == std::string::npos) {
                 refPosChrName = parameter.refeGenePos;
@@ -111,12 +109,8 @@ BlockReader* DecompressEngine::createBlockReader() {
 
 BlockWriter* DecompressEngine::createBlockWriter() {
     if (parameter.isDecToBam) {
-        /* -b: convert the decompressed SAM text to standard BAM when writing.
-           The writer does its SAM->BAM conversion and BGZF deflate in parallel, on the same
-           -t-derived budget the compression side gives its BGZF inflate (a quarter of -t, at
-           least one thread): the pipeline's blocks already spread over -t threads, so the BAM
-           container's own parallel stage is kept to its share instead of saturating the cores.
-           See bamBgzfThreadNum. */
+        /* -b: write BAM. SAM->BAM conversion and BGZF deflate run in parallel on the
+           same -t-derived budget as the compression side's inflate (see bamBgzfThreadNum). */
         BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(
             ioWriter, bamBgzfThreadNum(parameter.threadNum));
         if (blockWriter == nullptr) {
@@ -138,7 +132,7 @@ void DecompressEngine::releaseBlockReader(BlockReader* &blockReader) {
 }
 
 void DecompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
-    /* The BamWriter under -b needs finalization: flush the residual BGZF block and append the EOF marker */
+    /* Under -b, finish the BamWriter: flush the residual BGZF block and append the EOF marker. */
     BamWriter* bamWriter = dynamic_cast<BamWriter*>(blockWriter);
     if (bamWriter != nullptr && 0 != bamWriter->finish()) {
         LOG_ERROR("Bam writer finish failed.");
@@ -146,22 +140,8 @@ void DecompressEngine::releaseBlockWriter(BlockWriter* &blockWriter) {
     MemoryUtil::safeDeleteClass(blockWriter);
 }
 
-/*
- * Prior for random access: seek to the file-level offset, then hand it to the block
- * reader for parsing.
- *
- * Sequential decompression only needs the consumer to claim the prior when it is
- * passed by; random access, however, jumps straight to an arbitrary data block whose
- * package's prior block may never have been read, so the prior must be retrievable on
- * demand. The offset points at the block container header (where the magic number
- * lives), so after seeking, readBlock suffices; the container's magic number, length,
- * and checksum are still handled by the block reader, not parsed manually here.
- *
- * As with unpackReference, the offset is a distance relative to the start of the
- * package, not an absolute position; after concatenating with cat, the package start
- * must be added. The read position must also be restored when done, otherwise the main
- * loop would continue reading from after the prior block.
- */
+/* Load the QUAL prior on demand for random access: seek to its package-relative offset,
+   read the block, and claim it. The read position is restored afterward. */
 bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value& priorMeta) {
     if (blockReader == nullptr || !priorMeta.isMember("offset")) {
         return false;
@@ -177,7 +157,7 @@ bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value
     const int64_t packageStart = (int64_t)blockReader->getCurrentFileStart();
     const int64_t blockAddress = packageStart + offset;
     const int64_t packageIndex = blockReader->getCurrentFileIndex();
-    /* The offset is only used to seek and fetch the block; registration and lookups always use the package index. */
+    /* The offset is only used to seek; registration and lookup use the package index. */
     if (qualPriorConsumer.forPackage(packageIndex) != nullptr) {
         return true;
     }
@@ -206,9 +186,7 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
         return false;
     }
 
-    /* refe metadata may be in either baseFileMeta or dynamicFileMeta.
-       baseFileMeta is written before startWorkPreProc adds refe, so on
-       file-to-file compression the refe is only in dynamicFileMeta. */
+    /* refe metadata may live in baseFileMeta or dynamicFileMeta. */
     bool hasRefe = baseFileMeta.getMetaData("refe").isObject();
     if (!hasRefe) {
         hasRefe = dynamicFileMeta.getMetaData().isMember("refe");
@@ -261,20 +239,8 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
         return false;
     }
     pRefGene->setNiFile(parameter.niIndexFile);
-    /*
-     * SAM/BAM decompression only needs the reference base sequence (getSquash/
-     * getStretch and so on); it does not need the read-mapping hash table from
-     * makeIndex (useful only for locating FASTQ reads). The compression side records
-     * the source file type in srcFileType (in baseFileMeta for file input, in
-     * dynamicFileMeta for piped input).
-     *
-     * Old-version files, or files compressed from piped input, may lack this field:
-     * getMetaData fabricates null for a missing key and asUInt() returns 0. This is
-     * explicitly handled here — the type is adopted only when it is recognized as a
-     * known type, otherwise it is treated conservatively as unknown (going through
-     * makeIndex). If an explicitly specified reference cannot be loaded, decompression
-     * must abort, otherwise it would produce data that does not match expectations.
-     */
+    /* SAM/BAM need only the reference base sequence, so skip the read-mapping index;
+       the type comes from srcFileType, defaulting conservatively to unknown. */
     BlockType srcType = TYPE_UNKNOW;
     {
         const Json::Value* meta = nullptr;
@@ -329,7 +295,7 @@ int64_t DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
         return -1;
     }
 
-    // Read the beginning block of the Pbgz file to complete the file header parsing
+    // Read the first block to parse the Pbgz file header
     std::unique_ptr<RoughIOBlock> inBlockPtr = std::make_unique<RoughIOBlock>(getBlockSize());
     if (inBlockPtr == nullptr) {
         LOG_ERROR("Get free block failed.");
@@ -349,15 +315,8 @@ int64_t DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
             break;
         }
         if (BlockUtil::isAuxiliaryBlock(inBlockPtr->getBlockType())) {
-            /*
-             * Header pre-reading must also obey the rule that "an auxiliary block is
-             * not a data block". The prior block now sits before the file's first data
-             * block; parsing it as a SAM header would yield headLineNumber == 0 and
-             * exit the loop early, so chromosome information would never be registered
-             * and region queries would return empty.
-             * Hand it to the consumer as well: the prior read on this path is the same
-             * block the sequential stream would read.
-             */
+            /* Auxiliary blocks (e.g. the QUAL prior) are not data blocks; hand them to
+               the consumer rather than parsing them as a SAM header. */
             PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
             (void)offerAuxBlock(inBlockPtr.get(),
                                 pbgzReader ? pbgzReader->getCurrentFileIndex() : 0);
@@ -444,9 +403,7 @@ bool QualPriorConsumer::claim(RoughIOBlock* blockPtr, int64_t packageIndex) {
     }
 
     {
-        /* If already cached, claim it directly without decompressing again: the same
-           prior may be fetched early by a random-access seek and then encountered again
-           in the sequential stream, and both paths point at the same absolute address. */
+        /* Already cached (e.g. fetched by a random-access seek): claim without re-decompressing. */
         std::lock_guard<std::mutex> lock(mutex);
         if (byPackage.find(packageIndex) != byPackage.end()) {
             return true;
@@ -509,27 +466,12 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
             return false;
         }
         readPos = fileReader->getCurrentPos();
-        /*
-         * The offset stored in refe is a distance relative to the head of this
-         * compression package, not an absolute position in a concatenated file.
-         *
-         * During compression the output always starts writing at 0, so the two happen
-         * to be equal in the single-package case, and treating the value as an absolute
-         * position has worked for a long time. But once multiple packages are
-         * concatenated with cat, the second package is shifted down by the total length
-         * of all preceding packages; seeking to the absolute position then lands in the
-         * previous package's data region, the reference cannot be unpacked, and
-         * decompression stops at the end of the first package — which is exactly why
-         * cat concatenation failed when a reference genome was involved.
-         *
-         * Adding the current package's start restores the address. For a single package
-         * the start is 0, so the behavior is byte-for-byte identical to before the
-         * change.
-         */
+        /* refe offset is relative to this package's start, not absolute; add the
+           package start so concatenated packages still resolve. */
         fileReader->seekIO((int64_t)blockReader->getCurrentFileStart() + offset);
     }
     const int64_t pcnt = parameter.threadNum;
-    /* pcnt is runtime-dependent, so a heap vector replaces the non-standard VLA. */
+    /* Heap vector because pcnt is runtime-dependent (no VLA). */
     std::vector<RoughIOBlock*> block((size_t)pcnt);
     for (int64_t n = 0; n < pcnt; n++) {
         block[n] = MemoryUtil::safeNewClass<RoughIOBlock>(maxLen);
@@ -551,7 +493,7 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
                     if (currBlock == nullptr) {
                         return;
                     }
-                    /* First parse out current block's meta information, get corresponding line's stream information and encoder information */
+                    /* Parse this block's meta to get its stream and encoder info */
                     coder_json cmeta;
                     Json::Value refBlockMeta;
                     cmeta.decoder(currBlock->getMetaBuffer(), currBlock->getMetaLen(), refBlockMeta);
@@ -560,7 +502,7 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
                         int32_t srcLen = refBlockMeta["srclen"].asInt();
                         int32_t dstLen = refBlockMeta["dstlen"].asInt();
 
-                        /* Point to the position of data to be decompressed in current block of reference */
+                        /* Destination offset within the reference squash */
                         if (currBlock->getDataLen() != dstLen) {
                             LOG_ERROR("reference unpack failed in block %ld: encoded length expect %ld, actual is %ld",
                                 refBlockMeta["block"].asInt(), dstLen, currBlock->getDataLen());
@@ -627,7 +569,7 @@ Actuator* DecompressEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBloc
     }
 
     if (pActuator == nullptr) {
-        /* On failure, never release any block here; cleanup is uniformly handled by startWorkTask to avoid each block being returned twice. */
+        /* Don't release blocks here; cleanup is handled uniformly by startWorkTask. */
         LOG_ERROR("Not support block type: %d, blockId=%ld", inBlockPtr->getBlockType(), inBlockPtr->getBlockId());
         return nullptr;
     }

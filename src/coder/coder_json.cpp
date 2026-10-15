@@ -32,10 +32,7 @@ coder_json::~coder_json()
 {
 }
 
-/* Compress JSON data, return compressed length. If negative, it means out space is insufficient, 
- * e.g., return -28 means out_len needs to be increased by 28.
- * This function assumes out_len is sufficient, otherwise it will report an error and exit if out_len is insufficient.
- */
+/* Compress JSON data, returns compressed length; a negative value means the out buffer is too small. */
 int64_t coder_json::encoder(const Json::Value &in, uint8_t *out, const int64_t out_len)
 {
     Json::StreamWriterBuilder builder;
@@ -92,9 +89,7 @@ void coder_json::encoder(const Json::Value &in, std::string &out)
     int32_t finished;
     do
     {
-        /* Compress into the output buffer and write all of the output to
-             * the file so we can reuse the buffer next iteration.
-             */
+        /* Compress into the output buffer, appending it to `out` so the buffer can be reused. */
         ZSTD_outBuffer output = {buffOut, buffOutSize, 0};
         size_t const remaining = ZSTD_compressStream2(cctx, &output, &input, mode);
         if (ZSTD_isError(remaining))
@@ -103,10 +98,7 @@ void coder_json::encoder(const Json::Value &in, std::string &out)
             coder_exit(coder_ns::CODER_ERR_INNER, "ZSTD_compressStream2 error : %s \n", ZSTD_getErrorName(remaining));
         }
         out += std::string((char *)buffOut, output.pos);
-        /* If we're on the last chunk we're finished when zstd returns 0,
-             * which means its consumed all the input AND finished the frame.
-             * Otherwise, we're finished when we've consumed all the input.
-             */
+        /* On the last chunk, finished when zstd consumed all input and finished the frame. */
         finished = (remaining == 0);
     } while (!finished);
 
@@ -153,10 +145,7 @@ void coder_json::decoder(const uint8_t *in, const int64_t in_len, Json::Value &o
 
     if (lastRet != 0)
     {
-        /* The last return value from ZSTD_decompressStream did not end on a
-         * frame, but we reached the end of the file! We assume this is an
-         * error, and the input was truncated.
-         */
+        /* The last decompress did not end on a frame: the input was truncated. */
         ZSTD_freeDCtx(dctx);
         safe_free((void**)&buffOut);
         coder_exit(coder_ns::CODER_ERR_INNER, "EOF before end of stream: %zu\n", lastRet);

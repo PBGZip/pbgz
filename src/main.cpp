@@ -185,7 +185,7 @@ public:
                     return -1;
                 }
             } else {  // File doesn't exist, need to check directory permission
-                // At this point, output file has been converted to absolute path, must include filename
+                // Output file is absolute, so it includes a filename
                 char separator = std::filesystem::path::preferred_separator;
                 int pos = parameter.outputFile.find_last_of(separator);
                 if (pos == -1) {
@@ -240,7 +240,7 @@ public:
             }
         }
 
-        /* The index is only an acceleration mechanism; -r decides which reference is used. When the index is untrustworthy, fall back to -r and rebuild. */
+        /* -r decides the reference; the index only accelerates and can fall back. */
         if (!parameter.niIndexFile.empty()) {
             if (parameter.referenceGenic.empty()) {
                 fprintf(stderr, "--ni requires -r: the FASTA it was built from decides which reference is used.\n");
@@ -351,16 +351,7 @@ public:
             }
             name.resize(name.length() - 5);
 
-            /*
-             * The extension is determined by the output format and adjusted directly on
-             * name (it must not be appended after joining with the full path, which
-             * would produce double suffixes such as con_sorted.bam.bam):
-             *   - -b: output BAM, always .bam (replace the extension when the source
-             *     name is .sam/.bam);
-             *   - default: output SAM text; when the source file is .bam (.bam.pbgz),
-             *     the extension is changed back to .sam.
-             * FASTQ sources (e.g. .fq.gz.pbgz) keep their original name unchanged.
-             */
+            /* Choose the output extension from the output format, on the bare name. */
             if (parameter.isDecToBam) {
                 if (PathUtil::suffixCheck(name, ".sam") || PathUtil::suffixCheck(name, ".bam")) {
                     name.resize(name.length() - 4);
@@ -503,7 +494,7 @@ public:
             inputFile = inputFile.substr(0, inputFile.length() - 3);
         }
 
-        // Split the string into two parts based on the position of the last . in inputFile
+        // Split the name around its last dot
         size_t lastDotPos = inputFile.find_last_of('.');
         if (lastDotPos != std::string::npos && lastDotPos > 0) {
             std::string fileNamePrefix = inputFile.substr(0, lastDotPos);
@@ -544,12 +535,7 @@ public:
     }
 } ;
 
-/*
- * The reference index is only generated and loaded at the path explicitly given by -r;
- * no implicit caching is done. If an implicitly cached index were modified externally,
- * subsequent compressions would silently produce wrong output with no way to notice;
- * explicit specification keeps the index file controllable and verifiable.
- */
+/* Generate/load the reference index only at the path given by -r; no implicit caching. */
 class MakeRefCmdProc : public CommandProc {
 public:
     MakeRefCmdProc(PbgzParameter& para) : CommandProc(para) {}
@@ -796,18 +782,17 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Use command line argument processing logic
+    // Parse command line arguments
     PbgzParameter parameter;
 
     // Build option string containing only options supported by current subcommand
     std::string argOption = "";
-    // The long-option table plus its all-zero terminator. It is built at run time, so it has to be a
-    // container: a variable-length array is not standard C++ (clang: -Wvla-cxx-extension).
+    // Long-option table plus its all-zero terminator; a vector, not a VLA.
     std::vector<option> longopts(pbgzArgs.size() + 1);
     int optIndex = 0;
 
     for (uint32_t i = 0; i < pbgzArgs.size(); ++i) {
-        // Check if subcommand option is supported by current subcommand
+        // Keep only options supported by this subcommand
         bool supported = false;
         for (char supportedArg : selectedSubCommand->args) {
             if (pbgzArgs[i].argShort == supportedArg) {
@@ -912,7 +897,7 @@ int main(int argc, char** argv) {
             parameter.verbose = true;
             break;
         case 'm': {
-            /* archive is the default; only an explicit "fast" (or "f") changes it. */
+            /* Default archive; explicit "fast" changes it. */
             parameter.mode = PBGZ_MODE_ARCHIVE;
             if (optarg != nullptr && (strcmp(optarg, "fast") == 0 || strcmp(optarg, "f") == 0)) {
                 parameter.mode = PBGZ_MODE_FAST;
@@ -932,7 +917,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Process remaining arguments (such as input files, etc.)
+    // Process remaining arguments (input files)
     if (optind < argc) {
         if (argc - optind > 1) {
             fprintf(stdout, "Only one file is allowed");
@@ -966,7 +951,7 @@ int main(int argc, char** argv) {
     int32_t ret = processor->startEngine();
     if (ret != 0) {
         LOG_ERROR("Command start failed");
-        /* Abnormal exit: clean up and delete any output file that was created (e.g. a failure caused by a missing reference genome). */
+        /* Abnormal exit: clean up and delete any output file created. */
         PbgzManager::getInstance().exitProc(ret, nullptr);
     }
 

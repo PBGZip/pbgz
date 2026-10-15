@@ -30,24 +30,14 @@
 #include "actuator.h"
 
 
-/*
- * Claimant of the QUAL prior. When the reader thread passes a QUAL_PRIOR block, it
- * decompresses and stores it; worker threads use it afterwards.
- *
- * The blob is written by the reader thread and read by worker threads with no other
- * synchronization point between them, so this carries its own lock; reads happen only
- * when decoders are constructed, not on the hot path.
- */
+/* Claims the QUAL prior: the reader thread decompresses and stores it, worker threads
+   read it. Carries its own lock since there is no other synchronization point. */
 class QualPriorConsumer : public AuxBlockConsumer {
 public:
     bool claim(RoughIOBlock* blockPtr, int64_t packageIndex) override;
 
-    /*
-     * Return the prior for the given package index, or an empty payload if there is
-     * none.
-     * A shared_ptr is returned so the consumer can hold the data until it finishes
-     * decompressing, unaffected by the claimant's subsequent actions.
-     */
+    /* Return the prior for the given package index, or empty. A shared_ptr keeps it
+       alive for the caller's decompression. */
     AuxPayloadPtr forPackage(int64_t packageIndex) const {
         std::lock_guard<std::mutex> lock(mutex);
         std::map<int64_t, AuxPayloadPtr>::const_iterator it = byPackage.find(packageIndex);
@@ -126,10 +116,8 @@ private:
 private:
     bool readHeadBlockFlag;
     QualPriorConsumer qualPriorConsumer;
-    /* File-level POS delta prior, parsed once from the dynamic file meta
-     * (hex-encoded 512-byte weight table). Written by the engine init and read
-     * by worker threads only when decoders are constructed; publication before
-     * the first block dispatch gives the happens-before. */
+    /* File-level POS delta prior, parsed once from the dynamic file meta (hex-encoded
+       512-byte weight table); read-only after engine init. */
     AuxPayloadPtr posPriorBlob;
     std::string refPosChrName;
     uint32_t refPosBegin;

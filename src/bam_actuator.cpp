@@ -1,13 +1,24 @@
 /*
- * bam_actuator.cpp - column-wise BAM compression without SAM text
+ * bam_actuator.cpp - column-wise BAM compression without SAM text. See bam_actuator.h.
+ * Copyright (C) 2025 PBGZip
  *
- * See bam_actuator.h. Every column is encoded by the coder that preprocessing
- * picked for the matching SAM field, so the encoder of no field changes; what
- * changes is that the bytes are the values BAM already stores instead of their
- * textual rendering.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * Decompression is not implemented yet - this actuator exists to measure what
- * the structured representation does to the compression ratio.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include <map>
@@ -49,8 +60,7 @@ static const char kBamRefActg4[4] = {'A', 'C', 'T', 'G'};
 static inline uint32_t cigLen(uint32_t v) { return v >> 4; }
 static inline uint32_t cigOp(uint32_t v) { return v & 0xf; }
 
-/* Shared by encoder and decoder so the per-record reference decision is
-   symmetric. cigar/ops may be empty for unaligned records. */
+/* Shared by encoder and decoder so the per-record reference decision is symmetric. */
 static bool seqRefEligible(uint32_t flag, int32_t refId, int32_t pos,
                            const uint32_t* ops, size_t nOps, int32_t lSeq,
                            int64_t& chrStart, int64_t& refBase,
@@ -106,9 +116,7 @@ static uint32_t bamCigRefSpan(const uint32_t* ops, size_t n)
     return s;
 }
 
-/* What a BAM record has to satisfy before TLEN can be inferred, and then the shared rule itself
-   (samTemplateLen in sam_field_rules.h), which the SAM actuator applies to the same column.
-   mateSpan = 0 when the mate is not in this block. */
+/* Whether TLEN can be inferred, applying the shared rule (samTemplateLen); mateSpan = 0 when the mate is not in this block. */
 static int32_t bamTlenCompute(int64_t flag, int64_t refId, int64_t pos,
                               int64_t nextRefId, int64_t nextPos,
                               uint32_t selfSpan, uint32_t mateSpan, bool minusOne)
@@ -222,8 +230,7 @@ int32_t BamCodecActuator::encodeRawBwtColumn(uint32_t fieldIdx, const uint8_t* d
 
 int32_t BamCodecActuator::encodePosColumn(Json::Value& streamMeta)
 {
-    /* POS: zigzag-varint delta against the previous record, baseline reset on a
-       chromosome switch - the same transform the SAM path applies. */
+    /* POS: zigzag-varint delta against the previous record, reset on a chromosome switch. */
     std::vector<uint8_t> buf;
     buf.reserve(cols->pos.size() * 2);
     int64_t prev = 0;
@@ -255,11 +262,7 @@ int32_t BamCodecActuator::encodePnextColumn(Json::Value& streamMeta)
 
 int32_t BamCodecActuator::encodeTlenColumn(Json::Value& streamMeta)
 {
-    /* Decoder-side TLEN rebuild (same rule as the archive path): TLEN is only
-       stored as exceptions. Paired sorted reads whose mate is in the same
-       block are reconstructed from POS/PNEXT/CIGAR under the per-block
-       convention (minusOne / plain); everything else is an exception. If the
-       exceptions are not smaller than plain varints, fall back to plain. */
+    /* TLEN is stored as exceptions unless plain varints are smaller; paired reads with an in-block mate are reconstructed. */
     std::vector<uint32_t> span(cols->nRecords, 0);
     {
         size_t cOff = 0;
@@ -341,8 +344,7 @@ int32_t BamCodecActuator::encodeTlenColumn(Json::Value& streamMeta)
 
 int32_t BamCodecActuator::encodeCigarColumn(Json::Value& streamMeta)
 {
-    /* One varint per BAM cigar op, plus the per-record op count as its own
-       column (the payload alone would not be splittable). */
+    /* One varint per BAM cigar op, plus the per-record op count as its own column. */
     std::vector<uint8_t> buf;
     buf.reserve(cols->cigar.size() * 2);
     for (size_t i = 0; i < cols->cigar.size(); ++i) {
@@ -377,14 +379,7 @@ bool BamCodecActuator::seqReferenceUsable()
 
 int32_t BamCodecActuator::encodeSeqColumnRef(Json::Value& streamMeta)
 {
-    /*
-     * seqRefEligible addresses the reference by @SQ index (its cumulative length), so it is only
-     * meaningful when the FASTA really is laid out the header's way. When it is not, every
-     * record's diff would be taken against foreign bases - worse than storing the bases - so the
-     * column falls to the raw path instead. The verdict is a property of the run and is cached
-     * per actuator; the raw path is named in the stream meta, which is what the decoder reads,
-     * so this side needs no counterpart in the decoder.
-     */
+    /* seqRefEligible addresses the reference by @SQ index, so only use it when the FASTA matches the header; else fall to the raw path. */
     const bool noRef = !seqReferenceUsable();
     const int64_t refMaxBase = noRef ? 0 : ((int64_t)pRefeGene->getSquashLength() << 2);
 
@@ -431,14 +426,7 @@ int32_t BamCodecActuator::encodeSeqColumnRef(Json::Value& streamMeta)
             if (canRef && (refBase + (int64_t)refConsumed + 8 > refMaxBase))
                 canRef = false;
             if (canRef) {
-                /*
-                 * Mark the reference span this record matched against. Without
-                 * it the packed reference is sanitised to zero on the way out
-                 * (sanitizeRefSquash keeps only matched bytes), so decompression
-                 * would rebuild SEQ from an all-zero reference - i.e. all 'A'.
-                 * Same contract as the SAM path (SamCodecActuator calls
-                 * updateMatchedGene with the CIGAR reference-consumed span).
-                 */
+                /* Mark the reference span this record matched against, or decompression rebuilds SEQ from a zeroed reference. */
                 pRefeGene->updateMatchedGene((uint64_t)refBase, refConsumed);
             }
         }
@@ -491,9 +479,7 @@ int32_t BamCodecActuator::encodeSeqColumnRef(Json::Value& streamMeta)
 
 int32_t BamCodecActuator::encodeQualColumn(Json::Value& streamMeta)
 {
-    /* fast mode codes QUAL as one whole column in payload order. Missing
-       records were expanded to '*' during parsing, so lSeq sums to qual.size();
-       the decoder splits it back per record and re-detects missing quals. */
+    /* QUAL is one whole column in payload order; the decoder splits it per record and re-detects missing quals. */
     return encodeColumn(SAM_QUAL, CoderType::BWT_CM, cols->qual.data(), cols->qual.size(),
                         streamMeta, "QUAL", "block");
 }
@@ -511,13 +497,7 @@ int32_t BamCodecActuator::compress()
         return -1;
     }
 
-    /*
-     * Fast mode: the reader thread only streamed the raw BAM records
-     * ([u32 size][record]...) into the block buffer; the columns are parsed
-     * here, on the worker that compresses this block. Every worker parses its
-     * own block concurrently, so record->column work does not serialise on the
-     * reader (where it was the second-largest cost after inflate).
-     */
+    /* Fast mode: parse the raw record stream into columns here, on the compressing worker, not on the reader. */
     if (!cols->columnsBuilt) {
         PBGZ_PROF_SCOPE(pbgzprof::CODER_PARSE);
         const uint8_t* stream = inBlockPtr->getBuffer() + cols->recordStreamOffset;
@@ -529,8 +509,7 @@ int32_t BamCodecActuator::compress()
         }
     }
 
-    /* The output buffer is sized from the raw block; structured columns are
-       smaller than the SAM text they replace, so this is a safe upper bound. */
+    /* Structured columns are smaller than the SAM text they replace, so the raw block is a safe upper bound. */
     const size_t need = (size_t)inBlockPtr->getDataLen() + 4096;
     if (outBlockPtr->getBufferSize() < need) {
         if (0 != outBlockPtr->ensureCapacity(need)) {
@@ -541,8 +520,7 @@ int32_t BamCodecActuator::compress()
 
     Json::Value streamMeta;
 
-    /* QNAME: NUL-free by construction, so a '\n' separator makes the stream
-       self-delimiting without a separate length column. */
+    /* QNAME: '\n'-separated, self-delimiting, so no length column is needed. */
     std::vector<uint8_t> qnameStream;
     qnameStream.reserve(cols->qname.size() + cols->nRecords);
     size_t qoff = 0;
@@ -615,8 +593,7 @@ int32_t BamCodecActuator::compress()
         return -1;
     }
 
-    /* SEQ: encode against the reference when available (per-base diff stream),
-       otherwise the whole text column. */
+    /* SEQ: per-base diff against the reference when available, else the whole text column. */
     if (encodeSeqColumnRef(streamMeta) < 0) {
         return -1;
     }
@@ -701,8 +678,7 @@ inline void cigarOpText(uint32_t op, std::string& out)
     out += (code < 11) ? kOps[code] : 'M';
 }
 
-/* Render raw BAM aux bytes (2-char tag, type, payload...) into SAM tag text
-   appended to 'line', mirroring BamBlockReader::appendBamAux. */
+/* Render raw BAM aux bytes into SAM tag text appended to 'line'. */
 void renderBamTags(const uint8_t* p, const uint8_t* end, std::string& line)
 {
     while (p + 3 <= end) {
@@ -792,8 +768,7 @@ int32_t BamCodecActuator::decompress()
         return 0;
     }
 
-    /* chromosome name table: header decoding populated SamInfo from @SQ lines in
-       the same order BAM stores the references. */
+    /* Chromosome names in the order BAM stores the references. */
     std::vector<std::string> chrNames;
     {
         const std::vector<ChromosomeInfo>& all =
@@ -804,14 +779,7 @@ int32_t BamCodecActuator::decompress()
         }
     }
 
-    /*
-     * `-b` output: turn the records into BAM binary right here, on the
-     * decompression worker that owns this block, instead of emitting SAM text
-     * for the single writer thread to re-parse. That conversion used to
-     * dominate `-b` (see BamWriter). The name->id map mirrors the @SQ table
-     * BamWriter builds from the header block, so both paths resolve RNAME and
-     * RNEXT identically.
-     */
+    /* `-b` output: build BAM records here on the decompression worker instead of re-parsing SAM text on the writer thread. */
     const bool bamOut = (pbgzEngine != nullptr) && pbgzEngine->getParameter().isDecToBam;
     std::map<std::string, int32_t> refIndex;
     if (bamOut) {
@@ -1068,9 +1036,7 @@ int32_t BamCodecActuator::decompress()
                     }
                 }
                 while (rd < len) {
-                    /* The encoder's tail loop advances the read offset; the
-                       decoder must too, or it spins on the same base until the
-                       diff stream runs out. */
+                    /* Advance the read offset like the encoder's tail loop, or it spins on one base. */
                     if (dfi >= raw.size()) {
                         LOG_ERROR("BamCodecActuator::decompress: SEQR diff stream exhausted");
                         return -1;
@@ -1122,10 +1088,7 @@ int32_t BamCodecActuator::decompress()
             tlen[tlenExcLine[i]] = tlenExcVal[i];
     }
 
-    /* Render SAM text lines, byte-identical to the textual BAM->SAM path.
-       With bamOut the line is only an intermediate: bamScratch turns it into
-       the BAM bytes appended to the block, and the writer thread just frames
-       them into BGZF (BamWriter::writeBlock). */
+    /* Render SAM text lines, byte-identical to the textual BAM->SAM path; with bamOut the line is an intermediate. */
     bamrec::BamRecordScratch bamScratch;
     size_t tagOff = 0;
     size_t qualReadOff = 0;

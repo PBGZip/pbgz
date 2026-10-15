@@ -22,15 +22,10 @@
  */
 
 /*
- * The SEQ column of both formats is a byte stream that is written in the same handful of shapes:
- * positions and lengths as base-128 varints, and the reference match stream either whole or split
- * into zero runs and the values that follow them. Those shapes know nothing about records,
- * references or CIGARs, so they live here rather than inside either format's module - the SAM side
- * grew them first and the FASTQ side uses the very same ones, which is what this file exists for.
- *
- * The varint helpers are the more general half: they are what the SAM field layouts and the QNAME
- * column write and read their numbers with too, so they carry plain names despite having grown up
- * next to the TLEN payload that first needed them.
+ * Byte-level helpers shared by the SEQ columns of both formats: positions and lengths as base-128
+ * varints, and the reference match stream either whole or split into zero runs plus values. They
+ * know nothing about records, references or CIGARs. The varint helpers are also used by the SAM
+ * field layouts and the QNAME column.
  */
 #ifndef _SEQ_STREAM_UTIL_H_
 #define _SEQ_STREAM_UTIL_H_
@@ -39,12 +34,8 @@
 #include <memory>
 #include <vector>
 
-/*
- * LEB128 varint and zigzag helpers, used by the position, length and numeric sub-streams (the
- * names date from the TLEN stream, which was the first to replace a fixed-width layout with them).
- * Both replace layouts whose high bytes were almost always 0, and zigzag keeps small negative
- * differences small by moving the sign into the low bit.
- */
+/* LEB128 varint and zigzag helpers for the position, length and numeric sub-streams; zigzag keeps
+   small negative deltas small by moving the sign into the low bit. */
 static inline uint32_t writeVarint(uint8_t* p, uint32_t v) {
     uint32_t n = 0;
     while (v >= 0x80) {
@@ -83,8 +74,7 @@ static inline void appendVarint64(std::vector<uint8_t>& out, uint64_t value)
     out.push_back((uint8_t)value);
 }
 
-/* How many bytes appendVarint64 would write for this value, without writing them: the size a
-   column would take in a varint layout, for a caller deciding between two of them. */
+/* Bytes appendVarint64 would write for this value, without writing them. */
 static inline uint32_t varintLen64(uint64_t value)
 {
     uint32_t n = 1;
@@ -107,8 +97,7 @@ static inline int64_t unzigzag64(uint64_t value)
     return (int64_t)((value >> 1) ^ (uint64_t)(-(int64_t)(value & 1)));
 }
 
-/* Reads one varint from buf[off], advancing off; false when it runs off the end or is longer than
-   five bytes. */
+/* Read one varint from buf[off], advancing off; false on end or longer than five bytes. */
 static inline bool readVarint(const uint8_t* buf, uint32_t len, uint32_t& off, uint32_t& value)
 {
     uint32_t result = 0;
@@ -127,9 +116,7 @@ static inline bool readVarint(const uint8_t* buf, uint32_t len, uint32_t& off, u
     }
 }
 
-/* Same as readVarint, for the values that need more than 32 bits (the reference positions of the
-   FASTQ SEQ column are deltas of 64-bit coordinates); false when it runs off the end or is longer
-   than ten bytes. */
+/* readVarint for values needing more than 32 bits; false on end or longer than ten bytes. */
 static inline bool readVarint64(const uint8_t* buf, uint32_t len, uint32_t& off, uint64_t& value)
 {
     uint64_t result = 0;
@@ -148,15 +135,8 @@ static inline bool readVarint64(const uint8_t* buf, uint32_t len, uint32_t& off,
     }
 }
 
-/*
- * The two halves of a match stream split into runs and values.
- *
- * The match stream is a sparse 0..3 byte stream in which a block whose reads all take their bases
- * from the reference is ~99% zeros. When the zero share is high enough to pay for it, the stream is
- * replaced by two independent sub-streams: this one (the varint run lengths of the zero runs) and
- * the surviving non-zero values, one byte each. The decision is splitSeqMatchStream's, and its two
- * halves are the "m" and "mval" sub-streams.
- */
+/* The two halves of a match stream split into runs and values: the varint run lengths of the zero
+   runs, and the surviving non-zero values one byte each (the "m" and "mval" sub-streams). */
 struct SeqRleSplit {
     bool useRle = false;
     std::unique_ptr<uint8_t[]> run;   /* varint run lengths of the zero runs */
@@ -166,22 +146,9 @@ struct SeqRleSplit {
     uint32_t nonZero = 0;             /* how many bytes were not zero, i.e. what the threshold saw */
 };
 
-/*
- * Whether the match stream is split, and the split itself when it is.
- *
- * The verdict is per block and depends only on the payload: RLE is taken when at least 98% of the
- * bytes are zero. The crossover is sharp and was measured on SAM blocks built with a known fraction
- * of reads taken from the reference: at 99.0% zeros the split wins by 2.3%, at 95.6% it already
- * loses by 12%, and the two kinds of block production actually hands over sit three orders of
- * magnitude away from the line (all reads from the reference: 99.2% zeros; none of them: 30-36%).
- * Below the threshold, splitting is worse than useless: each surviving value then costs one byte of
- * "mval" plus about one of run length, so the coders see 14%-39% more input, and the two halves are
- * no longer adjacent, which costs most where the data repeats across reads.
- *
- * A block whose match stream is not split is written byte-for-byte as it was before the split
- * existed, so nothing here needs a format version: the decoder dispatches on whether the "m"
- * sub-stream's meta carries the "rle" member.
- */
+/* Whether the match stream is split, and the split itself when it is. The verdict is per block:
+   RLE is taken when at least 98% of the bytes are zero. The decoder dispatches on whether the "m"
+   sub-stream's meta carries the "rle" member. */
 static inline SeqRleSplit splitSeqMatchStream(const uint8_t* match, uint32_t matchLen)
 {
     SeqRleSplit split;

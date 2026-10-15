@@ -31,22 +31,21 @@
 #include "io_block.h"
 
 /*
- * Candidate coders that the pre-selector may trial-compress with.
- * The magic strings match what each coder writes into coder_io::meta,
- * so the decompression side can dispatch on them unchanged.
+ * Candidate coders the pre-selector may trial-compress with. Magic strings match what
+ * each coder writes into coder_io::meta, so decompression can dispatch on them.
  */
 enum class CoderType : uint8_t {
     BWT_CM = 0,   /* coder_bwt_cm: BWT + context model (current default)   */
     FC,           /* coder_fc:     LZP + BWT + MTF + context range coder   */
-    SIMPLE_RC,    /* coder_simple_rc: lossy, removed from the encode/decode path, kept only as an enum placeholder */
-    FCV2,         /* coder_fcv2:   context-mixing coder for quality values, only for the SAM QUAL column */
+    SIMPLE_RC,    /* coder_simple_rc: lossy, removed; kept only as an enum placeholder */
+    FCV2,         /* coder_fcv2:   context-mixing coder for quality values (SAM QUAL only) */
     QUAL,         /* coder_qual:   quality-specific context model coder    */
-    AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder, for regular SAM fields */
+    AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder */
     ARITH,        /* coder_arith:  order-0 adaptive arithmetic byte-stream coder */
     ARITH_K,      /* coder_arith_k: htscodecs order-1 rANS byte coder (see coder_arith_k.h) */
     RANS,         /* coder_rans:   static order-0 entropy coder, fast preset only (never a trial candidate) */
     QCM,          /* coder_qcm:    order-2 context model for the quality column (see coder_qcm.h) */
-    QNAME,        /* coder_qname:  the QNAME column's own coder (single-stream layout); never a trial candidate */
+    QNAME,        /* coder_qname:  the QNAME column's own coder; never a trial candidate */
     COUNT
 };
 
@@ -77,16 +76,10 @@ enum class FieldStatus : uint8_t {
 };
 
 /*
- * Context parameter tier for the fcv2 quality coder. QualSelector picks it by trial
- * compression among a candidate set, and the set is shaped by two data
- * characteristics: the block-volume tier that follows the compression level, and
- * the mean read length (which bounds which presets are worth trialling). The
- * quality alphabet size is not used to pick a tier, even though the tier
- * rationale is stated in those terms - measurements do not support using it, see
- * candidateFcv2Cfgs. Once selected it travels with PreprocessInfo to the
- * compression side and prior training. The decoder reads the same parameter set
- * back from the stream header and does not rely on this struct. Field semantics
- * are defined in Fcv2Cfg in coder_fcv2.h.
+ * Context parameter tier for the fcv2 quality coder, picked by QualSelector's trial
+ * compression. Once selected it travels with PreprocessInfo to the compression side and
+ * prior training; the decoder reads it back from the stream header. Field semantics are
+ * defined in Fcv2Cfg in coder_fcv2.h.
  */
 struct QualFcv2Params {
     int  cycleMax    = 96;
@@ -109,23 +102,9 @@ struct FieldCodecSelection {
     uint32_t    sampleLen;
     uint32_t    bestCompLen;
 
-    /*
-     * Trial-compression results for each candidate coder: which coder, how many bytes
-     * it produced, and how many microseconds it took.
-     *
-     * The candidate set differs per field (the QUAL column has its own), so each
-     * field declares its list and the print side reads it off, rather than
-     * assuming a fixed pair of coders.
-     *
-     * The trial time exists so the selection policy can trade off compression ratio
-     * against speed instead of always picking the minimum: it is common for two coders
-     * to differ by under a percentage point in ratio while differing severalfold in
-     * throughput. Note however that the sample is only a few hundred KB to 1-2 MB, so
-     * the relative error of a single timing is not small (repeat runs of the same binary
-     * fluctuate on the order of a few percent). Treat this number as indicative of
-     * order-of-magnitude differences, not suitable for comparing two coders that differ
-     * by a few percent.
-     */
+    /* Trial-compression results per candidate coder: which coder, bytes produced, microseconds
+       taken. The candidate set differs per field, so each field declares its list. Timings are
+       indicative of order-of-magnitude differences, not small ones. */
     static const uint32_t TRIAL_MAX = 3;
     CoderType   trialCoder[TRIAL_MAX] = { CoderType::BWT_CM, CoderType::BWT_CM, CoderType::BWT_CM };
     uint32_t    trialLen[TRIAL_MAX] = { 0, 0, 0 };
@@ -144,16 +123,8 @@ struct FieldCodecSelection {
         trialCount++;
     }
 
-    /*
-     * Number of sample bytes actually used to finalize the decision, and how many
-     * rounds were run to get there.
-     *
-     * Evaluation does not compress the whole sample in one pass: it starts from a
-     * small sample and doubles it each round, stopping as soon as the leader opens up
-     * enough of a gap. Most fields are decided within the first round or two, leaving
-     * the remaining budget for the genuinely hard-to-separate fields. decidedLen being
-     * smaller than sampleLen means this field was finalized early.
-     */
+    /* Sample bytes actually used to finalize the decision, and rounds run to get there.
+       Evaluation starts small and doubles until the leader opens enough of a gap. */
     uint32_t    decidedLen = 0;
     uint32_t    rounds = 0;
 
@@ -199,20 +170,10 @@ enum FastqField : uint32_t {
 };
 
 /*
- * Result of file preprocessing.
- *
- * Preprocessing runs exactly once, independent of the compression pipeline's
- * block-level concurrency.  The first worker to arrive for a SAM/FASTQ block
- * performs the trial-compression; other workers see "in progress" and simply
- * use their default coder without blocking, so the pipeline never stalls.
- *
- * The publish pattern is lock-free: writers set `state` to DONE with
- * memory_order_release; readers acquire-load `state` and only consult `fields`
- * after seeing DONE, which gives them a consistent snapshot without locks.
- *
- * The struct is intentionally extensible: future preprocessing results (ID
- * split-symbol statistics, quality-score range, read-length histogram, ...)
- * can be added as new members without changing the selection contract.
+ * Result of file preprocessing. Preprocessing runs once, independent of block-level
+ * concurrency: the first worker to arrive runs the trial compression, others see
+ * "in progress" and use their default coder without blocking. Publication is lock-free
+ * (writer sets DONE with release, readers acquire-load it before consulting `fields`).
  */
 enum class PreprocessState : uint8_t {
     IDLE = 0,
@@ -232,94 +193,38 @@ struct PreprocessInfo {
 
     std::vector<FieldCodecSelection> fields;
 
-    /*
-     * Snapshot of the model trained by fcv2 on QUAL accumulated across blocks
-     * (up to 45 MB: first block plus subsequent pre-training blocks), together with
-     * the amount of data it was trained on.
-     *
-     * The prior travels with the preprocessing result rather than being handed to some
-     * coder instance: PreprocessInfo is the only hand-off point between the pipeline and
-     * the coder decision, so the coder layer need not know about data blocks or file
-     * offsets, preserving the layering where coder/ never depends back on src/. An empty
-     * snapshot unambiguously means no prior is available this run, letting the caller
-     * unconditionally fall back to the existing cold-start behavior.
-     */
+    /* Snapshot of the model fcv2 trained on QUAL accumulated across blocks, plus the amount
+       of data it was trained on. Empty means no prior is available this run, so the caller
+       falls back to cold start. */
     std::vector<uint8_t> qualPriorSnapshot;
     uint64_t qualPriorTrainingBytes;
 
-    /*
-     * POS delta-varint file-level prior: a packed 256 x uint16 weight table
-     * (coder_arith::kPriorBytes bytes) trained by CodecSelector on the POS
-     * preprocessing sample. Unlike the QUAL prior it is produced directly
-     * during preprocessing (the distribution is stable, no cross-block
-     * accumulation is needed), so it travels from analyze to the compression
-     * side through this snapshot and is written into the file-level meta for
-     * the decoding side. Empty means no prior.
-     */
+    /* POS delta-varint file-level prior: a packed 256 x uint16 weight table
+       (coder_arith::kPriorBytes bytes), produced directly during preprocessing and written
+       into the file-level meta. Empty means no prior. */
     std::vector<uint8_t> posPriorSnapshot;
 
-    /*
-     * Pins which coder codes the SEQ match stream ("m").
-     *
-     * The codec pre-selection sets it once per file, before any block is dispatched, from
-     * CodecSelector::selectSeqReferenceCoder - which builds the block's real match payload (the
-     * 2-bit codes XORed against the reference, the record's own characters where it cannot use
-     * it, then the same RLE split) and measures the candidates on that stream. No other stage
-     * writes it, because no other stage runs while it is still alone.
-     *
-     * A value >= 0 is honored as-is, which is how a caller - and the unit tests - forces one
-     * candidate instead of letting the trial decide. -1 means no verdict was taken, and the
-     * coder side then writes the stream with coder_bwt_cm, the coder it used before the trial
-     * existed.
-     *
-     * Holds one of CoderType's values, or -1 while unset.
-     */
+    /* Which coder codes the SEQ match stream ("m"), set once per file by the codec
+       pre-selection (CodecSelector::selectSeqReferenceCoder). A value >= 0 is honored as-is;
+       -1 means no verdict, and the coder side uses coder_bwt_cm. */
     std::atomic<int32_t> seqMatchCoder;
 
-    /*
-     * Which form the block's N positions travel in: 0 = absolute 4-byte offsets
-     * ("npos"), 1 = deltas in varints ("nposd"), 2 = runs ("nposr"), -1 while undecided.
-     *
-     * All three forms are measured and the smallest wins. The absolute offsets are monotone
-     * and smooth, which compresses better when Ns are sparse; the deltas are small and
-     * nearly constant, which wins when they are dense (ERR14949932, 11.3% N: the stream
-     * went from two thirds of the archive to a few MB; con_sorted, 0.002% N: the
-     * absolute form stays smaller). Which applies is a property of the file - the N
-     * layout is set by the sequencing data and the masking, not by the block - so it is
-     * measured on the first block that has positions and reused, which keeps the cost at
-     * one trial per file rather than one per block.
-     *
-     * The pre-selection takes it along with the coder above (one pass builds the sample both
-     * need), before any block is written. A file whose first block carries no N takes no verdict,
-     * and the write side then keeps the absolute form for every block rather than measuring a
-     * coder mid-write.
-     */
+    /* Which form the block's N positions travel in: 0 = absolute 4-byte offsets ("npos"),
+       1 = varint deltas ("nposd"), 2 = runs ("nposr"), -1 while undecided. All three are
+       measured and the smallest wins; measured once on the first block that has positions. */
     std::atomic<int32_t> nposForm;
 
-    /*
-     * Which layout writes the QNAME column: 1 = the affix segmentation, 0 = coder_qname's
-     * cross-line deduplication, -1 while undecided.
-     *
-     * Like the two above it is a property of the file's naming scheme rather than of a block - a
-     * single FASTQ's constant prefix and locally ordered fragment numbers suit the segmentation,
-     * a concatenated file's alternating prefixes and globally random numbers suit coder_qname -
-     * so the pre-selection runs both encoders on a sample of the first block and every block is
-     * written the way it says (see CodecSelector::selectQnameLayout). -1 means no verdict was
-     * taken, and the coder side keeps the affix layout.
-     */
+    /* Which layout writes the QNAME column: 1 = affix segmentation, 0 = coder_qname's
+       cross-line deduplication, -1 while undecided. Decided from a sample of the first block
+       (see CodecSelector::selectQnameLayout); -1 keeps the affix layout. */
     std::atomic<int32_t> qnameUseAffix;
 
-    /*
-     * analyze decides this file is worth training and publishing a QUAL prior for.
-     * The decision is produced during preprocessing (the RUNNING stage) and read only
-     * by the reader thread; the actual training is deferred until the reader thread has
-     * consumed the pre-training blocks (cross-block accumulation); see
-     * CompressEngine::finalizePretrain.
-     */
+    /* Whether this file is worth training and publishing a QUAL prior for; training is
+       deferred until the pre-training blocks are consumed (see
+       CompressEngine::finalizePretrain). */
     bool qualPriorRequested;
 
-    /* The initializers follow the declaration order of the members, as the language requires them
-       to be applied in it. */
+    /* Initializers follow the declaration order of the members. */
     PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
                        qualPriorTrainingBytes(0), seqMatchCoder(-1), nposForm(-1), qnameUseAffix(-1),
                        qualPriorRequested(false) {}
@@ -345,11 +250,8 @@ struct PreprocessInfo {
         return state.load(std::memory_order_acquire) == PreprocessState::DONE;
     }
 
-    /*
-     * Atomically claim the right to run preprocessing.
-     * Returns true if this caller won the claim (should run preprocessing),
-     * false if another thread is already running or has finished.
-     */
+    /* Atomically claim the right to run preprocessing. True if this caller won the claim,
+       false if another thread is already running or has finished. */
     bool tryClaim()
     {
         PreprocessState expected = PreprocessState::IDLE;
@@ -368,11 +270,8 @@ struct PreprocessInfo {
         return (idx < fields.size()) ? &fields[idx] : nullptr;
     }
 
-    /*
-     * Return the coder to use for a field.  If preprocessing is DONE and
-     * selected a coder, return it; otherwise return fallback (the actuator's
-     * default).  Safe to call from any worker without blocking.
-     */
+    /* Coder to use for a field: the selected one if preprocessing is DONE, else fallback.
+       Safe from any worker without blocking. */
     CoderType coderFor(uint32_t idx, CoderType fallback) const
     {
         if (!isDone()) {
@@ -415,11 +314,9 @@ struct PreprocessInfo {
         posPriorSnapshot = std::move(snapshot);
     }
 
-    /* The two SEQ verdicts, published by the codec pre-selection while it is still the only
-       thing running: the coder the match stream is written with, and the form the N positions
-       travel in (see CodecSelector::selectSeqReferenceCoder). Both are read by every block
-       afterwards, so they go out with the release/acquire pair the rest of PreprocessInfo uses.
-       A caller may also write them before analyze, to force one candidate - see the fields. */
+    /* The two SEQ verdicts, published by the codec pre-selection (see
+       CodecSelector::selectSeqReferenceCoder) and read by every block afterwards. A caller may
+       also write them before analyze to force one candidate. */
     void setSeqMatchCoder(int32_t coder)
     {
         seqMatchCoder.store(coder, std::memory_order_release);

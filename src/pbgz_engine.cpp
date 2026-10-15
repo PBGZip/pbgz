@@ -104,15 +104,7 @@ int32_t PbgzEngine::init() {
     coder_ns::initFcCoder();
 
     // Create queues
-    /*
-     * Input-side capacity is threadNum + 1: once the SAM header is isolated as its
-     * own block it no longer contributes to the QUAL prior pre-training count. If the
-     * capacity were exactly threadNum, the reader thread would block on the free-block
-     * queue once it filled the queue and could never accumulate the target number of
-     * pre-training blocks; finalizePretrain would never fire and the coder threads
-     * would wait forever for priorSettled -> deadlock. The extra slot lets the reader
-     * get one block ahead of the coders, so pre-training finishes before the queue fills.
-     */
+    /* Input capacity is threadNum + 1, so the reader can finish pre-training before the queue fills. */
     freeInputPool->setCapility(parameter.threadNum + 1);
     inputDataPool->setCapility(parameter.threadNum + 1);
     freeOutputPool->setCapility(parameter.threadNum << 1);
@@ -120,13 +112,7 @@ int32_t PbgzEngine::init() {
 
     uint32_t blockBufferSize = getBlockSize();
     // First push empty blocks to free queue
-    /*
-     * Input blocks are initially allocated with a fixed 1MB; reads target the size
-     * chosen by -l (getBlockSize()), and when capacity is insufficient the reader's
-     * ensureCapacity reallocs on demand. This avoids allocating large memory up front
-     * based on -l (e.g. 512MB x N at -l 9). Output blocks and the header block_size
-     * still follow -l.
-     */
+    /* Input blocks start at 1MB and grow on demand; output blocks follow -l. */
     for (uint32_t i = 0; i < freeInputPool->getCapility(); ++i) {
         RoughIOBlock* inPtr = MemoryUtil::safeNewClass<RoughIOBlock>(FIXED_INPUT_BLOCK_SIZE);
         if (inPtr == nullptr) {
@@ -150,18 +136,7 @@ int32_t PbgzEngine::init() {
         LOG_INFO("Create PipeReader.");
     } else {
         if (PathUtil::isGzFile(parameter.inputFile)) {
-            /*
-             * Standard BAM is a BGZF (gzip) stream that is indistinguishable from a .gz
-             * file byte by byte. But its gzip is the inner layer of the format and must
-             * not go through "transparent gz decompression": transparent decompression
-             * uses the Gz/FastGz readers, which cannot obtain the total length of the
-             * input file (the dynamic_cast<FileReader*> in fileDecisionProc fails), so
-             * the "is it worth writing" criterion of the QUAL prior degrades and a BAM
-             * input ends up writing a needless prior auxiliary block. Therefore BAM is
-             * always handed to FileReader + BamGzBlockReader (the latter inflates
-             * internally), the block type remains BAM, and compression behavior is
-             * aligned with SAM input.
-             */
+            /* BAM is a BGZF stream, but must bypass transparent gz decompression so the block type stays BAM. */
             if (BlockUtil::isBamFile(parameter.inputFile)) {
                 ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
                 LOG_INFO("Create FileReader (BAM).");
@@ -213,7 +188,7 @@ int32_t PbgzEngine::init() {
     }
     ioWriter->openIO();
 
-    /* Register the output file so PbgzManager can clean it up on abnormal exit (e.g. missing reference genome). */
+    /* Register the output file for cleanup on abnormal exit. */
     if (parameter.outputFile != STDOUT && parameter.outputFile != "-") {
         PbgzManager::getInstance().addOutputFile(parameter.outputFile);
     }
@@ -291,12 +266,7 @@ int32_t PbgzEngine::start() {
     outputDataPool->push(nullptr);
     writeThread.join();
 
-    /*
-     * Writing to disk must be completed and checked here. The msync inside closeIO is
-     * the point where mmap output is actually flushed back to disk, and leaving it to
-     * the destructor would run it later than start() returns, with no way to report a
-     * failure. Calling it again is harmless: closeIO nulls out mappedAddress and fd.
-     */
+    /* Flush and check the output here; closeIO is idempotent. */
     if (ioWriter != nullptr) {
         ioWriter->closeIO();
         int32_t writeErr = ioWriter->getWriteError();
@@ -307,12 +277,7 @@ int32_t PbgzEngine::start() {
         }
     }
 
-    /*
-     * Final handling of block-level errors: if any block fails to compress/decompress,
-     * the overall result cannot be trusted. Zero-length blocks are only a stopgap to
-     * keep the pipeline from deadlocking; the process must never exit successfully and
-     * leave a truncated file behind.
-     */
+    /* Fail the run if any block failed, so a truncated output is never reported as success. */
     if (taskFailed.load()) {
         LOG_ERROR("Some blocks failed during processing; result is incomplete.");
         fprintf(stderr, "Error: some blocks failed, output is incomplete.\n");
@@ -354,12 +319,7 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
         return ret;
     }
 
-    /*
-     * By definition an auxiliary block is not part of the data stream and behaves the
-     * same for every engine, so this rule can only live here. An auxiliary block that
-     * no one claims is not an error: it is the forward-compatible behavior an old
-     * version needs when reading a newer format.
-     */
+    /* An auxiliary block is not part of the data stream and is handled here for every engine. */
     if (BlockUtil::isAuxiliaryBlock(blockPtr->getBlockType())) {
         PbgzBlockReader* pbgzReader = dynamic_cast<PbgzBlockReader*>(blockReader);
         (void)offerAuxBlock(blockPtr, pbgzReader ? pbgzReader->getCurrentFileIndex() : 0);
@@ -377,27 +337,20 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
         fileType = blockPtr->getBlockType();
     }
 
-    /*
-     * The file-level decision must happen before push (enqueueing means some worker
-     * thread may start processing immediately). A SAM header block (only @ lines, no
-     * data lines) does not trigger the decision; it is deferred to the first data block,
-     * otherwise codec selection would collect no field samples and fall back to the
-     * default codec. It must be called before push; behavior of other engines is unchanged.
-     */
+    /* The file-level decision must happen before the block is enqueued; SAM header blocks are skipped. */
     if (!fileDecisionInvoked && blockReader->blockHasData(blockPtr)) {
         fileDecisionInvoked = true;
         PBGZ_PROF_SCOPE(pbgzprof::READ_DECISION);
         fileDecisionProc(blockPtr);
     }
 
-    /* Per-block accumulation work such as cross-block pre-training (used by the compression engine) is also executed before enqueueing. */
+    /* Per-block accumulation (e.g. cross-block pre-training) runs before enqueueing. */
     {
         PBGZ_PROF_SCOPE(pbgzprof::READ_PRETRAIN);
         pretrainBlockProc(blockPtr);
     }
 
-    /* Work that depends only on the input (block checksum) is done here, on the
-       reader thread, instead of on a worker thread. */
+    /* Input-only work (block checksum) is done here, not on a worker thread. */
     preDispatchBlock(blockPtr);
 
     updateInputStatics(blockPtr);
@@ -409,12 +362,7 @@ int64_t PbgzEngine::readOneBlock(BlockReader* blockReader, BlockType& fileType) 
     return ret;
 }
 
-/*
- * Returns the result of the last readOneBlock: > 0 or -2 never reach here (the loop
- * continues in those cases), 0 is a clean EOF, and -1 is a read error. Callers must
- * use this to distinguish "read to the end" from "read corrupted data" - a truncated
- * or damaged input must never be silently treated as a normal EOF.
- */
+/* Returns the last readOneBlock result: > 0 or -2 continue, 0 is EOF, -1 is an error. */
 int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
     BlockType fileType = TYPE_UNKNOW;
     int64_t ret = 0;
@@ -422,20 +370,13 @@ int64_t PbgzEngine::readBlocks(BlockReader* blockReader) {
         ret = readOneBlock(blockReader, fileType);
     } while(ret > 0 || ret == -2);
 
-    /* Finish any incomplete preprocessing after EOF/error (e.g. cross-block prior training); this must happen before pushing the termination markers. */
+    /* Finish incomplete preprocessing before pushing the termination markers. */
     readLoopPostProc();
     return ret;
 }
 
 int32_t PbgzEngine::startReadTask() {
-    /*
-     * Deliberately unnamed. This task runs on the caller's thread, and start() is called from
-     * main(), so the thread being renamed here is the main thread - whose comm is what the
-     * whole process is called: renaming it to "readtask" made ps/top/profilers report the run
-     * as "readtask" instead of "pbgz" (and every thread created afterwards inherited that name).
-     * The reader stays identifiable as the thread whose TID equals the process PID; the writer
-     * and coder threads keep their names because those are threads of their own.
-     */
+    /* Deliberately unnamed: this runs on the main thread, whose comm names the process. */
     PBGZ_PROF_SCOPE(pbgzprof::READ_TOTAL);
     BlockReader* blockReader = createBlockReader();
     if (blockReader == nullptr) {
@@ -443,9 +384,7 @@ int32_t PbgzEngine::startReadTask() {
     }
     engineReaderReady(blockReader);
     int64_t readRet = readBlocks(blockReader);
-    /* Drain any reader-side staging between the reader and the workers (the
-       archive-mode SAM render stage) before the coder end markers: every real
-       block must reach inputDataPool before the nullptr terminators. */
+    /* Drain reader-side staging before the end markers. */
     renderStageDrain();
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
         inputDataPool->push(nullptr);
@@ -482,8 +421,7 @@ int32_t PbgzEngine::startWriteTask() {
             RoughIOBlock* outBlockPtr = nullptr;
             {
                 PBGZ_PROF_SCOPE(pbgzprof::WRITE_WAIT);
-                /* A plain wait: the writer takes the next block as it arrives and holds the ones
-                   behind a missing id until it turns up (see the reordering below). */
+                /* Take blocks as they arrive; reordering happens below. */
                 outBlockPtr = outputDataPool->get();
             }
             if (outBlockPtr == nullptr) {     // Got end marker
@@ -496,22 +434,13 @@ int32_t PbgzEngine::startWriteTask() {
                 writeFilePostProc(blockWriter);
                 break;
             } else if (outBlockPtr->isSyncAux()) {
-                /*
-                 * Auxiliary blocks are position-addressed and must be handled ahead of
-                 * writeBlockPreProc / the reordering / blockId2Write: they do not belong
-                 * to the data-block id sequence, and once they slip into the sorting
-                 * logic below they would displace a data block and permanently misalign
-                 * the write pointer.
-                 */
+                /* Auxiliary blocks are position-addressed and bypass the reordering and blockId2Write. */
                 completeSyncAuxBlock(blockWriter, outBlockPtr);
             } else {
                 writeBlockPreProc(blockWriter, outBlockPtr);
                 outputSortedCache.push_back(outBlockPtr);
                 { PBGZ_PROF_SCOPE(pbgzprof::WRITE_SORT);
-                /* Strict weak ordering: with <= two equal ids compare "less" both
-                   ways, which list::sort may resolve into a wrong order - and a
-                   front block that is not the expected id stops the drain below
-                   permanently. */
+                /* Strict weak ordering: false for equal ids. */
                 outputSortedCache.sort([](const RoughIOBlock* p1, RoughIOBlock* p2) {
                     return p1->getBlockId() < p2->getBlockId();
                 }); }
@@ -550,17 +479,13 @@ void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockP
 }
 
 void PbgzEngine::completeSyncAuxBlock(BlockWriter* blockWriter, RoughIOBlock* block) {
-    /*
-     * The position must be captured immediately before writeBlock: the first byte
-     * written by writeBlock is the container magic number, so the write pointer at this
-     * instant is exactly the offset that the decompression side's readBlock needs.
-     */
+    /* Capture the write position before writeBlock: it is the container-header offset. */
     FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
     const int64_t offset = (fileWriter != nullptr) ? (int64_t)fileWriter->getCurrentPos() : -1;
 
     blockWriter->writeBlock(block);
     updateOutputStatics(block);
-    /* Return to the free pool must precede the wake-up: the emitter, once woken, may immediately request another free block. */
+    /* Return to the free pool before waking the emitter. */
     freeOutputPool->push(block);
 
     {
@@ -596,7 +521,7 @@ int32_t PbgzEngine::startWorkTask() {
 
         LOG_INFO("Coder task (%d) begin to running!", id);
 
-        /* Prior-release latch of the compression engine: coder threads wait for notification before the prior is released, and only then start pulling blocks to compress. */
+        /* Coder threads wait for the prior to be released before pulling blocks. */
         {
             PBGZ_PROF_SCOPE(pbgzprof::CODER_BARRIER);
             workStartBarrier();
@@ -606,20 +531,7 @@ int32_t PbgzEngine::startWorkTask() {
             }
         }
 
-        /*
-         * First-block serialization (a perf-branch mechanism, see firstCoderNotify):
-         * the thread with id==0 starts directly; the others wait until block 0 has been
-         * processed (preAnalysis populates shared state such as SamInfo) before being
-         * released, so that concurrent preAnalysis cannot downgrade a block to BINARY
-         * while the chromosome table is not yet ready.
-         *
-         * The wait must use a predicate: if no actuator can be built for block 0 (e.g. an
-         * unsupported block type), processing fails immediately and the release
-         * notification may be emitted before the other threads start waiting, thus being
-         * missed - a bare wait without a predicate would then block forever and deadlock
-         * the whole pipeline. The predicate re-checks coderStartSync while holding the
-         * lock; whoever sets it first wins.
-         */
+        /* First-block serialization: id==0 starts; others wait until block 0 is processed. */
 
         while (true) {
             RoughIOBlock* inBlockPtr = nullptr;
@@ -628,7 +540,7 @@ int32_t PbgzEngine::startWorkTask() {
                 inBlockPtr = inputDataPool->get();
             }
             if (inBlockPtr == nullptr) {  // Got null pointer, indicating end marker
-                /* Even when block 0 was not completed (read error / all-failed), release the others, otherwise they would block forever. */
+                /* Release the others even if block 0 failed, to avoid a deadlock. */
                 if (firstCoderNotify(true)) {
                     coderStartCond.notify_all();
                 }
@@ -653,25 +565,10 @@ int32_t PbgzEngine::startWorkTask() {
                 pActuator = createActuator(inBlockPtr, outBlockPtr);
             }
             if (pActuator == nullptr) {
-                /*
-                 * Failing to build an actuator for a single block must never exit the
-                 * loop: if a worker thread ends early, the remaining threads have to
-                 * drain the entire input queue by themselves, and if all of them exit,
-                 * the reader thread blocks forever on the bounded queue. This path takes
-                 * exactly the same cleanup as an actuatorProc failure below - return the
-                 * input block, push a zero-length block with the same id so the writer
-                 * can keep advancing, then continue with the next block.
-                 */
+                /* A failed actuator must not exit the loop; do the same cleanup as actuatorProc failure. */
                 LOG_ERROR("Create actuator failed for block(%ld)", inBlockPtr->getBlockId());
                 taskFailed.store(true);
-                /*
-                 * Capture the id before returning the block to the pool: push()
-                 * hands it to the reader immediately, which assigns it the id of
-                 * the record it is about to read. Reading getBlockId() afterwards
-                 * races with that write, and a wrong id here leaves the expected
-                 * one missing forever - the writer waits for it while every later
-                 * block piles up in the reorder cache, and the pipeline deadlocks.
-                 */
+                /* Capture the id before returning the block; push() lets the reader rewrite it. */
                 const int64_t failedBlockId = inBlockPtr->getBlockId();
                 freeInputPool->push(inBlockPtr);
                 outBlockPtr->reset();
@@ -680,14 +577,7 @@ int32_t PbgzEngine::startWorkTask() {
                 continue;
             }
 
-            /*
-             * The coder layer's check_exit/coder_exit throw coder_exception rather than
-             * killing the process with _Exit inside the library, which would leave no
-             * log. This is their final handling point: catch and convert them into
-             * return values identical to any other failure, funneling into taskFailed.
-             * catch(...) is also included: an exception escaping a worker thread would
-             * invoke std::terminate directly, which is harder to debug than a dropped block.
-             */
+            /* Convert coder exceptions into return values for uniform handling. */
             int32_t ret = 0;
             try {
                 PBGZ_PROF_SCOPE(pbgzprof::CODER_COMPRESS);
@@ -703,19 +593,7 @@ int32_t PbgzEngine::startWorkTask() {
                 ret = -1;
             }
 
-            /*
-             * The single place that checks out-of-bounds errors. A coder_io overflow
-             * only sets a flag without aborting, and the actuator does not necessarily
-             * turn it into a return value, so a per-call-site check is easy to forget
-             * and data corrupted by an out-of-bounds write would be written out as
-             * "success". All coder_io errors are funneled onto the actuator instead:
-             * asking once here covers every stream and every actuator, so a newly
-             * added stream cannot be missed either.
-             *
-             * This sits before the ret check rather than merged into it: this extra
-             * question is only needed when ret is already 0; when ret is non-zero the
-             * failure cause is more specific and must not be overwritten.
-             */
+            /* Check coder_io out-of-bounds once, covering every stream and actuator. */
             if (ret == 0 && !pActuator->ioError().ok()) {
                 LOG_ERROR("Stream '%s' out of bounds on block(%ld): %s", pActuator->ioError().what,
                           inBlockPtr->getBlockId(),
@@ -727,15 +605,12 @@ int32_t PbgzEngine::startWorkTask() {
                 LOG_ERROR("Coder task failed for block(%d)", inBlockPtr->getBlockId());
                 fprintf(stderr, "Warning: block(%ld) process failed.\n", inBlockPtr->getBlockId());
                 taskFailed.store(true);
-                /* Capture the id before push(): see the note on the actuator-failure
-                   path above - the block goes back to the reader, which rewrites its
-                   id, so reading it afterwards makes the expected id go missing and
-                   the writer wait for it forever. */
+                /* Capture the id before push(); the reader rewrites it after. */
                 const int64_t failedBlockId = inBlockPtr->getBlockId();
                 freeInputPool->push(inBlockPtr);
                 outBlockPtr->reset();
                 outBlockPtr->setBlockId(failedBlockId);
-                // When an error occurs, push a block with length 0 but correct ID, the write thread ignores blocks with length 0 to prevent thread waiting
+                // Push a zero-length block with the correct id to keep the writer advancing
                 outputDataPool->push(outBlockPtr);
                 MemoryUtil::safeDeleteClass(pActuator);
                 continue;
@@ -743,7 +618,7 @@ int32_t PbgzEngine::startWorkTask() {
 
             outBlockPtr->setBlockType(inBlockPtr->getBlockType());
 
-            /* The first block that completes releases the other coder threads (usually block 0). */
+            /* Release the other coder threads on first completion. */
             if (firstCoderNotify(pActuator->getNotifyFlag())) {
                 coderStartCond.notify_all();
             }

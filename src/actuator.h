@@ -41,13 +41,9 @@ public:
     virtual int32_t cleanup() { return 0; }
 
     /*
-     * First-block serialization flag: the engine lets the coder thread with id==0
-     * finish processing block 0 first (including preAnalysis, which fills
-     * process-wide shared state such as SamInfo) before releasing the other threads.
-     * Defaults to true, meaning the block can be released as soon as it is done; SAM
-     * overrides it to return based on notifyFlag (set halfway through compression, so
-     * release is guaranteed to happen after preAnalysis). Release happens only once;
-     * see PbgzEngine::firstCoderNotify.
+     * First-block serialization flag: coder thread id==0 finishes block 0 (including
+     * preAnalysis) before other threads are released. Defaults to true; SAM overrides
+     * it via notifyFlag. See PbgzEngine::firstCoderNotify.
      */
     virtual bool getNotifyFlag() { return true; }
 
@@ -59,27 +55,15 @@ public:
     }
 
     /*
-     * All coder_io out-of-range errors during this block's processing funnel here. The
-     * engine asks once after actuatorProc returns - that is already the shared choke
-     * point for every actuator, sitting alongside existing failure handling like
-     * taskFailed and zero-length block padding, so each actuator type does not need to
-     * reinvent it.
-     *
-     * It is virtual because SAM/FASTQ/binary all go through the parallel CodecActuator
-     * base classes and are bridged in by adapters; the entity that actually opens
-     * coder_io is the adaptee, so the adapter must forward this query down.
+     * Sink for all coder_io out-of-range errors during this block's processing. The
+     * engine queries it once after actuatorProc returns. Virtual so adapters forward
+     * the query to the adaptee that actually opens coder_io.
      */
     virtual const coder_err_sink& ioError() const { return ioErrSink; }
 
 protected:
-    /*
-     * The only entry point for constructing a coder_io. Views created through here
-     * carry the error sink, so out-of-range access is guaranteed to be seen by the
-     * engine; calling make_shared<coder_io> directly does not, and that is reserved
-     * for trial compression and unit tests - in trial compression "does not fit" is
-     * just a selection signal that this coder is unsuitable, not a failure, and must
-     * not abort the whole block.
-     */
+    /* Sole entry point for constructing a coder_io; views carry the error sink.
+       Direct make_shared<coder_io> is reserved for trial compression and unit tests. */
     std::shared_ptr<coder_io> makeCoderIo(const uint8_t* buff, int32_t len, const char* name) {
         return std::make_shared<coder_io>(buff, len, &ioErrSink, name);
     }

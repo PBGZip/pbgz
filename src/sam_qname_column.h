@@ -1,21 +1,24 @@
 /*
- * sam_qname_column.h - the QNAME column's layouts: the analysis they need, and the two encoders
- * the file-level choice is between.
+ * sam_qname_column.h - the QNAME column's layouts and the analysis they need.
+ * Copyright (C) 2025 PBGZip
  *
- * The column is written one of two ways, and which one is a property of the file's naming scheme
- * rather than of a block: affix segmentation (coder_affix_match over the split segments) wins on a
- * single FASTQ, whose names share a constant prefix and carry locally ordered fragment numbers,
- * while coder_qname's cross-line deduplication wins on a concatenated file, whose alternating
- * prefixes leave nothing for the adjacent-prefix model to hold on to.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * So it is a file-level verdict like the SEQ column's: the codec pre-selection runs both encoders
- * on a sample of the first block and publishes which won (see PreprocessInfo::qnameUseAffix), and
- * the block pass only encodes the way it says. This module exists so that the trial and the block
- * pass run the *same* encoders - a verdict measured on a different encoder than the one used is
- * worthless - and so that neither of them has to carry the layouts itself.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- * Everything the encoders need is passed in: they read the block's bytes and its parsed tab
- * positions, and write into an output block the caller owns (the trial hands them a scratch one).
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -28,33 +31,15 @@
 class RoughIOBlock;
 struct coder_err_sink;
 
-/*
- * A QNAME segment that takes only a handful of distinct values inside a block - a tile number, a
- * lane - is a dictionary that block can carry once. The "dict" layout (see the module source) is
- * built on this cap, and the reader checks it against the count it finds.
- */
+/* Cap on distinct values the "dict" layout may carry for one segment. */
 inline constexpr uint32_t kMaxDictEntries = 16;
 
-/*
- * Caps for the fixed-alphabet layout ("hexd"): a UUID chunk draws from 16 characters, a base32
- * barcode from 32; past that a uniform character code costs more than the textual layout's model,
- * and the layout is measured against it anyway.
- */
+/* Caps for the fixed-alphabet layout ("hexd"): alphabet size and segment length. */
 inline constexpr uint32_t kMaxHexAlphabet = 32;
 inline constexpr uint32_t kMaxHexLen = 64;
 
-/*
- * What the ID analysis found in a block's QNAME column.
- *
- * The column is split at every separator character a read name is built from (see
- * analyzeQnameFirstLine); each occurrence becomes a boundary between two segments, and the
- * segments are what the layouts code. A segment that some line does not carry at all, or a line
- * whose separators do not line up with the first line's, makes the split unavailable - which is
- * what `posLength == UINT32_MAX` says, and the column is then written whole.
- *
- * The reader needs the same facts (it rebuilds the column segment by segment), so the analysis is
- * a value both sides hold rather than state inside an encoder.
- */
+/* What the ID analysis found in a block's QNAME column: separators, per-line positions and
+   segment lengths. posLength == UINT32_MAX means the split is unavailable. */
 struct IdSplitAnalysis {
     /* The separators, in the order the first line carries them. */
     std::vector<uint8_t> symbols;
@@ -62,44 +47,19 @@ struct IdSplitAnalysis {
     std::vector<std::vector<int32_t>> positions;
     std::vector<uint32_t> minLen;   /* shortest segment seen, per separator */
     std::vector<uint32_t> maxLen;   /* longest segment seen, per separator */
-    /* Segments counted so far; once the split turns out to be unavailable (a line does not carry
-       the separators in the same order) every later line leaves it at UINT32_MAX. */
+    /* Segments counted so far; UINT32_MAX once the split is unavailable. */
     uint32_t posLength = 0;
-    /*
-     * Scratch: the positions found in the line being analysed, reused from line to line.
-     *
-     * analyzeQnameLine() used to fill a local vector and then copy it into positions, so a QNAME
-     * with two separators cost a handful of allocations - and the analysis runs once per line of
-     * every block (rdtsc buckets put it at about a quarter of the pre-analysis pass). Holding the
-     * buffer here leaves only the copy that positions itself needs. It carries no information
-     * between lines: each call clears it first.
-     */
+    /* Scratch: positions found in the line being analysed, cleared per call. */
     std::vector<int32_t> lineScratch;
 };
 
-/*
- * Read one line's QNAME field: the first content line establishes which separators the column
- * uses and where they sit in it, and every line after that only has to confirm it carries them in
- * the same order (see analyzeQnameLine). `length` covers the field up to and including its tab.
- */
+/* Read one line's QNAME field; the first line establishes the separators, later lines confirm
+   the same order. `length` covers the field through its tab. */
 int32_t analyzeQnameFirstLine(const uint8_t* buffer, uint32_t length, IdSplitAnalysis& analysis);
 int32_t analyzeQnameLine(const uint8_t* buffer, uint32_t length, IdSplitAnalysis& analysis);
 
-/*
- * One line's tab positions, in the order the SAM reader recorded them: entry k is the offset of the
- * (k+1)-th tab, or of the line's '\n', which is what ends the last stored field. A record has at
- * most eleven of them - the parse stops at the OPTION column - and the count is what tells a line
- * without an OPTION column (ten) from one with (eleven).
- *
- * This is a vector-like view with its storage inside the entry, because the table of them - one
- * entry per line of the block, SamCodecActuator::contentPos - used to be a
- * std::vector<std::vector<int64_t>>: every line's inner vector grew from empty and was then copied
- * into the table, six heap operations per line, for a table that all twelve field passes read.
- * The stride is fixed and small, so the positions ride in the entry itself and no line allocates.
- *
- * The type lives here because QnameColumnInput carries the pointer to the table; the field layout
- * encoders index the same table directly.
- */
+/* One line's tab positions in recorded order: entry k is the offset of the (k+1)-th tab, or of
+   the line's '\n'. At most CAP entries (the parse stops at the OPTION column). */
 struct LineTabs {
     static const uint32_t CAP = 11;
     int64_t pos[CAP];
@@ -108,8 +68,7 @@ struct LineTabs {
     uint32_t size() const { return count; }
     bool empty() const { return count == 0; }
     int64_t operator[](size_t k) const { return pos[k]; }
-    /* Nothing pushes past CAP: the parse stops at the OPTION column, and the QNAME trial that also
-       fills this table only ever reads its first entry. */
+    /* Nothing pushes past CAP: the parse stops at the OPTION column. */
     void push_back(int64_t v) { if (count < CAP) pos[count++] = v; }
 };
 
@@ -122,14 +81,9 @@ struct QnameColumnInput {
     const std::vector<LineTabs>* fieldTabs = nullptr;
 };
 
-/*
- * Encode the whole column with the affix-segmentation layout: one sub-stream per separator, each
- * coded with whichever of its layouts came out smallest (see the module source for the catalogue).
- *
- * `trialLines` stops after that many content lines, which is how the trial measures the encoder on
- * a sample; 0 means the whole block. On success `fieldMeta` describes the streams and
- * `fieldSrcLen` is the column's source length. Returns the encoded size, negative on failure.
- */
+/* Encode the whole column with the affix-segmentation layout: one sub-stream per separator.
+   `trialLines` stops after that many content lines (0 means the whole block). Returns the
+   encoded size, negative on failure. */
 int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
                          RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
                          Json::Value& fieldMeta, uint32_t& fieldSrcLen);

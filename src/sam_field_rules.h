@@ -1,30 +1,35 @@
 /*
- * sam_field_rules.h - the rules a SAM field's value follows, shared by the actuators that read the
- * same field from a different representation.
+ * sam_field_rules.h - rules a SAM field's value follows, shared by the actuators that read the
+ * same field from different representations (SamCodecActuator's text vs BamCodecActuator's BAM
+ * columns), so the two cannot drift apart.
+ * Copyright (C) 2025 PBGZip
  *
- * SamCodecActuator parses SAM text and BamCodecActuator consumes the columns of a BAM record, but
- * the values they reconstruct are the same values, so the rules behind them have to be the same
- * too. The template length of a pair is one of them: TLEN is encoded against it, and both actuators
- * used to spell the rule out separately, which is exactly how two copies drift apart.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
 
 #include <cstdint>
 
-/*
- * The template length a pair implies, in one of the two conventions aligners write. They differ by
- * exactly 1:
- *   bwa       right-end position + right-read length - left-end position - 1   (minusOne = true)
- *   minimap2  right-end position + right-read length - left-end position       (minusOne = false)
- * Neither is "standard", so the convention is chosen per block by counting which one matches more
- * records; the wrong one marks 99%+ of records as exceptions and degenerates the exception stream
- * into storing full values.
- *
- * The caller decides whether the pair has a template length at all - unpaired, either end unmapped,
- * or a mate on another reference gives 0 - and what the two spans are (0 is allowed, for a mate
- * whose span is not in this block).
- */
+/* The template length a pair implies, in one of two aligner conventions differing by 1: bwa
+   subtracts one (minusOne = true), minimap2 does not. The caller chooses the convention per
+   block and decides whether the pair has a template length at all. */
 static inline int32_t samTemplateLen(int64_t pos, int64_t nextPos, uint32_t selfSpan,
                                      uint32_t mateSpan, bool minusOne)
 {

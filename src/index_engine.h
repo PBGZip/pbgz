@@ -53,6 +53,6 @@ protected:
 private:
     std::map<uint32_t, int64_t> blockFileOffset;
 
-    /* Start offset of the current block in the source file; obtainable only before reading, accessed only by the reader thread. */
+    /* Start offset of the current block in the source file; reader-thread only. */
     int64_t pendingBlockOffset = 0;
 };

@@ -30,48 +30,23 @@
 #include "io_block.h"
 
 /*
- * Claimant for auxiliary blocks.
+ * Claimant for auxiliary blocks. The reader asks each registered claimant in turn;
+ * each decides whether a block is for it. Unclaimed blocks are skipped. Adding a new
+ * auxiliary block type only requires registering another claimant.
  *
- * The block reader knows nothing about any concrete auxiliary block type; when it
- * passes an auxiliary block it simply asks each registered claimant in turn, and the
- * claimant itself decides whether the block is meant for it. Adding a new auxiliary
- * block type therefore only requires registering one more claimant - the reader does
- * not change a line. Auxiliary blocks no one claims are silently skipped, which is
- * exactly the forward-compatible behavior old versions need when they encounter the
- * new format.
- *
- * Threading contract: claim is only called on the reader thread, so claimants never
- * run concurrently with each other. However, the state a claimant writes is read by
- * worker threads, so cross-thread visibility is the claimant's own responsibility.
+ * Threading: claim runs only on the reader thread, but state it writes is read by
+ * worker threads, so cross-thread visibility is the claimant's responsibility.
  */
 class AuxBlockConsumer {
 public:
     virtual ~AuxBlockConsumer() { }
 
     /*
-     * Returning true means this block has been claimed; false means the claimant is
-     * not interested and the next claimant should be asked.
-     *
-     * packageIndex is the sequence number of the pbgz package this block belongs to,
-     * i.e. the auxiliary block's identity. Once multiple packages are cat-concatenated,
-     * the same auxiliary block type appears more than once, so a claimant must keep
-     * them per package and must not let a later one overwrite an earlier one - data
-     * blocks are decoded in parallel as they are read, and when a later package's
-     * auxiliary block lands, the earlier package's blocks are often still being decoded.
-     * Overwriting would silently make them use the wrong data.
-     *
-     * The identity here is the package sequence number rather than the absolute
-     * file offset: under a non-seekable pipe input the offset collapses to 0, so
-     * the claimant would register under 0 while data blocks look up by in-package
-     * relative offset and every lookup would miss. The sequence number depends
-     * only on the number of parsed package headers, so it holds equally for files
-     * and pipes.
-     *
-     * It is currently assumed that a package contains at most one auxiliary block of
-     * each kind, which holds until priors are sharded. Once sharding lands, the key
-     * must be extended to (packageIndex, ordinal of this auxiliary block type within
-     * the package), and the data block meta must record that ordinal; the offset in the
-     * block meta serves only as a seek mechanism and for verification, not as an index.
+     * Return true if the block is claimed, false to pass it to the next claimant.
+     * packageIndex identifies the pbgz package the block belongs to (the parsed
+     * package sequence number, valid for both files and pipes). Claimants must keep
+     * blocks per package and not let a later one overwrite an earlier one.
+     * Assumes at most one auxiliary block of each kind per package.
      */
     virtual bool claim(RoughIOBlock* blockPtr, int64_t packageIndex) = 0;
 };

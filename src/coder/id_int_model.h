@@ -1,25 +1,31 @@
 /*
  * id_int_model.h - value-domain coding for an all-digit ID segment.
  *
- * The split ID path carries a segment whose text is all digits in one of two layouts today: zigzag
- * delta varints (they win when successive values are correlated - ordinals, mate pairs - because
- * then the deltas are small) and the decimal text through coder_affix_match (which wins when digit
- * prefixes repeat). Neither codes a value that is spread over a range at its own entropy: varint
- * deltas are larger than the values themselves for scattered input, and text pays a character model
- * per decimal digit, so a value the aligner picked essentially at random costs more than its
- * information content.
+ * Codes the value itself rather than varint deltas or decimal text: the high
+ * bits walk an adaptive binary tree over the value domain, the low bits are
+ * coded as one uniform symbol.
  *
- * This codes the value itself instead: the high bits walk an adaptive binary tree over the value
- * domain, the low bits are coded as one uniform symbol. For a value uniform over [0, max] the cost
- * lands on log2(max + 1) - the entropy - and for any other distribution the tree follows the mass
- * wherever it sits, so it needs no assumption about how the segment is ordered.
+ * Layout is fixed by the stream meta: "intw" (bits per value, 1..32) and "intk"
+ * (number of low bits coded raw).
+ * Copyright (C) 2025 PBGZip
  *
- * The layout is fixed by two parameters the stream meta carries (see compressIdFieldSplit), so the
- * payload needs no header of its own:
- *   "intw" - bits per value (1..32), from the segment's maximum
- *   "intk" - how many low bits are coded raw; the remaining width-k bits walk the tree
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * Encoder and decoder share this type, so the two walks cannot drift apart.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -32,11 +38,7 @@
 
 namespace id_int {
 
-/*
- * Bits modelled as a tree; anything wider is split into a modelled high part and raw low bits.
- * 1 << 10 nodes keeps a segment's model at a few tens of KB while still letting the tree follow any
- * distribution over the value range.
- */
+/* Bits modelled as a tree; wider values split into modelled high and raw low bits. */
 static const uint32_t kMaxTreeBits = 6;
 
 /* Bits needed to hold maxValue (at least 1). */
@@ -50,13 +52,7 @@ inline uint32_t widthFor(uint64_t maxValue)
     return (w == 0) ? 1 : w;
 }
 
-/*
- * How many low bits are coded raw. The cap is not a tuning knob: the raw part travels as one symbol
- * whose frequency total is 2^lowBits, and the range coder needs its range (at least 2^24) to cover
- * that total, so past 16 bits the arithmetic would divide its range down to nothing. That in turn
- * bounds the layout to kMaxTreeBits + kMaxRawBits bits per value; anything wider is not carried by
- * this layout at all (see idIntLayoutFits).
- */
+/* Max raw low bits: the raw part is one symbol whose total the range coder must cover. */
 static const uint32_t kMaxRawBits = 16;
 
 inline uint32_t lowBitsFor(uint32_t width)
@@ -71,11 +67,7 @@ inline bool widthFits(uint32_t width)
     return width >= 1 && width <= (kMaxTreeBits + kMaxRawBits);
 }
 
-/*
- * The uniform layout (see Model::resetUniform) spends the whole value on one symbol, so its
- * frequency total is the segment's range. The range coder needs a total it can divide its range by
- * (see kMaxRawBits), and keeping it inside 16 bits leaves the same margin the raw low bits do.
- */
+/* Max total for the uniform layout: the range coder must be able to divide by it. */
 static const uint64_t kMaxUniformTotal = (uint64_t)1 << 16;
 
 class Model {
@@ -90,16 +82,7 @@ public:
         tree_.assign(((size_t)1 << treeBits) + 1, SIMPLE_MODEL<2>());
     }
 
-    /*
-     * Exact range: every value in [base, base + total) is equally likely and nothing is modelled.
-     *
-     * This is the layout for a segment that sits on its range without structure - an aligner's
-     * choice of coordinate, say. The tree above can follow any distribution, but following a flat
-     * one costs it (K-1)/2 * log2(N)/N bits per line in redundancy alone, which for 64 leaves over
-     * a block is more than a sixth of the value's own entropy; and the modelled high bits cannot
-     * help when the low bits are the ones that carry the range. Paying log2(total) per value with
-     * no model at all is then simply smaller, and the encoder picks it by size like any other layout.
-     */
+    /* Uniform layout: every value in [base, base + total) is equally likely and nothing is modelled. */
     void resetUniform(uint64_t base, uint64_t total)
     {
         uniform_ = true;
@@ -184,22 +167,9 @@ inline int64_t unzigzag32(uint32_t value)
 }
 
 /*
- * The delta sequence of a counter that mostly stays put and then steps by a little - a read
- * ordinal, a flowcell row number. What has to be coded is "how long does it stay put" and "how
- * far does it step", not the values themselves.
- *
- * The varint layout spends one byte per line on the zero steps and leaves the run structure to the
- * byte model behind it, which cannot see it: measured on a coordinate-sorted BAM it costs 0.984
- * bit/line, where coding the runs costs 0.934 (runs 0.833 + steps 0.101, both of them the measured
- * entropy of the sequence). That difference is the whole point of this type.
- *
- * One bit per line says whether the run ends here; the model behind it is picked by how long the
- * run has lasted, which is what turns a fixed per-line flag (0.891 bit, worse) into the run-length
- * distribution. When the run ends, the step travels as zigzag: the small ones - which is nearly all
- * of them - through a symbol model of their own, and anything past that through a value-domain tree
- * (see Model) that also absorbs the rare backwards jump. The split matters: a single stray step of
- * -19363 would otherwise set the tree's width to 16 bits and make every ordinary +1 pay ten raw
- * bits of it as well.
+ * Codes a mostly-constant counter's delta sequence: one bit per line for
+ * "run continues", then the step via zigzag (small steps through a symbol model,
+ * larger ones through the value-domain tree).
  */
 class Counter {
 public:

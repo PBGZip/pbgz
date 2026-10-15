@@ -37,15 +37,7 @@ public:
 
     virtual ~IndexActuator();
 
-    /*
-     * Block types for which an index can be built; the single place this is declared.
-     *
-     * An index needs "which position in the reference genome each read lands on": SAM
-     * carries RNAME/POS natively, while FASTQ must read them from the mpos substream
-     * produced by compressBaseWithRef - the extraction differs completely, so which
-     * types are supported depends on which decode branches this actuator implements.
-     * The engine side only queries; it does not duplicate the decision.
-     */
+    /* Block types that carry RNAME/POS and can be indexed. */
     static bool supports(BlockType type) {
         /* BAM block content is SAM text, so it can be indexed too */
         return type == SAM || type == SAM_GZIP || type == BAM;

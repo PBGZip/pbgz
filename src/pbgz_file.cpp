@@ -28,14 +28,10 @@
 
 
 std::string PbgzFileHeader::getVersionStr() {
-    // Convert version array to string format "x.x.x"
-    // Assuming version is in the format [major, minor, patch]
-    // where each element is a single character representing a digit.
-    // Adjust the conversion if the version format is different.
+    // Convert version array [major, minor, patch] to "x.x.x".
     if (version[0] == '\0') {
         return "Unknown Version";
     }
-    // Ensure that version elements are valid characters    
     char buffer[12];
     snprintf(buffer, sizeof(buffer), "%d.%d.%d", version[0], version[1], version[2]);
     return std::string(buffer);

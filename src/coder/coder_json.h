@@ -36,9 +36,7 @@ public:
     coder_json(int32_t level=6);
     virtual ~coder_json();
 
-    /* Compress JSON data, return compressed length, negative value indicates insufficient out space, e.g., return -28 means out_len needs 28 more bytes
-     * This function assumes out_len is sufficient, otherwise it will exit with error if out_len is insufficient
-     */
+    /* Compress JSON data, returns compressed length; a negative value means the out buffer is too small. */
     virtual int64_t encoder(const Json::Value &in, uint8_t *out, const int64_t out_len);
 
     /* Compress JSON data, allocate space internally, compressed data stored in out */

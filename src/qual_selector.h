@@ -1,24 +1,26 @@
 /*
- * qual_selector.h - encoder evaluation for the quality-value column
+ * qual_selector.h - encoder evaluation for the quality-value column. The column needs its own
+ * path: its candidates (coder_qual, fcv2) need record-level input, and coder_qual.h cannot share
+ * a translation unit with coder_fc.h.
+ * Copyright (C) 2025 PBGZip
  *
- * The quality-value column cannot go through the generic evaluation path, for
- * three reasons.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * First, the candidates differ. Generic fields are evaluated with byte-stream
- * compressors such as coder_bwt_cm and coder_fc, while quality values are
- * compressed with coder_qual and fcv2, so the generic evaluation would rank a
- * different set of coders than the column actually uses.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- * Second, the input shape differs. Generic evaluation concatenates the whole
- * column into one contiguous byte stream, losing record boundaries; but both of
- * these candidates need record-level information — fcv2 needs each record's
- * length to recover the sequencing cycle index, and coder_qual needs the
- * corresponding base sequence as context.
- *
- * Third, a compilation constraint. coder_qual.h brings in clr.h indirectly,
- * whose RangeCoder conflicts with the same-named class in fc/rangecoder.h
- * (brought in by coder_fc.h); the two cannot appear in the same translation
- * unit, so the quality-value evaluation must live in its own file.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -36,47 +38,19 @@ struct QualSampleRecord {
     bool        rev;    /* strand direction, taken from bit 0x10 of FLAG, used by fcv2 to recover the cycle index */
 };
 
-/*
- * Mean record length, in bytes of quality value, at which a file counts as
- * long-read. QualSelector drops the whole fcv2 coder from the QUAL candidate set
- * at or above it (see the prune in QualSelector::select); the measured short- and
- * long-read files sit at ~90 and ~14000 bytes per record, so the exact value only
- * has to land inside that gap.
- */
+/* Mean record length at which a file counts as long-read; fcv2 is dropped at or above it. */
 extern const uint32_t QUAL_LONG_READ_LEN;
 
 class QualSelector {
 public:
-    /*
-     * Trial-compress coder_qual, fcv2 (over several context parameter tiers)
-     * and bwt_cm on the sampled records and return the one with the smaller
-     * compressed size. freqByByte counts quality-value occurrences, indexed by
-     * raw byte value. All three candidates need it: coder_qual builds its own
-     * frequency table from it, and fcv2 builds its Huffman tree from it.
-     *
-     * Evaluation uses multi-round convergence: start at 64 KB and double the
-     * sample each round, finalizing once the leader opens a gap of more than 3%
-     * (see SETTLE_MARGIN in codec_selector.cpp). The winning fcv2 parameter tier
-     * (if any) is returned via FieldCodecSelection.fcv2Params so the compression
-     * side and prior training stay consistent with it; the decoder reads the
-     * same parameter set back from the fcv2 bitstream header.
-     *
-     * If the sample is too small, SKIPPED is returned and the caller keeps its
-     * default encoder. If evaluation fails (none of the candidates runs),
-     * FAILED is returned and the default is used as well; an evaluation problem
-     * must never make compression impossible.
-     */
+    /* Trial-compress the candidates on the sampled records and return the smallest. freqByByte
+       counts quality-value occurrences by raw byte value. Returns SKIPPED for a too-small sample
+       and FAILED when no candidate runs; both leave the caller's default encoder in place. */
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
                                       const std::vector<uint32_t>& freqByByte,
                                       uint8_t compressLevel = 5);
 
-    /*
-     * Same, with the candidate set given by the caller instead of read off the SAM QUAL row.
-     * This is how the FASTQ QUAL column is evaluated: its candidates are the FASTQ table's
-     * QUAL row (see fastqFieldCandidates), because what a FASTQ record can hand the coders is
-     * not the same as what an aligned SAM record can - no FLAG, so no strand - even though the
-     * coders themselves are the same ones.
-     */
+    /* Same, with the candidate set given by the caller (how the FASTQ QUAL column is evaluated). */
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
                                       const std::vector<uint32_t>& freqByByte,
                                       uint8_t compressLevel,

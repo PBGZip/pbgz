@@ -1,5 +1,24 @@
 /*
  * sam_seq_payload.cpp - the reference-coded SEQ payload (see sam_seq_payload.h).
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "sam_seq_payload.h"
@@ -15,16 +34,8 @@
 #include "log/logger.h"
 #include "sam_info.h"
 
-/*
- * The one CIGAR parse: the reference span, the read span, and the operation list all come out of it.
- * `ops` (and the spans) are filled only when the caller wants them.
- *
- * The two spans keep the letter sets they have always had, lower-case forms included, because both
- * feed decisions that the archive records: the read span is what the SEQ payloads are measured
- * against, and the reference span decides whether a record has a window to code against at all. They
- * therefore disagree about exactly one letter - a lower-case 'x' counts towards the read span only -
- * which is a difference to keep rather than to fix quietly, and the comment on each group says so.
- */
+/* The one CIGAR parse: reference span, read span, and operation list. Lower-case letters are
+   counted in the spans as they always have been; `ops` is filled only when requested. */
 static void parseCigarImpl(const uint8_t* cigar, uint32_t cigarLength, uint32_t* refConsumedOut,
                            uint32_t* seqConsumedOut, std::vector<CigarOp>* ops)
 {
@@ -101,10 +112,7 @@ uint32_t cigarRefConsumed(const uint8_t* cigar, uint32_t cigarLength)
     return refConsumed;
 }
 
-/*
- * splitSeqMatchStream now lives in seq_stream_util.h, as an inline the FASTQ SEQ column uses too;
- * the 98% threshold it applies and the measurements behind it are documented there.
- */
+/* splitSeqMatchStream lives in seq_stream_util.h. */
 
 bool seqRecordUsesReference(uint16_t chrId, uint16_t flag, uint64_t startPos, uint32_t refConsumed,
                             Reference* reference, int64_t& refPos)
@@ -133,19 +141,11 @@ bool referenceLinesUpWithHeader(const Reference* reference)
     }
     const std::vector<Reference::SequenceSpan>& seqs = reference->getSequences();
     if (seqs.empty()) {
-        /*
-         * The squash came from an NI index, which carries no names. Its layout has always been
-         * taken on trust, and callers relying on that must keep working, so an unverifiable
-         * reference is accepted rather than refused.
-         */
+        /* An NI index carries no names; an unverifiable reference is accepted. */
         return true;
     }
 
-    /*
-     * Where each name really starts. The offset a SEQ lookup will use is the running sum of the
-     * @SQ lengths in header order (SamInfo::calculateChromosomePositions), so the two agree only
-     * when the FASTA presents the same sequences in the same order.
-     */
+    /* Where each name really starts, to compare with the @SQ running-sum offsets. */
     std::unordered_map<std::string, uint64_t> offsetByName;
     offsetByName.reserve(seqs.size() * 2);
     for (const Reference::SequenceSpan& s : seqs) {
@@ -168,12 +168,8 @@ void warnReferenceNotUsableForSeq()
     if (warned.exchange(true, std::memory_order_relaxed)) {
         return;
     }
-    /*
-     * Worth saying out loud: the reference is loaded and its checksum verified, so nothing else
-     * in the run reports a problem - the SEQ column just quietly stops improving, by 20% of the
-     * archive on a single-end BAM measured here (471 MB against 434 MB, once PNEXT's own waste
-     * is set aside).
-     */
+    /* Nothing else reports this: the reference loads and verifies, the SEQ column just stops
+       improving. */
     LOG_WARNING("The reference does not line up with the file's @SQ list: its sequences are not "
                 "the ones the header names, in the header's order, so a read's position would "
                 "address the wrong bases. SEQ is compressed without it; supply a reference of "
@@ -182,19 +178,9 @@ void warnReferenceNotUsableForSeq()
                     "SEQ falls back to compression without a reference\n");
 }
 
-/*
- * Walk one record's ops and produce its coded SEQ bases: each read base as its 2-bit value, XORed
- * with the reference's 2-bit base where the op consumes reference (M/=/X) and as it stands where it
- * does not (I/S).
- *
- * Only the reference side varies between the two callers below - the file's genome and a block's own
- * consensus both present their bases as 2-bit, but are fetched differently - so it arrives as a
- * callable. A template parameter rather than std::function: this runs once per read of every block,
- * and an indirect call per op is exactly what the walk should not pay.
- *
- * Answers false when the ops do not describe the read (an op runs past seqLength, or the ops do not
- * consume it exactly), which is what makes the caller store the bases as they stand instead.
- */
+/* Walk one record's ops and produce its coded SEQ bases: each base as its 2-bit value, XORed
+   with the reference where the op consumes it (M/=/X). `stretch` supplies the reference bases.
+   False when the ops do not describe the read exactly. */
 template <class StretchFn>
 static bool seqCodedBasesWalk(const std::vector<CigarOp>& ops, const uint8_t* seq,
                               uint32_t seqLength, int64_t refPos, StretchFn stretch,
@@ -247,9 +233,7 @@ SeqRecordPayload buildSeqRecordPayload(uint16_t chrId, uint16_t flag, uint64_t s
             out.usedReference = true;
             out.refPos = refPos;
         } else {
-            /* CIGAR and SEQ disagree, or the CIGAR runs past the SEQ: the bases go in as their
-               2-bit codes anyway. The walk did not run, so the caller must not count this record
-               as reference-coded (its bases were not compared against anything). */
+            /* CIGAR and SEQ disagree: store the bases as their own 2-bit codes. */
             actgEncode(seq, coded, seqLength);
         }
     } else {

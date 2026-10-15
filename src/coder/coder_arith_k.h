@@ -1,20 +1,25 @@
-/*--
-
-coder_arith_k.h - lightweight entropy coders for the FC/base streams.
-
-Wraps htscodecs' byte-oriented coders (the ones CRAM 3.1 uses):
-  - arith_dynamic: order-0/1 range coder (+ optional bit-packing / RLE)
-  - rANS_static:   order-0/1 static rANS (SIMD)
-Both are O(1) per symbol and self-describing (the order travels in the stream),
-so the decoder needs no out-of-band parameters.
-
-The coder is meant as a drop-in replacement for coder_fc on the unaligned SEQ
-match stream: the ASCII A/C/G/T bases are mapped to 0..3, optionally packed four
-per byte, then coded. Non-ACGT input is passed through unchanged.
-
-SPDX-License-Identifier: MIT
-
---*/
+/*
+ * coder_arith_k.h - lightweight entropy coders for the FC/base streams.
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
 #pragma once
 

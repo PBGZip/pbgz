@@ -43,7 +43,7 @@
 #endif
 
 Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
-    // Initialize all pointers to nullptr to avoid wild pointers
+    // Initialize pointers to nullptr
     refGeneSquash = nullptr;
     refGeneSquashlen = 0;
     hashBucketCnt = nullptr;
@@ -51,7 +51,7 @@ Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
     refGeneSquashMatched = nullptr;
     refGeneSquashMatchedlen = 0;
 
-    // Set reference genome file path and thread count
+    // Set reference file path and thread count
     refGeneFile = fastaName;
     parallel = threadNum;
     guardBar = nullptr;
@@ -77,7 +77,7 @@ int32_t Reference::referencCheck() {
 }
 
 Reference::~Reference() {
-    // Free all dynamically allocated memory to avoid memory leaks
+    // Free allocated memory
     MemoryUtil::safeFree(refGeneSquash);
     MemoryUtil::safeFree(hashBucketCnt);
     MemoryUtil::safeFree(hashTableBuffer);
@@ -85,22 +85,13 @@ Reference::~Reference() {
     MemoryUtil::safeDeleteClass(guardBar);
 }
 
-/*
- * An index takes effect only after it is read entirely into memory and passes
- * verification. The on-disk index may be being rewritten by another process, so using
- * it while reading would mean trusting something that changes; therefore once read it
- * detaches from the disk and only the in-memory snapshot counts. If the payload does
- * not match the checksum recorded in the file, the index is corrupt or has been
- * tampered with and is rejected outright. No member is touched before verification
- * passes, and on failure the object is left unchanged, so the caller can fall back to
- * reading the fasta.
- */
+/* Read the whole index, verify its checksum, and detach from disk. */
 bool Reference::loadFromNiFile(const std::string& niFile) {
     const int64_t magicLen = (int64_t)PBGZ_FILE_MAGIC.length();
     const int64_t headerLen = magicLen + 3 + 2 + (int64_t)sizeof(int64_t);
     uint8_t* image = nullptr;
 
-    /* An unusable index is not fatal: warn and fall back to the fasta, avoiding silently compressing against an unexpected reference. */
+    /* An unusable index is not fatal: warn and fall back to the FASTA. */
     auto reject = [&](const std::string& why) {
         MemoryUtil::safeFree(image);
         fprintf(stderr, "warning: index %s is unusable (%s), building the index from %s instead.\n",
@@ -152,7 +143,7 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
         return reject(std::string("carries unreadable metadata: ") + e.what());
     }
 
-    /* -r decides which reference is used; the index must prove it was built from that very one. */
+    /* The index must have been built from the reference selected by -r. */
     const std::string wantName = PathUtil::getFileName(refGeneFile);
     const std::string haveName = niMeta["refe_name"].asString();
     if (haveName != wantName) {
@@ -197,8 +188,7 @@ bool Reference::initSquashFromFasta() {
         return false;
     }
 
-    /* Build squash in-memory: 4 ACGT bases -> 1 byte (2-bit each).
-       Buffer grows dynamically; no pre-scan needed. */
+    /* Build squash in memory: 4 bases per byte (2 bits each). */
     std::vector<uint8_t> squash;
     squash.reserve(refGeneLen / 4 + 1024);
 
@@ -206,17 +196,14 @@ bool Reference::initSquashFromFasta() {
     uint32_t cacheLen = 0;
     std::string line;
 
-    /* Bases appended so far, i.e. the base offset the next record will start at. The squash
-       packs across record boundaries (the 4-base cache is not flushed at a header), so a byte
-       offset would not name a record's start - the base count does. */
+    /* Base offset at which the next record starts. */
     uint64_t baseCount = 0;
     refSequences.clear();
 
     while (reader->readLine(line) > 0) {
         if (line.empty()) continue;
         if (line[0] == '>') {
-            /* The record's name is the first whitespace-delimited token of its header, which is
-               the token a @SQ SN is compared against (see referenceLinesUpWithHeader). */
+            /* Record name: first whitespace-delimited token of the header. */
             const size_t nameEnd = line.find_first_of(" \t", 1);
             refSequences.emplace_back(line.substr(1, nameEnd - 1), baseCount);
             continue;
@@ -243,13 +230,7 @@ bool Reference::initSquashFromFasta() {
         uint32_t remaining = lineLen - pos;
         uint32_t aligned = remaining >> 2 << 2;
         if (aligned > 0) {
-            /*
-             * Straight into the squash's own tail. This used to go through a fixed 1024-byte stack
-             * buffer, which a FASTA line of more than 4 K bases - or a record written on a single
-             * line, which is legal - wrote past: aligned >> 2 is the byte count and nothing bounds
-             * the line length. actgSquash answers the same count for an aligned length, so the
-             * resize below is exact.
-             */
+            /* Convert the aligned part straight into the squash tail. */
             const size_t at = squash.size();
             squash.resize(at + (aligned >> 2));
             actgSquash((const uint8_t*)(line.c_str() + pos), aligned, squash.data() + at);
@@ -296,17 +277,17 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
         uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
         md5_init(&md5);
 
-        // Use PathUtil to detect if it's a gzip file
+        // Detect gzip input
         bool isGzFile = PathUtil::isGzFile(refGeneFile);
-        // Choose appropriate reader based on file type
+        // Choose a reader based on file type
         if (isGzFile) {
-            // Detect hardware SIMD support and choose optimal gzip reader
+            // Choose gzip reader based on SIMD support
             bool useFastGzReader = false;
 #ifdef __SSE4_2__
             useFastGzReader = Hardware::isSupportSimd();
 #endif
             if (useFastGzReader) {
-                // Use FastGzFileReader to read gzip file (Intel ISA-L accelerated)
+                // Intel ISA-L accelerated reader
                 FastGzFileReader fastGzReader(refGeneFile);
                 if (fastGzReader.openIO() == 0) {
                     for (;;) {
@@ -333,7 +314,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                     return;
                 }
             } else {
-                // Use GzFileReader to read gzip file (standard implementation)
+                // Standard gzip reader
                 GzFileReader gzReader(refGeneFile, 1); // Use single thread reading
                 if (gzReader.openIO() == 0) {
                     for (;;) {
@@ -354,7 +335,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                 }
             }
         } else {
-            // Use FileReader to read regular text file
+            // Plain text reader
             FileReader fileReader(refGeneFile);
             if (fileReader.openIO() == 0) {
                 for (;;) {
@@ -392,37 +373,31 @@ bool Reference::writeNiFileHeader(FileWriter& niWriter, int64_t& offset) {
 }
 
 
-// Helper function to create appropriate IOReader based on file type and hardware support
+// Create an IOReader based on file type and hardware support
 std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName) {
     bool isGz = PathUtil::isGzFile(fileName);
     if (isGz) {
-        // Detect hardware SIMD support and choose optimal gzip reader
+        // Choose gzip reader based on SIMD support
         bool useFastGzReader = false;
 #ifdef __SSE4_2__
         useFastGzReader = Hardware::isSupportSimd();
 #endif
         if (useFastGzReader) {
-            // Use FastGzFileReader to read gzip file (Intel ISA-L accelerated)
-            // Create a mutable copy since FastGzFileReader requires non-const string reference
+            // Intel ISA-L accelerated reader
+            // FastGzFileReader requires a non-const string reference
             std::string mutableFileName = fileName;
             return std::make_unique<FastGzFileReader>(mutableFileName);
         } else {
-            // Use GzFileReader to read gzip file (standard implementation)
+            // Standard gzip reader
             return std::make_unique<GzFileReader>(fileName, 1); // Use single thread reading
         }
     } else {
-        // Use FileReader to read regular text file
+        // Plain text reader
         return std::make_unique<FileReader>(fileName);
     }
 }
 
-/*
- * Only serializes an already-built squash. Fasta parsing lives in exactly one place,
- * initSquashFromFasta, and this function parses nothing itself: a second parse loop here
- * would produce squashes that differ from the ones built by that path (for instance over
- * the trailing residue of fewer than 4 bases), i.e. the same reference yielding two
- * different results depending on which path built it.
- */
+/* Serialize the already-built squash; parsing lives in initSquashFromFasta. */
 bool Reference::writeNiFile(const std::string& niFile) {
     if (refGeneSquash == nullptr || refGeneSquashlen <= 0) {
         LOG_ERROR("Squash is not built yet, nothing to write into %s.", niFile.c_str());
@@ -469,8 +444,8 @@ bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& ref
     Json::Value meta;
     meta["refe_name"] = refename;
     meta["refe_len"] = Json::Value::UInt64(refGeneLen);
-    meta["refe_orgfile_md5"] = refGeneMd5; /* Original MD5 of reference file, i.e., directly read without decompression */
-    meta["ni_data_md5"] = md5;  /* MD5 of ni file data content */
+    meta["refe_orgfile_md5"] = refGeneMd5; /* MD5 of the reference file as read. */
+    meta["ni_data_md5"] = md5;  /* MD5 of the NI file payload. */
     fastaLength = refGeneLen;
     fastaChecksum = refGeneMd5;
 
@@ -481,12 +456,7 @@ bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& ref
     return true;
 }
 
-/*
- * The index is written to disk only at the path given by the caller; no implicit
- * caching is done: once a cache file is altered, later compressions would silently go
- * wrong with no way to notice, so no default directory is ever written and nothing is
- * registered in the global configuration.
- */
+/* Write the index only to the caller's path; no implicit caching. */
 bool Reference::makeNiFile(const std::string& niFile) {
     if (!initSquashFromFasta()) {
         LOG_ERROR("Build squash from %s failed.", refGeneFile.c_str());
@@ -495,7 +465,7 @@ bool Reference::makeNiFile(const std::string& niFile) {
     return writeNiFile(niFile);
 }
 
-/* Identify by the file header, not by the suffix; only the content counts. */
+/* Identify by file header, not suffix. */
 bool Reference::isNiFile(const std::string& file) {
     const size_t magicLen = PBGZ_FILE_MAGIC.length();
     const size_t headLen = magicLen + 3 + 2; /* magic + version + "ni" */
@@ -522,11 +492,11 @@ bool Reference::makeIndex() {
     BaseGroupHash *bgHash;
     HashTable hashTable;
     std::string tips;
-    /* Record the position where the next hash value of each bucket is written, this position is the offset relative to the start of hash_buff, this is for concurrent writing */
+    /* Per-bucket write cursor into hash_buff, for concurrent writes. */
     uint32_t *hashBucketCurpos;
 
     hashBucketCurpos = MemoryUtil::safeAlloc<uint32_t>(hashBuckets);
-    /* If the index cannot be trusted, fall back to reading the fasta: the reference genome is decided by -r, the index only saves one round of parsing. */
+    /* Fall back to the FASTA if the index cannot be trusted. */
     if (!loadSquashAndMatched()) {
         MemoryUtil::safeFree(hashBucketCurpos);
         return false;
@@ -549,14 +519,10 @@ bool Reference::makeIndex() {
     return true;
 }
 
-/*
- * Load the reference squash (NI first, then FASTA), allocate the matched tracking
- * buffer, and print the supported upper bound. Shared by makeIndex and makeSquashIndex;
- * does not touch the hash table.
- */
+/* Load the reference squash and allocate the matched tracking buffer. */
 bool Reference::loadSquashAndMatched() {
     const int64_t supportMax = ((int64_t)2 << 30) * baseGroupStep;
-    /* If the index cannot be trusted, fall back to reading the fasta: the reference genome is decided by -r, the index only saves one round of parsing. */
+    /* Fall back to the FASTA if the index cannot be trusted. */
     bool squashReady = !niIndexFile.empty() && loadFromNiFile(niIndexFile);
     if (!squashReady) {
         squashReady = initSquashFromFasta();
@@ -573,13 +539,13 @@ bool Reference::loadSquashAndMatched() {
                 supportMax / 1024 / 1024, (refGeneSquashlen << 2) / 1024 / 1024);
     }
 
-    refGeneSquashMatchedlen = refGeneSquashlen; /* One byte indicates whether a squash byte is matched */
-    /* safeAlloc zeroes, which is what "nothing matched yet" is (see the note on the member). */
+    refGeneSquashMatchedlen = refGeneSquashlen; /* One byte per squash byte: matched flag. */
+    /* safeAlloc zeroes the buffer, i.e. nothing matched yet. */
     refGeneSquashMatched = MemoryUtil::safeAlloc<std::atomic<uint8_t>>(refGeneSquashMatchedlen);
     return true;
 }
 
-/* Only load the reference squash; do not build the read-mapping hash table: used for SAM/BAM compression. */
+/* Load only the squash, without building the hash table. */
 bool Reference::makeSquashIndex() {
     Timer cost_ms(true);
     if (!loadSquashAndMatched()) {
@@ -610,7 +576,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
     int64_t current, offset_start;
     int64_t *pnn = nullptr;
     for (int64_t n = 0; n < pcnt; n++) {
-        current = (n + 1 == pcnt) ? (each + remain) : each; /* Number of keys currently processed */
+        current = (n + 1 == pcnt) ? (each + remain) : each; /* Keys processed by this thread */
         if ((n + 1) == pcnt) {
             gbTotal = 0;
             gbCurrent = current;
@@ -621,8 +587,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
 
         offset_start = bhash - bhash_start;
 
-        /* bg_len is only read in constant expressions here (it is initialized from the compile-time
-           baseGroupLen), so it does not have to be captured. */
+        /* bg_len is a compile-time constant here, so no capture needed. */
         tpools.push_back(std::thread([p, current, offset_start, hmask, &bhash_start,
                                       &actg_stretch_tab, &hb_cnt, &slocks, pnn]() {
             int64_t n = 0, m = 0;
@@ -634,13 +599,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
             int64_t *pnnn = (pnn) ? pnn : (&n);
             uint64_t xsquash;
 
-            /*
-             * The scratch buffers take their sizes from the compile-time baseGroupLen instead of the
-             * captured bg_len: the two are the same value (bg_len is assigned baseGroupLen just above,
-             * and referencCheck rejects any other length), but only the member is a constant
-             * expression, so sizing from it keeps these ordinary arrays rather than variable-length
-             * ones, which are a clang extension in C++.
-             */
+            /* Size scratch buffers from the compile-time baseGroupLen to avoid VLAs. */
             static constexpr uint32_t len_bgs = (baseGroupLen >> 2) + ((baseGroupLen & 0x3) ? 1 : 0);
             const char actg4[4] = {'A', 'C', 'T', 'G'};
             char actg_bg[baseGroupLen + 1];
@@ -708,7 +667,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
             }
         }));
 
-        p += (current * (baseGroupStep >> 2)); /* This limits basegroup_step to be a multiple of 4, can be modified if needed */
+        p += (current * (baseGroupStep >> 2)); /* Advances past the bases consumed by this thread. */
         bhash += current;
     }
 
@@ -722,7 +681,7 @@ void Reference::makeIndexFetchBaseGroup(BaseGroupHash* &bgHash) {
 
 void Reference::makeIndexCalcHashTableSize(HashTable& hashTable) {
     uint32_t pcnt = this->parallel;
-    /* First segment stores hash buffer content and total length, second segment stores hash bucket length */
+    /* First segment: hash buffer content and length; second: bucket length. */
     hashTable.resize(pcnt);
 
     int64_t total = hashBuckets;
@@ -744,7 +703,7 @@ void Reference::makeIndexCalcHashTableSize(HashTable& hashTable) {
             for (n = 0; n < current; n++) {
                 current_cnt = *(p + n);
                 len_bucket++;
-                /* If current bucket has multiple hash values, the first element of hash buffer stores a pointer pointing to the buffer corresponding to the hash values of current bucket */
+                /* Multi-value buckets reserve a slot for their buffer offset. */
                 len_hash += (current_cnt <= 1) ? 1 : (current_cnt + 1);
             }
             hash_buffer.first.second = len_hash;
@@ -802,13 +761,13 @@ void Reference::makeIndexInitHashTable(const HashTable& hashTable, uint32_t* &ha
                     p++;
                     break;
                 case 1:
-                    *pn++ = p - phbuffStart; /* When no hash conflict, next position writes bucket directly */
+                    *pn++ = p - phbuffStart; /* No conflict: bucket points directly into the hash buffer. */
                     p++;
                     break;
                 default:
                     *pn++ = pc - phbuffStart;
-                    *p = pc - phbuffStart; /* When hash conflict, first element of bucket stores offset of hash conflict buffer relative to hash buffer start */
-                    pc += current_cnt;      /* Current bucket has current_cnt hash values, so make current_cnt offsets */
+                    *p = pc - phbuffStart; /* Conflict: bucket stores the offset of its conflict buffer. */
+                    pc += current_cnt;      /* Reserve one offset per hash value. */
                     p++;
                     break;
                 }
@@ -860,7 +819,7 @@ void Reference::makeIndexBuildHashTable(const BaseGroupHash* bgHash, uint32_t* &
                     default:
                         pos = hb_curpos[bucket];
                         *(phbuffStart + pos) = (h + n)->baseGroupPos;
-                        hb_curpos[bucket]++; /* This bucket points to next position */
+                        hb_curpos[bucket]++; /* Advance the bucket cursor. */
                         break;
                     }
                 }
@@ -902,7 +861,7 @@ void Reference::makeIndexSortHashTable() {
                         p = pstart + phb_buff[n];
                         std::sort(p, p + current_cnt, [](const uint32_t &p1, const uint32_t &p2) -> bool {
                              return p1 < p2;
-                        }); // Fix potential core dump issue, returning true for equality causes out-of-bounds, uses quick sort when element count >16 (_S_threshold), uses insertion sort when <=16 (quick sort performance is not ideal for few objects)
+                        }); // Stable ordering, avoids out-of-bounds on equal elements
                     }
                     *(phb_cnt_start + offset + n) = std::min((uint32_t)16, current_cnt);
                 }
@@ -1112,7 +1071,7 @@ void Reference::getActgFrom2Bits(const uint8_t *src2Bits, uint32_t src2BitsLen, 
     }
 }
 
-/* Get squash bases of specified length at specified position, i.e., 2 bits placed at the end of one character */
+/* Get 2-bit squash bases for the given range. */
 void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t actgPos) {
     uint32_t offset = 0;
     uint64_t squashPos = actgPos >> 2;
@@ -1143,10 +1102,7 @@ void Reference::getStretch2Bits1Char(uint8_t *out, uint32_t outLen, uint64_t act
     default:
         break;
     }
-    /* The left unaligned part may write up to 3 bytes even when outLen is
-       smaller (e.g. a 1- or 2-base M/=/X segment at an unaligned position).
-       Guard with >= so we never run the aligned loop with an underflowed
-       (outLen - offset), which would otherwise blow past the buffer. */
+    /* The unaligned part may write up to 3 bytes even when outLen is smaller. */
     if (offset >= outLen) {
         return;
     }

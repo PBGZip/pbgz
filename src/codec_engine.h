@@ -75,10 +75,7 @@ protected:
     }
 
     virtual void updateInputStatics(RoughIOBlock* inBlockPtr) override {
-        /* Raw-record blocks are counted by the worker that renders them (see
-           bamRenderRawBlockToText), where the original size is the rendered text
-           length - the reader here only knows the raw record bytes, which would
-           understate the denominator and inflate the reported ratio. */
+        /* Raw-record blocks are counted by the render worker instead (see bamRenderRawBlockToText). */
         if (inBlockPtr->isRawBam()) {
             return;
         }
@@ -99,7 +96,7 @@ protected:
     Reference* pRefGene;
     PbgzFileMeta baseFileMeta;
     PbgzFileMeta dynamicFileMeta;
-    // The writer thread filling in refe.offset and the tail thread accumulating reference statistics concurrently modify the same JSON, so they must share this lock.
+    // Guards dynamicFileMeta: writer and tail threads modify it concurrently.
     std::mutex dynamicFileMetaMutex;
     bool refeOffsetFLag;
 

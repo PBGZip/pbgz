@@ -20,10 +20,8 @@
 //
 // CityHash, by Geoff Pike and Jyrki Alakuijala
 //
-// This file declares the subset of the CityHash functions that require
-// _mm_crc32_u64().  See the CityHash README for details.
-//
-// Functions in the CityHash family are not suitable for cryptography.
+// Declares the subset of CityHash functions that require _mm_crc32_u64().
+// Not suitable for cryptography.
 
 #ifndef CITY_HASH_CRC_H_
 #define CITY_HASH_CRC_H_

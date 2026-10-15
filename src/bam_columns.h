@@ -1,18 +1,29 @@
 /*
  * bam_columns.h - column-oriented BAM record storage
  *
- * The classic path turns every BAM record into a SAM text line (BamBlockReader
- * ::parseBamRecord) and hands the text to SamCodecActuator. That inflates the
- * data by ~2.2x (2.95 GB of BAM became 6.39 GB of SAM text on the measured
- * long-read file) and forces every numeric column through its decimal text
- * representation.
+ * Keeps BAM fields in structured columns instead of converting records to SAM text:
+ * fixed-width scalars stay scalars, bases stay 4-bit packed, and variable-length
+ * fields are concatenated with a per-record length table. Each column is encoded by
+ * the same coder preprocessing picked for that SAM field.
+ * Copyright (C) 2025 PBGZip
  *
- * BamColumns keeps the fields the BAM record already stores: fixed-width
- * scalars stay scalars (FLAG uint16, POS int32, MAPQ uint8 ...), bases stay
- * 4-bit packed, and variable-length fields are concatenated with a per-record
- * length table. The coders are unchanged - each column is still encoded by the
- * coder that preprocessing picked for that SAM field - only the bytes handed to
- * them are structured instead of textual.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -23,15 +34,11 @@
 
 struct BamColumns {
     uint32_t nRecords = 0;
-    /* False until a worker has parsed the raw records in the block buffer into
-       the payload columns below. In fast mode the reader thread only streams
-       the raw BAM record bytes ([u32 size][record]...), and each coder thread
-       parses its own block here - so record->column work runs in parallel
-       across blocks instead of serially on the reader. */
+    /* False until a worker has parsed the raw records into the columns below.
+       In fast mode each coder thread parses its own block. */
     bool columnsBuilt = false;
-    /* Byte offset in the block buffer where the [u32 size][record] stream
-       starts. Zero for the usual split-header layout; non-zero only when a SAM
-       header text is prepended to the first data block (!splitHeader). */
+    /* Byte offset where the [u32 size][record] stream starts; non-zero only when a
+       SAM header is prepended to the first data block (!splitHeader). */
     uint32_t recordStreamOffset = 0;
 
     /* Fixed-width columns, one entry per record. */
@@ -83,10 +90,8 @@ struct BamColumns {
     }
 };
 
-/* Record/record-stream parsers used by the worker that builds the columns of
-   one block (BamCodecActuator in fast mode). They were moved out of
-   BamBlockReader so the reader thread never parses: it only streams raw
-   records, and parsing is fanned out over the coder threads, one block each. */
+/* Record/record-stream parsers used by the worker that builds one block's columns
+   (BamCodecActuator in fast mode). */
 namespace bamcol {
 
 inline const char kBaseMap[16] = {'=', 'A', 'C', 'M', 'G', 'R', 'S', 'V',
@@ -105,9 +110,8 @@ inline int32_t rI32(const uint8_t*& p) {
     return v;
 }
 
-/* Parse one BAM alignment record (data..data+size) into cols. Columns keep
-   their on-disk values: bases are expanded to characters, quality is raw
-   phred with 0xFF rendered as '*' (same conversion as the SAM text path). */
+/* Parse one BAM alignment record (data..data+size) into cols. Bases are expanded to
+   characters; quality is raw phred with 0xFF rendered as '*'. */
 inline int32_t parseRecord(const uint8_t* data, int32_t size, BamColumns& cols)
 {
     const uint8_t* p = data;
@@ -179,10 +183,8 @@ inline int32_t parseRecord(const uint8_t* data, int32_t size, BamColumns& cols)
     return 0;
 }
 
-/* Parse a whole block whose buffer is a sequence of [u32 recordSize][record]
-   entries (exactly what BamBlockReader appends for structured BAM blocks).
-   On success fills cols and marks it built; returns 0, -1 on a corrupt
-   stream. */
+/* Parse a block buffer of [u32 recordSize][record] entries. On success fills cols
+   and marks it built; returns 0, or -1 on a corrupt stream. */
 inline int32_t parseRecordStream(const uint8_t* buf, size_t len, BamColumns& cols)
 {
     cols.clear();

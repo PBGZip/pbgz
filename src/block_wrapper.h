@@ -39,30 +39,17 @@ namespace BlockUtil {
     bool isBAMBlock(BlockType type);
 
     /*
-     * Determine whether a file is BAM: a raw BAM magic number, or a BGZF/gzip stream that
-     * inflates to BAM.
-     *
-     * A standard BAM is a BGZF (gzip) stream and is byte-for-byte indistinguishable from a .gz
-     * file; the engine uses this to decide whether input goes through "transparent gz
-     * decompression" or is handed to FileReader + BamGzBlockReader. BAM's gzip is inside the
-     * format; if transparent decompression were used, FileReader would not know the total file
-     * size, and the "is it worth writing" heuristic for the QUAL prior would degrade.
+     * Whether a file is BAM: raw BAM magic, or a BGZF/gzip stream inflating to BAM.
      */
     bool isBamFile(const std::string& fileName);
 
     /*
-     * Detect the input format from file content (SAM/BAM/FASTQ/BINARY/PBGZFILE), auto-inflating
-     * gz/BGZF before judging. Used for pre-compression decisions (e.g. loading a reference for
-     * SAM/BAM only needs squash, no read-mapping hash table). Detection only reads the file
-     * header and does not modify the file; callers must not use it on pipes/STDIN.
+     * Detect the input format from file content (SAM/BAM/FASTQ/BINARY/PBGZFILE), inflating gz/BGZF first. Regular files only; not for pipes/STDIN.
      */
     BlockType detectInputFileType(const std::string& fileName);
 
     /*
-     * Auxiliary block: carries no user data and does not enter the "read -> parallel compress ->
-     * write in order" pipeline; it is loaded on demand by seek using file-level offsets (reference
-     * genome, its index, and QUAL priors all belong here). Pipeline entry points only query this
-     * single predicate, so adding a new auxiliary block type requires no new branches at each entry.
+     * Auxiliary block: no user data, loaded on demand by seek; reference genome, its index and QUAL priors.
      */
     bool isAuxiliaryBlock(BlockType type);
 
@@ -70,18 +57,12 @@ namespace BlockUtil {
 }
 
 /*
- * Block read base class: reads raw data from ioReader (including the format-detection data
- * prefetched by the Creator and the cache left by the previous block read), then hands it to
- * the subclass analyzeBlock for format pre-analysis.
- *
- * There is one subclass per file format (Fastq/Sam/Bam/FastqGz/BamGz/Binary/Pbgz); the concrete
- * type is determined and created by BlockFactory after prefetching.
+ * Block read base class: reads raw data from ioReader, then hands it to the subclass analyzeBlock for pre-analysis.
  */
 class BlockReader {
 public:
     /*
-     * preReadData/preReadLen is the format-detection data the Creator read before creating this
-     * reader; on the first readBlock call it is merged verbatim into the target RoughIOBlock's buffer.
+     * preReadData/preReadLen is the format-detection data prefetched by the Creator, merged into the first block.
      */
     BlockReader(IOReader* reader, const uint8_t* preReadData = nullptr, uint64_t preReadLen = 0) {
         ioReader = reader;
@@ -99,26 +80,20 @@ public:
         ioReader = nullptr;
     }
 
-    /*
-     * Read one data block. Returns the actual data length (after alignment); 0 means EOF, -1 means a read error.
-     */
+    /* Read one data block: actual length after alignment, 0 for EOF, -1 for error. */
     virtual int64_t readBlock(RoughIOBlock* blockPtr, BlockType fileType = TYPE_UNKNOW);
 
     virtual int32_t init() { return 0; }
 
     /*
-     * Set the per-block read target in bytes determined by the -l option (the block initially
-     * allocates only 1MB and grows to this target on demand). 0 means falling back to the
-     * block's own blockSize.
+     * Per-block read target in bytes set by -l; 0 falls back to the block's own blockSize.
      */
     void setReadBlockBytes(uint32_t bytes) {
         readBlockBytes = bytes;
     }
 
     /*
-     * Whether this block carries data lines. Default true; the SAM header block (only @ lines)
-     * returns false, which lets the engine defer file-level decisions (codec selection) until
-     * the first data block.
+     * Whether this block carries data lines; the SAM header block returns false.
      */
     virtual bool blockHasData(const RoughIOBlock* /*blockPtr*/) const { return true; }
 
@@ -129,24 +104,16 @@ protected:
     }
 
     /*
-     * Subclasses pre-analyze the block content according to their format (newline position
-     * recording, Fastq/Sam actuator preAnalysis) and return the determined block type. On
-     * pre-analysis failure, Fastq/Sam must return BINARY so that compression creates a binary
-     * Actuator.
+     * Pre-analyze the block for its format and return the block type; on failure Fastq/Sam return BINARY.
      */
     virtual BlockType analyzeBlock(RoughIOBlock* blockPtr, BlockType fileType);
 
     /*
-     * Move the incomplete record at the block tail into cache so that structured coding lands
-     * exactly on record boundaries. Returns false when the tail block (dataLen < read target)
-     * contains malformed data; the caller should degrade to BINARY.
+     * Move the incomplete tail record into cache so coding lands on record boundaries; false on malformed tail.
      */
     bool alignToRecordBoundary(RoughIOBlock* blockPtr, bool isFastq);
 
-    /* Merge the Creator's prefetched data and the leftover cache into the block buffer and
-     * return the number of bytes merged. With capAtBlockSize=false (SAM blocks split by read
-     * line count may exceed byte blockSize), all prefetched data and cache are merged at once,
-     * growing the buffer on demand. */
+    /* Merge prefetched data and leftover cache into the block buffer; returns bytes merged. */
     size_t prependBufferedData(RoughIOBlock* blockPtr, size_t& totalLen, bool capAtBlockSize = true);
 
 protected:
@@ -186,19 +153,14 @@ protected:
 class SamBlockReader : public BlockReader {
 public:
     /*
-     * readsPerBlock: upper bound for splitting the data region by read line count (set by the
-     * compression level: 1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000).
-     * splitHeader=true: header lines form their own block (blockId==0 returns only @ lines);
-     * =false (downstream like sorting needs self-contained @SQ within a block) merges the header
-     * with the first data block, still splitting the data region by readsPerBlock.
+     * readsPerBlock: read-count bound per data block (1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000).
+     * splitHeader=true gives the header its own block; false merges it with the first data block.
      */
     SamBlockReader(IOReader* reader, const uint8_t* preReadData = nullptr, uint64_t preReadLen = 0,
                    uint32_t readsPerBlock = 10000, bool splitHeader = true)
         : BlockReader(reader, preReadData, preReadLen), readsPerBlock(readsPerBlock), splitHeader(splitHeader) {
         lastBlockHasData = false;
-        /* CRAM rule: bases_per_slice = seqs_per_slice * 500. With the per-level
-           seqs tiers (1-5:10000, 6-7:25000, 8-9:100000) this yields the three
-           base caps 5M / 12.5M / 50M per data block. */
+        /* CRAM rule: bases_per_slice = seqs_per_slice * 500. */
         blockMaxBases = (size_t)readsPerBlock * 500;
     }
 
@@ -219,11 +181,7 @@ protected:
 };
 
 /*
- * BAM format: reads the raw BAM byte stream, returns the header as an independent block
- * (converted to SAM header text), decompresses each alignment read into a SAM line, groups
- * readsPerBlock reads into a SAM block, and hands it to the SAM compressor. The block type is
- * marked BAM (FileType prints BAM), but the content is SAM text, so every capability SAM
- * supports (codec, priors, indexing, etc.) is also supported for BAM.
+ * BAM format: the header becomes its own block (SAM text) and each alignment read is decompressed into a SAM line, grouped into readsPerBlock blocks. The block type stays BAM.
  */
 class BamBlockReader : public BlockReader {
 public:
@@ -233,8 +191,7 @@ public:
         headerParsed = false;
         headerWritten = false;
         lastBlockHasData = false;
-        /* CRAM rule: bases_per_slice = seqs_per_slice * 500 (5M / 12.5M / 50M
-           for the three per-level reads tiers). */
+        /* CRAM rule: bases_per_slice = seqs_per_slice * 500. */
         blockMaxBases = (size_t)readsPerBlock * 500;
     }
 
@@ -247,13 +204,7 @@ public:
     void setStructMode(bool on) { structMode = on; }
 
     /*
-     * Archive-mode reader offload: with rawStreamMode on, the reader renders the
-     * header and the first `textBlockLimit` data blocks as SAM text (those feed the
-     * reader-side codec decision and QUAL pre-training), then every later data block
-     * is streamed as raw [i32 size][record] bytes (block sliced by the same
-     * read-count/base-count rules). The compressing worker renders the raw records
-     * into the identical SAM text, moving the BAM->SAM cost off the single reader
-     * thread. Off by default (today's behaviour: everything rendered on the reader).
+     * With rawStreamMode on, the reader renders the first textBlockLimit blocks as SAM text, then streams later blocks as raw records for the worker to render.
      */
     void setRawStreamMode(bool on, int64_t textBlockLimit) {
         rawStreamMode = on;
@@ -271,11 +222,7 @@ protected:
     int32_t parseBamRecord(const uint8_t* data, int32_t size, std::string& samLine);
 
     /*
-     * Structured mode: instead of rendering every record into a SAM line, the
-     * reader only appends the raw BAM record bytes ([u32 size][record]...) to
-     * the block. BamCodecActuator then parses the records into columns on its
-     * own thread (one block per worker), so the record->column work is fanned
-     * out over the coder threads instead of serialising on the reader.
+     * Structured mode: append raw BAM record bytes only; BamCodecActuator parses them into columns on the worker thread.
      */
 protected:
     std::vector<BamRef> refs;          /* BAM reference sequence list (name + length) */
@@ -288,16 +235,11 @@ protected:
     bool lastBlockHasData;
 
     /*
-     * A read whose SAM line would push the current data block past the -l byte
-     * budget is parked here (fully parsed) and emitted as the first line of the
-     * next data block, so blocks never exceed the budget and over-long reads are
-     * never lost. Empty normally.
+     * A read whose SAM line would push the block past the budget is parked here for the next block.
      */
     std::string pendingSamLine;
 
-    /* Reused scratch buffers for one BAM record + its parsed SAM line, so the
-       read thread does not allocate/free per record (allocation churn dominated
-       the read side on long-read data). Capacity is kept across records. */
+    /* Reused scratch buffers for one BAM record and its parsed SAM line. */
     std::vector<uint8_t> recBuf;
     std::string lineBuf;
     bool structMode = false;
@@ -308,7 +250,7 @@ protected:
     std::shared_ptr<const std::vector<BamRef>> rawRefs; /* shared ref table handed to raw blocks */
 };
 
-/* GZ-compressed BAM format: the inner layer is still a BGZF stream; inflate it to raw BAM first, then convert to SAM */
+/* GZ-compressed BAM: inflate the BGZF stream to raw BAM, then convert to SAM. */
 class BamGzBlockReader : public BamBlockReader {
 public:
     BamGzBlockReader(IOReader* reader, const uint8_t* preReadData = nullptr, uint64_t preReadLen = 0,
@@ -332,9 +274,7 @@ public:
     }
 
     /*
-     * Number of inflate workers for the parallel BGZF decoder (>=1); the compression engine
-     * passes bamBgzfThreadNum(threadNum), so `-t` decides it (see BlockFactory::createBlockReader).
-     * A caller that passes nothing keeps the default of 4.
+     * Number of inflate workers for the parallel BGZF decoder, derived from -t; a missing value keeps the default of 4.
      */
     void setParThreads(int n) { parThreads = (n >= 1) ? n : 4; }
 
@@ -362,16 +302,7 @@ class BlockWriter;
 class PbgzBlockWriter;
 
 /*
- * Thread budget for the BAM container's parallel BGZF stage, derived from -t: a quarter of the
- * pipeline's threads, at least one.
- *
- * The stage sits inside the pipeline on both sides of the format - while compressing, the
- * reader inflates a BGZF (BAM) input block by block (BamGzBlockReader); while `-b` writes a
- * BAM, the writer deflates the BGZF blocks and converts SAM text to records (BamWriter). The
- * pipeline's own blocks already spread over -t threads, so a quarter keeps this stage from
- * competing with the rest of the work while still covering its share of it; one thread is the
- * floor, because a BGZF stream must be walked forward in order and the stage has to make
- * progress even when -t is 1..4.
+ * Thread budget for the BAM parallel BGZF stage: a quarter of -t, at least one.
  */
 inline uint32_t bamBgzfThreadNum(uint32_t threadNum)
 {
@@ -380,35 +311,13 @@ inline uint32_t bamBgzfThreadNum(uint32_t threadNum)
 }
 
 /*
- * Creator for BlockReader/BlockWriter.
- *
- * createBlockReader first reads a small amount of data to determine the file format
- * (FASTQ/SAM/BAM/PBGZ, treating unrecognizable input as binary), then creates the matching
- * BlockReader subclass; prefetched data is handed to the subclass to merge into the first block.
- * GZ-compressed input is transparently decompressed by the io layer or inflated inside the
- * reader; the block type is always set to the true format after decompression
- * (FASTQ/SAM/BAM/BINARY), never a GZ variant.
+ * Creator for BlockReader/BlockWriter: reads a small sample to pick the format, then creates the matching reader; the block type is always the true format, never a GZ variant.
  */
 class BlockFactory {
 public:
     /*
-     * compressLevel determines the read-line-count granularity for splitting SAM/SAM-GZ data
-     * blocks: 1-5 -> 10000 reads/block, 6-7 -> 25000, 8-9 -> 100000. With splitSamHeader=false
-     * the SAM header does not form its own block (merging with the first data block), for
-     * downstream consumers such as sorting that need a self-contained @SQ within the block.
-     *
-     * pbgzAsOpaque is for the compression pipeline. There a file that already is a pbgz archive
-     * is not an input format but the product of the same pipeline: its blocks carry already-coded
-     * payloads, and PbgzBlockReader hands exactly those over (that is what decompression, indexing
-     * and region queries need). An actuator receiving them as if they were the original text or
-     * records cannot parse them - every block comes out empty and the input is lost. With this
-     * set, such a file is read as opaque binary instead, so compressing an archive stores its
-     * bytes verbatim: decompressing the result once yields that archive byte for byte, and
-     * decompressing it again yields the original data.
-     *
-     * bgzfThreads is the worker count for the parallel BGZF inflate of a BAM input (see
-     * BamGzBlockReader::setParThreads); 0 keeps the reader's own default. Callers with a thread
-     * budget pass bamBgzfThreadNum(threadNum).
+     * compressLevel sets SAM block granularity (1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000 reads).
+     * splitSamHeader=false merges the header into the first data block. bamStructMode reads raw records for column parsing. pbgzAsOpaque reads an existing pbgz archive as opaque binary. bgzfThreads sets the BGZF inflate worker count (0 keeps the default).
      */
     static BlockReader* createBlockReader(IOReader* ioReader, uint8_t compressLevel = 0,
                                           bool splitSamHeader = true,
@@ -417,12 +326,7 @@ public:
                                           uint32_t bgzfThreads = 0);
 
     /*
-     * The SAM block granularity actually used by the readers for a level:
-     * 1-5 -> 10000 reads/block, 6-7 -> 25000, 8-9 -> 100000 (see createBlockReader).
-     * Exposed as a function so codec pre-selection can trial on the same volume
-     * that real compression feeds a coder; trialling on a much smaller sample
-     * misjudges coders whose cost is concentrated at block start (model cold
-     * start), e.g. coder_arith on the POS delta stream.
+     * The SAM block granularity used for a level (1-5 -> 10000, 6-7 -> 25000, 8-9 -> 100000), so pre-selection trials at real block volume.
      */
     static uint32_t samReadsPerBlockOfLevel(uint8_t compressLevel);
 
@@ -434,9 +338,7 @@ public:
 class PbgzBlockReader : public BlockReader {
 public:
     /*
-     * preReadData/preReadLen is the format-detection data prefetched by the Creator (piped
-     * input cannot be seeked back, so it must be handed over); the internal PbgzFileReader
-     * consumes these bytes before reading from ioReader.
+     * preReadData/preReadLen is the prefetched format-detection data, consumed by the internal PbgzFileReader.
      */
     PbgzBlockReader(IOReader* reader, const uint8_t* preReadData = nullptr, uint64_t preReadLen = 0)
         : BlockReader(reader) {
@@ -533,27 +435,13 @@ private:
 };
 
 /*
- * BAM output writer: converts decompressed SAM text blocks into standard BAM (BGZF-compressed)
- * and writes them to the underlying ioWriter.
- *
- * Usage: DecompressEngine selects -b to use it in place of the plain BlockWriter when
- * decompressing.
- *   - The first SAM block (@ header lines, possibly with merged data lines) is parsed to extract
- *     the reference sequence list and writes the BAM header;
- *   - Subsequent data blocks are converted line by line into BAM records;
- *   - Output is compressed in BGZF blocks; at file end the residual block is flushed and a BGZF
- *     EOF marker is appended (standard BAM).
- *
- * If the first block is not SAM/BAM (e.g. decompressing FASTQ/binary), it is not converted but
- * passed through as-is with a warning, avoiding data loss.
+ * BAM output writer (-b): converts decompressed SAM text blocks into standard BAM (BGZF) and writes them.
+ * The first block yields the BAM header; later blocks are converted line by line; a non-SAM first block is passed through.
  */
 class BamWriter : public BlockWriter {
 public:
     /*
-     * maxThreads caps how many threads the writer may use to convert SAM text
-     * into BAM records and to deflate the resulting BGZF blocks; 0 means "as
-     * many as the machine has". The engine passes -t, so `-t N` also bounds the
-     * writer instead of letting it saturate every core behind the user's back.
+     * maxThreads caps the writer's convert and deflate threads; 0 means hardware_concurrency.
      */
     explicit BamWriter(IOWriter* pIoWriter, uint32_t maxThreads = 0);
 
@@ -562,9 +450,7 @@ public:
     virtual int32_t writeBlock(RoughIOBlock* blockPtr) override;
 
     /*
-     * Finish: compress the remaining data in the BGZF buffer into a block and append the BGZF
-     * EOF marker. Called before the writer thread exits (releaseBlockWriter); the destructor
-     * calls it once more as a fallback (idempotent).
+     * Flush the BGZF buffer and append the EOF marker; idempotent.
      */
     int32_t finish();
 
@@ -582,16 +468,8 @@ private:
     int32_t bgzfWrite(const void* data, size_t len);
 
     /*
-     * Frame the buffered uncompressed bytes into BGZF blocks. Every complete
-     * 64KB block is deflated independently, so a batch is compressed in
-     * parallel (the writer thread is otherwise the pipeline bottleneck, and
-     * single threaded BGZF deflate was ~90% of `-b` wall time). Block
-     * boundaries, parameters and output order are unchanged, so the byte
-     * stream is identical to the serial path. Only the writer thread calls
-     * this, and the helper threads do nothing but deflate.
-     *
-     * bgzfWrite() emits every complete 64KB block it can; bgzfFlushRemaining()
-     * emits the trailing partial block at end of stream.
+     * Frame the buffered bytes into BGZF blocks, deflating complete 64KB blocks in parallel.
+     * bgzfWrite() emits every complete block; bgzfFlushRemaining() emits the trailing partial one.
      */
     int32_t bgzfFlushRemaining();
 
@@ -609,11 +487,7 @@ private:
     bool finished;                         /* finish() has been executed (prevents duplicate EOF markers) */
 
     /*
-     * Uncompressed BAM bytes not yet framed into BGZF blocks. bgzfWrite()
-     * drains every complete 64KB block; finish() drains the trailing partial
-     * block. Kept across writeBlock calls, so block boundaries only depend on
-     * the byte offset in the stream - exactly as the previous per-call flush
-     * loop behaved.
+     * Uncompressed BAM bytes not yet framed into BGZF blocks; kept across writeBlock calls.
      */
     std::vector<uint8_t> bgzfPending;
 
@@ -621,20 +495,12 @@ private:
 };
 
 /*
- * BAM record rendering shared by the reader (text mode) and the worker-side
- * raw-record render: convert one BAM alignment record into a SAM line. `refs`
- * resolves the RNAME/RNEXT columns; on error returns non-zero and `line` is
- * undefined. Deterministic: identical input record + refs always yield the
- * identical line, on any thread.
+ * Convert one BAM alignment record into a SAM line; `refs` resolves RNAME/RNEXT. Returns non-zero on error.
  */
 int32_t bamRecordToSamLine(const uint8_t* data, int32_t size,
                            const std::vector<BamRef>& refs, std::string& line);
 
 /*
- * Worker-side render of a raw-record BAM block (isRawBam()): rebuilds the
- * identical SAM text into the block buffer, recomputes the newline positions
- * (npos) and sets the block MD5 over that text, so the block handed to the
- * SAM compressor is byte-identical to what the reader thread used to render.
- * Returns 0 on success.
+ * Worker-side render of a raw-record BAM block: rebuild the SAM text, recompute npos and set the MD5. Returns 0 on success.
  */
 int32_t bamRenderRawBlockToText(RoughIOBlock* blockPtr);

@@ -22,21 +22,11 @@
  */
 
 #include "coder.h"
-/*
- * fcinit()/FC_OK come through here (coder_fc.h -> fc/pp.h -> fc_header.h). include-cleaner cannot
- * see that path and reports the header as unused; replacing it with the leaf headers it suggests
- * breaks other builds, so it is pinned with an IWYU pragma instead of removed.
- */
+/* fcinit()/FC_OK come through here via fc/pp.h; pinned instead of removed. */
 #include "fc.h"
 #include "fc_header.h"  
 
-/*
- * The four callbacks have self-sufficient defaults, and registration is an
- * optional override on top of them. An entry point that bypasses the engine
- * (e.g., explicitly building a reference index) must not reach the codec layer
- * with empty implementations, where safe_alloc would fail on the spot and
- * safe_free would silently leak; dependencies are not guaranteed by call order.
- */
+/* Default implementations for the four allocator/logger callbacks. */
 static uint8_t* defaultAllocProc(size_t size) {
     return size > 0 ? static_cast<uint8_t*>(calloc(size, 1)) : nullptr;
 }
@@ -160,11 +150,7 @@ void coder_logger(coder_ns::coder_log_level level, const char* log_format, ...) 
     return;
 }
 
-/*
- * Errors are thrown as exceptions and caught by the caller (PbgzEngine's
- * single-block processing boundary), which then follows the normal failed-return
- * path, ensuring every error is eventually handled.
- */
+/* Errors are thrown as exceptions and caught at the engine's processing boundary. */
 void coder_exit(int16_t exit_code, const char* exit_msg_format, ...) {
     char exit_message[2048];
     va_list args;

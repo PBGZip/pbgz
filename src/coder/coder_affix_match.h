@@ -106,18 +106,10 @@ public:
         if ((int32_t)in_len < suf_len + pre_len)
             suf_len = in_len - pre_len;
 
-        if (encode_higher())
-        { /* Higher compression rate */
-            model_prefix[last_prelen].encodeSymbolOrder(&rc, pre_len);
-            model_suffix[last_suflen].encodeSymbolOrder(&rc, suf_len);
-            model_len[last_len].encodeSymbolOrder(&rc, in_len);
-        }
-        else
-        {
-            model_prefix[last_prelen].encodeSymbol(&rc, pre_len);
-            model_suffix[last_suflen].encodeSymbol(&rc, suf_len);
-            model_len[last_len].encodeSymbol(&rc, in_len);
-        }
+        /* Lengths as 7-bit varints, so a length >= 256 stays within the 256-entry models. */
+        encodeLen(model_prefix, last_prelen, pre_len);
+        encodeLen(model_suffix, last_suflen, suf_len);
+        encodeLen(model_len, last_len, in_len);
 
         last_prelen = pre_len;
         last_suflen = suf_len;
@@ -210,18 +202,9 @@ public:
             this->plast = last;
         }
 
-        if (encode_higher())
-        {
-            pre_len = model_prefix[last_prelen].decodeSymbolOrder(&rc);
-            suf_len = model_suffix[last_suflen].decodeSymbolOrder(&rc);
-            len = model_len[last_len].decodeSymbolOrder(&rc);
-        }
-        else
-        {
-            pre_len = model_prefix[last_prelen].decodeSymbol(&rc);
-            suf_len = model_suffix[last_suflen].decodeSymbol(&rc);
-            len = model_len[last_len].decodeSymbol(&rc);
-        }
+        pre_len = decodeLen(model_prefix, last_prelen);
+        suf_len = decodeLen(model_suffix, last_suflen);
+        len = decodeLen(model_len, last_len);
 
         last_prelen = pre_len;
         last_suflen = suf_len;
@@ -331,6 +314,45 @@ private:
     bool encode_higher() const
     {
         return this->level > 1;
+    }
+
+    /* Code one line length: context is the previous length (clamped), value is a 7-bit varint. */
+    void encodeLen(SIMPLE_MODEL<256>* modelArr, int32_t ctx, int32_t value)
+    {
+        SIMPLE_MODEL<256>& m = modelArr[(ctx >= 0 && ctx < 256) ? ctx : 255];
+        uint32_t v = (uint32_t)value;
+        for (;;) {
+            uint8_t b = (uint8_t)(v & 0x7F);
+            v >>= 7;
+            if (v != 0) {
+                b |= 0x80;
+            }
+            if (encode_higher()) {
+                m.encodeSymbolOrder(&rc, b);
+            } else {
+                m.encodeSymbol(&rc, b);
+            }
+            if (v == 0) {
+                break;
+            }
+        }
+    }
+
+    int32_t decodeLen(SIMPLE_MODEL<256>* modelArr, int32_t ctx)
+    {
+        SIMPLE_MODEL<256>& m = modelArr[(ctx >= 0 && ctx < 256) ? ctx : 255];
+        uint32_t v = 0;
+        int shift = 0;
+        for (;;) {
+            const uint8_t b = (uint8_t)(encode_higher() ? m.decodeSymbolOrder(&rc)
+                                                        : m.decodeSymbol(&rc));
+            v |= (uint32_t)(b & 0x7F) << shift;
+            shift += 7;
+            if ((b & 0x80) == 0) {
+                break;
+            }
+        }
+        return (int32_t)v;
     }
 
 private:

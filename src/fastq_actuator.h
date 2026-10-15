@@ -46,7 +46,7 @@ class CompressEngine;
 enum class CommentType {
     PLUS_ONLY,     // Comment line contains only a '+' sign
     SAME_AS_ID,    // Comment line is the same as ID line
-    OTHER,         // Comment line is neither of the above, could be any other string including empty string
+    OTHER,         // Comment line is neither of the above
     UNKNOWN        // Unknown type
 };
 
@@ -157,25 +157,13 @@ private:
 
     int32_t initDecoder(RoughIOBlock* outputBlock);
 
-    /*
-     * The reference layout's match stream when it was split into runs and values: rebuild the
-     * whole stream from the "m"/"mval" sub-streams into matchBlock, so the per-read pulls below
-     * are a straight copy. Answers 0, or -1 with the reason already logged.
-     */
+    /* Rebuild the split match stream from the "m"/"mval" sub-streams into matchBlock. Returns 0, or -1 with the reason logged. */
     int32_t initRleMatchStream(const Json::Value& metaStreams, uint32_t& id, uint32_t& readOffset);
 
-    /*
-     * One read's match bytes: out of the rebuilt stream when this block's was split, or straight
-     * from its coder otherwise. Returns the number of bytes (== len), or a negative coder error.
-     */
+    /* One read's match bytes: from the rebuilt stream when split, else from its coder. Returns bytes read or a negative error. */
     int32_t pullMatchBytes(uint8_t* dst, uint32_t len);
 
-    /*
-     * Decode one auxiliary sub-stream of the reference layout whole, into a caller-supplied buffer
-     * of exactly the length the stream declares on its source side. The coder is built from the
-     * magic the stream carries and the level is replayed from the same meta, so a stream written
-     * by a different coder decodes without this side naming it.
-     */
+    /* Decode one auxiliary sub-stream whole into dst; the coder and level come from the stream meta. */
     int32_t decodeWholeStream(const Json::Value& streamMeta, const uint8_t* src, uint32_t srcLen,
                               uint8_t* dst, uint32_t dstLen, const char* tag);
 
@@ -223,29 +211,17 @@ private:
     uint32_t* baseNPosBuffer;
     uint8_t* refeStretchBuffer;
 
-    /*
-     * The auxiliary columns of the reference layout, expanded per block.
-     *
-     * All three are read one entry per read (the length, the reference position) or per N (the N
-     * position), so they are expanded once here rather than parsed inside the per-read loop; the
-     * streams themselves are varints, which is what the compressed size depends on. The vectors
-     * own the storage the pointers above point into - a fixed uint16/uint32/uint64 per read is no
-     * longer written or read (see compressBaseWithRef), and the length vector is in bases, not in
-     * "bases above the shortest read", so nothing clamps a read to 65535 any more.
-     */
+    /* Auxiliary columns of the reference layout, expanded once per block; the vectors own the storage the pointers point into. */
     std::vector<uint32_t> baseNPosVec;
     std::vector<uint32_t> baseLengthVec;
     std::vector<uint64_t> baseMappedPosVec;
 
-    /* Whether this block's match stream arrived split into runs and values (see
-       splitSeqMatchStream): when it did, matchBlock holds the rebuilt stream and the per-read
-       pulls copy out of it instead of asking the coder. */
+    /* Whether this block's match stream arrived split into runs and values (see splitSeqMatchStream). */
     bool baseMatchRle;
     uint8_t* baseMatchBlock;
     uint32_t baseMatchBlockLen;
     uint32_t baseMatchBlockOffset;
 
-    /* Whether this block's "no match" records carry their own characters rather than two-bit codes
-       (see the literal form in compressBaseWithRef, and the "litbases" member of the block meta). */
+    /* Whether this block's "no match" records carry their own characters rather than two-bit codes. */
     bool baseLitBases;
 };

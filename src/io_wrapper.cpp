@@ -148,8 +148,7 @@ size_t FileReader::readIO(void* pBuffer, size_t readSize) {
     const uint8_t* src = fo.mappedAddress + fo.position;
     uint8_t* dst = (uint8_t*)pBuffer;
 
-    // Conservative SIMD optimization: only for large data (>= 1MB)
-    // Use aligned SIMD copy for better performance on large reads
+    // SIMD copy for large reads (>= 1MB)
     if (realRead >= 1024 * 1024) {
         // Enhanced prefetch for large data
         const size_t prefetchDistance = 2048;
@@ -241,8 +240,7 @@ size_t FileReader::readLine(std::string& line) {
     const size_t remaining = fo.fileSize - fo.position;
     const char* current = (const char*)(fo.mappedAddress + fo.position);
 
-    // Conservative SIMD optimization: only for long lines (>500 bytes)
-    // Avoid overhead for common short lines, use standard method for consistency
+    // SIMD newline scan for long lines (>500 bytes)
     if (remaining > 500) {
 #if defined(__x86_64__) && defined(__AVX2__)
         const __m256i newline_vec = _mm256_set1_epi8('\n');
@@ -319,11 +317,7 @@ size_t FileReader::readLine(std::string& line) {
     return lineLength;
 }
 
-/*
- * msync returns EINVAL when the length is 0 (consistently observed on exfat /
- * APFS); this is only the degenerate case of "nothing to flush", not a write
- * failure, so it must not be recorded into the error chain.
- */
+/* msync returns EINVAL for a zero length; that is a no-op, not a write failure. */
 static int32_t msyncMapped(uint8_t* addr, size_t len, int flags)
 {
     if (addr == nullptr || len == 0) {
@@ -332,11 +326,7 @@ static int32_t msyncMapped(uint8_t* addr, size_t len, int flags)
     return msync(addr, len, flags);
 }
 
-/* Flush the byte range [startOff, endOff) of the mapping (page-aligned) without blocking:
-   the dirty pages are scheduled for write-back and the call returns immediately. Blocking
-   here per write (MS_SYNC) serialised the whole writer thread to disk latency, ~46 MB/s on
-   a spinning volume; the caller's closeIO() performs the final synchronous msync + fsync,
-   so on a clean shutdown durability is unchanged. */
+/* Flush [startOff, endOff) asynchronously; closeIO performs the final sync. */
 static int32_t msyncRangeAsync(uint8_t* addr, size_t startOff, size_t endOff)
 {
     if (addr == nullptr || endOff <= startOff) {
@@ -374,14 +364,7 @@ int32_t FileWriter::openIO() {
 }
 
 void FileWriter::closeIO() {
-    /*
-     * Writes go through mmap, and all of msync/ftruncate/munmap/close must be
-     * checked: discarding them would leave the file length right but the content
-     * all zeros when the write-back fails, while still exiting with 0 - observed
-     * in practice as a 12MB "normal" compressed file that was entirely zeros after
-     * the first 5MiB on an external volume. Each call is checked and errors are
-     * latched onto writeErr.
-     */
+    /* Check all msync/ftruncate/munmap/close results and latch errors. */
     if (fo.mappedAddress != nullptr) {
         if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
             LOG_ERROR("msync %zu bytes failed: %s", fo.fileSize, strerror(errno));
@@ -402,7 +385,7 @@ void FileWriter::closeIO() {
 
     // Close file descriptor
     if (fo.fd != -1) {
-        // After munmap, fsync is the only guarantee that the data is actually flushed to disk; msync is unavailable on some file systems
+        // fsync is the only durability guarantee after munmap.
         if (0 != fsync(fo.fd)) {
             LOG_ERROR("fsync output file failed: %s", strerror(errno));
             latchWriteError(errno);
@@ -420,12 +403,7 @@ size_t FileWriter::getMappedSize(size_t fileSize) {
 }
 
 size_t FileWriter::calculateNextMapSize() {
-    /*
-     * File/mapping growth policy:
-     *   1) start small (1MB) and double while the mapping is below 32MB;
-     *   2) once it reaches 32MB, stop doubling and grow by a fixed 16MB step, so
-     *      very large outputs do not reserve exponentially sized mappings.
-     */
+    /* Mapping growth: double below 32MB, then grow linearly by 16MB. */
     const size_t INITIAL_SIZE     = 1 << 20;      // 1MB initial mapping
     const size_t LINEAR_THRESHOLD = 32u << 20;    // 32MB: switch from doubling to linear growth
     const size_t LINEAR_STEP      = 16u << 20;    // fixed increment added per remap above the threshold
@@ -454,9 +432,8 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
 
         size_t newSize = fo.fileSize + writeLen;
     if (newSize > mapSize) {
-        // If file size exceeds mapping size, need to remap
-        // Dirty pages stay in the page cache across the remap (same fd/inode);
-        // only nudge write-back without blocking.
+         // If file size exceeds mapping size, need to remap
+        // Dirty pages survive the remap; just nudge write-back without blocking.
         if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
             LOG_ERROR("msync(MS_ASYNC) before remap failed: %s", strerror(errno));
             latchWriteError(errno);
@@ -485,8 +462,7 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     const uint8_t* src = (const uint8_t*)pBuffer;
     uint8_t* dst = fo.mappedAddress + fo.fileSize;
 
-    // Conservative SIMD optimization: only for large data (>= 1MB)
-    // Use aligned SIMD copy for better performance on large writes
+    // SIMD copy for large writes (>= 1MB)
     if (writeLen >= 1024 * 1024) {
         // Prefetch destination regions for write-combining optimization
         const size_t prefetchDistance = 2048;
@@ -554,23 +530,12 @@ size_t FileWriter::writeIO(const void* pBuffer, size_t writeLen) {
     }
     fo.fileSize = newSize;
     fo.position = fo.fileSize;
-    /* Schedule the just-written bytes for write-back without blocking the
-       writer thread (final durability is guaranteed by closeIO's msync+fsync). */
+    /* Schedule written bytes for write-back; closeIO guarantees final durability. */
     if (0 != msyncRangeAsync(fo.mappedAddress, newSize - writeLen, newSize)) {
         LOG_ERROR("msync(MS_ASYNC) after write failed: %s", strerror(errno));
         latchWriteError(errno);
     }
-    /*
-     * Returns the number of bytes actually written this call, not the cumulative
-     * file position newSize.
-     *
-     * The writeIO contract is "return the number of bytes written (PipeWriter
-     * and GzFileWriter do the same); the caller sums them to get the total
-     * length". Returning newSize would make the sum of the 7 calls in
-     * writeBlockData ≈ 7 * file position; once the output file exceeds
-     * ~2^31/7 ≈ 307MB, the uint32 accumulation then cast to int32 overflows to
-     * a negative value, which gets misreported as "Write block failed".
-     */
+    /* Return bytes written this call (not cumulative position); callers sum these. */
     return writeLen;
 }
 
@@ -584,9 +549,8 @@ int32_t FileWriter::writeIOAt(size_t seekOffset, const void* pBuffer, size_t wri
     size_t requiredSize = seekOffset + writeLen;
 
     if (requiredSize > mapSize) {
-         // If file size exceeds mapping size, need to remap
-        // Dirty pages stay in the page cache across the remap (same fd/inode);
-        // only nudge write-back without blocking.
+        // If file size exceeds mapping size, need to remap
+        // Dirty pages survive the remap; just nudge write-back without blocking.
         if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
             LOG_ERROR("msync(MS_ASYNC) before remap failed: %s", strerror(errno));
             latchWriteError(errno);
@@ -1037,13 +1001,13 @@ bool FastGzFileReader::readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen,
 
 int64_t FastGzFileReader::processMultipleGzipHeaders() {
     for (;;) {
-        /* Record current decompression position info, including original data position and length, output data position and length */
+        /* Save the current decompression position and length info. */
         uint8_t* isalIn = isalState.next_in;
         int64_t isalInLen = isalState.avail_in;
         uint8_t* isalOut = isalState.next_out;
         int64_t isalOutLen = isalState.avail_out;
 
-        /* When encountering some special gz files with multiple headers, intel gz needs to reset header */
+        /* Reset the header for gz files with multiple headers. */
         isal_inflate_reset(&isalState);
         int64_t isalRes = isal_read_gzip_header(&isalState, &isalHeader);
         if (ISAL_DECOMP_OK == isalRes) {/* Gz decompression ok, exit*/
@@ -1253,7 +1217,7 @@ size_t FastGzPipeReader::readIO(void* pBuffer, size_t readSize) {
         return 0;
     }
 
-    // Directly use ISAL state, referencing FastGzFileReader pattern
+    // Use ISAL state directly.
     state.next_out = static_cast<uint8_t*>(pBuffer);
     state.avail_out = readSize;
 
@@ -1359,7 +1323,7 @@ void FastGzPipeReader::closeIO() {
 size_t FastGzPipeReader::readLine(std::string& line) {
     line.clear();
 
-    // Use larger buffer for batch reading to improve efficiency
+    // Batch read via a larger buffer
     const size_t BUFFER_SIZE = 8192;  // 8KB buffer
     char buffer[BUFFER_SIZE];
     size_t totalRead = 0;

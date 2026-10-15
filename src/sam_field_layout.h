@@ -1,20 +1,27 @@
 /*
- * sam_field_layout.h - the byte layouts a SAM field payload can be in, and how a stream says which.
- *
- * The archive records a layout per sub-stream in its meta, and a decoder has to read every layout a
- * released revision wrote, not only the one this build writes. Those readers live here - pure
- * functions over a payload buffer - instead of inline in the record loop, so that the compatibility
- * reading is in one place and each layout can be pinned by a test without an archive (see
+ * sam_field_layout.h - the byte layouts a SAM field payload can be in, and how a stream says
+ * which. A decoder must read every layout a released revision wrote, so these pure readers over a
+ * payload buffer live here rather than inline in the record loop (see
  * test/testcase/sam_field_layout_testcase.cpp).
+ * Copyright (C) 2025 PBGZip
  *
- * What this build writes:
- *   - TLEN exceptions: (delta line index, zigzag32 TLEN) varint pairs, marked "exc" = 1;
- *   - SEQ exception positions: forward deltas as varints ("nposd"), or runs ("nposr");
- *   - SEQ exception positions, absolute: "npos" together with a "ch".
- * What older revisions wrote and is still read:
- *   - TLEN exceptions as fixed int32 pairs, with no marker at all (up to 2026-08-19);
- *   - SEQ exception positions as one absolute list under "npos" with no "ch", holding 'N' and 'n'
- *     alike, counted by the field-level "ncount", and writing 'N' back at every position.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -27,26 +34,16 @@
 
 #include <json/json.h>
 
-/* The varint/zigzag helpers live with the other byte-stream shapes both formats share (see
- * seq_stream_util.h); they are used here for the TLEN and numeric sub-streams. */
+/* Varint/zigzag helpers live in seq_stream_util.h. */
 #include "seq_stream_util.h"
 
 /* The marker the TLEN field meta carries, naming the layout its exception stream is in. */
 enum { TLEN_EXC_LAYOUT_FIXED = 0, TLEN_EXC_LAYOUT_VARINT = 1 };
 
 /*
- * The two layouts a TLEN exception stream arrives in. This build writes (delta line index, zigzag32
- * TLEN) as varint pairs and records that in the field meta under the short key "exc" - the marker
- * sits in the meta of every block that has exceptions, so its name is three characters and its
- * value a small integer rather than a string. The layout before it wrote (line, TLEN) as fixed
- * int32 pairs - eight bytes per entry, the line an absolute content index - and wrote no marker at
- * all, so an archive without "exc" holds that one.
- *
- * The marker is authoritative where it is present: the layout it names is the one decoded, and a
- * stream that does not decode under it is corruption rather than the other layout. Where it is
- * absent the fixed layout is assumed, as an archive predating the marker must - unless the stream's
- * size rules that out, since eight bytes per entry and the count the field declares are the one
- * thing the fixed layout must satisfy.
+ * Decode a TLEN exception stream written as (delta line index, zigzag32 TLEN) varint pairs, the
+ * layout this build writes and marks "exc" in the field meta. Returns false if the entries do not
+ * match the declared count.
  */
 static inline bool tlenDecodeVarints(const uint8_t* buf, uint32_t srclen, uint32_t declared,
                                      std::map<uint32_t, int32_t>& out)
@@ -79,20 +76,15 @@ static inline bool tlenDecodeFixedPairs(const uint8_t* buf, uint32_t srclen, uin
     return true;
 }
 
-/*
- * The SEQ exception sub-streams: one per character present, each a strictly increasing list of
- * block offsets, and each named for the form its positions are written in. The names are the single
- * source of truth for the encoder and the reader - they are the meta, so both sides have to agree
- * on them exactly.
- */
+/* SEQ exception sub-stream names: each names the form its positions are written in and is the
+   meta key both encoder and reader agree on. */
 static const char kSeqExcDeltaName[] = "nposd";
 static const char kSeqExcAbsName[] = "npos";
 static const char kSeqExcRunName[] = "nposr";
 
 enum class SeqExcForm { None, Absolute, Delta, Run };
 
-/* None when the name is not one of the forms; the decoder then knows the block's exception streams
-   have ended, since they are written consecutively. */
+/* None when the name is not one of the forms (exception streams have ended). */
 static inline SeqExcForm seqExcFormOf(const std::string& sname)
 {
     if (sname == kSeqExcDeltaName) {
@@ -107,8 +99,7 @@ static inline SeqExcForm seqExcFormOf(const std::string& sname)
     return SeqExcForm::None;
 }
 
-/* What a SEQ exception sub-stream's meta says: the form, the character to write at every position it
-   carries, how many positions, and for the run form how many runs. */
+/* What a SEQ exception sub-stream's meta says: form, character, position count, run count. */
 struct SeqExcLayout {
     SeqExcForm form;
     uint8_t ch;
@@ -120,8 +111,7 @@ static inline SeqExcLayout seqExcLayoutOf(const Json::Value& fieldMeta, const Js
 {
     SeqExcLayout out;
     out.form = seqExcFormOf(streamMeta["sname"].asString());
-    /* The first layout's "npos" predates "ch": it held 'N' and 'n' alike and wrote 'N' back at
-       every position, which is what a reader without the key has to do. */
+    /* The legacy "npos" had no "ch"; default to 'N'. */
     const Json::Value& chJson = streamMeta["ch"];
     out.ch = chJson.isUInt() ? (uint8_t)chJson.asUInt() : (uint8_t)'N';
     /* A stream's own count; "ncount" is the legacy form of it for that "npos". */
@@ -131,12 +121,9 @@ static inline SeqExcLayout seqExcLayoutOf(const Json::Value& fieldMeta, const Js
     return out;
 }
 
-/*
- * Expands a decoded payload into the block offsets it names. Absolute holds one 4-byte offset per
- * position; delta holds one varint per position, each the step from the previous one; run holds
- * both of its streams as varints, all the gaps first and then all the lengths (see the encoder), and
- * the runs it describes must add up to the declared count.
- */
+/* Expand a decoded payload into the block offsets it names. Absolute: one 4-byte offset per
+   position. Delta: one varint step per position. Run: all gaps as varints then all lengths; the
+   runs must add up to the declared count. */
 static inline bool seqExcDecodePositions(const SeqExcLayout& layout, const uint8_t* buf,
                                          uint32_t srclen, std::vector<uint32_t>& out)
 {

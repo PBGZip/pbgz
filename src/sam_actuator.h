@@ -35,22 +35,13 @@
 #include "reference.h"
 #include "coder_bwt_cm.h"
 #include "coder_factory.h"
-/* The reference-coded SEQ payload, and the CIGAR operation it walks: shared with the codec
-   pre-selection, which trials that payload on a sample of the first block (see
-   sam_seq_payload.h for why it is its own module). */
+/* The reference-coded SEQ payload and CIGAR walk, shared with the codec pre-selection (see sam_seq_payload.h). */
 #include "sam_seq_payload.h"
 #include "seq_stream_util.h"   /* SeqRleSplit, used by the SEQ payload helpers below */
-/* The QNAME column's layouts and the analysis they need: shared with the codec pre-selection,
-   which runs both encoders on a sample to decide which one the file's names suit. */
+/* The QNAME column's layouts and analysis, shared with the codec pre-selection. */
 #include "sam_qname_column.h"
 
-/*
- * The QNAME column's pre-decode state (see preDecodeForTLEN): the sub-stream views it reads
- * from - kept alive here, since the decoders point into them - the decoders themselves, one
- * per sub-stream and null where the layout carries no coder, and the numeric sub-streams the
- * rebuild loop serves one value per line from. Defined in sam_actuator.cpp, like the rest of
- * the SEQ/QNAME column's machinery.
- */
+/* The QNAME column's pre-decode state (see preDecodeForTLEN). */
 struct IdPredecodeState {
     std::vector<std::shared_ptr<coder_io>> streams;
     std::vector<std::shared_ptr<coder>> decoders;
@@ -60,17 +51,14 @@ struct IdPredecodeState {
     std::vector<uint64_t> numericAcc;
 };
 
-/*
- * One of the columns TLEN reconstruction needs (POS, CIGAR, PNEXT) and the decoder built for
- * it: the stream view is kept alive here, since the decoder reads through a raw pointer into
- * it, and the magic travels along because a coder's buffer trait is looked up by it (see
- * CoderFactory::decoderHoldsCallerBuffer).
- */
+/* One TLEN-reconstruction column (POS/CIGAR/PNEXT) and its decoder (see TlenColumnPredecoder). */
 struct TlenColumnPredecoder {
     std::shared_ptr<coder_io> stream;
     std::shared_ptr<coder> decoder;
     std::string coderName;
     std::string mode;
+    /* Column source length: bounds the widest line (sizes the decode buffer). */
+    uint32_t srcLen = 0;
 };
 
 
@@ -86,16 +74,13 @@ struct PairInt64Hash {
     }
 };
 
-/* What decoding one line's fields leaves behind for the fields after it (see decodeSamFields):
-   where this line's SEQ landed and how long it is, which is what QUAL is decoded against. */
+/* What decoding one line's fields leaves for the fields after it (see decodeSamFields). */
 struct SamLineDecodeState {
     uint8_t* basePtr = nullptr;
     uint32_t actualBaseLen = 0;
 };
 
-/* What reconstructing one line's TLEN needs from the block's tracking tables (see gatherTLEN). The
-   two conventions of the rule differ only in the arithmetic applied to these, so a caller that
-   needs both - compressTLen's convention vote - gathers once and applies the rule twice. */
+/* What reconstructing one line's TLEN needs (see gatherTLEN). */
 struct TlenInput {
     int64_t  pos = 0;
     int64_t  pnext = 0;
@@ -104,8 +89,7 @@ struct TlenInput {
 };
 
 
-/* The OPTION column's parse result: the tag dictionary, what each line carried, and the byte
-   count of the OPTION text (see collectOptionTags). */
+/* The OPTION column's parse result (see collectOptionTags). */
 struct OptionParseState {
     std::vector<std::pair<std::string, std::string>> tagDict;  /* tag name and type, first-seen order */
     std::map<std::string, int> tagId;                          /* name -> slot in tagDict */
@@ -114,33 +98,9 @@ struct OptionParseState {
     uint32_t srcLen = 0;
 };
 
-/*
- * A table indexed by data-line number, which is what this actuator's per-line tracking tables are
- * (mappedPos, mappedFlag, mappedChr, nextMappedPos, nextMappedChr, cigarReadLen).
- *
- * They were std::map<uint32_t, V>. The keys are line numbers, so within a block they are dense and
- * bounded by the block's line count, while a std::map pays a tree walk per lookup and a node
- * allocation per write. Measured in isolation - two tables written once and read once per line over
- * a million lines, which is less than the columns ask of them between them - a std::map costs
- * 314 ns/line against 1.2 ns/line for an array, i.e. about 78 ns per operation against 0.3. The
- * TLEN rebuild alone gathers six values per line, and every column writes one or two.
- *
- * The element type keeps std::map's shape, so it->first and it->second read the same way at every
- * call site, and the interface is the subset the call sites use, so the call sites did not change:
- *
- *   t[k]                 read, inserting a default value for an absent key exactly as std::map's
- *                        operator[] does: call sites read through it and then test the key, so the
- *                        insertion is part of the contract
- *   t.find(k), t.end()   an iterator at the entry, or end() when the key is absent
- *   t.count(k)
- *   for (auto& kv : t)   the present entries, in ascending line order (what std::map gave)
- *   t.clear()
- *
- * Nodes live in a deque and iterators carry an index rather than a pointer into storage, so a
- * write - which may grow the table - neither moves an existing entry nor dangles an iterator that
- * is still being used, which a vector-backed table would do. Storage is one (key, value) per line
- * reached plus one presence bit per line, against 48-64 bytes per std::map node.
- */
+/* A table indexed by data-line number, the shape of this actuator's per-line tracking tables.
+   Backed by a deque plus a presence bitmap, with std::map's interface (operator[], find/end,
+   count, ascending range-for, clear) so call sites are unchanged. */
 template <typename V>
 class LineTable {
 public:
@@ -235,11 +195,7 @@ public:
     SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine = nullptr, Reference* pRefeGene = nullptr);
     virtual ~SamCodecActuator() override;
 
-    /* preAnalysis' two passes over a block: the SAM header lines (via the caller's loop, which
-       hands them over one by one) and the record lines. The record-line pass walks a raw
-       (pointer, length) view of the line straight out of the block buffer - building a
-       std::string per data line means a memcpy of ~15KB per line (~1.5GB for this workload),
-       for data that the scan only reads. */
+    /* preAnalysis' two passes over a block: header lines, then record lines walked as raw (pointer, length) views. */
     int32_t parseHeaderLine(const std::string& line);
     int32_t scanDataLine(const uint8_t* line, uint32_t lineLen, uint32_t idx,
                          std::pair<uint8_t, uint32_t>* qualityFrequnce);
@@ -258,27 +214,19 @@ public:
 
     int32_t decompressSamByFields(RoughIOBlock* outputBlock);
 
-    /* initDecoder's per-field steps: the ID/QNAME column (one decoder per split sub-stream,
-       plus the payload state each segment layout reads back), the SEQ column (with or without
-       a reference), and the fields whose columns are decoded lazily and keep only an offset. */
+    /* initDecoder's per-field setup: ID/QNAME, SEQ, and the lazily-decoded offset-only columns. */
     int32_t initIdFieldDecoders(Json::Value& idMeta);
     int32_t initSeqFieldDecoders(Json::Value& baseMeta, uint32_t idx, RoughIOBlock* outputBlock);
     bool recordDeferredFieldOffset(uint32_t idx, Json::Value& fieldMeta);
     int32_t initDecoder(RoughIOBlock* outputBlock);
 
-    /*
-     * Pre-decode the whole block's POS/CIGAR/PNEXT so that the full mate index
-     * and reference spans are ready; only then can the main loop reconstruct
-     * TLEN via computeTLEN while emitting lines, allowing exceptional values to
-     * compress to near zero.
-     */
+    /* Pre-decode the whole block's POS/CIGAR/PNEXT so TLEN can be reconstructed in the main loop. */
     int32_t preDecodeForTLEN();
 
     int32_t decompressRegularField(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock);
 
     /* The OPTION field (all tags from column 12 on) is compressed/decompressed by CRAM-style tag columnization. Currently disabled (OPTION goes through affix); code kept for future use. */
-    /* The OPTION column's parse: the tag dictionary and what every line carried, into
-       OptionParseState (see collectOptionTags). */
+    /* The OPTION column's parse into OptionParseState (see collectOptionTags). */
     int32_t collectOptionTags(OptionParseState& st);
 
     int32_t compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
@@ -300,10 +248,8 @@ public:
     int32_t decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& totalBaseLen, RoughIOBlock* outputBlock);
 
-    /* Read one record's worth of bytes from the SEQ match stream.
-       When matchBlockDecode is set (coder_fc, block-only) the bytes are sliced from
-       the pre-decoded matchBlockBuffer; otherwise they are decoded line by line.
-       Returns the number of bytes produced, or -1 on failure. */
+    /* Read one record's bytes from the SEQ match stream; sliced from matchBlockBuffer when
+       matchBlockDecode, else decoded per line. Returns bytes, or -1. */
     int32_t readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_t len, uint32_t lineNo);
 
     int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock);
@@ -312,14 +258,7 @@ public:
 
     int32_t computeTLEN(uint32_t lineIdx, bool minusOne);
 
-    /*
-     * Fills `in` with one line's TLEN inputs and returns true; returns false (with `in` untouched)
-     * when the rule makes the line's TLEN 0, i.e. when the record is not a proper pair on one
-     * reference. Split out of computeTLEN because the gather is six std::map lookups keyed by line
-     * index on tables with an entry per line of the block, and both the convention vote and the
-     * exception scan of compressTLen need the same line's inputs: gathering once per line instead
-     * of once per (line, convention, pass) is what that costs.
-     */
+    /* Fills `in` with one line's TLEN inputs; false when the rule makes TLEN 0 (not a proper pair on one reference). */
     bool gatherTLEN(uint32_t lineIdx, TlenInput& in);
 
     template<typename T>
@@ -373,22 +312,14 @@ private:
                                  uint32_t lineNumber, uint32_t fieldCount, uint32_t totalSrcLen,
                                  uint32_t totalDstLen);
 
-    /* The QNAME column: affix segmentation against coder_qname, decided by a trial and reused
-       across blocks (see encodeQnameColumn). */
+    /* The QNAME column: affix segmentation vs coder_qname, decided by a trial (see encodeQnameColumn). */
     int32_t encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
     int32_t compressSamByFields();
 
-    /* The QNAME column's lines as the layout encoders want them (see sam_qname_column.h): the
-       block being compressed and what its parse recorded. */
+    /* The QNAME column's lines as the layout encoders want them (see sam_qname_column.h). */
     QnameColumnInput qnameColumnInput() const;
 
-    /*
-     * The two QNAME layouts, encoding the whole block (see sam_qname_column.h). The module's
-     * encoders also take a line bound, which is the trial's business and not this one's: the
-     * pre-selection passes it to measure the layout on a sample, while a block being written is
-     * always written in full. Which layout runs here is the file-level verdict's
-     * (PreprocessInfo::qnameUseAffix, see encodeQnameColumn).
-     */
+    /* The two QNAME layout encoders, writing the whole block (see sam_qname_column.h). */
     int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
     /* QNAME-specific: cross-line deduplication + position-based modeling (see coder_qname.h). */
     int32_t compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
@@ -399,12 +330,7 @@ private:
     // Regular field compression
     int32_t compressRegularField(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    /*
-     * The OPTION column with the repeated tag name and type left out of the stream (see the note on
-     * the definition). Returns true when it wrote the column into the block, false when the data
-     * does not suit this layout - a caller that gets false writes the column with
-     * compressRegularField instead, and nothing has been written yet at that point.
-     */
+    /* The OPTION column with repeated tag names/types left out; false when the data does not suit it. */
     bool compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta,
                              uint32_t& dstLen);
 
@@ -416,13 +342,7 @@ private:
     /* The coder type chosen by preprocessing; returns fallback when the engine provides none or the decision is not yet made. */
     CoderType pickedCoderFor(uint32_t fieldIdx, CoderType fallback) const;
 
-    /*
-     * The coder for the SEQ match stream, as decided once per file by the codec pre-selection
-     * (CodecSelector::selectSeqReferenceCoder): BWT_CM or FC, whichever coded the block's real
-     * match payload smaller. A verdict pinned in PreprocessInfo is honored as-is - that is how
-     * the tests exercise each candidate - and without one the pre-trial default, coder_bwt_cm,
-     * is returned. See the definition.
-     */
+    /* The SEQ match stream coder chosen once per file by the codec pre-selection (see seqMatchCoderFor). */
     CoderType seqMatchCoderFor();
 
     /* The file-level preprocessing result, or nullptr when there is no engine to hold one. */
@@ -433,9 +353,7 @@ private:
 
     /* Only counts CIGAR operations that consume reference sequence (M/D/N/=/X); used for TLEN reconstruction. */
 
-    /* PNEXT's exception stream: the (contentIdx, delta) pairs of the records that cannot be
-       rebuilt from their mate. Returns the stream's encoded size and records in fieldMeta how
-       the stream was written (see writePnextExceptions). */
+    /* PNEXT's exception stream: (contentIdx, delta) pairs of records that cannot be rebuilt from their mate. */
     template<typename CoderType>
     uint32_t writePnextExceptions(const std::vector<std::pair<uint32_t, int64_t>>& exc,
                                   Json::Value& fieldMeta, Json::Value& metaStreams,
@@ -486,12 +404,7 @@ private:
 
             std::string str = std::string((char*)fieldStart, fieldLength);
             T value = (T)std::stoll(str);
-            /*
-             * fieldSrcLen records the raw text size (including the trailing tab,
-             * i.e. currTabPos - prevTabPos); once converted to numbers, the stream
-             * holds only fixed-width binary, whose total size is recorded in
-             * meta["srclen"] (srcLen).
-             */
+            /* fieldSrcLen is the raw text size (with trailing tab); meta["srclen"] is the fixed-width binary size. */
             fieldSrcLen += fieldLength + 1;
             // Encode the field data
             numberCoder->encode_line(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
@@ -517,13 +430,8 @@ private:
         fieldMeta["dstlen"] = numberIo->data_len;
         fieldMeta["coder"] = numberIo->meta;
         fieldMeta["field"] = fieldIdx;
-        /*
-         * Numeric fields have two compression forms: fixed-width binary here;
-         * when preprocessing selects affix, compressSamByFields switches to the
-         * textual form (compressRegularField, mode="string"). mode is written
-         * into meta, and the decompression side selects the decode path
-         * accordingly.
-         */
+        /* Numeric fields: fixed-width binary here, or textual (compressRegularField,
+           mode="string") when affix is selected; mode in meta picks the decode path. */
         fieldMeta["mode"] = "number";
 
         LOG_INFO("SAM field(%d) compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
@@ -536,23 +444,7 @@ private:
 
     int32_t compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    /*
-     * A reference the block builds for itself out of its own alignments.
-     *
-     * It exists for the one case the file's reference cannot serve: no -r was given, or the one
-     * supplied cannot be addressed with the file's @SQ list (see referenceUsableForSeq). Storing
-     * the bases then costs far more than coding them against something, and the block's own
-     * alignments already say what that something is - a per-base majority vote over everything
-     * they cover, which is what CRAM falls back on when it cannot find a reference
-     * (cram_generate_reference). The reads of a sequencing file agree with each other wherever
-     * they overlap, so the vote recovers the underlying sequence wherever coverage exists.
-     *
-     * The window is the base range the block's mapped records span, in the same coordinate space
-     * as the file's reference (@SQ cumulative lengths + POS); the squash covers it, four bases per
-     * byte, exactly like the reference's. A block whose window is too large - it mixes distant
-     * chromosomes, which is what an unsorted file does - or too sparsely covered to be worth a
-     * squash answers 'false' and keeps the plain path.
-     */
+    /* A reference the block builds from its own alignments, for when no usable file reference exists (see buildBlockConsensus). */
     struct BlockConsensus {
         int64_t windowStart = 0;
         int64_t windowBases = 0;
@@ -561,15 +453,10 @@ private:
 
     bool buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& out);
 
-    /*
-     * The SEQ column when the file's reference cannot be used: build the consensus and code the
-     * column against it through the ordinary reference path, or fall back to the plain path when
-     * there is no consensus to be had.
-     */
+    /* SEQ coded against a block-built consensus, or the plain path when there is none (see compressBaseSelfRef). */
     int32_t compressBaseSelfRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
-    /* compressBaseWithRef's base-length auxiliary stream, for the layout where base lengths vary
-       (see the definition for what it holds and why it is shaped that way). */
+    /* compressBaseWithRef's base-length auxiliary stream (see the definition). */
     int32_t writeSeqBaseLengthStream(Json::Value& metaSubs, Json::Value& metaStreams,
                                      uint32_t& totalSrcLen, uint32_t& totalDstLen);
     /* The SEQ match stream: sub-stream "m" and, under RLE, sub-stream "mval". */
@@ -578,26 +465,18 @@ private:
                                  Json::Value& metaStreams, uint32_t& totalDstLen);
 
     int32_t compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
-    /* One SEQ exception sub-stream (see SeqExceptionClass): encode its positions, describe
-       the stream in `streamMeta`, and add its sizes to the block's totals. */
+    /* One SEQ exception sub-stream: encode its positions and describe it in `streamMeta`. */
     int32_t writeSeqExceptionStream(SeqExceptionClass& exc, uint8_t ch, const char* sname,
                                     uint32_t srcLen, const uint8_t* src, uint32_t runCount,
                                     Json::Value& streamMeta, uint32_t& totalSrcLen,
                                     uint32_t& totalDstLen);
-    /* All of them, one per character that occurred, in ascending character order - including
-       the per-file choice of form for the 'N' class (see PreprocessInfo::nposForm). */
+    /* All SEQ exception streams, one per character that occurred, in ascending order. */
     int32_t writeSeqExceptionStreams(std::vector<SeqExceptionClass>& excClasses,
                                      std::vector<uint8_t>& excPresent, Json::Value& streamMeta,
                                      uint32_t& totalSrcLen, uint32_t& totalDstLen);
-    /* The SEQ column's reference path - whether a record can be coded against the reference, and
-       the CIGAR walk that produces its per-base 2-bit payload - is in sam_seq_payload.h: the codec
-       pre-selection builds the same payload to trial the match coder on it. */
+    /* The SEQ reference path (sam_seq_payload.h): shared with the codec pre-selection. */
 
-    /*
-     * The SEQ column's decoder setup, split by the two layouts it can be written in (see
-     * compressBaseWithRef): the whole column as one stream, or the match stream that carries
-     * the per-base 2-bit codes. Both are steps of initDecoder's SEQ branch.
-     */
+    /* The SEQ column's decoder setup, by layout: whole column as one stream, or the per-base match stream. */
     int32_t initSeqWholeBlockDecoder(const Json::Value& baseMeta, uint32_t idx,
                                      RoughIOBlock* outputBlock);
     int32_t predecodeSeqMatchStream(const Json::Value& streams, uint32_t& streamId,
@@ -607,36 +486,28 @@ private:
                                          coder_io* matchIo, uint32_t idx);
     int32_t predecodeSeqBaseLengthStream(const Json::Value& streams, uint32_t streamId);
 
-    /* The block's own consensus (see buildBlockConsensus): decoded into baseSelfRefSquash, with
-       its window taken from the field meta by the caller. */
+    /* The block's own consensus decoded from the block (see predecodeSeqSelfRefStream). */
     int32_t predecodeSeqSelfRefStream(const Json::Value& streams, uint32_t streamId);
     int32_t predecodeSeqExceptionStreams(const Json::Value& baseMeta, const Json::Value& streams,
                                          uint32_t& streamId);
     /* The QUAL column's stream: its frequency table, then the decoder the magic names. */
     int32_t initQualFieldDecoders(const Json::Value& qualMeta);
-    /* Any ordinary column: one stream, its decoder built by the magic it carries (see
-       CoderFactory::makeFieldDecoder), and its position recorded for preDecodeForTLEN. */
+    /* Any ordinary column: one stream, decoder built from its magic (see CoderFactory::makeFieldDecoder). */
     int32_t initFieldDecoder(uint32_t fieldIdx, const Json::Value& fieldMeta);
-    /* The TLEN column: its reconstruction layout carries one exception stream, everything else
-       is an ordinary column. */
+    /* The TLEN column: one exception stream, else an ordinary column. */
     int32_t initTlenFieldDecoders(const Json::Value& tlenMeta, uint32_t fieldIdx);
     int32_t decodeTlenExceptionStream(const Json::Value& stream, const Json::Value& tlenMeta);
-    /* The QNAME column's own decoders, rebuilt from the recorded sub-stream offsets so the
-       main loop's idDecoders are not consumed (see IdPredecodeState). */
+    /* The QNAME column's own decoders, rebuilt so the main loop's idDecoders are not consumed. */
     int32_t predecodeIdStreams(IdPredecodeState& state);
-    /* The two columns preDecodeForTLEN rebuilds before the POS chain and the TLEN walk: FLAG
-       (which decides whether PNEXT holds a delta) and RNAME (which the POS delta chain uses to
-       spot chromosome switches). */
+    /* FLAG (decides whether PNEXT holds a delta) and RNAME (POS-delta chromosome switches). */
     int32_t predecodeFlagColumn();
     int32_t predecodeRnameColumn();
-    /* POS(3) / CIGAR(5) / PNEXT(7): build the column's pre-decoder, then rebuild the column
-       from it line by line (see TlenColumnPredecoder). */
+    /* POS(3)/CIGAR(5)/PNEXT(7): build the column's pre-decoder, then rebuild it line by line. */
     bool buildTlenColumnPredecoder(uint32_t fieldIdx, TlenColumnPredecoder& out);
     int32_t rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnPredecoder& pre);
     /* QNAME (field 0) into decodedQnames - the pairing key the PNEXT mode below needs. */
     int32_t rebuildQnameColumn();
-    /* PNEXT (field 7) in pnext_qname_rebuild mode: the exception pairs plus the records that
-       belong to a QNAME group of two mapped mates. */
+    /* PNEXT (7) in pnext_qname_rebuild mode: exception pairs plus QNAME-grouped mates. */
     int32_t rebuildPnextByQname();
     /* The (pos, pnext) -> lineNo index the TLEN walk reads. */
     void buildTlenMateIndex();
@@ -644,9 +515,7 @@ private:
     // Helper methods
     void setReference(Reference* ref) { pRefeGene = ref; }
 
-    /* The QUAL column's record loop: what the trial picked is fed record by record, so this step
-       knows nothing about which coder won (see qual_record_encoder). Returns the column's source
-       length (the quality text itself, without the frequency-table auxiliary stream). */
+    /* The QUAL column's record loop; returns the column's source length (without the frequency-table stream). */
     /* The quality column's frequency-table auxiliary stream (see writeQualFreqStream). */
     int32_t writeQualFreqStream(Json::Value& subMeta, Json::Value& streamMeta,
                                 uint32_t& totalSrcLength, uint32_t& totalDstLength);
@@ -657,33 +526,13 @@ private:
 
     int32_t buildSamIndex();
 
-    /*
-     * Whether the SEQ column may be coded against the reference, i.e. whether the loaded FASTA
-     * really is laid out the way the @SQ list addresses it (see referenceLinesUpWithHeader).
-     *
-     * The first block to reach the SEQ column takes the verdict - by then the @SQ table is
-     * populated, whether it came from the reader thread's header pass or from this actuator's
-     * own header parse - and this instance caches it, so the check costs one pass over the
-     * @SQ list per block (tens of microseconds against a block's own compression). A reference
-     * that does not line up is dropped for SEQ: reading the wrong bases makes the column barely
-     * better than plain text, and on a single-end BAM measured worse than not consulting the
-     * reference at all, so the text path is both the smaller and the honest answer. The choice
-     * is recorded in the block's meta, which is what the decoder follows, so nothing about the
-     * file format changes.
-     */
+    /* Whether the SEQ column may be coded against the loaded reference (see referenceUsableForSeq); cached per instance. */
     bool referenceUsableForSeq();
 
  private:
     int64_t headEndLine;
     uint32_t samLine;
-    /*
-     * Every content line's tab positions, indexed by line number minus headEndLine (see LineTabs).
-     *
-     * The entry holds its positions itself, so filling the table costs one copy and no allocation:
-     * as a std::vector<std::vector<int64_t>> it was six heap operations per line (the inner vector
-     * grew from empty and there are five growth steps for eleven entries), which rdtsc buckets put
-     * at most of the pre-analysis pass - the walk over the bytes is the smaller half of it.
-     */
+    /* Every content line's tab positions, indexed by line number minus headEndLine (see LineTabs). */
     std::vector<LineTabs> contentPos;
 
     Reference* pRefeGene;
@@ -692,11 +541,7 @@ private:
     bool refeUsableChecked = false;
     bool refeUsableForSeq = false;
 
-    /*
-     * The block consensus the SEQ column is currently being coded against, or null when it is
-     * not: set by compressBaseSelfRef around its call into the ordinary reference path, which
-     * then takes its bases (and its window) from here instead of from pRefeGene.
-     */
+    /* The block consensus the SEQ column is currently coded against, or null (see compressBaseSelfRef). */
     const BlockConsensus* seqSelfRef = nullptr;
 
     /* The same consensus on the decoding side, read back out of the block (see
@@ -706,11 +551,7 @@ private:
     int64_t baseSelfRefWindowBases = 0;
     bool baseSelfRefActive = false;
 
-    /*
-     * What the ID analysis found in this block's QNAME column (see sam_qname_column.h). The
-     * encoder reads it to lay the column out, and the reader reads it to rebuild the column
-     * segment by segment - which is why the analysis, not the encoder, holds it.
-     */
+    /* What the ID analysis found in this block's QNAME column (see sam_qname_column.h). */
     IdSplitAnalysis idAnalysis;
     uint16_t maxFieldSize = 0;
     std::vector<std::pair<int64_t, uint16_t>> lineFiledCount;
@@ -739,25 +580,13 @@ private:
     int64_t posDeltaPrev = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
 
-    /* Per-line CIGAR operation list (op char, length), parsed once by
-       compressCigar / decompressCigar / preDecodeForTLEN and reused by the
-       SEQ reference rebuild (M segments from reference, I/S stored separately)
-       and by TLEN reconstruction. Indexed by lineNo - headEndLine. */
+    /* Per-line CIGAR op list, parsed once and reused by the SEQ reference rebuild and TLEN. */
     std::vector<std::vector<CigarOp>> cigarOpList;
 
 private:
     uint32_t baseNCount;
 
-    /*
-     * A decoded SEQ exception stream for the current block: the character it carries, and
-     * its positions, which increase strictly. One stream per character that occurs, so the
-     * set of streams follows the data instead of a fixed list of classes - a character that
-     * never occurs has no stream and no meta at all (see the layout note on
-     * SeqExceptionClass in sam_actuator.cpp).
-     *
-     * The cursor lives here rather than in a local because it is read per record: a record's
-     * refill picks up where the previous record stopped.
-     */
+    /* A decoded SEQ exception stream for the current block: its character and its positions. */
     struct SeqExcStream {
         uint8_t byte;
         std::vector<uint32_t> pos;
@@ -780,40 +609,27 @@ private:
 
     std::vector<std::shared_ptr<coder_io>> ioVector;
     std::vector<std::shared_ptr<coder>> idDecoders;
-    /* Per-sub-stream offset/length of the QNAME compressed stream, recorded by
-       initDecoder so preDecodeForTLEN can rebuild independent decoders and
-       pre-decode QNAME without consuming idDecoders used by the main loop. */
+    /* Per-sub-stream offset/length of the QNAME stream, for preDecodeForTLEN to rebuild decoders. */
     std::vector<uint32_t> idStreamOffsets;
     std::vector<uint32_t> idStreamDstLens;
     /* Coder type name per QNAME sub-stream, for preDecodeForTLEN to rebuild decoders. */
     std::vector<std::string> idStreamCoders;
     /* True when QNAME is compressed/decompressed with coder_qname (see decompressIdField). */
     bool idUsesQnameCoder = false;
-    /* State for numeric QNAME sub-streams (compressIdFieldSplit "mode":"numeric").
-       Such a stream carries no split-symbol terminator, so it cannot be decoded
-       one segment per line the way the textual path does; instead the whole varint
-       stream is decoded once per block and one value is served per line. Indexes
-       run parallel to idDecoders; entries for textual sub-streams stay null/zero. */
+    /* State for numeric QNAME sub-streams ("mode":"numeric"): whole varint stream decoded once, one value per line. */
     std::vector<uint8_t*> idNumericBufs;
     std::vector<uint32_t> idNumericLens;
     std::vector<uint32_t> idNumericPos;
     std::vector<uint64_t> idNumericAcc;
-    /* State for value-domain QNAME sub-streams (compressIdFieldSplit "mode":"intd"): the payload is
-       the coded values themselves, so no outer coder is involved and a range decoder walks them one
-       value per line. Indexes run parallel to idNumericBufs; other sub-streams leave their entry
-       untouched, so the two layouts cannot be confused at reconstruction time. */
+    /* State for value-domain QNAME sub-streams ("mode":"intd"): a range decoder walks one value per line. */
     std::vector<RangeCoder> idIntCoders;
     std::vector<id_int::Model> idIntModes;
     std::vector<uint8_t> idIntActive;
-    /* The text of a constant QNAME sub-stream (compressIdFieldSplit "mode":"const"): such a segment
-       repeats the same bytes in every line, so the encoder stores it once and the reconstruction
-       appends it without touching a coder. Empty for every other kind of sub-stream. */
+    /* Text of a constant QNAME sub-stream ("mode":"const"), stored once. */
     std::vector<std::string> idConstTexts;
-    /* A "dict" sub-stream's texts, indexed by the per-line index it carries (see the layout in
-       compressIdFieldSplit). Empty for every other kind of sub-stream. */
+    /* A "dict" sub-stream's texts, indexed by its per-line index. */
     std::vector<std::vector<std::string>> idDictEntries;
-    /* A "hexd" sub-stream's per-line payloads are drawn from this alphabet, each character at
-       log2(size) bits (see the layout in compressIdFieldSplit). Empty for every other layout. */
+    /* A "hexd" sub-stream's alphabet, one code per character. */
     struct IdHexAlphabet {
         std::string chars;
         uint32_t minLen = 0;
@@ -824,48 +640,28 @@ private:
     /* Releases the buffers above; called before (re)populating them per block. */
     void clearIdNumericState();
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
-    /* Decoder for the QUAL column, whichever coder the stream says wrote it; built by
-       CoderFactory::makeQualDecoder (see qual_coder_factory.cpp). Null until the QUAL stream
-       has been set up. */
+    /* Decoder for the QUAL column (see CoderFactory::makeQualDecoder). */
     std::shared_ptr<qual_record_decoder> qualDecoder;
 
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;
     uint8_t* refeStrecchBuffer;
-    /* SEQ match stream decoded as a whole block (coder_fc only supports block
-       decompression, unlike coder_bwt_cm which is decoded line by line).
-       When matchBlockDecode is true, the whole match stream is decoded up front
-       into matchBlockBuffer and each record is then served by slicing it with its
-       own length (see decompressBase). */
+    /* SEQ match stream decoded as a whole block (coder_fc); records are sliced from matchBlockBuffer. */
     bool matchBlockDecode = false;
     uint8_t* matchBlockBuffer = nullptr;
     uint32_t matchBlockLength = 0;
     uint32_t matchBlockOffset = 0;
-    /* Byte length of the extra "mval" sub-stream that follows the "m" sub-stream when
-       RLE is in use; used to advance readOffset past both sub-streams. */
+    /* Byte length of the "mval" sub-stream under RLE, to advance readOffset past both. */
     uint32_t matchExtraOffset = 0;
-    /* Reads with missing QUAL (*): expanded into seqLen '*' on compression so that
-       each record's length in the quality stream matches the decompression side
-       (which fetches each record by SEQ/CIGAR length). */
+    /* Reads with missing QUAL (*), expanded to seqLen '*' on compression. */
     std::vector<uint8_t> qualMissingBuf;
 
     /* OPTION tag-split columnization: decodes the whole block once and serves lines from cache. Currently disabled; code kept for future use. */
     int32_t decodeOptionColumn(const Json::Value& fieldMeta);
-    /*
-     * The decoded OPTION text of every record of the block being decoded, one record after another,
-     * with optionRecOff giving each one's extent: record r owns [optionRecOff[r], optionRecOff[r+1]).
-     *
-     * This was one std::string per record, assembled in a temporary and moved in: an allocation and
-     * a copy per record for a block that can carry a million of them, plus the vector-of-strings
-     * overhead. The text is the same bytes either way - only the container changed. optionRecOff
-     * holds one entry more than there are records, so the last record's end is its back().
-     */
+    /* The decoded OPTION text of every record in the block, with optionRecOff giving each record's extent. */
     std::vector<uint8_t> optionRecText;
     std::vector<uint32_t> optionRecOff;
-    /* Per record, whether it has an OPTION column at all (see decodeOptionStripColumn): a record
-       without one takes the tab after QUAL as its newline, a record whose column is present but
-       empty keeps that tab and gets the newline appended. The two carry no bytes of their own, so
-       the text alone cannot tell them apart. */
+    /* Per record, whether it has an OPTION column at all (see decodeOptionStripColumn). */
     std::vector<uint8_t> optionRecPresent;
     bool optionCacheEmpty = true;
 

@@ -1,5 +1,24 @@
 /*
  * sam_qname_column.cpp - the QNAME column's layouts (see sam_qname_column.h).
+ * Copyright (C) 2025 PBGZip
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "sam_qname_column.h"
@@ -17,12 +36,7 @@
 #include "log/logger.h"
 #include "utils/memory_util.h"
 
-/*
- * The characters the QNAME column can be split on: the separators a read name is built from.
- * Every one of them that occurs in the column becomes a sub-stream of its own (see
- * analyzeQnameFirstLine), which is what lets the layouts code each segment with the alphabet it
- * actually uses.
- */
+/* Separator characters a read name is built from; each occurring one becomes a sub-stream. */
 static const std::string kIdSplitDefault = "/:= _.,-#\r\t\n";
 
 /* Address of the block's output area, with the sink the coders report into. */
@@ -111,12 +125,7 @@ int32_t analyzeQnameLine(const uint8_t* pBuffer, uint32_t bufferLen,
     analysis.positions.push_back(currentLinePos);
     return 0;
 }
-/*
- * One split symbol's segments, gathered from the block: the texts as they appear (trailing
- * split symbol included, which is what the textual layout codes) and the bare payloads
- * (without it, which is what the value-domain layouts code), plus the two facts every
- * layout needs from the scan.
- */
+/* One split symbol's segment texts (with trailing separator) and bare payloads, from the block. */
 struct IdSplitSegments {
     std::vector<std::string> texts;
     std::vector<std::string> payloads;
@@ -124,12 +133,7 @@ struct IdSplitSegments {
     uint32_t srcLength = 0;    /* bytes this segment occupies in the source lines */
 };
 
-/*
- * The dictionary layout: the few texts this segment takes in the block, written once, plus
- * one index per line coded as a counter (see id_int::Counter). Empty when the segment does
- * not fit the shape (a line without it, or too many distinct texts) or when the index
- * stream could not be coded.
- */
+/* Dictionary layout: the segment's few distinct texts, plus one counter-coded index per line. */
 struct IdDictLayout {
     bool ok = false;
     std::vector<uint8_t> buf;
@@ -138,11 +142,7 @@ struct IdDictLayout {
     uint32_t values = 0;       /* indices written */
 };
 
-/*
- * The fixed-alphabet layout: every character of the payload drawn uniformly from the small
- * alphabet the segment uses, so a random hex chunk costs exactly the four bits a character
- * carries, and the split symbol comes free because the layout implies it.
- */
+/* Fixed-alphabet layout: payload characters coded uniformly over the segment's alphabet. */
 struct IdHexLayout {
     bool ok = false;
     std::string alphabet;
@@ -151,8 +151,7 @@ struct IdHexLayout {
     uint32_t maxLen = 0;
 };
 
-/* The textual layout: the segment texts through coder_affix_match, which is what every
-   other layout has to beat. */
+/* The textual layout: the segment texts through coder_affix_match. */
 static void encodeIdSegmentText(const std::vector<std::string>& texts, coder_io* io)
 {
     std::shared_ptr<coder_affix_match> coder = std::make_shared<coder_affix_match>(io);
@@ -160,7 +159,8 @@ static void encodeIdSegmentText(const std::vector<std::string>& texts, coder_io*
         if (texts[k].empty()) {
             continue;
         }
-        coder->encode_line((uint8_t*)texts[k].data(), (uint32_t)texts[k].size());
+        /* need2hold: the segment texts are temporary, so the coder holds its own context copy. */
+        coder->encode_line((uint8_t*)texts[k].data(), (uint32_t)texts[k].size(), true);
     }
     coder->encode_flush();
 }
@@ -204,13 +204,7 @@ static IdDictLayout buildIdDictLayout(const std::vector<std::string>& texts)
         layout.buf.insert(layout.buf.end(), entries[e].begin(), entries[e].end());
     }
 
-    /*
-     * The indices walk a counter layout (see id_int::Counter): what they do is stay put and
-     * step by one when the value changes, and coding that as a run is what keeps a segment
-     * that changes twice in a block down to a few dozen bytes. An adaptive model over the
-     * index values cannot do it - measured 1844 B for such a sequence against the textual
-     * layout's 419 B - because it has to learn a step function one symbol at a time.
-     */
+    /* Indices go through a counter layout (see id_int::Counter), which codes the runs. */
     std::vector<uint32_t> indexOf;
     indexOf.reserve(texts.size());
     int64_t prevIndex = 0;
@@ -254,16 +248,7 @@ static IdDictLayout buildIdDictLayout(const std::vector<std::string>& texts)
     return layout;
 }
 
-/*
- * Build the fixed-alphabet layout, or leave it unset when the payloads do not fit the shape.
- *
- * One character is the const layout's business, and past a small alphabet a uniform code
- * costs more per character than the textual layout's model does. All-digit payloads are the
- * value-domain layouts' business: they code a run of digits as one value rather than one
- * character at a time and beat this by construction. Building the candidate for them only
- * buys the scan: measured on a 100 MB Nanopore file whose QNAME is mostly numbers, that was
- * 11 s of a 26 s run.
- */
+/* Build the fixed-alphabet layout, or leave it unset when the payloads do not fit the shape. */
 static IdHexLayout buildIdHexLayout(const std::vector<std::string>& payloads)
 {
     IdHexLayout layout;
@@ -325,23 +310,8 @@ static IdHexLayout buildIdHexLayout(const std::vector<std::string>& payloads)
     return layout;
 }
 
-/*
- * What the value-domain layouts did with an all-digit segment. They are built in one helper
- * because they share the stream they write into: each candidate is encoded behind the
- * previous one, so the winner keeps the bytes it already has and none is encoded twice.
- *
- *   numeric  the zigzag deltas as varints, left to the stream's own coder (coder_bwt_cm),
- *            which pays off when consecutive ordinals are correlated;
- *   counter  the deltas themselves through id_int::Counter, which codes the runs rather
- *            than the bytes and beats the varints when the ordinal just increments;
- *   model    the values through id_int::Model: the high bits go through an adaptive tree
- *            over the value domain, the low bits travel raw, which costs about
- *            log2(values in use) per row when the ordinals scatter;
- *   uniform  the exact range the values occupy, coded with no model at all.
- *
- * `wrote` says one of them stands in `io`; `textWroteOut` says the textual comparison that
- * runs last kept its own bytes and has already settled the block's data length.
- */
+/* What the value-domain layouts (numeric, counter, model, uniform, text) did with an all-digit
+   segment; all are encoded into one shared stream. */
 struct IdValueLayout {
     bool wrote = false;
     bool numeric = false;
@@ -358,15 +328,7 @@ struct IdValueLayout {
     uint32_t uniTotal = 0;
 };
 
-/*
- * What the scan of an all-digit segment produced, and nothing about how a layout encodes it:
- * the values in row order (only the rows that carry a payload), their steps, the zigzag
- * varints the first layout codes, and the two facts the later ones test.
- *
- * The varints are built during the scan because that is where the values are already in hand;
- * the caller sizes the buffer for the 10-bytes-per-row worst case (64-bit value, 7 payload
- * bits per varint byte).
- */
+/* What the scan of an all-digit segment produced: values, deltas, varints and test facts. */
 struct IdValueScan {
     bool ok = false;              /* every payload parsed and every step 32-bit decodable */
     bool correlated = false;      /* enough pure +1 steps for the ordinal layouts to pay */
@@ -394,8 +356,7 @@ static IdValueScan scanIdValues(const std::vector<std::string>& payloads, uint8_
     uint64_t prevVal = 0;
     uint32_t deltaOneCnt = 0;    /* how often the ordinal just increments */
     uint32_t deltaTotal = 0;
-    /* UINT64_MAX until the first value arrives: this is the base of the uniform layout,
-       and taking it as 0 would make that layout pay for the empty space below the range. */
+    /* UINT64_MAX until the first value arrives (the uniform layout's base). */
     uint64_t minVal = UINT64_MAX;
     scan.ok = true;
     scan.values.reserve(payloads.size());
@@ -438,14 +399,7 @@ static IdValueScan scanIdValues(const std::vector<std::string>& payloads, uint8_
         prevVal = cur;
     }
 
-    /*
-     * Varints only pay off when consecutive ordinals are correlated (successive reads, or
-     * mate pairs stored adjacently). When the file is ordered by alignment position and the
-     * ordinals scatter (e.g. "ERR031968.<random id>"), the deltas are large and nearly
-     * incompressible, and the decimal text wins because affix matching still finds repeated
-     * digit prefixes. Require a meaningful share of pure +1 steps before switching away from
-     * the text path.
-     */
+    /* Varints pay off only when consecutive ordinals are correlated; require many pure +1 steps. */
     scan.varintLength = pos;
     scan.minValue = minVal;
     scan.correlated = (deltaTotal > 0) && (deltaOneCnt * 10 >= deltaTotal);
@@ -454,15 +408,7 @@ static IdValueScan scanIdValues(const std::vector<std::string>& payloads, uint8_
     return scan;
 }
 
-/*
- * One candidate that has just been encoded *behind* the previous one inside the segment's own
- * stream: `length` is what it came to, and the values the metadata needs travel with it, so
- * the settlement below never has to know which builder filled which.
- *
- * Encoding the candidates behind each other - rather than each in a buffer of its own - is
- * what keeps this path free of copies: the winner is promoted to the front of the stream (one
- * memmove of its own length) and the losers are simply overwritten by what follows.
- */
+/* One candidate encoded behind the previous one in the segment's stream; the winner is promoted. */
 struct IdValueCandidate {
     bool ok = false;
     uint32_t length = 0;
@@ -474,9 +420,7 @@ struct IdValueCandidate {
     Json::Value coderMeta;    /* the textual candidate's own coder meta, when it has one */
 };
 
-/* The zigzag delta varints through coder_bwt_cm: the layout for a correlated ordinal. Its
-   stream's coder leaves data_len at the length written, so a losing counter (below) cannot
-   disturb it. */
+/* The zigzag delta varints through coder_bwt_cm. */
 static IdValueCandidate buildIdOrdinalVarints(coder_io* io, const uint8_t* varints, uint32_t length)
 {
     IdValueCandidate cand;
@@ -490,14 +434,12 @@ static IdValueCandidate buildIdOrdinalVarints(coder_io* io, const uint8_t* varin
     return cand;
 }
 
-/* The deltas themselves through id_int::Counter, which codes the runs rather than the bytes.
-   Written at `offset`, so the varints it may beat stay in front of it. */
+/* The deltas through id_int::Counter, written at `offset`. */
 static IdValueCandidate buildIdDeltaCounter(coder_io* io, uint32_t offset,
                                             const std::vector<int64_t>& deltas)
 {
     IdValueCandidate cand;
-    /* The tree carries only the steps past the small ones (see id_int::Counter): its width
-       must come from those, not from the largest step overall. */
+    /* The tree carries only steps past the small ones (see id_int::Counter). */
     uint64_t maxStep = 0;
     for (size_t k = 0; k < deltas.size(); ++k) {
         const uint64_t zz = id_int::zigzag32(deltas[k]);
@@ -530,9 +472,7 @@ static IdValueCandidate buildIdDeltaCounter(coder_io* io, uint32_t offset,
     return cand;
 }
 
-/* The values themselves: their high bits go through an adaptive tree over the value domain,
-   the low bits travel raw, which costs about log2(values in use) per row. Written at `offset`
-   (0 unless something was encoded before it). */
+/* The values through id_int::Model: high bits in an adaptive tree, low bits raw. */
 static IdValueCandidate buildIdValueModel(coder_io* io, uint32_t offset,
                                           const std::vector<uint64_t>& values, uint32_t width,
                                           uint32_t lowBits)
@@ -584,8 +524,7 @@ static IdValueCandidate buildIdUniformRange(coder_io* io, uint32_t offset,
     return cand;
 }
 
-/* The decimal text through coder_affix_match: what every other layout has to beat, encoded
-   last so all of them can be compared without encoding any of them twice. */
+/* The decimal text through coder_affix_match, encoded last. */
 static IdValueCandidate buildIdTextSegment(coder_io* io, uint32_t offset,
                                            const std::vector<std::string>& texts,
                                            coder_err_sink* sink)
@@ -603,9 +542,7 @@ static IdValueCandidate buildIdTextSegment(coder_io* io, uint32_t offset,
     return cand;
 }
 
-/* Settle the two layouts that cover a correlated ordinal: the varints, and the counter that
-   codes their deltas as runs. Both are encoded - the counter behind the varints, so the winner
-   keeps the bytes it already has - and the smaller wins. */
+/* Settle the correlated-ordinal layouts: varints vs. the counter; the smaller wins. */
 static void settleIdOrdinalLayouts(coder_io* io, const uint8_t* varints, uint32_t varintLength,
                                    const IdValueScan& scan, IdValueLayout& layout)
 {
@@ -634,12 +571,7 @@ static void settleIdOrdinalLayouts(coder_io* io, const uint8_t* varints, uint32_
     }
 }
 
-/*
- * Settle the three layouts that cover scattered values: the model, their exact range, and the
- * decimal text. The values are scattered, so neither the deltas nor the decimal digits can
- * reach their entropy; the model codes the values themselves, the uniform layout codes their
- * range with no model at all, and the text is encoded last so all three are compared once.
- */
+/* Settle the scattered-value layouts: the model, the exact range, and the decimal text. */
 static void settleIdValueLayouts(coder_io* io, const std::vector<std::string>& texts,
                                  const IdValueScan& scan, RoughIOBlock* outBlock,
                                  int64_t segBlockStart, coder_err_sink* sink,
@@ -668,9 +600,7 @@ static void settleIdValueLayouts(coder_io* io, const std::vector<std::string>& t
     }
 
     const IdValueCandidate text = buildIdTextSegment(io, model.length + uniform.length, texts, sink);
-    /* A tie keeps the earlier layout, which is what an archive written before the later one
-       existed carries - hence the strict comparisons except where the original said
-       "no larger". */
+    /* A tie keeps the earlier layout, for compatibility with older archives. */
     if (uniform.ok && uniform.length < model.length &&
         (!text.ok || uniform.length <= text.length)) {
         memmove(io->data, io->data + model.length, uniform.length);
@@ -703,18 +633,11 @@ static IdValueLayout buildIdValueLayouts(const std::vector<std::string>& texts,
                                          coder_err_sink* sink)
 {
     IdValueLayout layout;
-    /*
-     * An all-digit segment can travel three ways, and the strongest one wins: zigzag delta
-     * varints (correlated ordinals), the value itself through id_int::Model (spread over a
-     * range), and the decimal text through coder_affix_match (repeated digit prefixes).
-     */
+    /* An all-digit segment travels as correlated varints, modelled values, or decimal text. */
     if (constMode || !allNumeric || texts.empty()) {
         return layout;
     }
-    /*
-     * Worst case 10 bytes per varint (64-bit value, 7 payload bits each). The encoder falls
-     * back to the text path if it would not be shorter.
-     */
+    /* Worst case 10 bytes per varint (64-bit value, 7 payload bits each). */
     const uint32_t cap = (uint32_t)(texts.size() * 10);
     uint8_t* varBuf = MemoryUtil::safeAlloc<uint8_t>(cap);
     if (varBuf == nullptr) {
@@ -731,10 +654,7 @@ static IdValueLayout buildIdValueLayouts(const std::vector<std::string>& texts,
     return layout;
 }
 
-/*
- * Which layout a segment ended up in, and what it costs. The order of the kinds is the
- * precedence the metadata has always used, so a switch over them reproduces it.
- */
+/* Which layout a segment ended up in, and what it costs. */
 struct IdSplitWinner {
     enum Kind {
         Error = -1,   /* the output buffer could not take the segment; the caller gives up */
@@ -751,12 +671,7 @@ struct IdSplitWinner {
     uint32_t dstLength = 0;
 };
 
-/*
- * A segment holding the same text in every line of the block is stored once and costs
- * nothing per line. That is what the constant parts of a naming scheme are - instrument,
- * run, flowcell, lane - and every layout below still spends a fraction of a bit per line
- * repeating them.
- */
+/* Whether the segment holds the same text in every line of the block. */
 static bool isConstantIdSplit(const IdSplitSegments& seg, std::string& constText)
 {
     if (seg.texts.empty() || seg.texts[0].empty()) {
@@ -764,8 +679,7 @@ static bool isConstantIdSplit(const IdSplitSegments& seg, std::string& constText
     }
     constText = seg.texts[0];
     for (size_t k = 1; k < seg.texts.size(); ++k) {
-        /* A segment that some line does not carry at all is not constant: the other lines
-           would be given text they never had. */
+        /* A line missing the segment makes it non-constant. */
         if (seg.texts[k].empty() || seg.texts[k] != constText) {
             return false;
         }
@@ -773,16 +687,7 @@ static bool isConstantIdSplit(const IdSplitSegments& seg, std::string& constText
     return true;
 }
 
-/*
- * Gather one split symbol's segments from the block.
- *
- * Numeric sub-stream mode: when every occurrence of a segment is a plain decimal integer
- * (typical for FASTQ/SEQ read ordinals such as "SRR2769247.<n>"), the segment can be stored
- * as a binary stream of zigzag(delta) LEB128 varints instead of decimal text. Adjacent
- * ordinals are strongly correlated (delta == 1 dominates), and the decimal text wastes that
- * structure across digit boundaries. Non-numeric segments keep the original textual
- * coder_affix_match path unchanged.
- */
+/* Gather one split symbol's segments from the block, recording texts, payloads and stats. */
 static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialLines,
                                               const std::vector<size_t>& npos,
                                               const uint8_t* buffer,
@@ -815,10 +720,7 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
             segmentLength = currPos - prevPos;
         }
 
-        /*
-         * Keep the full segment (trailing split symbol included) for the text path, and the
-         * bare payload for the numeric path / the all-digits test.
-         */
+        /* Keep the full segment for the text path and the bare payload for the numeric one. */
         const bool hasSep = (segmentLength > 0 && segmentStart[segmentLength - 1] == splitSymbols[splitIdx]);
         const uint32_t payloadLen = hasSep ? segmentLength - 1 : segmentLength;
         std::string payload((char*)segmentStart, payloadLen);
@@ -826,10 +728,7 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
             if (payload.find_first_not_of("0123456789") != std::string::npos) {
                 seg.allNumeric = false;
             } else if (payload.size() > 1 && payload[0] == '0') {
-                /* A numeric segment with a leading zero (e.g. a zero-padded date/month "01"
-                   inside a Nanopore QNAME) cannot round-trip through the zigzag-delta varint
-                   stream: the decoder re-emits plain decimal text and would silently drop the
-                   "0". Force the lossless textual path for such segments. */
+                /* A leading zero cannot round-trip through the varint stream; force the textual path. */
                 seg.allNumeric = false;
             }
         }
@@ -840,17 +739,7 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
     return seg;
 }
 
-/*
- * Settle which layout the segment travels in and leave it in the block, then say which one
- * that was so the metadata can describe it.
- *
- * Everything that writes into the segment's own stream has written by now: the value layouts
- * wrote their payload and moved the data length themselves (they may also have already kept
- * the textual layout - see buildIdValueLayouts), and the dictionary and fixed-alphabet
- * layouts wait in buffers of their own. They are the ones that can still win here: if the
- * smaller of the two is no larger than what stands, its bytes replace it at the segment's own
- * offset, and the room is there by construction.
- */
+/* Settle which layout the segment travels in, leave it in the block, and return the choice. */
 static IdSplitWinner settleIdSplitLayout(const IdSplitSegments& seg, bool constMode,
                                          const std::string& constText, const IdValueLayout& value,
                                          const IdDictLayout& dict, const IdHexLayout& hex,
@@ -886,11 +775,7 @@ static IdSplitWinner settleIdSplitLayout(const IdSplitSegments& seg, bool constM
                 winner.kind = IdSplitWinner::Error;
                 return winner;
             }
-            /*
-             * The block's data length advances by whatever this segment produced, whichever
-             * layout wrote it: the value layout writes its payload itself, and the textual
-             * layout that lost the comparison has already settled the length.
-             */
+            /* Advance the block's data length by whatever this segment produced. */
             outBlock->setDataLen(outBlock->getDataLen() + io->data_len);
         }
         winner.dstLength = io->data_len;
@@ -931,13 +816,7 @@ static IdSplitWinner settleIdSplitLayout(const IdSplitSegments& seg, bool constM
     return winner;
 }
 
-/*
- * Describe the layout that won in the stream's metadata. Absent "mode" (or "text") is the
- * legacy textual layout; "numeric" is the zigzag delta varints; "intd" the values themselves
- * through id_int::Model; "intu" their exact range; "cnt" the deltas of a counter; "dict" one
- * index per line into the few texts the block carries for this segment; "const" the single
- * text it carries for all of them; "hexd" one character at a time over a fixed alphabet.
- */
+/* Describe the winning layout in the stream's metadata. */
 static Json::Value buildIdSplitMeta(const IdSplitWinner& winner, uint32_t splitIdx,
                                     uint32_t srcLength, const IdValueLayout& value,
                                     const IdDictLayout& dict, const IdHexLayout& hex,
@@ -972,8 +851,7 @@ static Json::Value buildIdSplitMeta(const IdSplitWinner& winner, uint32_t splitI
         break;
     case IdSplitWinner::Counter:
         meta["mode"] = "cnt";
-        /* srclen is the size the varint layout would have had: the decoder expands the coded
-           deltas back into exactly that form, so everything downstream of it is unchanged. */
+        /* srclen is the size the varint layout would have had. */
         meta["srclen"] = value.srcLength;
         meta["intw"] = (Json::Value::UInt)value.width;
         meta["intk"] = (Json::Value::UInt)value.lowBits;
@@ -1004,12 +882,12 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
                          RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
                          Json::Value& fieldMeta, uint32_t& fieldSrcLen)
 {
-    // Similar to FastqActuator::compressIdInSplit, create multiple streams for each split symbol
+    // One sub-stream per split symbol
     Json::Value streamMeta;
     uint32_t totalSrcLength = 0;
     uint32_t totalDstLength = 0;
 
-    // Process each split symbol (similar to FastqActuator)
+    // Process each split symbol
     for (uint32_t i = 0; i < analysis.symbols.size(); ++i) {
         std::shared_ptr<coder_io> idIo = makeColumnIo(outBlock, "QNAME sub-stream", sink);
         const int64_t segBlockStart = (int64_t)outBlock->getDataLen();
@@ -1020,19 +898,10 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
         std::string constText;
         const bool constMode = isConstantIdSplit(seg, constText);
 
-        /*
-         * The dictionary layout (see buildIdDictLayout) and the fixed-alphabet layout (see
-         * buildIdHexLayout) are built in buffers of their own, so they can be tried and
-         * compared against everything else; the smallest of them wins in settleIdSplitLayout.
-         * Both are skipped when the segment is constant, which costs nothing per line.
-         */
+        /* The dict and hex layouts are built in their own buffers; the smallest wins. */
         const IdDictLayout dict = constMode ? IdDictLayout{} : buildIdDictLayout(seg.texts);
         const IdHexLayout hex = constMode ? IdHexLayout{} : buildIdHexLayout(seg.payloads);
-        /*
-         * The value-domain layouts are built in one helper (see buildIdValueLayouts); a value
-         * layout writes its payload into the segment's own stream and settles the block's data
-         * length itself, which is why nothing is copied here.
-         */
+        /* Value layouts write into the segment's stream and settle the data length themselves. */
         const IdValueLayout value = buildIdValueLayouts(seg.texts, seg.payloads, seg.allNumeric,
                                                         constMode, idIo.get(), outBlock,
                                                         segBlockStart, sink);
@@ -1042,15 +911,14 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
         if (winner.kind == IdSplitWinner::Error) {
             return -1;
         }
-        /* The segment's source size - except for the varint layout, whose stream is what the
-           decoder expands back into, and which the counter layout reports in its place. */
+        /* The segment's source size, except for the varint layout which reports its own. */
         const uint32_t segSrcLen = value.numeric ? value.srcLength : seg.srcLength;
         streamMeta.append(buildIdSplitMeta(winner, i, segSrcLen, value, dict, hex, idIo.get()));
         totalSrcLength += seg.srcLength;
         totalDstLength += winner.dstLength;
     }
 
-    // Set field metadata with streams (similar to FastqActuator)
+    // Set field metadata
     fieldMeta["totalsrclen"] = totalSrcLength;
     fieldMeta["totaldstlen"] = totalDstLength;
     fieldMeta["splitsym"] = std::string((char*)analysis.symbols.data(), analysis.symbols.size());
@@ -1086,7 +954,7 @@ int32_t encodeQnameByQname(const QnameColumnInput& in, RoughIOBlock* outBlock, c
         }
         uint32_t contentId = lineIdx - (uint32_t)in.headEndLine;
         const uint8_t* idStart = buffer + lineStart;
-        /* The QNAME field runs up to the first tab (inclusive, consistent with compressIdFieldInAll). */
+        /* The QNAME field runs up to the first tab, inclusive. */
         uint32_t idLength = (uint32_t)(*in.fieldTabs)[contentId][0] + 1;
         qnameCoder->encode_line(idStart, idLength);
         fieldSrcLen += idLength;

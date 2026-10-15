@@ -135,11 +135,7 @@ int32_t SamCodecActuator::preAnalysisIdLine(uint8_t* pBuffer, uint32_t bufferLen
     return analyzeQnameLine(pBuffer, bufferLen, idAnalysis);
 }
 
-/*
- * Where the QNAME column's lines are, as the layout encoders want them (see sam_qname_column.h):
- * the block being compressed, the tab positions the parse recorded, and how many leading lines
- * are header.
- */
+/* The QNAME column's lines as the layout encoders want them (see sam_qname_column.h). */
 QnameColumnInput SamCodecActuator::qnameColumnInput() const
 {
     QnameColumnInput in;
@@ -151,8 +147,7 @@ QnameColumnInput SamCodecActuator::qnameColumnInput() const
 }
 
 int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    /* 0 = the whole block: the line bound the module's encoders take is the trial's, and this is
-       not the trial (see the declaration). */
+    /* 0 = the whole block (the encoders' line bound is the trial's). */
     return encodeQnameSplit(qnameColumnInput(), idAnalysis, outBlockPtr, &ioErrSink, 0, fieldMeta,
                             fieldSrcLen);
 }
@@ -163,15 +158,7 @@ int32_t SamCodecActuator::compressIdFieldQname(uint32_t& fieldSrcLen, Json::Valu
 }
 
 
-/*
- * Analyse one SAM header line (it starts with '@'): capture the chromosome table from @SQ,
- * check the reference path it names against the one in use, and read the bwa command line out
- * of @PG for the same check.
- *
- * Answers 0 when the line has been dealt with, which is what the loop's `continue` used to
- * mean; an unknown header type, an unparsable @SQ line or a chromosome missing from the index
- * is an error.
- */
+/* Analyse one SAM header line: capture @SQ chromosomes and check the reference/@PG names. Returns 0, or -1 on error. */
 int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
 {
     if (line.length() < 3) {
@@ -278,30 +265,16 @@ int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
     return 0;
 }
 
-/*
- * Analyse one record line (it does not start with '@'): hand the ID column to the ID analysis,
- * check RNAME against the chromosome index, and measure the CIGAR-derived length against the
- * SEQ column, the SEQ length against QUAL, the base count and the quality histogram. The
- * field offset table it builds is kept in contentPos.
- *
- * `qualityFrequnce` is the caller's 256-entry histogram, indexed by the quality byte.
- */
+/* Analyse one record line: ID to the ID analysis, RNAME check, CIGAR/SEQ/QUAL length checks, base count and quality histogram. */
 int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, uint32_t idx,
                                        std::pair<uint8_t, uint32_t>* qualityFrequnce)
 {
-    /*
-     * The line's tab positions. The storage is inside the entry, so having one per call costs
-     * nothing and there is no buffer to reuse between lines (see LineTabs).
-     */
+    /* The line's tab positions (see LineTabs). */
     LineTabs linePos;
     uint32_t baseLen = 0;
     bool lineCigarMatchFlag = false;
     uint32_t baseFieldLen = 0;
-    /*
-     * The line is walked byte by byte and this pass runs once per line of every block, so the scan
-     * reads through a raw pointer and a hoisted length: the checked access of std::string::at(), or
-     * a size() call per iteration, is a branch per byte that the bound already makes unnecessary.
-     */
+    /* Walk the line through a raw pointer and hoisted length; this runs once per line of every block. */
     const char* const src = (const char*)line;
     const uint32_t srcLen = lineLen;
     for (uint32_t i = 0; i < srcLen; ++i) {
@@ -409,13 +382,7 @@ int32_t SamCodecActuator::preAnalysis() {
         return -1;
     }
 
-    /*
-     * Archive-mode reader offload: a raw-record BAM block (isRawBam) carries the
-     * [i32 size][record] stream, not SAM text. The reader streamed it to move the
-     * BAM->SAM cost off the single reader thread; this worker renders it into the
-     * identical text (same lines, same npos, same MD5) before the usual passes, so
-     * the compressed result is byte-identical to reader-rendered input.
-     */
+    /* Archive-mode reader offload: render a raw-record BAM block into SAM text before the usual passes. */
     if (inBlockPtr->isRawBam()) {
         if (0 != bamRenderRawBlockToText(inBlockPtr)) {
             LOG_ERROR("SAM block(%ld): failed to render raw BAM records to text.",
@@ -424,31 +391,14 @@ int32_t SamCodecActuator::preAnalysis() {
         }
     }
 
-    /*
-     * A SAM block's line positions are recorded by the format's own reader (SamBlockReader /
-     * BamGzBlockReader): they split the input on newlines and keep every record boundary, so a
-     * non-empty block with no line position at all is not SAM/BAM text. The pbgz-input path is
-     * the case that matters here - it hands over the archive's already-coded payloads (see
-     * PbgzBlockReader::readBlock) - but any such block must not be coded as text.
-     *
-     * Failing here is what makes the bytes survive: the caller sees it and swaps in a
-     * BinaryCompressActuator (CompressEngine::actuatorPreProc), which stores the block verbatim.
-     * Returning 0 instead would let compress() take its "header only" branch and write an empty
-     * block, dropping the whole block's data without a word.
-     */
+    /* A non-empty block with no line position is not SAM/BAM text; fail so the caller can store it verbatim as binary. */
     if (inBlockPtr->getDataLen() > 0 && inBlockPtr->getNpos().empty()) {
         LOG_ERROR("SAM block(%ld) carries %ld bytes but no line positions, not SAM/BAM text.",
                   (long)inBlockPtr->getBlockId(), (long)inBlockPtr->getDataLen());
         return -1;
     }
 
-    /*
-     * The SEQ column's file-level decisions (its match coder, and the form the N positions travel
-     * in) are not taken here: they are the codec pre-selection's, which measures them on the first
-     * block before any actuator exists (see CodecSelector::selectSeqReferenceCoder). This pass only
-     * fills the column stats below, and the consumption side reads the pinned verdicts
-     * (seqMatchCoderFor, and the N-form choice inside writeSeqExceptionStreams).
-     */
+    /* SEQ's file-level decisions (match coder, N form) come from the codec pre-selection; this pass only fills column stats. */
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -460,19 +410,7 @@ int32_t SamCodecActuator::preAnalysis() {
         qualityFrequnce[i].second = 0;
     }
 
-    /*
-     * One line buffer for the whole block: the loop below walks every line of it, and a fresh
-     * std::string per line means a heap allocation per line - a SAM line is longer than the
-     * small-string buffer - for a copy that only the duration of the call needs. assign() reuses
-     * whatever the previous line left behind.
-     *
-     * This pass has to be accounted for on its own: measured on a 35-block BAM it is 1.8 s against
-     * 0.32 s for the whole codec trial it feeds. rdtsc buckets over that file put ~70% of it in
-     * scanDataLine's walk and the tab table it fills, ~27% in the ID-column analysis, and ~4% in
-     * the RNAME and CIGAR work together; within that 70% the byte loop was the smaller half, the
-     * rest having been the per-line container churn (see LineTabs, and the ID-column side in
-     * sam_qname_column).
-     */
+    /* One reusable line buffer for the whole block (assign reuses the previous line's storage). */
     std::string line;
     // Parse SAM file header
     for (uint32_t idx = 0; idx < lineNum; ++idx) {
@@ -488,8 +426,7 @@ int32_t SamCodecActuator::preAnalysis() {
                 return -1;
             }
         } else {
-            /* Record line: scan it straight out of the block buffer; no per-line copy
-               (the previous std::string per data line cost a ~15KB memcpy per read). */
+            /* Scan the record straight out of the block buffer; no per-line copy. */
             if (scanDataLine(buffer + begin, end - begin, idx, qualityFrequnce) != 0) {
                 return -1;
             }
@@ -533,9 +470,7 @@ int32_t SamCodecActuator::compress() {
         return -1;
     }
 
-    /* Same worker-side raw-record render as preAnalysis, for callers that
-       compress without running the pre-analysis first (idempotent: after the
-       render the block is not raw any more). */
+    /* Same raw-record render as preAnalysis, for callers that compress without it. */
     if (inBlockPtr->isRawBam()) {
         if (0 != bamRenderRawBlockToText(inBlockPtr)) {
             LOG_ERROR("SAM block(%ld): failed to render raw BAM records to text.",
@@ -544,15 +479,7 @@ int32_t SamCodecActuator::compress() {
         }
     }
 
-    /*
-     * Grow the output block to the real size of this input block before any
-     * stream is written. The engine pool hands out output blocks whose initial
-     * buffer only follows -l; with long reads a SAM/BAM data block (bounded by
-     * the read-count/base-count slicer in BlockReader) can be far larger than
-     * that, and a fixed -l-sized coder_io would overflow and abort compression.
-     * So -l is only an allocation hint here, never a cap on the encoded block.
-     * The formula mirrors the decompression side (see SamCodecActuator:decompress).
-     */
+    /* Grow the output block to the input block's real size: -l is only an allocation hint, never a cap. */
     if (pbgzEngine != nullptr) {
         size_t bs = pbgzEngine->getFileBlockSize();
         if (bs == 0) {
@@ -579,13 +506,7 @@ int32_t SamCodecActuator::compress() {
         }
     }
 
-    /*
-     * The same guard as preAnalysis(), for the callers that compress without running the
-     * pre-analysis first: a block with bytes but no line position cannot be "header only" -
-     * taking that branch would write an empty block and drop the data. The pipeline always
-     * runs preAnalysis() first (CompressEngine::actuatorPreProc), where the block is turned
-     * into a binary one instead, so this is the belt to that branch's braces: fail loudly.
-     */
+    /* Same guard as preAnalysis: a block with bytes but no line position must not be written header-only. */
     if (inBlockPtr->getDataLen() > 0 && inBlockPtr->getNpos().empty()) {
         LOG_ERROR("SAM block(%ld) carries %ld bytes but no line positions, cannot code as text.",
                   (long)inBlockPtr->getBlockId(), (long)inBlockPtr->getDataLen());
@@ -696,16 +617,7 @@ int32_t SamCodecActuator::compressSamHeader() {
     return 0;
 }
 
-/*
- * The QNAME column (field 0), written in whichever of its two layouts the codec pre-selection
- * picked for this file: affix segmentation, or coder_qname's cross-line deduplication. Both are
- * encoders, so the choice is made by running them (see CodecSelector::selectQnameLayout), and it
- * is a property of the file's naming scheme rather than of a block - which is why it is taken
- * before any block is written and not here. This reads that verdict (PreprocessInfo::qnameUseAffix)
- * and encodes with it; a column with no split to work from is written whole instead.
- *
- * Returns the column's encoded size, negative on failure.
- */
+/* The QNAME column (field 0), written with the layout the codec pre-selection picked (affix or coder_qname). Negative on failure. */
 int32_t SamCodecActuator::encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& fieldMeta)
 {
     // ID field: compress based on analysis result
@@ -714,16 +626,7 @@ int32_t SamCodecActuator::encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& 
         return compressIdFieldInAll(fieldSrcLen, fieldMeta);
     }
 
-    /*
-     * Which of the two layouts writes this column is a file-level verdict, and it arrives from the
-     * codec pre-selection, which ran both encoders on a sample of the first block before any block
-     * was dispatched (see CodecSelector::selectQnameLayout). Nothing is measured here: writing a
-     * block is not a place to be comparing encoders.
-     *
-     * A file the pre-selection could not judge - the ID analysis above failed on the deciding
-     * block, or the actuator is driven without an engine - keeps the affix layout, which is the
-     * segmentation this column has always been written with.
-     */
+    /* Which layout writes this column is the file-level verdict (PreprocessInfo::qnameUseAffix); affix is the fallback. */
     const PreprocessInfo* preInfo = preprocessInfoMut();
     const int32_t verdict =
         (preInfo != nullptr) ? preInfo->qnameUseAffix.load(std::memory_order_relaxed) : -1;
@@ -733,13 +636,7 @@ int32_t SamCodecActuator::encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& 
                     : compressIdFieldQname(fieldSrcLen, fieldMeta);
 }
 
-/*
- * Close the block: write the SAM meta (line and field counts, the two length totals, the exact
- * decoded text size the decompressor sizes its buffer from, then the per-field stream metas), hash
- * the block and encode the whole meta into the meta buffer.
- *
- * Returns 0 on success; the caller has already set the block id and type.
- */
+/* Close the block: write the SAM meta and per-field stream metas, hash the block, encode the meta. */
 int32_t SamCodecActuator::finalizeSamBlockMeta(Json::Value& samMeta,
                                                const Json::Value& streamMeta, uint32_t lineNumber,
                                                uint32_t fieldCount, uint32_t totalSrcLen,
@@ -750,10 +647,7 @@ int32_t SamCodecActuator::finalizeSamBlockMeta(Json::Value& samMeta,
     samMeta["fieldcount"] = fieldCount;
     samMeta["totalsrclen"] = totalSrcLen;
     samMeta["totaldstlen"] = totalDstLen;
-    /* Exact decoded-text size of this block, so the decompressor can size its
-       output buffer from the real block length instead of guessing from -l or
-       from the compressed payload length (which under-allocates for large
-       long-read blocks and caused out-of-bounds writes on decode). */
+    /* Exact decoded-text size of this block, used to size the decompressor's output buffer. */
     samMeta["textlen"] = (Json::Value::UInt64)inBlockPtr->getDataLen();
     samMeta["streams"] = streamMeta;
     meta["sam"] = samMeta;
@@ -822,14 +716,7 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 3: // POS
-                /*
-                 * POS is compressed as unsigned varint (LEB128) deltas against the
-                 * previous line's POS; the baseline resets at each chromosome
-                 * switch, so deltas stay small and non-negative. The underlying
-                 * entropy coder is chosen by preprocessing on the delta-varint
-                 * stream itself (bwt_cm vs order-0 arithmetic, see
-                 * CodecSelector::selectPosDeltaCoder); bwt_cm is the fallback.
-                 */
+                /* POS as unsigned varint (LEB128) deltas against the previous line, baseline reset at each chromosome switch. */
                 if (pickedCoderFor(fieldIdx, CoderType::BWT_CM) == CoderType::ARITH) {
                     fieldDstLen = compressPosFieldDelta<coder_arith>(fieldIdx, fieldSrcLen, fieldMeta);
                 } else {
@@ -850,42 +737,17 @@ int32_t SamCodecActuator::compressSamByFields() {
                 fieldDstLen = compressChrName(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 7: // PNEXT
-                /*
-                 * PNEXT is compressed as the delta against POS. The deltas of
-                 * consecutive lines are far smaller than the raw coordinates;
-                 * empirically bwt_cm compresses the delta text to ~0.86
-                 * bytes/line, far better than compressing raw PNEXT or affix.
-                 * The trial-based selection is based on raw PNEXT text, which
-                 * does not match the delta encoding actually used here, so this
-                 * field always takes the delta path and is excluded from coder
-                 * selection.
-                 */
+                /* PNEXT as the delta against POS; always the delta path, excluded from coder selection. */
                 fieldDstLen = compressPNextFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 8: // TLEN
-                /*
-                 * TLEN is not stored verbatim: it is reconstructed from
-                 * POS/PNEXT/CIGAR on decompression, storing exceptions only for
-                 * lines that cannot be reconstructed. CIGAR/FLAG/RNAME/RNEXT/
-                 * POS/PNEXT are all compressed before this field, so the
-                 * tracking maps needed for reconstruction are already populated.
-                 */
+                /* TLEN reconstructed from POS/PNEXT/CIGAR on decompression, with exceptions only for lines that cannot be rebuilt. */
                 fieldDstLen = compressTLen<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 9: // SEQ
-                /*
-                 * A reference the @SQ list cannot address (see referenceUsableForSeq) is worse
-                 * than none, so the text path takes over rather than reading foreign bases. The
-                 * verdict is taken here rather than when the reference is handed in because the
-                 * @SQ table is only complete once the header has been parsed.
-                 */
+                /* A reference the @SQ list cannot address is dropped for SEQ; the verdict is taken after the header is parsed. */
                 if (!referenceUsableForSeq()) {
-                    /*
-                     * No reference this file can address. Code against one the block builds from
-                     * its own alignments where that is possible - the reads agree with each other
-                     * wherever they overlap, so the consensus recovers the sequence - and only
-                     * store the bases where it is not (see compressBaseSelfRef).
-                     */
+                    /* No usable reference: code against a block-built consensus where possible, else store the bases (see compressBaseSelfRef). */
                     fieldDstLen = compressBaseSelfRef(fieldIdx, fieldSrcLen, fieldMeta);
                 } else {
                     LOG_DEBUG("Base will compress with reference");
@@ -897,12 +759,7 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 11: // Optional fields (all tags)
             {
-                /*
-                 * The stripped layout first (see compressOptionStrip): the same column with the
-                 * repeated tag names left to the meta, which is where most of this field's time
-                 * goes. It declines the data it cannot describe, and then the plain line-wise
-                 * column - what this field has always used - is written instead.
-                 */
+                /* Try the stripped OPTION layout first, else the plain line-wise column. */
                 uint32_t stripDst = 0;
                 if (compressOptionStrip(fieldIdx, fieldSrcLen, fieldMeta, stripDst)) {
                     fieldDstLen = (int32_t)stripDst;
@@ -948,19 +805,7 @@ CoderType SamCodecActuator::pickedCoderFor(uint32_t fieldIdx, CoderType fallback
     return fallback;
 }
 
-/*
- * Where one field of one content line sits.
- *
- * `line` is the start of the line, `tabs` the tab positions of that line (contentPos for this
- * record) and `fieldIdx` the 1-based SAM column; `lineEnd` is the line's length, used for the
- * last field, which no tab follows.
- *
- * The two lengths are the point of this struct. The column walks in this file disagree on
- * whether a field includes its trailing tab - the bytes handed to a coder usually do, since
- * the tab is what the decoder splits on, while a length or a hash usually does not - and
- * hiding that behind one `length` is exactly how the two conventions drifted apart at the
- * dozen sites that used to compute this inline.
- */
+/* Where one field of one content line sits: line start, tab positions, 1-based field index, and the two lengths. */
 struct SamFieldRange {
     uint8_t* start = nullptr;
     /* The delimiter that ends the field: the next tab, or the end of the line for the last. */
@@ -985,23 +830,7 @@ PreprocessInfo* SamCodecActuator::preprocessInfoMut() const
     return (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfoMut() : nullptr;
 }
 
-/*
- * Which coder codes the SEQ match stream: coder_fc, the sole candidate (see
- * CodecSelector::seqMatchCoderChoice - the candidate list holds one coder, so no
- * trial runs; coder_bwt_cm still carries the payload outside coder_fc's length
- * window and always carries the "mval" sub-stream).
- *
- * The question is a file-level one, asked once by the codec pre-selection before any block is
- * dispatched and only read here. There is no per-block trial: that existed for coder_lzma, whose
- * per-block variation was worth bytes, and it cost a sample encode of every block - measured at -l8
- * on ERR11436629 it was 43% of the run time for a byte-identical archive. With coder_lzma gone from
- * the candidates (it wins on size but costs ~17x the time, see its registry row) there is nothing
- * left that varies enough per block to pay for that.
- *
- * A caller driving the actuator without an engine has no verdict to read, and a run without a
- * reference never got one (the column is not written as the match stream then): both fall back to
- * coder_bwt_cm, the stream's historical coder.
- */
+/* The coder for the SEQ match stream, decided once per file by the codec pre-selection; coder_bwt_cm is the fallback. */
 CoderType SamCodecActuator::seqMatchCoderFor()
 {
     PreprocessInfo* preInfo = preprocessInfoMut();
@@ -1012,30 +841,11 @@ CoderType SamCodecActuator::seqMatchCoderFor()
         }
     }
 
-    /*
-     * No verdict covers this file: the pre-selection found no SEQ payload to measure, or a caller
-     * is driving the actuator without an engine. coder_bwt_cm is the coder this stream used before
-     * the trial existed.
-     */
+    /* No verdict covers this file; coder_bwt_cm is the fallback. */
     return CoderType::BWT_CM;
 }
 
-/*
- * Encode PNEXT's exception stream: the (contentIdx, delta) pairs of the records that cannot be
- * rebuilt from their mate and do have something to say - see the filter in
- * compressPNextFieldDelta, which leaves out an unpaired record whose field is "0" because the
- * decoder derives that 0 by itself.
- *
- * The contentIdx column goes out as forward deltas and the delta column as zigzag varints, and
- * where every delta is the same value that value moves into the meta and the column is dropped
- * outright. An empty list is written as no sub-stream at all (exc_enc "none"), which is the
- * common shape for an all-single-end or all-unmapped block, like ERR14949932.
- *
- * contentIdx is the block-internal data-line index (small, increasing); delta = pnext - pos is
- * signed (the mate offset, negative when the record had no real PNEXT), so it goes through
- * zigzag. fieldMeta records how the stream was written, and the function returns its encoded
- * size.
- */
+/* Encode PNEXT's exception stream: (contentIdx, delta) pairs of records that cannot be rebuilt from their mate. */
 template<typename CoderType>
 uint32_t SamCodecActuator::writePnextExceptions(const std::vector<std::pair<uint32_t, int64_t>>& exc,
                                                   Json::Value& fieldMeta, Json::Value& metaStreams,
@@ -1046,18 +856,7 @@ uint32_t SamCodecActuator::writePnextExceptions(const std::vector<std::pair<uint
         std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "PNEXT exceptions");
         std::shared_ptr<CoderType> excCoder = std::make_shared<CoderType>(excIo.get());
 
-        /*
-         * Exception stream encoding: the contentIdx column as forward deltas and the delta
-         * column as zigzag varints, and where every delta is the same value that value moves
-         * into the meta and the column is dropped outright. A block whose records are all
-         * unpaired - or all unmapped, like ERR14949932 - has every line in this stream with
-         * the same delta, and there the old layout (absolute contentIdx then delta, 1-3 B + 1 B
-         * per entry) spent 937,737 B of stream on 3,343,586 entries whose delta is uniformly 0.
-         *
-         * contentIdx is the block-internal data-line index (small, increasing); delta =
-         * pnext - pos is signed (mate offset, negative when the record had no real PNEXT), so
-         * it goes through zigzag.
-         */
+        /* contentIdx as forward deltas, delta as zigzag varints; a constant delta moves into the meta and the column is dropped. */
         std::vector<uint8_t> excStream;
         excStream.reserve(exc.size() * 2 + 16);
         uint32_t prevOrdinal = 0;
@@ -1106,29 +905,10 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
     fieldSrcLen = 0;
     uint32_t totalSrcLen = 0;
 
-    /*
-     * PNEXT is stored as "exception-only": for a paired record whose mate is
-     * present and mutually mapped (same QNAME), the PNEXT can be rebuilt on the
-     * decoder from the mate's POS, so it need not be stored. Only records that
-     * cannot be rebuilt (unpaired / mate unmapped / supplementary / mate
-     * missing from the block / asymmetric coords) are stored as exceptions.
-     *
-     * The decoder rebuilds non-exception PNEXT by grouping records with the
-     * same QNAME (a QNAME with exactly two mutually-mapped records is a mate
-     * pair). This preserves the block line order, so POS delta coding and the
-     * output order are unaffected.
-     */
+    /* PNEXT is exception-only: paired records with a mutually-mapped mate are rebuilt from the mate's POS; the rest are stored. */
 
     // Pass 1: collect (lineIdx -> qname, pos, pnext, flag) for every data line.
-    /*
-     * The record table is indexed by data-line number rather than keyed by it: the second pass
-     * walks lines in increasing order (which is the order the old std::map produced, and the order
-     * the exception list's deltas depend on), so a vector reads the same and costs one allocation.
-     *
-     * The QNAME is kept as a slice of the block buffer instead of a std::string. A QNAME is longer
-     * than the small-string buffer, so the old per-line std::string was a heap allocation per line
-     * of the block.
-     */
+    /* Record table indexed by data-line number; QNAME kept as a slice of the block buffer. */
     struct RecInfo {
         uint32_t qoff = 0;           // QNAME slice in the block buffer
         uint32_t qlen = 0;
@@ -1140,15 +920,7 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
         bool valid = false;          // paired (0x1) and mate mapped (not 0x8)
         bool hasPnext = false;       // pnext != 0/ *
     };
-    /*
-     * One group per distinct QNAME: how many valid records carry it, and the two lines that could
-     * pair up. It replaces an unordered_map<std::string, std::vector<uint32_t>>, which hashed the
-     * name twice per line and allocated a vector for every distinct name in the block - a million
-     * of them on a position-sorted BAM - and a std::map insert per line. The groups live in one
-     * array reached through a hash -> index chain, so a name costs one CityHash64 and one lookup
-     * on the small table, and nothing is allocated per name. A chain collision is resolved by
-     * comparing the name bytes, so the grouping is exact rather than probabilistic.
-     */
+    /* One group per distinct QNAME: valid-record count and the two lines that could pair up, through a hash -> index chain. */
     struct QnameGroup {
         uint32_t count = 0;          // valid records with this name
         uint32_t line[2] = {0, 0};   // the first two of them
@@ -1264,28 +1036,10 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
             }
         }
         if (!rebuildable) {
-            /*
-             * A record whose field holds no value (hasPnext false, i.e. it was "0" or "*") and
-             * that is not a mapped pair (valid false) has PNEXT 0, and the decoder reaches that
-             * 0 on its own: rebuildPnextByQname only consults the exception list, and a line it
-             * has no exception for stays 0 unless the FLAG marks it as a mapped pair it can
-             * pair up by QNAME. Storing an exception for such a line would have the decoder
-             * carry a value it can already derive, and because that value is delta = -POS it
-             * varies from record to record - which also keeps the "all deltas equal" case below
-             * from collapsing the column into the meta. On an all-single-end BAM that cost one
-             * exception per line for a constant 0: 36.8 MB of a 471 MB archive on a 25.9M-read
-             * file, where TLEN - the same field in the same situation - pays nothing because it
-             * is derived rather than stored.
-             *
-             * Everything else keeps the exception path as before, so the bytes this writes for a
-             * record are unchanged; only records that need no exception stop getting one.
-             */
+            /* A record with no real PNEXT (field "0"/"*") and not a mapped pair derives PNEXT 0; no exception is stored. */
             if (ri.valid || ri.hasPnext) {
                 uint32_t contentIdx = lineIdx - headEndLine;
-                /* Reconstruction on the decoder is pnext = delta + pos. When the record
-                   had no real PNEXT (field was "0" or "*"), hasPnext is false and the
-                   original value is 0, so delta must be -pos (not 0) for the decoder to
-                   reproduce 0. */
+                /* Decoder reconstructs pnext = delta + pos; a record with no real PNEXT needs delta = -pos to reproduce 0. */
                 int64_t delta = ri.hasPnext ? (ri.pnext - ri.pos) : (0 - (int64_t)ri.pos);
                 pnextExceptions.emplace_back(contentIdx, delta);
             }
@@ -1299,11 +1053,8 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
     /* (see writePnextExceptions) */
     totalDstLen = writePnextExceptions<CoderType>(pnextExceptions, fieldMeta, metaStreams, totalDstLen);
 
-    // fieldSrcLen (output) must be the original PNEXT field byte length (with
-    // trailing tab) summed over all lines, so the -s statistics and
-    // recordFieldStats print the true source length. totalSrcLen accumulates
-    // exactly that (the exception-stream size is recorded only in the sub-stream
-    // meta, not folded into the field source length).
+    // fieldSrcLen is the original PNEXT byte length (with trailing tab)
+    // summed over all lines; the exception-stream size is only in the sub-stream meta.
     fieldSrcLen = totalSrcLen;
     fieldMeta["srclen"] = totalSrcLen;
     fieldMeta["dstlen"] = totalDstLen;
@@ -1327,11 +1078,7 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
 
     std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "POS delta");
     std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
-    /* The arithmetic backend consumes the file-level delta prior to skip each
-     * block's model cold start. bwt_cm (the other CoderType this template is
-     * instantiated with) ignores it: dynamic_cast yields null. The prior was
-     * produced by preprocessing only when arith won the POS trial, so it is
-     * consistent with this instance being coder_arith. */
+    /* The arithmetic backend takes the file-level delta prior to skip the model cold start; bwt_cm ignores it. */
     if (coder_arith* arithCoder = dynamic_cast<coder_arith*>(fieldCoder.get())) {
         const PreprocessInfo* preInfo =
             (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
@@ -1355,13 +1102,7 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
 
         uint32_t contentIdx = lineIdx - headEndLine;
 
-        /*
-         * Detect chromosome switches via the per-line chromosome index that
-         * compressChrName (field 2) already recorded in mappedChr. No reset
-         * index list is stored in the metadata: the decoder replays the same
-         * comparison against its own decoded mappedChr, which keeps the
-         * bitstream independent of RNAME ordering (CRAM-style).
-         */
+        /* Detect chromosome switches via the per-line mappedChr index; the decoder replays the same comparison. */
         if (contentIdx > 0) {
             const auto curChrIt = mappedChr.find(lineIdx);
             const auto prevChrIt = mappedChr.find(lineIdx - 1);
@@ -1389,11 +1130,7 @@ int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fie
             mappedPos[lineIdx] = 0;
             fieldSrcLen += 2;
         }
-        /*
-         * Delta is encoded as an unsigned varint (LEB128). After the baseline
-         * is reset at every RNAME change, coordinate-sorted deltas are
-         * non-negative, so the sign bit never needs to be stored.
-         */
+        /* Delta as unsigned LEB128 varint; after the baseline resets, sorted deltas are non-negative. */
         uint64_t u = (uint64_t)delta;
         uint8_t vbuf[10];
         uint32_t vlen = 0;
@@ -1549,17 +1286,7 @@ int32_t SamCodecActuator::compressChrName(uint32_t fieldIdx, uint32_t& fieldSrcL
         }
 
         if (fieldIdx == 6) {
-            /*
-             * RNEXT: the mate's reference is "=" (same as RNAME) in ~99.6% of
-             * paired reads, so a fixed uint16 per line wastes a byte of zeros on
-             * nearly every row. Store a one-byte code instead:
-             *   0x00 = "=" (0xFFFE)
-             *   0x01 = "*" (0xFFFF)
-             *   0x02..0xFD = chrIndex + 2   (real contig index 0..251)
-             *   0xFF = escape, followed by the raw uint16 (index >= 252,
-             *          extremely rare; requires > 250 reference contigs)
-             * 0xFE is unused.
-             */
+            /* RNEXT stored as a one-byte code: 0x00 "=", 0x01 "*", 0x02..0xFD contig+2, 0xFF escape + raw uint16. */
             uint8_t code = 0;
             if (str == "=") {
                 code = 0x00;
@@ -1623,6 +1350,10 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
 
     fieldSrcLen = 0;
 
+    /* Placeholder for a line without this field; outside the loop so coder_affix_match's
+       context pointer stays valid. */
+    uint8_t ch = '\n';
+
     // Process each line and extract the current field
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -1637,7 +1368,6 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
         uint32_t contentIdx = lineIdx - headEndLine;
         // Middle fields: between tabs
         if (fieldIdx > contentPos[contentIdx].size()) {
-            uint8_t ch = '\n';
             fieldCoder->encode_line(&ch, 1);
             fieldSrcLen += 1;
             continue;
@@ -1651,14 +1381,7 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
             fieldCoder->encode_line(fieldStart, fieldLength);
             fieldSrcLen += fieldLength;
 
-            /*
-             * When FLAG/POS/PNEXT are compressed in textual form (affix), the
-             * tracking maps must still be filled here: compressBaseWithRef
-             * relies on mappedPos/mappedChr/mappedFlag to restore reference
-             * positions in the SEQ phase, and the decompression side does too.
-             * The binary form fills them in compressNumber; the textual form
-             * fills them here, keeping both sides consistent.
-             */
+            /* Textual FLAG/POS/PNEXT must still fill the tracking maps here, keeping both sides consistent. */
             if (fieldLength > 1 && (fieldIdx == 1 || fieldIdx == 3 || fieldIdx == 7)) {
                 std::string str = std::string((char*)fieldStart, fieldLength - 1);
                 if (fieldIdx == 1) {
@@ -1695,28 +1418,8 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
     return fieldIo->data_len;
 }
 
-/*
- * The OPTION field (all tags starting at column 12) is compressed by CRAM-style
- * tag columnization.
- *
- * Idea: OPTION text = constant tag structure (name/colon/type) + varying
- * values. Generic byte-stream compression (affix/bwt) absorbs the tag structure
- * via prefix matching, but values are still stored as decimal text, wasting
- * roughly half. Here the structure and the values are separated:
- *   1. Build a per-block tag dictionary (each name+type stored once).
- *   2. Each record stores only its sequence of tag ids (in order).
- *   3. Each tag's values form a separate column: integers as delta +
- *      fixed-width binary, the rest as length-prefixed byte streams.
- *   4. Each column is compressed independently with bwt_cm.
- */
-/*
- * Parse the OPTION column line by line: build the tag dictionary (name and type, in first-seen
- * order), each line's tag sequence, and each tag's own column of values. Tags are the
- * "TAG:TYPE:VALUE" triples of a SAM line's trailing fields, and a line that carries none
- * contributes an empty sequence.
- *
- * Returns 0, or -1 when a line has no OPTION field at all.
- */
+/* The OPTION field (column 12 on) is compressed by CRAM-style tag columnization. */
+/* Parse the OPTION column: tag dictionary (first-seen order), each line's tag sequence, each tag's value column. */
 int32_t SamCodecActuator::collectOptionTags(OptionParseState& st)
 {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
@@ -1807,13 +1510,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         tags.append(e);
     }
 
-    /*
-     * Every column is encoded as "line by line + delimiter" and compressed with
-     * bwt_cm's line-wise mode. A single large blob must not be used: bwt_cm
-     * fails to decode near-constant large blobs (id sequences almost constant,
-     * integer columns with deltas almost all 0), whereas line-wise encoding with
-     * '\n' delimiters is a verified working usage.
-     */
+    /* Each column is encoded line by line with delimiters and compressed with bwt_cm's line-wise mode. */
 
     /* id column: one line per record, ids comma-separated, line terminated by '\n'. */
     {
@@ -1893,41 +1590,13 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
     return (int32_t)totalDst;
 }
 
-/*
- * The OPTION column, with the tag name and type left out of the stream.
- *
- * The column is the records' trailing `TAG:TYPE:VALUE` segments, tab-separated, one line per
- * record, and the same few tags recur on every line: con_sorted.sam carries 78 MB of it over a
- * million records, 64% of that text being the names and types, and only three distinct tag
- * sequences occur in the whole file. The coder walks every input byte - coder_bwt_cm measures
- * 88 ns/byte on this column against 85 ns/byte on the values alone - so leaving the names in costs
- * that share of the time while buying nothing: measured on the same column, values-only is 2.4 s
- * against 6.9 s, and what comes out is 1.5% *smaller*, not larger (the names were already nearly
- * free to code).
- *
- * So each record contributes
- *
- *   - one index into a per-block table of tag sequences,  and
- *   - one line of tab-separated values, in the order that sequence lists them,
- *
- * and the sequence table travels in the meta, one entry per segment: either a (name, type) pair,
- * rebuilt as "NAME:TYPE:" in front of the value, or a verbatim entry for a segment that is not of
- * that shape at all (fewer than two colons, or empty), whose value is the whole original segment.
- * Both are exact: splitting at the first two colons and rejoining reproduces the segment byte for
- * byte whatever the value contains, and a value can never hold a tab or a newline since the column
- * is tab-separated lines to begin with.
- *
- * This layout is used only when the data suits it. If the block has more than kMaxSequences
- * distinct sequences, or a record's column does not end in the newline that a block line ends in,
- * the function returns false without having written anything and the caller falls back to the plain
- * line-wise column. Nothing else is affected: the mode travels in the field meta, so a reader -
- * including an older one for an archive written by an older writer - dispatches on what it finds.
- */
+/* The OPTION column with tag name/type left out of the stream: a per-block table of tag
+   sequences in the meta, plus one index and one line of values per record. Returns false
+   (writes nothing) when the data does not suit it. */
 bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrcLen,
                                            Json::Value& fieldMeta, uint32_t& dstLen)
 {
-    /* A block's tag set is small and constant; a file that varies wildly per record is one the
-       stripped layout cannot describe compactly, so it keeps the plain one. */
+    /* A block's tag set is small and constant; the plain layout is for the rest. */
     const size_t kMaxSequences = 4096;
 
     struct SeqEntry {
@@ -1963,10 +1632,7 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
         }
         const uint32_t contentIdx = lineIdx - headEndLine;
 
-        /* The same view compressRegularField feeds: the record's fields 12.. as one column, or a
-           bare newline when the record has no OPTION at all (fieldIdx > the tabs present, or a
-           range that ends before it starts, which is what the same record looks like when the
-           scan recorded one more tab). */
+        /* The same field view compressRegularField feeds: the record's fields 12.. as one column, or a bare newline. */
         const uint8_t* text = nullptr;
         uint32_t len = 0;
         bool hasField = true;
@@ -1988,19 +1654,13 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
         }
         srcLen += len;
 
-        /* A block is split at line ends, so the column ends with the record's newline, which this
-           layout leaves implicit. Anything else is not something it can express. */
+        /* Blocks split at line ends, so the column ends with the record's newline (left implicit here). */
         if (len == 0 || text[len - 1] != '\n') {
             return false;
         }
         --len;
 
-        /* Split the line into segments: tab-separated, and a record with no OPTION has none. A
-           field that is present but empty - a record whose last column exists and holds nothing -
-           is one empty verbatim segment instead, because the two have to stay apart: the reader
-           turns the tab it appended after QUAL into the line's newline for the first, and appends
-           that newline itself for the second, which is the difference between a record that ends
-           in "...\\t\\n" and one that ends in "...\\n". */
+        /* Split the line into tab-separated segments; a present but empty last column is one empty verbatim segment. */
         segs.clear();
         if (len == 0 && hasField) {
             SegView v;
@@ -2040,8 +1700,7 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
             }
         }
 
-        /* Find this line's sequence, comparing segment by segment - there are a handful of them and
-           a few segments each, so a key string per line would cost more than it saves. */
+        /* Find this line's sequence by comparing segments. */
         int32_t seqIdx = -1;
         for (size_t s = 0; s < sequences.size() && seqIdx < 0; ++s) {
             const std::vector<SeqEntry>& seq = sequences[s];
@@ -2093,8 +1752,7 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
         const int idxLen = snprintf(idxBuf, sizeof(idxBuf), "%d\n", (int)seqIdx);
         indexText.insert(indexText.end(), idxBuf, idxBuf + idxLen);
 
-        /* The values, in sequence order: the segment's value, or the whole segment for a verbatim
-           entry. Every one is separated by a tab and the record ends with the newline. */
+        /* The values in sequence order, tab-separated, ending with the newline. */
         for (const SegView& v : segs) {
             if (v.verbatim) {
                 valueText.insert(valueText.end(), text + v.segOff, text + v.segOff + v.segLen);
@@ -2110,8 +1768,7 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
         }
     }
 
-    /* Commit. Both sub-streams are written before the meta says so, and a failure puts the block
-       back where it was so the caller can write the plain layout. */
+    /* Commit: both sub-streams written before the meta; a failure rolls the block back. */
     const uint32_t savedDst = outBlockPtr->getDataLen();
     Json::Value streams(Json::arrayValue);
     uint32_t totalDst = 0;
@@ -2129,7 +1786,8 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
                 ok = false;
                 break;
             }
-            c->encode_line(texts[i]->data(), (uint32_t)texts[i]->size());
+            /* need2hold: texts are temporary, so coder_affix_match holds its own context copy. */
+            c->encode_line(texts[i]->data(), (uint32_t)texts[i]->size(), true);
             c->encode_flush();
             if (io->err != coder_io::IO_OK) {
                 ok = false;
@@ -2252,14 +1910,7 @@ int32_t SamCodecActuator::compressCigar(uint32_t fieldIdx, uint32_t& fieldSrcLen
     return fieldIo->data_len;
 }
 
-/*
- * Reconstruct TLEN per the SAM spec:
- *   |TLEN| = rightmost mapped base - leftmost mapped base + 1
- * The left fragment is positive and the right one negative. When pos < pnext,
- * this read is on the left and the right end = pnext + mate reference span - 1;
- * when pos > pnext, this read is on the right, the left end = pos, and the
- * template length is negative.
- */
+/* TLEN per the SAM spec: |TLEN| = rightmost mapped base - leftmost mapped base + 1; left fragment positive, right negative. */
 bool SamCodecActuator::gatherTLEN(uint32_t lineIdx, TlenInput& in) {
     /* Not paired (FLAG bit 0) or either end unmapped (bits 2/3): TLEN is set to 0. */
     auto flagIt = mappedFlag.find(lineIdx);
@@ -2348,18 +1999,9 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         tlenMateIndex[std::make_pair(posIt2->second, entry.second)] = entry.first;
     }
 
-    /*
-     * First pass: count how many records each template-length convention
-     * matches (bwa minus 1 / minimap2 plain); the one with more matches is
-     * chosen as this block's convention. The convention is stored in meta for
-     * the decompression side.
-     */
+    /* First pass: count matches for each TLEN convention (bwa minus 1 / minimap2 plain); the winner is stored in meta. */
     uint64_t convMinus1 = 0, convPlain = 0;
-    /*
-     * Both conventions' values, kept for the second pass so that it does not have to gather the
-     * line's inputs again - only one convention survives the vote, and which one is not known until
-     * this pass ends. One int32 per line per convention.
-     */
+    /* Both conventions' values, kept for the second pass. */
     std::vector<int32_t> tlenMinus1(lineNum, 0);
     std::vector<int32_t> tlenPlain(lineNum, 0);
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
@@ -2456,8 +2098,7 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + tlenIo->data_len);
         totalSrcLen += tlenExcSrcLen;
         totalDstLen += tlenIo->data_len;
-        /* Which layout the stream is in (see tlenDecodeVarints). Set here, where a stream exists,
-           so a block without exceptions carries no marker. */
+        /* Which layout the stream is in (see tlenDecodeVarints); set here where a stream exists. */
         fieldMeta["exc"] = (Json::Value::UInt)TLEN_EXC_LAYOUT_VARINT;
     }
 
@@ -2544,30 +2185,11 @@ int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fi
     return fieldIo->data_len;
 }
 
-/*
- * The SEQ match stream split into (run lengths, surviving values), or left whole when the
- * split would not pay for itself: a split with useRle false carries no buffers at all, and
- * the caller codes the match stream as it is.
- */
-/*
- * Where one field of one content line sits.
- *
- * `line` is the start of the line, `tabs` the tab positions of that line (contentPos for this
- * record) and `fieldIdx` the 1-based SAM column; `lineEnd` is the line's length, used for the
- * last field, which no tab follows. The range excludes both surrounding tabs.
- *
- * Every column walk in this file asks this question - SEQ, QUAL, Nodifier, the fields
- * compressed as a whole - and it used to be spelled out inline at each of them.
- */
-/* SamFieldRange and samFieldRange are defined near the top of this file, before their first
-   user: every column walk below needs them. */
+/* The SEQ match stream split into (run lengths, surviving values), or carried whole when the split would not pay. */
+/* Where one field of one content line sits: line start, tab positions, 1-based index; range excludes surrounding tabs. */
+/* Defined near the top of the file, before its first user. */
 
-/*
- * Record that `ch` occurred at block position `pos`: the first occurrence registers the
- * character (and reserves its list, unless it is the 'N' class the constructor sized), every
- * occurrence appends the position. The other half of the SEQ column's exception handling is
- * the emitter, writeSeqExceptionStreams.
- */
+/* Record that `ch` occurred at block position `pos` (see writeSeqExceptionStreams for the emitter). */
 static void addSeqException(std::vector<SeqExceptionClass>& classes,
                             std::vector<uint8_t>& present, uint8_t ch, uint32_t pos)
 {
@@ -2581,12 +2203,7 @@ static void addSeqException(std::vector<SeqExceptionClass>& classes,
     exc.add(pos);
 }
 
-/*
- * Append one record's payload to the block's match stream, refusing to run past `capacity`
- * (the caller reports that as a block error, with the lengths it already knows). What the
- * stream is then coded as - whole, or split into runs and values - is splitSeqMatchStream's
- * business.
- */
+/* Append one record's payload to the block's match stream, refusing to run past `capacity`. */
 static bool appendSeqMatch(uint8_t* matchBuffer, uint32_t& matchLen, uint32_t capacity,
                            const uint8_t* bytes, uint32_t length)
 {
@@ -2598,29 +2215,13 @@ static bool appendSeqMatch(uint8_t* matchBuffer, uint32_t& matchLen, uint32_t ca
     return true;
 }
 
-/*
- * Write the base-length auxiliary stream, for the layout where base lengths vary: the reads whose
- * length is not already implied by their CIGAR, as (ordinal, length) pairs.
- *
- * Both columns go out as forward deltas in varint, with the ordinals written as one run before the
- * lengths rather than interleaved with them: a file that is entirely unmapped - or entirely mapped
- * - collapses its whole ordinal column into the same repeated delta, and the lengths keep
- * statistics of their own. The absolute 4-byte pairs this replaced cost 8 B per read; on
- * ERR14949932 (all 3,343,586 reads unmapped) 26,748,688 B of source became 6,171,912 B, where
- * CRAM's read-length series needs 1,302,132 B for the same reads.
- *
- * Does nothing when every read has the same length.
- */
+/* Base-length auxiliary stream: reads whose length is not implied by their CIGAR, as (ordinal, length) forward-delta varints. */
 int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::Value& metaStreams,
                                                   uint32_t& totalSrcLen, uint32_t& totalDstLen)
 {
     if (minBaseLength != maxBaseLength) {
         std::shared_ptr<coder_io> lenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ length");
-        /*
-         * The reads whose length is not already implied by their CIGAR, as (ordinal, length)
-         * pairs. Both columns go out as forward deltas in varint, with the ordinals written as
-         * one run before the lengths rather than interleaved with them.
-         */
+        /* The reads whose length is not implied by their CIGAR, as (ordinal, length) forward-delta varints. */
         std::vector<uint8_t> lenBuf;
         lenBuf.reserve((unmapedReadLength.size() << 1) + 16);
         uint32_t prevOrdinal = 0;
@@ -2646,8 +2247,7 @@ int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::
         metaSubs["dstlen"] = lenIo->data_len;
         metaSubs["coder"] = lenIo->meta;
         metaSubs["sname"] = "baselen";
-        /* The delta layout, and how many entries each of the two runs holds; a stream without
-           these carries the absolute pairs this replaced. */
+        /* The delta layout and the two run lengths; without them the stream is absolute pairs. */
         metaSubs["count"] = (Json::Value::UInt)unmapedReadLength.size();
         metaSubs["delta"] = (Json::Value::UInt)1;
         LOG_DEBUG("SEQ baselen stream: entries=%u src=%u dst=%u", (uint32_t)unmapedReadLength.size(),
@@ -2660,14 +2260,7 @@ int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::
     return 0;
 }
 
-/*
- * Write the SEQ match stream: sub-stream "m" (the run-length segment under RLE, the whole match
- * stream otherwise) and, under RLE, sub-stream "mval" (the surviving non-zero values).
- *
- * A pinned verdict, or one measured on a sample coder_fc could carry, can still name a segment too
- * short for it, so an FC verdict on such a segment falls back to BWT_CM. "mval" stays pinned to
- * BWT_CM either way; the decoder dispatches on the magic each sub-stream records.
- */
+/* Write the SEQ match stream: "m" (run lengths under RLE, else whole) and, under RLE, "mval" (surviving values). */
 int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uint8_t* matchBuffer,
                                                uint32_t matchLen, uint32_t srcLen, coder_io* matchIo,
                                                Json::Value& metaSubs, Json::Value& metaStreams,
@@ -2677,23 +2270,12 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
         const uint32_t payLen = rle.useRle ? rle.runLength : matchLen;
         const uint8_t* payBuf = rle.useRle ? rle.run.get() : matchBuffer;
 
-        /*
-         * The whole (non-RLE) match stream of an unaligned block is plain ASCII
-         * A/C/G/T bases. Coding it with coder_arith_k (htscodecs rANS order-1 on
-         * the bases packed four per byte) instead of coder_fc's LZP+BWT+CM is
-         * ~1.5x faster on the long-read files at -l8 for ~2.5pt more bytes, and
-         * still below CRAM 3.1 archive. The coder maps/packs only an all-ACGT
-         * stream and falls back to its plain path otherwise, so a reference-coded
-         * whole match stream (2-bit codes, not ASCII) still decodes with it; a
-         * reference-heavy block takes the RLE split instead and never reaches
-         * this path.
-         */
+        /* An all-ACGT whole match stream is coded with coder_arith_k (rANS order-1), faster than coder_fc's LZP+BWT+CM. */
         CoderType payType = seqMatchCoderFor();
         if (!rle.useRle) {
             payType = CoderType::ARITH_K;
         }
-        /* A pinned verdict, or one measured on a sample coder_fc could carry, can still
-           name a segment too short for it (FC_MIN_LEN bytes or less). */
+        /* A pinned or sampled verdict can still name a segment too short for coder_fc (FC_MIN_LEN bytes or less). */
         if (payType == CoderType::FC &&
             (payLen <= FC_MIN_LEN || payLen >= (uint32_t)FC_MAX_LEN)) {
             payType = CoderType::BWT_CM;
@@ -2719,12 +2301,7 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
     metaSubs["coder"] = matchIo->meta;
     metaSubs["sname"] = "m";
     if (rle.useRle) {
-        /*
-         * orgrawlen = the expanded original length (the base count); the decoder
-         *             allocates and reconstructs from it.
-         * rlelen    = this sub-stream's (run segment's) decode output length, equal
-         *             to the srclen written above.
-         */
+        /* orgrawlen: the expanded original length (base count); rlelen: this sub-stream's decode output length. */
         metaSubs["rle"] = (Json::Value::UInt)1;
         metaSubs["orgrawlen"] = (Json::Value::UInt)srcLen;
         metaSubs["rlelen"] = (Json::Value::UInt)rle.runLength;
@@ -2736,8 +2313,7 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
     /* Second sub-stream: the surviving non-zero values (RLE only). */
     if (rle.useRle && rle.valLength > 0) {
         std::shared_ptr<coder_io> valIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match val");
-        /* This half stays pinned to BWT_CM: only the run-length stream above follows
-           the field selection. Decoding dispatches on the recorded magic either way. */
+        /* This half stays pinned to BWT_CM; decoding dispatches on the recorded magic. */
         {
             CoderFactory::applyLevel(valIo.get(), CoderType::BWT_CM, engineCompressLevel());
             std::shared_ptr<coder_bwt_cm> bwt = std::make_shared<coder_bwt_cm>(valIo.get());
@@ -2776,12 +2352,7 @@ bool SamCodecActuator::referenceUsableForSeq()
     return refeUsableForSeq;
 }
 
-/*
- * The 2-bit code a SEQ character stands for, or -1 when it is none of the four.
- *
- * The order is the one the squash uses throughout - actgSquash maps by (ch & 0x06) >> 1, which
- * puts A at 0, C at 1, T at 2 and G at 3 - and the one atcg4 decodes with.
- */
+/* The 2-bit code a SEQ character stands for, or -1 (order matches actgSquash / atcg4). */
 static int atcgIndexOf(uint8_t ch)
 {
     switch (ch) {
@@ -2795,13 +2366,7 @@ static int atcgIndexOf(uint8_t ch)
 
 bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& out)
 {
-    /*
-     * Bounds on what is worth doing. The window is what the squash must cover, so its size is
-     * what the block pays for in bytes whatever the coverage; the cap keeps one block's counters
-     * (four per base) and squash from growing past a few MB, and a block that mixes distant
-     * chromosomes - which an unsorted file produces - simply keeps the plain path. The coverage
-     * floor drops a window that is mostly gap: a squash there would cost more than it saves.
-     */
+    /* Bounds on building a consensus: window size cap (counters/squash memory) and a coverage floor. */
     static const int64_t kMaxWindowBases = 2 << 20;   /* 2 Mb: ~8 MB of counters, ~0.5 MB of squash */
     static const int64_t kMinCoverageShift = 3;       /* at least 1/8 of the window covered */
 
@@ -2855,8 +2420,7 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
         return false;
     }
 
-    /* Pass 2: vote. One saturating counter per base, so a position that is covered by more than
-       255 reads still lets the majority through. */
+    /* Pass 2: one saturating counter per base. */
     std::vector<uint8_t> count[4];
     for (int k = 0; k < 4; ++k) {
         count[k].assign((size_t)windowBases, 0);
@@ -2890,8 +2454,7 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
         if (seqLength == 0 || contentIdx >= cigarOpList.size() || cigarOpList[contentIdx].empty()) {
             continue;
         }
-        /* The same CIGAR walk as the coding side, so the vote lands on exactly the bases the
-           walk will later compare against: only M/=/X consume the reference. */
+        /* The same CIGAR walk as the coding side, so the vote lands on the bases the walk will compare. */
         const std::vector<CigarOp>& ops = cigarOpList[contentIdx];
         uint32_t readPos = 0;
         int64_t refPos = refStart - winStart;
@@ -2915,8 +2478,7 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
         }
     }
 
-    /* Majority rule; a position nobody covered stays at code 0, which the walk reads as any
-       other code - the read's own base then survives as a non-zero payload byte. */
+    /* Majority rule; an uncovered position stays at code 0. */
     const uint64_t squashLen = (uint64_t)(windowBases >> 2) + !!(windowBases & 0x3) + 1;
     std::vector<uint8_t> squash((size_t)squashLen, 0);
     int64_t covered = 0;
@@ -2965,11 +2527,7 @@ int32_t SamCodecActuator::compressBaseSelfRef(uint32_t fieldIdx, uint32_t& field
 }
 
 int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    /*
-     * Two things can play the reference here: the file's own (pRefeGene) and a consensus the
-     * block built from its alignments (seqSelfRef). The latter exists precisely because the
-     * former may be absent or unaddressable, so only the absence of both is an error.
-     */
+    /* Either the file's reference (pRefeGene) or a block-built consensus (seqSelfRef); only the absence of both is an error. */
     if (pRefeGene == nullptr && seqSelfRef == nullptr) {
         LOG_ERROR("Reference genome is not available for base compression with reference");
         return -1;
@@ -2979,17 +2537,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
 
-    /*
-     * SEQ characters the 2-bit path cannot carry, one accumulator per character (see
-     * SeqExceptionClass), with excPresent listing the ones that occurred. The positions
-     * increase strictly within the block, so the deltas are small - a file with ~11% Ns
-     * averages ~5, i.e. one byte each - and unlike the absolute form their statistics do not
-     * widen with the block: on ERR14949932 the absolute form of the 'N' class compresses
-     * 14.7% worse at -l8 (100k reads per block) than at -l5 (10k).
-     *
-     * 'N' is the only character whose absolute form is a candidate, so it is the only one
-     * given the size estimate up front; the others are small and grow as they are filled.
-     */
+    /* SEQ characters the 2-bit path cannot carry, one accumulator per character (see SeqExceptionClass); positions are delta-coded. */
     std::vector<SeqExceptionClass> excClasses(256);
     std::vector<uint8_t> excPresent;
     excClasses[(uint8_t)'N'].keepForms = true;
@@ -3007,10 +2555,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     std::unique_ptr<uint8_t[]> baseMappedBuffer = std::make_unique<uint8_t[]>(baseMappedLength);
     /* The N positions are collected into nposVarint below, which needs no upfront
        allocation of the (up to 4x larger) absolute-offset array. */
-    /* Scratch for the reference 2-bit-per-base sequence used by the CIGAR
-       M/=/X segment rebuild (a single op never exceeds baseMaxLength bases).
-       getStretch2Bits1Char can write up to outLen + 3 bytes because of its
-       unaligned 4-byte writes, so size the buffer with extra slack. */
+    /* Scratch for the reference 2-bit sequence in the CIGAR M/=/X rebuild; getStretch2Bits1Char can overshoot by 3 bytes. */
     std::unique_ptr<uint8_t[]> ref2bitBuf = std::make_unique<uint8_t[]>(baseMaxLength + 8);
     /* Empty op list for reads with a `*` CIGAR (no operations). */
     static const std::vector<CigarOp> emptyCigarOps;
@@ -3023,18 +2568,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
 
     // Second pass: compress with reference
     std::shared_ptr<coder_io> matchIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match");
-    /*
-     * The SEQ match stream (per-base 2-bit: M/=/X segments are the XOR against the
-     * reference, I/S segments are the raw value).
-     *
-     * Mirrors FastqCodecActuator::compressBaseWithRef (src/fastq_actuator.cpp:954):
-     *   1) accumulate the whole block's 2-bit result into matchBuffer first, to get
-     *      the total length matchLen;
-     *   2) encode it as one block once it is complete (see the note on
-     *      matchCoderType below), because coder_fc's decode_line only supports
-     *      whole-block decompression ("only support block decompress"), not line by
-     *      line.
-     */
+    /* The SEQ match stream (per-base 2-bit: M/=/X XOR the reference, I/S raw). Accumulated whole-block, then encoded once. */
     std::unique_ptr<uint8_t[]> matchBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen() + 1);
     uint32_t matchLen = 0;
     int64_t srcLen = 0;
@@ -3076,20 +2610,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         // Extract FLAG field to determine strand
         uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
 
-        /*
-         * CIGAR-segment-based reference rebuild: for a mapped read the SEQ is encoded per-base as a
-         * 2-bit XOR against the reference, but only on the operations that consume reference
-         * (M/=/X); operations that consume SEQ but not reference (I/S) are stored directly, and
-         * reference-only operations (D/N) only advance the reference position without producing
-         * any SEQ bytes. This is required so that indels do not cause the read to be compared
-         * against a contiguous reference window it does not actually align to, and the
-         * decompression side mirrors the same walk (see buildSeqReferenceCodedBases).
-         *
-         * The branch itself is the shared one (buildSeqRecordPayload), because the codec
-         * pre-selection builds the same payload to trial the match coder on it; what stays here is
-         * what only the block pass does with it - the reference's own match statistics and the
-         * exception characters.
-         */
+        /* CIGAR-segment reference rebuild: M/=/X are 2-bit XOR against the reference, I/S stored directly, D/N only advance. */
         static const std::vector<CigarOp> emptyCigarOps;
         /* The reference span this record's CIGAR consumes, from the parse the caller did. */
         const auto crlIt = cigarReadLen.find(lineIdx);
@@ -3097,11 +2618,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         const std::vector<CigarOp>& ops =
             (contentIdx < cigarOpList.size()) ? cigarOpList[contentIdx] : emptyCigarOps;
 
-        /*
-         * Which reference this record is walked against: the block's own consensus when one is
-         * in play (the windowed twin of the same decision), otherwise the file's. Both produce
-         * the identical payload shape, so nothing below this point has to know which it was.
-         */
+        /* Which reference this record is walked against: the block consensus when in play, otherwise the file's. */
         const SeqRecordPayload payload =
             (seqSelfRef != nullptr)
                 ? buildSeqSquashRecordPayload(chrId, flag, startPos, refConsumed, ops, seqStart,
@@ -3117,17 +2634,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
             pRefeGene->updateMatchedGene((uint64_t)payload.refPos,
                 (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
         }
-        /*
-         * Record the characters the payload cannot carry, one list per character (see
-         * SeqExceptionClass).
-         *
-         * A record coded against the reference has 2-bit codes in the payload, so A/C/G/T ride
-         * there and every other spelling - N, lower case, IUPAC codes - is recorded instead of
-         * being silently folded, the case-insensitivity of that code being exactly the problem.
-         * A record that writes its own characters carries the plain bases and N itself; the
-         * payload is still a stream of a DNA-oriented coder, though, and it does not hand back
-         * every byte it is given, so anything outside A/C/G/T/N is recorded here as well.
-         */
+        /* Characters the payload cannot carry are recorded, one list per character (see SeqExceptionClass). */
         for (uint32_t n = 0; n < seqLength; n++) {
             const uint8_t ch = seqStart[n];
             const bool carried = (ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T') ||
@@ -3151,73 +2658,13 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
             srcLen += seqLength;
         }
     }
-    /*
-     * RLE preprocessing, applied only when the zero runs are long enough to pay for it.
-     *
-     * The match stream is a sparse 0..3 byte stream in which a block whose reads all take their
-     * bases from the reference is ~99.28% zeros. Splitting it into two independent sub-streams
-     *   "m"    - varint-encoded run lengths of the zero runs
-     *   "mval" - the surviving non-zero values (1 byte each)
-     * lets each be modelled on its own instead of forcing one context model to cope with two very
-     * different distributions.
-     *
-     * That split is a loss whenever the zeros do not come in long runs, which is exactly the block
-     * where no read is aligned to the reference: every base is then coded from its own value, the
-     * zeros are just the 'A's (A codes as 0), and their runs are short. Measured on two all-unmapped
-     * datasets - an ONT block (3995 reads, 56,570,656 bases, 30.6% 'A', average zero run 0.44) and a
-     * short-read file (64 bp reads, 43.1% 'A', average run 0.76) - the split needs 3.4% and 19.2%
-     * more for the SEQ column than the same stream coded whole. The reason it is worse rather than
-     * merely useless is that the split destroys what the modeller exploits: each non-zero base
-     * becomes one byte of "mval" plus about one byte of "m" (so the input the coders see grows by
-     * 14%-39%), and the two streams are no longer adjacent, which costs most where the data has
-     * cross-read structure to begin with (the short-read file, whose reads repeat each other).
-     *
-     * So the split is conditional, on how much of the block actually came from the reference: it is
-     * written only when the match stream is at least 98% zeros. Where the crossover sits was
-     * measured on 90 bp blocks built from con_sorted with a known fraction of reads marked unmapped
-     * (same block, same coder, only the layout differing):
-     *
-     *   zeros  reads unmapped   SEQ split   SEQ whole
-     *   99.0%      0%             27,018      27,649    the split wins, by 2.3%
-     *   95.6%      5%             94,024      83,938    it loses, by 12%
-     *   92.1%     10%            134,213     111,138
-     *   85.2%     20%            198,046     150,558
-     *   78.3%     30%            252,684     184,408
-     *
-     * The crossover is sharp and sits between 99.0% and 95.6%; 98% is the middle of that window,
-     * with the two kinds of block production actually hands it well away from the line - a block
-     * whose reads all take their bases from the reference is 99.2% zeros, one where none do is
-     * 30-36%. So the rule is a threshold rather than a measurement: the two regimes are three
-     * orders of magnitude apart in this statistic, and there is nothing in between to compare.
-     *
-     * The decision is per block, which is what lets one file hold both kinds of block - a reference
-     * used for part of a file and not the rest - and each be written the better way.
-     *
-     * The decoding side needs no change and no new format version: it dispatches per sub-stream on
-     * whether the block's SEQ meta carries the "rle" member (see initDecoder / decompressBase), and
-     * a stream written without the split is byte-for-byte the form used before the split existed.
-     */
+    /* RLE preprocessing: split the match stream into "m" (varint zero-run lengths) and "mval" (non-zero values), applied only when at least 98% zeros. */
     const auto seqSplitT0 = pbgzprof::nowOrZero();
     SeqRleSplit rle = splitSeqMatchStream(matchBuffer.get(), matchLen);
     pbgzprof::addSince(pbgzprof::SEQ_MATCH_BUILD, seqBuildT0);
     pbgzprof::addSince(pbgzprof::SEQ_MATCH_SPLIT, seqSplitT0);
 
-    /*
-     * Sub-stream "m": the run-length segment under RLE, otherwise the whole match
-     * stream. Which coder writes it was decided once per file, before any block ran, by
-     * the codec pre-selection (see CodecSelector::selectSeqReferenceCoder / seqMatchCoderFor);
-     * here that verdict is applied, with the FC length guard above. The decoder dispatches on
-     * the magic the sub-stream's own meta records, so an archive written under a different
-     * verdict still decodes.
-     *
-     * What each coder is worth on this transformed layout, measured on
-     * con_sorted.sam (1M reads, -l8, dual-stream RLE):
-     *   coder_bwt_cm : SEQ 362,880 B
-     *   coder_fc     : SEQ 440,989 B   (+17%; generic LZP+BWT+MTF text path)
-     *   coder_arith  : SEQ 580,606 B   (+60%, and its whole-block decode fails)
-     * so arith is not among the candidates. The stream is sparse (~99.45% zero)
-     * with long runs and cross-read patterns, which needs context modeling.
-     */
+    /* Sub-stream "m": run lengths under RLE, otherwise the whole match stream; the coder is the per-file verdict (seqMatchCoderFor). */
     /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
     {
     const auto seqEncT0 = pbgzprof::nowOrZero();
@@ -3230,15 +2677,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     }
 
 
-    /*
-     * SEQ exception sub-streams: one per character that is actually present, each carrying
-     * the positions of that character (see SeqExceptionClass). A file of plain A/C/G/T writes
-     * none of them, and only the 'N' character has two forms to be measured against each
-     * other. They are emitted in ascending character order, so the block layout follows the
-     * set of characters rather than the order in which they happened to appear.
-     *
-     * Both halves live in writeSeqExceptionStreams / writeSeqExceptionStream.
-     */
+    /* SEQ exception sub-streams: one per character present, in ascending character order (see writeSeqExceptionStreams). */
     if (writeSeqExceptionStreams(excClasses, excPresent, metaStreams, totalSrcLen, totalDstLen) != 0) {
         return -1;
     }
@@ -3247,15 +2686,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         return -1;
     }
 
-    /*
-     * The block's own consensus, when that is what coded this column (see
-     * SamCodecActuator::buildBlockConsensus). It travels with the block rather than being
-     * rebuilt on the decoding side, because it is a function of this block's alignments: the
-     * sub-stream holds its squash and the field meta the window it covers, so the decoder can
-     * run the same windowed walk (see decompressBase). Appended last so that every stream the
-     * layouts already knew keeps its position, and read back by name rather than by being
-     * expected.
-     */
+    /* The block's own consensus, appended last: its squash plus the window it covers. */
     if (seqSelfRef != nullptr) {
         std::shared_ptr<coder_io> selfIo = makeCoderIo(outBlockPtr->getCurrent(),
                                                        outBlockPtr->getRemain(), "SEQ selfref");
@@ -3281,31 +2712,18 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     }
 
     // Set metadata
-    /* Count of the 'N' stream, which older archives read as their whole N list; every stream
-       carries its own count in its stream meta. */
+    /* Count of the 'N' stream, for older archives. */
     fieldMeta["ncount"] = (Json::Value::UInt)excClasses[(uint8_t)'N'].count;
     fieldMeta["litbases"] = (Json::Value::UInt)1;
 
-    /*
-     * How to read a payload byte that is above the 2-bit range: as one of the record's own
-     * characters, because the record does not use the reference (see the fallback in the record
-     * loop). Written unconditionally - it describes the layout this build writes, not whether this
-     * particular block held such a record - and a stream without it is read the old way, every byte
-     * a 2-bit code with the exception streams applied over it.
-     */
+    /* How to read a payload byte above the 2-bit range: as one of the record's own characters. */
     fieldMeta["minlen"] = minBaseLength;
     fieldMeta["maxlen"] = maxBaseLength;
     fieldMeta["totalsrclen"] = totalSrcLen;
     fieldMeta["totaldstlen"] = totalDstLen;
     fieldMeta["streams"] = metaStreams;
     fieldMeta["field"] = fieldIdx;
-    /*
-     * Only fieldSrcLen is corrected: the SEQ column's raw size = the match
-     * stream's source length (srcLen, i.e. the total SEQ text length across
-     * records, matching the QUAL column's accounting); the npos/baselen
-     * auxiliary streams are excluded. meta's totalsrclen is kept as is (it
-     * includes the auxiliary streams).
-     */
+    /* fieldSrcLen is corrected to the match stream's source length only; meta's totalsrclen keeps the auxiliary streams. */
     fieldSrcLen = (uint32_t)srcLen;
 
     LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
@@ -3359,15 +2777,7 @@ int32_t SamCodecActuator::writeSeqExceptionStreams(std::vector<SeqExceptionClass
         const uint8_t ch = excPresent[ei];
         SeqExceptionClass& exc = excClasses[ch];
 
-        /*
-         * Only the 'N' class keeps more than one form, and the form arrives as a verdict from the
-         * codec pre-selection, which measured the three candidates on the first block before any
-         * block was dispatched (see CodecSelector::selectSeqReferenceCoder). Nothing is measured
-         * here: writing a block is not a place to be comparing coders, and every block of the file
-         * writes the one form the file's first block settled. A file the pre-selection could not
-         * judge - its first block carried no N at all - keeps the absolute form, which is what this
-         * stream held before the trial existed. The other characters are always in the delta form.
-         */
+        /* The 'N' class's form is a file-level verdict from the codec pre-selection; the absolute form is the fallback. */
         int32_t form = 1;
         if (ch == (uint8_t)'N') {
             PreprocessInfo* preInfo = preprocessInfoMut();
@@ -3402,18 +2812,7 @@ int32_t SamCodecActuator::writeSeqExceptionStreams(std::vector<SeqExceptionClass
     return 0;
 }
 
-/*
- * Encode the QUAL column record by record, through whichever coder the pre-selection's trial
- * picked (see qual_record_encoder) - all this step knows is how to hand one record over.
- *
- * Three details it does carry: a record whose quality is the single '*' for "missing" is expanded
- * into seqLen '*' first, or the length the decoder fetches by SEQ/CIGAR would not match the one
- * byte written here and the whole column would shift out of alignment (the decoder folds it back,
- * see decompressQuality); the SEQ column is passed along as context; and the strand direction is
- * read out of FLAG by hand (bit 0x10), since only coder_fcv2 wants it.
- *
- * Returns the column's source length - the quality text itself, without the auxiliary stream.
- */
+/* Encode the QUAL column record by record through the chosen coder; missing-quality records are expanded to seqLen '*' first. */
 uint32_t SamCodecActuator::encodeQualRecords(qual_record_encoder* encoder, uint32_t lineNum,
                                                    uint32_t fieldIdx, bool needStrand)
 {
@@ -3453,28 +2852,14 @@ uint32_t SamCodecActuator::encodeQualRecords(qual_record_encoder* encoder, uint3
             seqLen = contentPos[contentIdx][fieldIdx - 1] - contentPos[contentIdx][fieldIdx - 2] - 1;
         }
 
-        /*
-         * Reads with missing quality (a single '*'): expand into seqLen '*'
-         * before entering the stream; otherwise the per-record stream length (1)
-         * would not match what the decompression side fetches by SEQ/CIGAR
-         * length (seqLen), and the whole quality column would shift out of
-         * alignment. The decode side folds it back into a single '*' (see
-         * decompressQuality).
-         */
+        /* Missing quality (single '*') is expanded to seqLen '*' so the record length matches the decoder's fetch. */
         if (qualLength == 1 && qualStart[0] == '*' && seqLen > 0) {
             qualMissingBuf.assign(seqLen, '*');
             qualStart = qualMissingBuf.data();
             qualLength = seqLen;
         }
 
-        /*
-         * Take the strand direction from the FLAG field. Per the SAM spec, bit 0x10 being
-         * set means SEQ and QUAL are stored relative to the reference's forward strand, i.e.
-         * reversed relative to the order read out by the sequencer, and a coder that models
-         * sequencing cycles must use this to restore the real cycle number. The field is
-         * parsed by hand rather than with strtol because it is not NUL-terminated and this
-         * is a hot path taken for every record.
-         */
+        /* Strand direction from FLAG bit 0x10, parsed by hand (not NUL-terminated, hot path). */
         bool rev = false;
         if (needStrand && contentPos[contentIdx].size() > 1) {
             uint32_t flagBeg = contentPos[contentIdx][0] + 1;
@@ -3493,14 +2878,7 @@ uint32_t SamCodecActuator::encodeQualRecords(qual_record_encoder* encoder, uint3
     return streamSrcLen;
 }
 
-/*
- * Write the quality column's frequency table as an auxiliary stream: the alphabet in
- * frequency-descending order, two uint16 per entry (byte and weight), coded with BWT_CM.
- *
- * The decoder needs it to rebuild the coder's alphabet before the first record, and the stream
- * counts toward the field's totalsrclen (the original accounting) although the column's own source
- * length excludes it.
- */
+/* Write the QUAL frequency table as an auxiliary stream: alphabet in frequency-descending order, two uint16 per entry, BWT_CM. */
 int32_t SamCodecActuator::writeQualFreqStream(Json::Value& subMeta, Json::Value& streamMeta,
                                                uint32_t& totalSrcLength, uint32_t& totalDstLength)
 {
@@ -3545,22 +2923,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     // Create quality encoder similar to FastqActuator
     std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
 
-    /*
-     * Quality values can use two coders. coder_qual is the original one and uses
-     * SEQ as context; fcv2 is a context-mixing coder that uses the previous and
-     * second-previous quality values, the in-record sequencing-cycle number, and
-     * the strand direction as context.
-     *
-     * Which one is used is decided by the preprocessing trial results. The
-     * quality column goes through a dedicated evaluation path (QualSelector),
-     * whose two candidates are these coders; samples are collected per record
-     * and therefore preserve record boundaries and strand direction.
-     *
-     * When preprocessing did not run, was skipped because the sample was too
-     * small, or the current engine provides no preprocessing information,
-     * coderFor returns the passed-in fallback QUAL, i.e. the original
-     * coder_qual, behaving exactly as before selection was wired in.
-     */
+    /* QUAL may use coder_qual (with SEQ context) or coder_fcv2 (context mixing); the pre-selection's trial decides. */
     int64_t qualPriorAddress = -1;
     CoderType pickedQualCoder = CoderType::QUAL;
     const PreprocessInfo* qualPreInfo =
@@ -3568,17 +2931,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     if (qualPreInfo != nullptr) {
         pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, samFieldDefaultCoder(SAM_QUAL, CoderType::QUAL));
     }
-    /*
-     * Turning that verdict into an encoder - the quality alphabet, the fcv2 context tier
-     * the trial settled on, the trained prior - is the factory's business, not this
-     * actuator's (see CoderFactory::makeQualEncoder). All this side has to know is how to
-     * feed a record, which is what qual_record_encoder offers whichever coder won.
-     *
-     * The prior's absolute address must be written into the block meta: the decoding side
-     * can only match up if it obtains the same snapshot, and in random-access scenarios it
-     * cannot infer the address by walking the sequential stream. It is registered only when
-     * the snapshot was actually loaded, so the decoder is never promised one it cannot get.
-     */
+    /* Turning the verdict into an encoder is CoderFactory::makeQualEncoder's job; the prior's absolute address goes into the meta. */
     AuxPayloadPtr qualPriorBlob =
         (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(0) : AuxPayloadPtr();
     bool qualPriorLoaded = false;
@@ -3599,13 +2952,7 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
                                       engineCompressLevel());
     pbgzprof::addSince(pbgzprof::QUAL_PREP, qualT0);
 
-    /*
-     * The prior carries the alphabet of the blocks it was trained on and a stream is coded with one
-     * alphabet throughout, so a block whose quality values left it cannot be coded with that prior
-     * (see coder_io::IO_UNCODABLE). The prior is dropped for such a block instead: the coder then
-     * builds its alphabet from the block's own values, exactly what the decoder does for a block
-     * whose meta carries no prior address.
-     */
+    /* A block whose quality values left the prior's alphabet cannot use that prior; it is dropped for that block. */
     if (pickedQualCoder == CoderType::FCV2 && qualPriorBlob.get() != nullptr && qualEncoder != nullptr) {
         bool covered = true;
         for (size_t i = 0; i < qualFreqTable.size(); ++i) {
@@ -3676,34 +3023,10 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     fieldMeta["streams"] = streamMeta;
     fieldMeta["field"] = fieldIdx;
 
-    /*
-     * Only fieldSrcLen is corrected: the QUAL column's raw size = total length
-     * of the quality text (streamSrcLen); the frequency-table auxiliary stream
-     * is excluded. meta's totalsrclen is kept as is (it includes freqSrcLen).
-     */
+    /* fieldSrcLen is corrected to the quality text length only; meta's totalsrclen keeps the frequency-table stream. */
     fieldSrcLen = streamSrcLen;
 
-    /*
-     * In verbose mode, print per block which coder this block's QUAL actually
-     * took, along with this block's own compression ratio.
-     *
-     * Why it must be done here: QUAL selection follows a "decided once in
-     * preprocessing, reused by all subsequent blocks" pattern, but a single
-     * compression run has ~10 threads compressing different blocks
-     * concurrently, and the final log is a single summary line—looking at just
-     * that line you cannot confirm each block really used the expected coder,
-     * nor see the ratio jitter between blocks.
-     *
-     * Three constraints:
-     *   1. Only output when verbose=true; otherwise keep the default output
-     *      byte-identical;
-     *   2. Each line must be emitted with a single fprintf call, because
-     *      multiple threads write to stderr concurrently and splitting into
-     *      several calls would interleave and become unreadable; a single
-     *      fprintf write into the kernel buffer is usually atomic;
-     *   3. When totalSrcLength is 0, set the ratio directly to 0 to avoid
-     *      division by zero.
-     */
+    /* Verbose mode: print per block which QUAL coder was used and this block's ratio (single fprintf per line for thread safety). */
     if (pbgzEngine != nullptr && pbgzEngine->getParameter().verbose) {
         const double qualRatio = (totalSrcLength == 0)
             ? 0.0
@@ -3749,47 +3072,24 @@ int32_t SamCodecActuator::decompress() {
     // Parse meta information
     initMetaInfo();
 
-    /*
-     * -m fast blocks carry a structured "bam" meta (columns instead of SAM
-     * text). They are routed here because their block type is BAM like the
-     * textual path's; hand them to the column decoder.
-     */
+    /* -m fast blocks carry structured "bam" meta; hand them to the column decoder. */
     if (meta.isMember("bam")) {
         BamCodecActuator bamActuator(inBlockPtr, outBlockPtr, pbgzEngine, pRefeGene);
         int32_t ret = bamActuator.decompress();
         return ret;
     }
 
-    /*
-     * Pre-allocate at the block entry: the file header's block_size (the upper
-     * bound fixed at compression time) x2 guarantees a large enough output
-     * buffer—a deterministic value, not an estimate, unaffected by
-     * fieldcount/read length. This is the primary defense against
-     * out-of-bounds writes across all fields. block_size is read back from
-     * baseFileMeta (DecompressEngine::createBlockReader) and is already
-     * available here; when it is 0 (old files that did not write it), fall back
-     * to the default getBlockSize(). coder_io's putc checks and the decode
-     * error-return chain act as a backstop (see decompressQuality et al.).
-     */
+    /* Pre-allocate block_size*2 from the file header (fallback getBlockSize()), the primary out-of-bounds defense. */
     size_t bs = pbgzEngine->getFileBlockSize();
     if (bs == 0) {
         bs = ConfigManager::getInstance().getBlockSizeByCompressLevel(pbgzEngine->getParameter().compressLevel);
     }
-    /*
-     * Pre-allocate the output buffer as the larger of "block-size upper bound
-     * x2" and "this block's actual data length": SAM blocks may be split by
-     * read count and exceed the byte block_size (e.g. with -l 1, 10000 reads
-     * ~= 1.8MB > the 512KB block upper bound). inBlockPtr->getDataLen() comes
-     * from the block meta's datalen, i.e. the original pre-compression length,
-     * which is the output bound.
-     */
+    /* Pre-allocate as the larger of block_size*2 and this block's actual data length. */
     size_t outCapacity = bs * 2;
     if ((size_t)inBlockPtr->getDataLen() > outCapacity) {
         outCapacity = (size_t)inBlockPtr->getDataLen();
     }
-    /* The block records its original decoded text length (textlen, written by
-       the compressor): that is the exact output bound, independent of -l and of
-       how large the compressed payload happens to be. */
+    /* The block's textlen is the exact output bound. */
     if (meta.isMember("sam") && meta["sam"].isMember("textlen")) {
         const uint64_t textLen = meta["sam"]["textlen"].asUInt64();
         if ((uint64_t)outCapacity < textLen) {
@@ -3864,17 +3164,7 @@ int32_t SamCodecActuator::decompress() {
     return 0;
 }
 
-/*
- * Decode one line's fields, in order, appending each to the output block.
- *
- * The dispatch is per field, because the layout of a column is the stream's own business: ID has
- * its own split/coder machinery, SEQ and QUAL need the coder that wrote them, POS/PNEXT/CIGAR/TLEN
- * come from the pre-decode cache when preDecodeForTLEN filled it (see copyPreDecodedField below)
- * and fall back to their own decoders otherwise, and the trailing optional fields are ordinary
- * text with the block's final tab turned into a newline.
- *
- * SEQ's landing spot and length travel back in `st`, because QUAL is decoded against them.
- */
+/* Decode one line's fields in order, appending each; SEQ's landing spot and length travel back in `st` for QUAL. */
 
 int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
     if (inBlockPtr == nullptr || outBlockPtr == nullptr || outputBlock == nullptr) {
@@ -3902,44 +3192,18 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
 
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     baseDiffSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
-    /* +8 slack: getStretch2Bits1Char may write up to outLen+3 bytes due to its
-       unaligned 4-byte writes, and outLen (= actualBaseLen) can reach maxBaseLength. */
+    /* +8 slack: getStretch2Bits1Char may write outLen+3 bytes. */
     refeStrecchBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength + 8);
     uint32_t totalBaseLen = 0;
     /* The SEQ exception streams and their cursors live in seqExc (see SeqExcStream). */
 
     uint8_t* pBaseOut = nullptr;
     if (CoderFactory::decoderIsWholeBlock(streams[9]["coder"]["magic"].asString())) {
-        /*
-         * A "whole-block" coder (coder_fc, see CoderFactory::decoderIsWholeBlock)
-         * decodes SEQ in one go, but the final SAM output is interleaved line by line
-         * (ID\tFLAG\t...\tSEQ\tQUAL\n), so SEQ can only land somewhere else
-         * first and be moved line by line afterwards. It is staged at the
-         * **tail** of the outputBlock buffer (same landing spot as in
-         * initDecoder), while the head appends line content normally; the two
-         * grow toward each other without overlapping:
-         *   head output <= block_size, tail SEQ <= block_size, and the block
-         *   entry has already done a one-shot ensureCapacity at block_size*2,
-         *   giving a deterministic capacity bound.
-         * Why not a separate malloc'd buffer: the number of memcpy calls is
-         * identical (lines must be moved either way); a separate buffer only
-         * adds one malloc/free per block, page faults on first write, and an
-         * extra memory peak of "threads x one full SEQ".
-         *
-         * Invariant: never realloc outputBlock within a block, or both the tail
-         * pointer here and basePtr below would dangle.
-         */
+        /* A whole-block coder (coder_fc) decodes SEQ in one go, staged at the tail of the output block while the head appends lines. */
         pBaseOut = pBaseEnd - streams[9]["totalsrclen"].asUInt();
     }
 
-    /*
-     * First pre-decode POS/CIGAR/PNEXT: TLEN reconstruction needs the full mate
-     * index, and during line-by-line decoding a mate may lie in the second half
-     * of the block, not yet decoded. The pre-decoded results are cached per
-     * line and the main loop copies them directly, avoiding a second decode.
-     * POS delta baseline resets are detected from the decoded RNAME indices
-     * (mappedChr), so no reset list is needed.
-     */
+    /* First pre-decode POS/CIGAR/PNEXT so TLEN reconstruction has the full mate index. */
     posDeltaPrev = 0;
     if (0 != preDecodeForTLEN()) {
         LOG_ERROR("Pre-decode for TLEN failed.");
@@ -4124,12 +3388,7 @@ int32_t SamCodecActuator::decompressHeader(RoughIOBlock* outputBlock) {
     return 0;
 }
 
-/*
- * A "cnt" sub-stream's deltas (see id_int::Counter) expanded into the zigzag varint form the numeric
- * layout carries, so that everything downstream of the buffer sees one delta per line either way.
- * Both initDecoder - which fills idNumericBufs - and preDecodeForTLEN, which rebuilds its own copy
- * because it must not consume the buffer the main loop reads from, need exactly this.
- */
+/* A "cnt" sub-stream's deltas expanded into the zigzag varint form the numeric layout carries. */
 static int32_t expandCounterSubStream(const uint8_t* payload, uint32_t payloadLen,
                                       const Json::Value& streamMeta, uint8_t* out, uint32_t outCap)
 {
@@ -4145,8 +3404,7 @@ static int32_t expandCounterSubStream(const uint8_t* payload, uint32_t payloadLe
     uint32_t wp = 0;
     for (uint32_t k = 0; k < numValues; ++k) {
         const int64_t dv = counter.decode(rc);
-        /* The numeric layout's own convention, which is what the per-line accumulation expects:
-           the magnitude in the high bits, the sign in the low one. */
+        /* The numeric layout's zigzag form: magnitude in the high bits, sign in the low one. */
         const uint64_t mag = (dv >= 0) ? (uint64_t)dv : (uint64_t)(-dv);
         const uint32_t zz = (uint32_t)((dv >= 0) ? (mag << 1) : ((mag << 1) | 1u));
         if (wp + 5 > outCap) {
@@ -4157,16 +3415,7 @@ static int32_t expandCounterSubStream(const uint8_t* payload, uint32_t payloadLe
     return (int32_t)wp;
 }
 
-/*
- * Build the ID/QNAME column: one decoder per split sub-stream, plus the payload state each
- * segment layout needs (the reading side of collectIdSplitSegments, buildIdDictLayout,
- * buildIdHexLayout and buildIdValueLayouts).
- *
- * A decoder is only built for the layouts whose stream carries a coder of its own. A constant,
- * a dictionary, a fixed alphabet, a counter and the value-domain layouts all put their bytes
- * in the block raw and are walked per line by decompressIdField, so their slot holds no
- * decoder - which is what the nulls in idDecoders mean.
- */
+/* Build the ID/QNAME column: one decoder per split sub-stream, plus the payload state each layout needs. */
 int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
 {
     std::string idSplit = idMeta["splitsym"].asString();
@@ -4222,11 +3471,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
             /* The payload is the value-domain stream itself (no outer coder). */
             idDecoders.push_back(nullptr);
         } else if (coderName == "coder_affix_match" || coderName == "coder_bwt_cm") {
-            /*
-             * Which decoder the sub-stream needs is the stream's own business (see
-             * CoderFactory::makeFieldDecoder), and the level it was written with
-             * travels in its own meta.
-             */
+            /* The sub-stream's decoder comes from its own meta (see CoderFactory::makeFieldDecoder). */
             FieldDecoderArgs idArgs;
             idArgs.level = idStreamMeta[i]["coder"]["level"].asInt();
             std::shared_ptr<coder> idDec =
@@ -4245,14 +3490,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
             return -1;
         }
 
-        /*
-         * Numeric sub-streams carry no per-line terminator, so they cannot
-         * be decoded one segment per line the way the textual path does.
-         * Decode the whole varint stream once here and serve one value per
-         * line from idNumericPos (see decompressIdField). The value-domain
-         * layout ("intd") works the same way, except that its payload needs
-         * no undoing: the range decoder walks it one value per line.
-         */
+        /* Numeric sub-streams have no per-line terminator, so the whole varint stream is decoded once and served per line. */
         uint8_t* nbuf = nullptr;
         uint32_t nlen = 0;
         RangeCoder intRc;
@@ -4297,12 +3535,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
             }
             intActive = 1;
         } else if (isCnt) {
-            /*
-             * A counter's deltas, run-length coded (see id_int::Counter), expanded into the
-             * very zigzag varint form the numeric layout carries - the layout this one
-             * competes with - so nothing downstream has to know which of the two won: one
-             * delta per line, same buffer, same per-line accumulation.
-             */
+            /* A counter's deltas expanded into the same zigzag varint form as the numeric layout. */
             const uint32_t numSrcLen = idStreamMeta[i]["srclen"].asUInt();
             nbuf = MemoryUtil::safeAlloc<uint8_t>(numSrcLen + 8);
             if (nbuf == nullptr) {
@@ -4318,13 +3551,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
             }
             nlen = (uint32_t)wp;
         } else if (isDict) {
-            /*
-             * A low-cardinality segment: the block's few distinct texts sit at the head of the
-             * payload and every line is an index into them, coded through id_int::Model - the
-             * same value layout the "intd" case uses, so the per-sub-stream state already
-             * kept here serves both. What the index means differs, and the reconstruction
-             * below knows that.
-             */
+            /* Low-cardinality segment: distinct texts at the head of the payload, one index per line through id_int::Model. */
             const uint8_t* p = inBlockPtr->getBuffer() + readOffset;
             uint32_t pos = 0;
             uint32_t num = 0;
@@ -4341,11 +3568,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
                 dictEntries.push_back(std::string((const char*)p + pos, len));
                 pos += len;
             }
-            /*
-             * The index stream is a counter layout (see id_int::Counter): its deltas are
-             * expanded here into one absolute index per line, which is what the per-line
-             * reconstruction reads.
-             */
+            /* The index stream is a counter layout; its deltas are expanded into one absolute index per line. */
             const uint32_t numValues = idStreamMeta[i]["numv"].asUInt();
             const uint8_t* ip = p + pos;
             const uint32_t ilen = dstLength - pos;
@@ -4376,11 +3599,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
             }
             nlen = wp;
         } else if (isHex) {
-            /*
-             * Fixed-alphabet characters (see the encoder): the payload holds one uniform
-             * code per character over the block's alphabet, and a length per line when the
-             * lengths vary. Nothing is decoded here; the reconstruction walks it per line.
-             */
+            /* Fixed-alphabet characters: one uniform code per character, plus a length per line when lengths vary. */
             hexAlpha.chars = idStreamMeta[i]["hexa"].asString();
             hexAlpha.minLen = idStreamMeta[i]["hexn"].asUInt();
             hexAlpha.maxLen = idStreamMeta[i]["hexm"].asUInt();
@@ -4426,33 +3645,19 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
     return 0;
 }
 
-/*
- * Build the SEQ column: with a reference, the match / whole-match sub-stream, the exception
- * streams and (when base lengths vary) the base-length stream; without one, the single stream
- * for the whole column, which initSeqWholeBlockDecoder either prepares or decodes outright.
- * readOffset walks the block in both cases.
- */
+/* Build the SEQ column: reference layout (match, exception, base-length streams) or the single whole-column stream. */
 int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t idx,
                                               RoughIOBlock* outputBlock)
 {
     maxBaseLength = baseMeta["maxlen"].asUInt();
     minBaseLength = baseMeta["minlen"].asUInt();
     LOG_DEBUG("maxBaseLen = %d, minBaseLen = %d", maxBaseLength, minBaseLength);
-    /*
-     * A column coded against the block's own consensus uses the same layout as the reference
-     * one ("streams"), and - unlike it - can be read back with no external reference at all,
-     * which is the whole point of that layout. Everything below therefore treats the two the
-     * same; only the walk's source differs (see decompressBase).
-     */
+    /* A block-consensus column uses the same layout as the reference one but needs no external reference. */
     baseSelfRefActive = false;
     bool isUseReference = baseMeta.isMember("selfref") ||
                           (pRefeGene != nullptr && baseMeta.isMember("streams"));
     if (!isUseReference) {
-        /*
-         * One stream for the whole column: initSeqWholeBlockDecoder builds its decoder
-         * (or decodes it outright, for the whole-block coder) and answers what it
-         * consumed.
-         */
+        /* One stream for the whole column; initSeqWholeBlockDecoder builds its decoder or decodes it outright. */
         const int32_t consumed = initSeqWholeBlockDecoder(baseMeta, idx, outputBlock);
         if (consumed < 0) {
             return -1;
@@ -4469,10 +3674,7 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
 
         uint32_t dstLength = baseMetaStreams[id]["dstlen"].asUInt();
         std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ match");
-        /* The sub-stream's meta travels with the view: a whole-block coder
-           needs it to decode (coder_fc reads bi/bn/lv and its trailing index
-           offset from there, while coder_bwt_cm carries the block size in
-           the stream itself and ignores it). */
+        /* The sub-stream's meta travels with the view: a whole-block coder (coder_fc) needs it to decode. */
         io->meta = baseMetaStreams[id];
         ioVector.push_back(io);
         const bool rleEnabled = baseMetaStreams[id].isMember("rle") &&
@@ -4490,12 +3692,7 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
 
         readOffset += dstLength + matchExtraOffset;   /* +mval sub-stream under RLE */
         matchExtraOffset = 0;
-        /*
-         * SEQ exception streams (see SeqExceptionClass): one per character present,
-         * each a strictly increasing list of block offsets naming its character in
-         * "ch" - read by predecodeSeqExceptionStreams, which is also where the older
-         * absolute "npos" layout is handled.
-         */
+        /* SEQ exception streams (see SeqExceptionClass): one per character present, a strictly increasing offset list. */
         if (predecodeSeqExceptionStreams(baseMeta, baseMetaStreams, id) != 0) {
             return -1;
         }
@@ -4507,12 +3704,7 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
             }
         }
 
-        /*
-         * The block's own consensus, when the column was coded against one: its squash is the
-         * last sub-stream, and the meta says which window of the file's coordinate space it
-         * covers. Read here, before any record, because decompressBase walks every record
-         * against it (see baseSelfRefActive).
-         */
+        /* The block's own consensus, when used: its squash is the last sub-stream and the meta gives its window. */
         if (baseMeta.isMember("selfref")) {
             id++;
             if (id >= (uint32_t)baseMetaStreams.size() ||
@@ -4528,27 +3720,13 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
     return 0;
 }
 
-/*
- * Record the stream offset of a field whose column is decoded lazily, and answer whether this
- * was such a field (in which case the caller moves on to the next one).
- *
- * OPTION tag-split builds no decoder here and does not advance readOffset: the start of the
- * field's stream is recorded, and decompressOptionField decodes all of its columns from the
- * streams array on the first OPTION line. readOffset cannot be used for that at the time -
- * line-by-line decoders such as decompressIdField advance it, so by the time the OPTION line
- * is reached it has already shifted (measured as off by the ID field's dstlen).
- *
- * PNEXT qname-rebuild keeps only an exception stream in streams[7]["streams"][0]: no
- * line-by-line decoder either, just its offset, with readOffset advanced past it so the later
- * fields stay aligned.
- */
+/* Record the stream offset of a lazily-decoded field and report whether this was such a field. */
 bool SamCodecActuator::recordDeferredFieldOffset(uint32_t idx, Json::Value& fieldMeta)
 {
     if (idx == 11 && fieldMeta.isMember("mode") &&
         (fieldMeta["mode"].asString() == "tag_split" ||
          fieldMeta["mode"].asString() == "opt_strip")) {
-        /* OPTION is the last field, so its streams need no advancing here either; the mode says
-           which layer decodes them (decompressOptionField). */
+        /* OPTION is the last field, so its streams need no advancing. */
         fieldIoStart[idx] = readOffset;
         return true;
     }
@@ -4617,12 +3795,7 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lin
     }
     outputBlock->setDataLen(outputBlock->getDataLen() + fieldLen);
 
-    /*
-     * When FLAG/POS/PNEXT are compressed in textual form (affix), the tracking
-     * maps must be repopulated here: the later QUAL and reference-sequence
-     * stages all read mappedPos/mappedChr/mappedFlag. This must stay consistent
-     * with what decompressNumber fills for the binary form.
-     */
+    /* Textual FLAG/POS/PNEXT must repopulate the tracking maps here, consistent with decompressNumber. */
     if (fieldLen > 1 && (fieldIdx == 1 || fieldIdx == 3 || fieldIdx == 7)) {
         uint8_t* vs = outputBlock->getBuffer() + outputBlock->getDataLen() - fieldLen;
         std::string str((char*)vs, (size_t)fieldLen - 1);
@@ -4637,34 +3810,18 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lin
     return fieldLen;
 }
 
-/*
- * Decompression side of the OPTION field: before decoding the whole block, all
- * id-sequence columns and tag-value columns are decoded and cached; when
- * emitting lines, `NAME:TYPE:VALUE` is reassembled from that line's id
- * sequence, fully symmetric with the compression side.
- *
- * On compression the entire OPTION field is one field (field 11), and on
- * decompression all lines are decoded at once with output advancing line by
- * line from the block start. Everything is lazily decoded on the first call
- * (lineNo == 0 with an empty cache).
- */
+/* OPTION field (disabled tag-columnization path): decode all columns once and cache them, then emit per line. */
 int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFlag,
                                                 RoughIOBlock* outputBlock,
                                                 const Json::Value& fieldMeta) {
-    /*
-     * The stripped layout: the column was written without the repeated tag names, so each record's
-     * text is rebuilt from its sequence index and its values (see compressOptionStrip). The record
-     * index is the output line number less the block's header lines, since the column carries one
-     * entry per record and the line number counts the header too.
-     */
+    /* The stripped layout: rebuild each record from its sequence index and values (see compressOptionStrip). */
     if (fieldMeta.isMember("mode") && fieldMeta["mode"].asString() == "opt_strip") {
         if (optionCacheEmpty) {
             if (decodeOptionStripColumn(fieldMeta) != 0) {
                 return -1;
             }
         }
-        /* lineNo counts data lines here, not lines of the block: one entry per record, which is
-           what the writer emitted (the header lines never reach a field decoder). */
+        /* lineNo counts data lines here, one per record. */
         const uint32_t recIdx = lineNo;
         if (recIdx + 1 < optionRecOff.size() && recIdx < optionRecPresent.size() &&
             optionRecPresent[recIdx] != 0) {
@@ -4685,14 +3842,7 @@ int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFl
     }
 
     if (!fieldMeta.isMember("tags") || fieldMeta["mode"].asString() != "tag_split") {
-        /*
-         * affix form: the OPTION of all lines in the block is one column. When a
-         * line has no OPTION, the decoded result is empty and only a delimiter
-         * was appended (fieldLen == 1); the '\t' just appended after QUAL must
-         * be removed (same handling as empty lines in tag_split). The per-block
-         * field count is the block-wide maximum, so lines without OPTION also
-         * reach this path.
-         */
+        /* affix form: the whole block's OPTION is one column; a line with no OPTION yielded a bare delimiter. */
         const int32_t fieldLen = decompressRegularField(11, lineNo, splitFlag, outputBlock);
         if (fieldLen == 1) {
             uint8_t* pEnd = outputBlock->getCurrent();
@@ -4807,13 +3957,7 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
         optBase += dstlen;
     }
 
-    /*
-     * Reassemble the OPTION text line by line, straight into the flat buffer.
-     *
-     * The tag names and types are read out of the meta once, not once per tag instance: asString()
-     * builds a std::string on every call, and a block of ten million tag instances spent most of its
-     * reassembly time on those temporaries even though the column has a handful of tags.
-     */
+    /* Reassemble the OPTION text line by line into the flat buffer. */
     std::vector<std::string> tagNames(nTag), tagTypes(nTag);
     for (uint32_t t = 0; t < nTag; ++t) {
         tagNames[t] = tags[t][0].asString();
@@ -4843,16 +3987,7 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
     return 0;
 }
 
-/*
- * Reads back the stripped OPTION layout (see compressOptionStrip): one sequence index per record
- * and one line of values, both line-wise, with the tag sequences in the meta. A sequence entry of
- * the verbatim kind is the whole segment, and any other entry is "NAME:TYPE:" in front of the
- * value, which is how the record's text is put back together.
- *
- * Like the tag-split layout, everything is decoded when the first OPTION line is reached: the two
- * sub-streams are sequential, so a record can only be read after the records before it, and the
- * per-record text is cached in optionRecText.
- */
+/* Read the stripped OPTION layout back: one sequence index and one line of values per record, both line-wise. */
 int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
 {
     optionRecText.clear();
@@ -4867,8 +4002,7 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
         return -1;
     }
 
-    /* The start of this field's streams: recorded by recordDeferredFieldOffset, because the
-       line-by-line decoders of the earlier fields have moved readOffset past it by now. */
+    /* This field's stream start, recorded by recordDeferredFieldOffset. */
     uint32_t off = readOffset;
     auto startIt = fieldIoStart.find(11);
     if (startIt != fieldIoStart.end()) {
@@ -4898,11 +4032,7 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
         return -1;
     }
 
-    /*
-     * The level travels the same way initFieldDecoder hands it over: the textual coder always
-     * reads it from the meta, coder_arith only when the meta carries one, and a bwt_cm stream keeps
-     * its own settings in its header instead.
-     */
+    /* The level travels as in initFieldDecoder. */
     auto openSub = [&](const Json::Value& meta, uint32_t at, uint32_t len) -> std::shared_ptr<coder> {
         const std::string coderName = meta["coder"]["magic"].asString();
         std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + at, len, "OPTION stream");
@@ -4922,18 +4052,7 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
         return -1;
     }
 
-    /*
-     * The sequence table's flags and texts, read out of the meta once per sequence instead of once
-     * per record: seqText[i][k] is segment k of sequence i.
-     *
-     * A record's segments are the same sequences over and over, and seq[k][1].asString() builds a
-     * std::string on every call - a block of ten million tag instances was paying for twenty
-     * million of those temporaries while the table itself holds a handful of entries.
-     *
-     * Each sequence is built the first time a record references it, with the same accessors the
-     * per-record code used: a sequence the block never uses is never read, so a meta entry of an
-     * unexpected shape cannot fail a block that does not refer to it.
-     */
+    /* The sequence table's texts, read out of the meta once per sequence (seqText[i][k] is segment k of sequence i). */
     struct SeqSegment {
         bool verbatim = false;
         std::string prefix;   /* "NAME:TYPE:", empty when the segment is verbatim */
@@ -4941,10 +4060,7 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
     std::vector<std::vector<SeqSegment>> seqText((size_t)seqs.size());
     std::vector<uint8_t> seqReady((size_t)seqs.size(), 0);
 
-    /*
-     * optionRecOff is a prefix sum: entry r is where record r's text starts, so the table needs its
-     * leading zero before the records are appended to.
-     */
+    /* optionRecOff is a prefix sum; its leading zero precedes the records. */
     optionRecOff.push_back(0);
     uint8_t tmp[1 << 16];
     std::vector<uint32_t> valueStarts;
@@ -4980,9 +4096,7 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
             --valsEnd;
         }
 
-        /* How many values there are is fixed by the sequence, not by the line's own length: a
-           single segment with an empty value and a record with no OPTION at all both write an
-           empty line, and only the sequence tells them apart (one value against none). */
+        /* The value count is fixed by the sequence, not the line's length. */
         const Json::Value& seq = seqs[seqIdx];
         if (!seqReady[seqIdx]) {
             const uint32_t segs = (uint32_t)seq.size();
@@ -5045,10 +4159,7 @@ int32_t SamCodecActuator::decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t 
     bool isPNextValid = false;
     if (flagIt != mappedFlag.end()) {
         uint16_t flag = flagIt->second;
-        /* PNEXT is valid only if:
-         * - FLAG bit 0x1 is set (paired-end sequencing)
-         * - FLAG bit 0x8 is not set (mate is mapped)
-         */
+        /* PNEXT is valid only when FLAG 0x1 is set and 0x8 is clear. */
         isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
     }
 
@@ -5085,14 +4196,7 @@ int32_t SamCodecActuator::decompressPNextFieldDelta(uint32_t fieldIdx, uint32_t 
 }
 
 int32_t SamCodecActuator::decompressPosFieldDelta(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock) {
-    /*
-     * Decode an unsigned varint (LEB128), mirroring compressPosFieldDelta.
-     * Bytes are read one at a time (fixed-length decode_line) until the
-     * continuation bit is clear. The accumulator is cleared whenever the
-     * chromosome (RNAME) changes, detected from the per-line chromosome
-     * index decoded by decompressChrName — no reset list is stored in the
-     * metadata.
-     */
+    /* Decode an unsigned LEB128 varint (mirrors compressPosFieldDelta); the accumulator resets on RNAME change. */
     if (lineNo > 0) {
         const auto curChrIt = mappedChr.find(lineNo);
         const auto prevChrIt = mappedChr.find(lineNo - 1);
@@ -5160,18 +4264,8 @@ int32_t SamCodecActuator::decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uin
     return len + 1;
 }
 
-/*
- * Pre-decode POS/CIGAR/PNEXT and cache the results per line. TLEN
- * reconstruction needs the full mate index and reference spans; while the main
- * loop decodes line by line, a mate may lie in the second half of the block and
- * be unavailable. Here all lines are decoded once up front; the main loop then
- * copies the cache directly without decoding again.
- */
-/*
- * The SEQ column with no reference: it is one stream, and this builds its decoder (or decodes
- * it outright, for the whole-block coder). Answers the bytes it consumed, or -1 on an error
- * already reported.
- */
+/* Pre-decode POS/CIGAR/PNEXT and cache per line, so TLEN has the full mate index. */
+/* SEQ with no reference: one stream; build its decoder or decode it outright. */
 int32_t SamCodecActuator::initSeqWholeBlockDecoder(const Json::Value& baseMeta, uint32_t idx,
                                                    RoughIOBlock* outputBlock)
 {
@@ -5180,24 +4274,9 @@ int32_t SamCodecActuator::initSeqWholeBlockDecoder(const Json::Value& baseMeta, 
     const uint32_t srcLength = baseMeta["totalsrclen"].asUInt();
     LOG_DEBUG("srclen = %d, dstlen = %d", srcLength, dstLength);
 
-    /*
-     * Whether the stream is one a decoder can only take whole. The coder's own descriptor
-     * answers it (see CoderFactory::decoderIsWholeBlock) rather than a name comparison here:
-     * the property belongs to the coder.
-     */
+    /* Whether the stream is whole-block-only is the coder's own trait (CoderFactory::decoderIsWholeBlock). */
     if (CoderFactory::decoderIsWholeBlock(coderName)) {
-        /*
-         * The whole-block SEQ is decoded into the tail of the outputBlock buffer as staging,
-         * then decompressBase moves it to the head line by line. No separate buffer is
-         * allocated: that would add one malloc/free of the whole SEQ per block plus page
-         * faults on first touch, and raise peak memory by threads x SEQ size, while the number
-         * of copies stays the same.
-         *
-         * Invariant: never realloc outputBlock within a block, or this tail pointer would
-         * dangle. Capacity is guaranteed by the one-shot block_size*2 pre-allocation at the
-         * block entry (see decompress())-head output <= block_size and tail staging <=
-         * block_size, exactly 2x.
-         */
+        /* The whole-block SEQ is staged at the output block's tail, then moved to the head line by line. */
         coder_io baseIo(inBlockPtr->getBuffer() + readOffset, dstLength, &ioErrSink, "SEQ");
         baseIo.meta = baseMeta;
         baseIo.meta["dstlen"] = baseMeta["totaldstlen"].asUInt();
@@ -5208,14 +4287,7 @@ int32_t SamCodecActuator::initSeqWholeBlockDecoder(const Json::Value& baseMeta, 
             return -1;
         }
     } else {
-        /*
-         * A record-by-record coder only has its stream prepared here; decompressBase pulls one
-         * record at a time from it. The coder is built from the magic the stream carries rather
-         * than from a list of accepted names: which one is written here is decided by the SEQ
-         * row of the profile in use (archive writes coder_bwt_cm, fast writes coder_rans), so a
-         * row must not need a change down here to be readable. The level is replayed from the
-         * same meta, so the decoder sits on the model the encoder built.
-         */
+        /* A record-by-record coder's stream is only prepared here; decompressBase pulls one record at a time. */
         std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLength, "SEQ");
         io->meta = baseMeta;
         io->meta["dstlen"] = dstLength;
@@ -5235,19 +4307,7 @@ int32_t SamCodecActuator::initSeqWholeBlockDecoder(const Json::Value& baseMeta, 
     return (int32_t)dstLength;
 }
 
-/*
- * The reference layout's match stream. Under the RLE split (see compressBaseWithRef) the two
- * sub-streams
- *   "m"    -> varint run lengths of the zero runs
- *   "mval" -> the surviving non-zero values (1 byte each)
- * are decoded here and expanded back into the original sparse byte stream (orgrawlen bytes),
- * which decompressBase then serves per record through matchBlockDecode. Without the split the
- * stream is simply kept as the record's decoder.
- *
- * `streamId` points at "m" on entry and at the last sub-stream the layout used on return, so
- * the caller can carry on from there; `extraOffset` reports the bytes it must skip past (the
- * "mval" stream, when there is one).
- */
+/* The reference layout's match stream: under RLE, "m" (run lengths) and "mval" (values) expanded back to the sparse stream. */
 int32_t SamCodecActuator::predecodeSeqMatchStream(const Json::Value& streams, uint32_t& streamId,
                                                   uint32_t firstDstLength, coder_io* matchIo,
                                                   uint32_t idx, uint32_t& extraOffset)
@@ -5267,12 +4327,7 @@ int32_t SamCodecActuator::predecodeSeqMatchStream(const Json::Value& streams, ui
         return -1;
     }
 
-    /*
-     * The value sub-stream (if any) sits immediately after the run sub-stream. A fully
-     * reference-matching block has no surviving non-zero values, so compressBaseWithRef writes
-     * no "mval" sub-stream at all; the caller then carries on from the run stream, so the npos
-     * / baselen sub-streams that follow are addressed as if the value stream never existed.
-     */
+    /* The value sub-stream, if any, sits after the run sub-stream; a fully matching block writes none. */
     uint32_t valDstLen = 0;
     uint32_t valLen = 0;
     std::unique_ptr<uint8_t[]> valBuf;
@@ -5284,9 +4339,7 @@ int32_t SamCodecActuator::predecodeSeqMatchStream(const Json::Value& streams, ui
             inBlockPtr->getBuffer() + readOffset + firstDstLength, valDstLen, "SEQ match val");
         valIo->meta = streams[streamId];
         ioVector.push_back(valIo);
-        /* Each sub-stream carries its own coder name: the two halves of the RLE layout are
-           written independently, so the value stream must not be decoded with the run
-           stream's coder. */
+        /* Each sub-stream carries its own coder name; the two halves may differ. */
         const std::string valCoderName = streams[streamId]["coder"]["magic"].asString();
         std::shared_ptr<coder> valDecoder =
             CoderFactory::makeFieldDecoder(valCoderName, valIo.get(), FieldDecoderArgs());
@@ -5305,8 +4358,7 @@ int32_t SamCodecActuator::predecodeSeqMatchStream(const Json::Value& streams, ui
         extraOffset = 0;
     }
 
-    /* Expand: each run is followed by one surviving value. calloc zero-fills, so the expanded
-       zeros need no explicit write. */
+    /* Expand: each run is followed by one surviving value; calloc zero-fills the rest. */
     MemoryUtil::safeFree(matchBlockBuffer);
     matchBlockBuffer = MemoryUtil::safeAlloc<uint8_t>(srcLen + 1);
     if (matchBlockBuffer == nullptr) {
@@ -5337,22 +4389,12 @@ int32_t SamCodecActuator::predecodeSeqMatchStream(const Json::Value& streams, ui
     return 0;
 }
 
-/*
- * The match stream of the reference layout when it was written whole - the legacy layout with
- * no "rle" member. Mirrors predecodeSeqMatchStream, which is the split case.
- */
+/* The reference layout's match stream when written whole (legacy, no "rle" member). */
 int32_t SamCodecActuator::predecodeSeqWholeMatchStream(const Json::Value& streams, uint32_t streamId,
                                                        coder_io* matchIo, uint32_t idx)
 {
     const std::string matchCoderName = streams[streamId]["coder"]["magic"].asString();
-    /*
-     * Which decoder the sub-stream needs is the stream's own business (see
-     * CoderFactory::makeFieldDecoder), and whether it hands back a whole block or one record at
-     * a time is the coder's own trait rather than a name this side knows (see
-     * decoderIsWholeBlock): a whole-block coder's stream is decoded here and decompressBase
-     * slices it per record, while every other coder - including the legacy layout with no "rle"
-     * member - is read line by line.
-     */
+    /* The decoder comes from the stream's own magic; whether it is whole-block is the coder's trait. */
     fieldDecoders[idx] = CoderFactory::makeFieldDecoder(matchCoderName, matchIo, FieldDecoderArgs());
     if (fieldDecoders[idx] == nullptr) {
         LOG_ERROR("check sub stream failed, coder name not match: %s", matchCoderName.c_str());
@@ -5376,12 +4418,7 @@ int32_t SamCodecActuator::predecodeSeqWholeMatchStream(const Json::Value& stream
     return 0;
 }
 
-/*
- * The baselen sub-stream: the reads whose length is not already implied by their CIGAR, which
- * the SEQ column needs before it can slice the payload per record (see decompressBase). The
- * delta layout holds the entry ordinals as one run of forward deltas followed by the lengths;
- * an archive written before it holds absolute 4-byte (ordinal, length) pairs instead.
- */
+/* The baselen sub-stream: (ordinal, length) forward deltas, or absolute 4-byte pairs in older archives. */
 int32_t SamCodecActuator::predecodeSeqBaseLengthStream(const Json::Value& streams, uint32_t streamId)
 {
     if (streams[streamId]["sname"].asString() != "baselen") {
@@ -5476,18 +4513,7 @@ int32_t SamCodecActuator::predecodeSeqSelfRefStream(const Json::Value& streams, 
     return 0;
 }
 
-/*
- * The SEQ column's exception streams (see SeqExceptionClass): one per character that occurred,
- * each a strictly increasing list of block offsets with its character in the stream meta's
- * "ch". A character that never occurs has no stream, so this reads sub-streams until one turns
- * up that is not an exception stream (see seqExcFormOf / seqExcLayoutOf); the per-record refill
- * then walks the lists collected here.
- *
- * The one older archive still read is the first layout's lone "npos": a single list of absolute
- * offsets holding every position that layout knew of, 'N' and 'n' alike, with no "ch" and with
- * its count in the field-level "ncount". It wrote an 'N' back at each of those positions, and
- * so does this.
- */
+/* SEQ exception streams: one per character present (stream meta "ch"); the older layout's lone "npos" list is also read. */
 int32_t SamCodecActuator::predecodeSeqExceptionStreams(const Json::Value& baseMeta,
                                                        const Json::Value& streams,
                                                        uint32_t& streamId)
@@ -5497,8 +4523,7 @@ int32_t SamCodecActuator::predecodeSeqExceptionStreams(const Json::Value& baseMe
         const std::string name = (streams.size() > (size_t)streamId + 1)
                                      ? streams[streamId + 1]["sname"].asString()
                                      : std::string();
-        /* Every form name identifies an exception stream, so the block's exception streams are
-           the ones that come next and this stops at the first other name. */
+        /* Exception streams come next; stop at the first other name. */
         if (seqExcFormOf(name) == SeqExcForm::None) {
             break;   /* this block has no further exception stream */
         }
@@ -5515,8 +4540,7 @@ int32_t SamCodecActuator::predecodeSeqExceptionStreams(const Json::Value& baseMe
 
         coder_io excIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ npos");
         auto excCoder = std::make_unique<coder_bwt_cm>(&excIo);
-        /* The payload carries the positions alone - the character travels in the stream's meta
-           ("ch") - and every form is expanded by the same reader. */
+        /* The payload carries positions alone; the character is in the stream meta's "ch". */
         std::vector<uint8_t> raw(srclen);
         std::vector<uint32_t> pos;
         if (excCoder->decode_line(raw.data(), srclen, UINT8_MAX, false) < 0 ||
@@ -5537,12 +4561,7 @@ int32_t SamCodecActuator::predecodeSeqExceptionStreams(const Json::Value& baseMe
     return 0;
 }
 
-/*
- * The QUAL column. Its frequency-table sub-stream is decoded first, because the alphabet it
- * carries is what the value coder is built with; the value stream's decoder is then built by
- * the magic its meta carries (see CoderFactory::makeQualDecoder, the only place that knows
- * which coder takes which parameters).
- */
+/* The QUAL column: decode its frequency table first, then build the value decoder from the stream's magic. */
 int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
 {
     const Json::Value& qualStreamMeta = qualMeta["streams"];
@@ -5560,8 +4579,7 @@ int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
     coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength, &ioErrSink, "QUAL freq table");
     auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
     const uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
-    /* Same as fastq_actuator: counting with uint8_t wraps when the alphabet exceeds 127
-       symbols, causing a heap out-of-bounds write. */
+    /* Counting with uint8_t wraps when the alphabet exceeds 127 symbols. */
     const uint32_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
     uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
     const int32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr, qualFreqSrcLength, UINT8_MAX, false);
@@ -5577,14 +4595,7 @@ int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
 
     std::shared_ptr<coder_io> qualIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualDstLength, "QUAL");
     ioVector.push_back(qualIo);
-    /*
-     * Turning the magic the stream carries into a decoder is the factory's business (see
-     * CoderFactory::makeQualDecoder); what this side supplies is the alphabet it has just
-     * decoded and the prior the engine holds. The stream's meta says whether the encoder
-     * started from one, and the package index is the key the prior is stored under: under
-     * piped input the absolute offset degenerates to 0, so looking it up by offset always
-     * misses.
-     */
+    /* The magic-to-decoder step is CoderFactory::makeQualDecoder's; this side supplies the alphabet and the prior. */
     QualDecoderArgs qualArgs;
     qualArgs.freqTable = qualFreqTable.empty() ? nullptr : &qualFreqTable;
     qualArgs.priorRequired = qualStreamMeta[0].isMember("prior");
@@ -5605,16 +4616,7 @@ int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
     return 0;
 }
 
-/*
- * Any ordinary column: one stream, whose decoder is the one its magic names. The stream's
- * compression level and - for coder_arith - the file-level POS delta prior travel with the
- * meta; a missing prior must fall back to the coder's uniform table, exactly as the encoder
- * cold-starts (see the encoder's note on that fallback).
- *
- * The position of the stream is recorded as well: preDecodeForTLEN rebuilds decoders for
- * POS(3)/CIGAR(5)/PNEXT(7) from these, which is what lets TLEN reconstruction obtain the full
- * mate index before the column is decoded line by line.
- */
+/* Any ordinary column: one stream, decoder built from its magic; its position is recorded for preDecodeForTLEN. */
 int32_t SamCodecActuator::initFieldDecoder(uint32_t fieldIdx, const Json::Value& fieldMeta)
 {
     const std::string coderName = fieldMeta["coder"]["magic"].asString();
@@ -5628,11 +4630,7 @@ int32_t SamCodecActuator::initFieldDecoder(uint32_t fieldIdx, const Json::Value&
     std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SAM field");
     ioVector.push_back(io);
 
-    /*
-     * The level is handed over for the coders whose stream records one: the textual coder
-     * always reads the field meta's value, while coder_arith takes it only when the meta
-     * carries one; a bwt_cm stream keeps its own settings instead.
-     */
+    /* The level is handed over only for coders whose stream records one. */
     FieldDecoderArgs args;
     if (coderName == "coder_affix_match" ||
         (coderName == "coder_arith" && fieldMeta["coder"].isMember("level"))) {
@@ -5653,14 +4651,7 @@ int32_t SamCodecActuator::initFieldDecoder(uint32_t fieldIdx, const Json::Value&
     return 0;
 }
 
-/*
- * The TLEN column's exception stream: the records whose TLEN the pair walk cannot produce.
- * Reading it fills tlenCache before the column is decoded, and its layout is read back from the
- * field meta (see the marker note on tlenDecodeVarints): the marker is authoritative where it
- * is there, and without one the archive is older - the fixed layout, unless the stream's size
- * rules that out, in which case the archive was written between the change to varint and the
- * marker and holds varints.
- */
+/* The TLEN exception stream: records the pair walk cannot produce; its layout is read from the field meta. */
 int32_t SamCodecActuator::decodeTlenExceptionStream(const Json::Value& stream,
                                                     const Json::Value& tlenMeta)
 {
@@ -5709,10 +4700,7 @@ int32_t SamCodecActuator::decodeTlenExceptionStream(const Json::Value& stream,
     return 0;
 }
 
-/*
- * The TLEN column. Under the reconstruction optimization it carries nothing but the exception
- * stream above; otherwise it is an ordinary column whose decoder is built here.
- */
+/* The TLEN column: the exception stream under reconstruction, else an ordinary column. */
 int32_t SamCodecActuator::initTlenFieldDecoders(const Json::Value& tlenMeta, uint32_t fieldIdx)
 {
     if (tlenMeta.isMember("optimized") && tlenMeta["optimized"].asBool()) {
@@ -5744,17 +4732,7 @@ int32_t SamCodecActuator::initTlenFieldDecoders(const Json::Value& tlenMeta, uin
     return 0;
 }
 
-/*
- * The QNAME column's own decoders, rebuilt from the recorded sub-stream offsets so the main
- * loop's idDecoders are not consumed by this pre-decode (mirrors decompressIdField).
- *
- * Two kinds of sub-stream are read up front: the numeric layout, which has no per-line
- * terminator (one varint per line, served from numericPos), and the counter layout, which
- * carries the same one-delta-per-line content and rebuilds it from its own payload without
- * touching state the main loop decodes through. The value-domain and constant layouts stay
- * with the main loop and get a null decoder, which the rebuild loop reads as "handled
- * elsewhere".
- */
+/* The QNAME column's own decoders, rebuilt from the recorded offsets so the main loop's are not consumed. */
 int32_t SamCodecActuator::predecodeIdStreams(IdPredecodeState& state)
 {
     Json::Value& streams = meta["sam"]["streams"];
@@ -5833,18 +4811,7 @@ int32_t SamCodecActuator::predecodeIdStreams(IdPredecodeState& state)
     return 0;
 }
 
-/*
- * Pre-decode the FLAG column (field 1).
- *
- * PNEXT is stored as a delta against POS only when the mate position is meaningful (FLAG bit
- * 0x1 set and bit 0x8 clear) and holds the original value otherwise, so this column has to be
- * known before PNEXT is rebuilt; it mirrors compressPNextFieldDelta.
- *
- * The column is read through a decoder of its own, so the one the main loop keeps is not
- * consumed. Which coder that decoder is comes from the stream's magic (see
- * CoderFactory::makeFieldDecoder); a null result means this build cannot read that coder, and
- * the flag column is simply left unreconstructed.
- */
+/* Pre-decode FLAG (field 1): PNEXT's delta form depends on the flag bits (mirrors compressPNextFieldDelta). */
 int32_t SamCodecActuator::predecodeFlagColumn()
 {
     Json::Value& streams = meta["sam"]["streams"];
@@ -5895,11 +4862,7 @@ int32_t SamCodecActuator::predecodeFlagColumn()
     return 0;
 }
 
-/*
- * Pre-decode RNAME (field 2) so the POS delta chain below can detect chromosome switches from
- * mappedChr, mirroring the encoder. Another decoder of its own, so the main loop's RNAME
- * decoder state stays untouched.
- */
+/* Pre-decode RNAME (field 2) so the POS delta chain can detect chromosome switches. */
 int32_t SamCodecActuator::predecodeRnameColumn()
 {
     Json::Value& streams = meta["sam"]["streams"];
@@ -5933,15 +4896,7 @@ int32_t SamCodecActuator::predecodeRnameColumn()
     return 0;
 }
 
-/*
- * Build the pre-decoder of one of the columns TLEN reconstruction needs. The decoder is the
- * one the stream's magic names (see CoderFactory::makeFieldDecoder), with the level the field
- * meta records and - for coder_arith - the file-level POS prior the encoder used, or the
- * arithmetic decode diverges on the first symbol (the factory applies it).
- *
- * Answers false when there is nothing to pre-decode here: the field has no stream of its own,
- * or this build cannot read the coder that wrote it.
- */
+/* Build the pre-decoder for a TLEN-reconstruction column from the stream's magic. Returns false when there is nothing to pre-decode. */
 bool SamCodecActuator::buildTlenColumnPredecoder(uint32_t fieldIdx, TlenColumnPredecoder& out)
 {
     Json::Value& streams = meta["sam"]["streams"];
@@ -5955,6 +4910,8 @@ bool SamCodecActuator::buildTlenColumnPredecoder(uint32_t fieldIdx, TlenColumnPr
     const uint32_t dstlen = fieldIoDstLen[fieldIdx];
     out.coderName = streams[fieldIdx]["coder"]["magic"].asString();
     out.mode = streams[fieldIdx].isMember("mode") ? streams[fieldIdx]["mode"].asString() : "";
+    /* Column source length: bounds the widest line (sizes the decode buffer in rebuildTlenColumn). */
+    out.srcLen = streams[fieldIdx].isMember("srclen") ? streams[fieldIdx]["srclen"].asUInt() : 0;
 
     out.stream = makeCoderIo(inBlockPtr->getBuffer() + off, dstlen, "TLEN predecode");
     FieldDecoderArgs args;
@@ -5971,20 +4928,7 @@ bool SamCodecActuator::buildTlenColumnPredecoder(uint32_t fieldIdx, TlenColumnPr
     return out.decoder != nullptr;
 }
 
-/*
- * Rebuild one column from its pre-decoder, line by line, and leave it in the cache the TLEN
- * walk reads (tlenPreDecodedFields) together with the maps the reconstruction needs: POS
- * fills mappedPos, CIGAR fills baseLengthBuffer and the parsed op lists, PNEXT fills
- * nextMappedPos.
- *
- * Three field forms travel here. CIGAR is always textual. POS and PNEXT are fixed-width binary
- * by default and textual when their mode says so; POS in "pos_delta" mode is a zigzag varint
- * stream read byte by byte until the continuation bit clears (mirroring
- * compressPosFieldDelta), whose values are the deltas from the previous line - reset to 0 at a
- * chromosome switch, which is what the RNAME pre-decode above is for. PNEXT in "pnext_delta"
- * mode holds a delta against POS only for records whose mate is mapped (FLAG 0x1 set, 0x8
- * clear) and the absolute value otherwise.
- */
+/* Rebuild one TLEN column from its pre-decoder, line by line, into tlenPreDecodedFields and the per-column maps. */
 int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnPredecoder& pre)
 {
     const std::string& coderName = pre.coderName;
@@ -5993,23 +4937,16 @@ int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnP
     fieldCache.clear();
     fieldCache.reserve(samLine);
 
-    uint8_t tmpBuf[1024];
+    /* Per-line decode buffer, sized from the column's source length. */
+    const uint32_t decodeCap = std::max<uint32_t>(1024, pre.srcLen + 1);
+    std::vector<uint8_t> tmpStore(decodeCap);
+    uint8_t* tmpBuf = tmpStore.data();
     /* Delta chain of pos_delta mode: the absolute POS reconstructed from the previous line. */
     int64_t posPrev = 0;
     for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-        /*
-         * coder_affix_match points last at the caller's output buffer unless need2hold is set;
-         * it must be set here, otherwise the cross-line context would be overwritten by the
-         * next decode. bwt_cm buffers internally on its own.
-         */
+        /* coder_affix_match points at the caller's buffer unless need2hold is set; set it here or the context is overwritten. */
         const bool need2hold = CoderFactory::decoderHoldsCallerBuffer(coderName);
-        /*
-         * Field form: CIGAR is always textual; POS/PNEXT default to fixed-width binary and are
-         * decoded as text only when mode is textual. POS uses a zigzag varint stream: the value
-         * is read byte-by-byte (fixed-length decode_line) until the continuation bit is clear.
-         * Textual data must never be decoded as fixed-length, otherwise bwt_cm's fixed-length
-         * branch would spin past the block boundary.
-         */
+        /* CIGAR is always textual; POS/PNEXT are binary unless mode is textual. POS uses a zigzag varint read byte by byte. */
         if (fieldIdx == 3 && mode == "pos_delta") {
             /* Unsigned varint decode, mirroring compressPosFieldDelta. */
             if (lineNo > 0) {
@@ -6052,7 +4989,7 @@ int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnP
         if (binary) {
             len = pre.decoder->decode_line(tmpBuf, 4, UINT8_MAX, need2hold);
         } else {
-            len = pre.decoder->decode_line(tmpBuf, (uint32_t)sizeof(tmpBuf), '\t', need2hold);
+            len = pre.decoder->decode_line(tmpBuf, decodeCap, '\t', need2hold);
         }
         if (len <= 1) {
             fieldCache.emplace_back();
@@ -6087,10 +5024,7 @@ int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnP
                     bool isPNextValid = false;
                     if (flagIt != mappedFlag.end()) {
                         uint16_t flag = flagIt->second;
-                        /* PNEXT is valid only if:
-                         * - FLAG bit 0x1 is set (paired-end sequencing)
-                         * - FLAG bit 0x8 is not set (mate is mapped)
-                         */
+                        /* PNEXT is valid only when FLAG 0x1 is set and 0x8 is clear. */
                         isPNextValid = ((flag & 0x1) != 0) && ((flag & 0x8) == 0);
                     }
 
@@ -6124,14 +5058,7 @@ int32_t SamCodecActuator::rebuildTlenColumn(uint32_t fieldIdx, const TlenColumnP
     return 0;
 }
 
-/*
- * Pre-decode QNAME (field 0) into decodedQnames.
- *
- * PNEXT in pnext_qname_rebuild mode is rebuilt by pairing records that share a QNAME, so every
- * line's QNAME must be known before PNEXT is reconstructed. The column is decoded with the
- * per-sub-stream decoders initDecoder already built (see predecodeIdStreams), mirroring
- * decompressIdField.
- */
+/* Pre-decode QNAME (field 0) into decodedQnames, the pairing key for pnext_qname_rebuild. */
 int32_t SamCodecActuator::rebuildQnameColumn()
 {
     decodedQnames.clear();
@@ -6163,15 +5090,11 @@ int32_t SamCodecActuator::rebuildQnameColumn()
                 qname.assign(qnameBuf, (size_t)len - strip);
             }
         } else {
-            // Reconstruct QNAME from split sub-streams. Each sub-stream
-            // encodes its segment including the trailing separator (the
-            // split symbol is part of the segment bytes), mirroring
-            // decompressIdField; so we simply append each decoded segment.
+            // Reconstruct QNAME from split sub-streams, appending each decoded segment (mirrors decompressIdField).
             for (uint32_t si = 0; si < preIdDec.size(); ++si) {
                 if (!preIdDec[si] && numBufs[si] == nullptr) continue;
                 if (numBufs[si] != nullptr) {
-                    /* Numeric sub-stream: one varint per line, no separator byte
-                       (the textual path strips a trailing '\t' here anyway). */
+                    /* Numeric sub-stream: one varint per line, no separator byte. */
                     if (numPos[si] >= numLens[si]) {
                         break;
                     }
@@ -6196,9 +5119,7 @@ int32_t SamCodecActuator::rebuildQnameColumn()
                     continue;
                 }
                 if (!idIntActive.empty() && idIntActive[si]) {
-                    /* Value-domain segment: the payload holds the values themselves, one per
-                       line, and carries no separator (the split symbol belongs to the segment
-                       that ends with it, exactly as in the numeric layout). */
+                    /* Value-domain segment: one value per line, no separator. */
                     char ntmp[24];
                     const uint64_t v = idIntModes[si].decode(idIntCoders[si]);
                     const int nn = snprintf(ntmp, sizeof(ntmp), "%llu", (unsigned long long)v);
@@ -6208,16 +5129,13 @@ int32_t SamCodecActuator::rebuildQnameColumn()
                     continue;
                 }
                 if (!preIdDec[si]) {
-                    /* Every layout without a coder of its own is handled above; getting here
-                       means a mode this build does not know, which must not be dereferenced. */
+                    /* Every coder-backed layout is handled above; an unknown mode must not be dereferenced. */
                     LOG_ERROR("Predecode id sub-stream(%u) has no decoder", si);
                     return -1;
                 }
                 uint8_t sep = (si < idAnalysis.symbols.size()) ? idAnalysis.symbols[si] : UINT8_MAX;
-                // coder_affix_match keeps cross-line context in an internal
-                // buffer only when need2hold is set; without it, it points
-                // last at our fixed qnameBuf and the next line would corrupt
-                // the prefix reference.
+                // coder_affix_match keeps cross-line context only when need2hold is set;
+                // without it the next line would corrupt the prefix reference.
                 bool hold = CoderFactory::decoderHoldsCallerBuffer(idStreamCoders[si]);
                 int32_t len = preIdDec[si]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), sep, hold);
                 if (len > 0) {
@@ -6234,15 +5152,7 @@ int32_t SamCodecActuator::rebuildQnameColumn()
     return 0;
 }
 
-/*
- * PNEXT (field 7) in pnext_qname_rebuild mode.
- *
- * The stream carries only the exception (line, delta) pairs in streams[7]["streams"][0]; every
- * other line is rebuilt here by pairing the records that share a QNAME and are mutually mapped.
- * mappedPos is already populated by the POS (field 3) pre-decode, and the flags and QNAMEs come
- * from the two pre-decodes above. The result fills tlenPreDecodedFields[7] and nextMappedPos
- * for every line.
- */
+/* PNEXT (field 7) in pnext_qname_rebuild mode: exceptions from streams[7]["streams"][0], the rest rebuilt by QNAME pairing. */
 int32_t SamCodecActuator::rebuildPnextByQname()
 {
     Json::Value& streams = meta["sam"]["streams"];
@@ -6269,8 +5179,7 @@ int32_t SamCodecActuator::rebuildPnextByQname()
             const std::string excEnc = streams[7].isMember("exc_enc")
                                            ? streams[7]["exc_enc"].asString()
                                            : std::string();
-            /* One buffer size for both varint layouts, so the parse loop below is shared:
-               an entry is at most a u32 varint (<= 5 B) plus a zigzag i64 varint (<= 10 B). */
+            /* One buffer size for both varint layouts: a u32 varint (<=5 B) plus a zigzag i64 varint (<=10 B). */
             std::vector<uint8_t> raw((size_t)pairCount * 16, 0);
             size_t rawOff = 0;
             auto nextVarint = [&raw, &rawOff](uint64_t& out) -> bool {
@@ -6286,9 +5195,7 @@ int32_t SamCodecActuator::rebuildPnextByQname()
                 return false;
             };
             if (excEnc == "varint2") {
-                /* Every ordinal as a forward delta, then every delta as a zigzag varint;
-                   where all the deltas are the same value that value is in the meta and the
-                   second run is not there at all (see compressPNextFieldDelta). */
+                /* Ordinals as forward deltas, then deltas as zigzag varints; a constant delta lives in the meta. */
                 excDec->decode_line(raw.data(), (uint32_t)raw.size(), UINT8_MAX, false);
                 const bool constDelta = streams[7].isMember("exc_delta");
                 const uint64_t constZ = constDelta ? streams[7]["exc_delta"].asUInt64() : 0;
@@ -6315,8 +5222,7 @@ int32_t SamCodecActuator::rebuildPnextByQname()
                     pnextCache[lineNo] = delta + basePos;
                 }
             } else if (excEnc == "varint") {
-                /* Absolute contentIdx then a zigzag-LEB128 delta per pair, the layout this
-                   replaced; archives written by it still decode here. */
+                /* Absolute contentIdx then a zigzag-LEB128 delta per pair (older layout). */
                 excDec->decode_line(raw.data(), (uint32_t)raw.size(), UINT8_MAX, false);
                 for (int32_t i = 0; i < pairCount; ++i) {
                     uint64_t ci = 0, z = 0;
@@ -6337,10 +5243,7 @@ int32_t SamCodecActuator::rebuildPnextByQname()
                 for (int32_t i = 0; i < pairCount; ++i) {
                     uint32_t contentIdx = (uint32_t)excBuf[2 * i];
                     int32_t delta = excBuf[2 * i + 1];
-                    /* The exception stores the 0-based data-line index (contentIdx on
-                       the compression side, i.e. lineIdx - headEndLine). On this
-                       decompression side lineNo is also 0-based data-line indexed, so
-                       no headEndLine offset is added here. */
+                    /* The exception stores the 0-based data-line index (lineIdx - headEndLine), which is also lineNo here. */
                     uint32_t lineNo = contentIdx;
                     int64_t pos = mappedPos.count(lineNo) ? mappedPos[lineNo] : 0;
                     pnextCache[lineNo] = delta + pos;
@@ -6417,20 +5320,12 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
         return -1;
     }
 
-    /*
-     * FLAG (field 1) first: PNEXT is stored as a delta against POS only when the mate position
-     * is meaningful, and that is decided by the flag bits. See predecodeFlagColumn, which is
-     * also what mirrors compressPNextFieldDelta.
-     */
+    /* FLAG (field 1) first: the flag bits decide whether PNEXT holds a delta (see predecodeFlagColumn). */
     if (predecodeFlagColumn() != 0) {
         return -1;
     }
 
-    /*
-     * Pre-decode RNAME (field 2) so the POS delta chain below can detect
-     * chromosome switches from mappedChr, mirroring the encoder. A separate
-     * decoder is used so the main loop's RNAME decoder state is untouched.
-     */
+    /* Pre-decode RNAME (field 2) so the POS delta chain can detect chromosome switches; a separate decoder. */
     if (predecodeRnameColumn() != 0) {
         return -1;
     }
@@ -6448,10 +5343,7 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
         }
     }
 
-    /*
-     * PNEXT (field 7): in pnext_qname_rebuild mode the stream carries only the exceptions and
-     * the rest of the column is rebuilt from the QNAME groups (see rebuildPnextByQname).
-     */
+    /* PNEXT (7) in pnext_qname_rebuild mode: only exceptions in the stream; the rest from QNAME groups. */
     std::string pnextMode = streams.isValidIndex(7) && streams[7].isMember("mode")
         ? streams[7]["mode"].asString() : "";
     if (pnextMode == "pnext_qname_rebuild" && rebuildPnextByQname() != 0) {
@@ -6463,38 +5355,19 @@ int32_t SamCodecActuator::preDecodeForTLEN() {
 }
 
 
-/*
- * Reconstruct one split segment of this line's ID, whatever layout it was written in, and append
- * it to the output block.
- *
- * The layouts differ in where the bytes come from and whether the split symbol travels with them:
- * "numeric" (and "cnt", which initDecoder expanded into exactly that varint buffer) keeps one
- * value per line in a buffer decoded once, so the value is rendered back to decimal text and the
- * split symbol re-appended here; "dict" carries one index per line into the block's few texts;
- * "hexd" is a uniform code per character over a fixed alphabet; a constant segment is the text
- * itself, stored once; the value-domain layout ("intd"/"intu") decodes one value per line from its
- * model; and the legacy textual layout is one decode_line per line, split symbol included.
- *
- * Returns 0 when the segment is done, -1 on a corrupt or truncated stream.
- */
+/* Reconstruct one split segment of this line's ID by whatever layout wrote it, and append it. Returns 0, or -1 on a corrupt stream. */
 int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& splitMeta,
                                                 RoughIOBlock* outputBlock, uint32_t& idLength)
 {
     const uint32_t splitDstLen = splitMeta["dstlen"].asUInt();
     std::string coderName = splitMeta["coder"]["magic"].asString();
 
-    /* "cnt" is the same layout from here on: initDecoder already expanded the counter's deltas
-       into the varint buffer that the numeric layout carries (see id_int::Counter). */
+    /* "cnt" is the numeric layout from here on: initDecoder already expanded its deltas. */
     const std::string idMode = splitMeta.isMember("mode") ? splitMeta["mode"].asString()
                                                          : std::string();
     const bool numericMode = (idMode == "numeric" || idMode == "cnt");
     if (numericMode) {
-        /*
-         * Numeric layout: the whole varint stream was decoded once by
-         * initDecoder (no per-line terminator exists). Serve exactly one value
-         * per line here, render it back to decimal text and re-append the split
-         * symbol, so the caller sees the same output shape as the textual path.
-         */
+        /* Numeric layout: serve one value per line, render to decimal text, re-append the split symbol. */
         readOffset += splitDstLen;
         idLength += splitDstLen;
 
@@ -6531,9 +5404,7 @@ int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& s
         return 0;
     }
     if (!idDictEntries.empty() && !idDictEntries[splitIdx].empty()) {
-        /* Dictionary segment: one index per line, and the text those few index values stand for
-           came with the payload (the trailing split symbol included, like the textual layout).
-           initDecoder already turned the index stream into one absolute index per line. */
+        /* Dictionary segment: one index per line; initDecoder turned it into one absolute index per line. */
         if (splitIdx >= idNumericBufs.size() || idNumericBufs[splitIdx] == nullptr ||
             idNumericPos[splitIdx] >= idNumericLens[splitIdx]) {
             LOG_ERROR("id dictionary segment(%u) exhausted", splitIdx);
@@ -6556,8 +5427,7 @@ int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& s
         return 0;
     }
     if (!idHexAlphabets.empty() && !idHexAlphabets[splitIdx].chars.empty()) {
-        /* Fixed-alphabet segment: the length when they vary, then one uniform character code
-           each, then the split symbol this segment ends with (the encoder stored neither). */
+        /* Fixed-alphabet segment: the length when they vary, one uniform char code each, then the split symbol. */
         const std::string& alpha = idHexAlphabets[splitIdx].chars;
         RangeCoder& hrc = idHexCoders[splitIdx];
         uint32_t len = idHexAlphabets[splitIdx].minLen;
@@ -6594,8 +5464,7 @@ int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& s
         return 0;
     }
     if (!idConstTexts.empty() && !idConstTexts[splitIdx].empty()) {
-        /* Constant segment: stored once for the block, so nothing per line was coded for it.
-           The text carries its own trailing split symbol, exactly as the textual path emits it. */
+        /* Constant segment: stored once; its text carries the trailing split symbol. */
         const std::string& text = idConstTexts[splitIdx];
         if (outputBlock->getRemain() < text.size()) {
             LOG_ERROR("Reconstruct id constant segment(%u) overflow", splitIdx);
@@ -6606,8 +5475,7 @@ int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& s
         return 0;
     }
     if (!idIntActive.empty() && idIntActive[splitIdx]) {
-        /* Value-domain segment: one value per line, then the split symbol this segment ends
-           with (the encoder stored neither as text). */
+        /* Value-domain segment: one value per line, then the split symbol. */
         const uint8_t sep = (splitIdx < idAnalysis.symbols.size())
                             ? (uint8_t)idAnalysis.symbols[splitIdx] : (uint8_t)'\t';
         const uint64_t v = idIntModes[splitIdx].decode(idIntCoders[splitIdx]);
@@ -6704,12 +5572,7 @@ int32_t SamCodecActuator::decompressChrName(uint32_t fieldIdx, uint32_t lineNo, 
             return -1;
         }
     }
-    /*
-     * Record the chromosome index for every line (including the special
-     * "*" = 0xFFFF and "=" = 0xFFFE values), mirroring compressChrName.
-     * The POS delta decoder uses consecutive lines' indices to detect
-     * chromosome switches instead of a reset-index list in the metadata.
-     */
+    /* Record the chromosome index per line ("*"=0xFFFF, "="=0xFFFE), mirroring compressChrName. */
     if (fieldIdx == 2) {
         mappedChr[lineNo] = chrIndex;
     } else if (fieldIdx == 6) {
@@ -6753,33 +5616,14 @@ int32_t SamCodecActuator::readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_
 
 int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& totalBaseLen, RoughIOBlock* outputBlock) {
-    /*
-     * ensureCapacity **must not** be called here: the caller
-     * decompressSamByFields captured basePtr = outputBlock->getCurrent() in the
-     * SEQ phase for QUAL to use, and any realloc within the block would leave it
-     * dangling and produce random garbage. Sufficient buffer space is guaranteed
-     * by the one-shot pre-allocation at the block entry (the deterministic
-     * block_size upper bound x 2, see decompress()); no further growth happens
-     * line by line.
-     */
-    /*
-     * Two ways a column can be reference-coded. Against the file's reference: the archive has the
-     * reference layout ("streams") and this side holds the reference. Or against a consensus the
-     * block built for itself: the archive carries the squash and the window it covers
-     * ("selfref"), and this side needs nothing else - which is the point, since that layout
-     * exists for the case where no usable reference is available at all.
-     */
+    /* ensureCapacity must not be called here: the caller captured basePtr for QUAL, and a realloc would dangle it. */
+    /* Reference-coded two ways: the file's reference ("streams"), or a block-built consensus ("selfref"). */
     const bool isSelfReference = baseSelfRefActive && fieldMeta.isMember("selfref");
     bool isUserReference =
         isSelfReference || (pRefeGene != nullptr && fieldMeta.isMember("streams"));
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
-        /*
-         * Every row length is known here, so the record is taken by its exact length and the
-         * separator is never looked for: split_ch = UINT8_MAX means "hand back out_len bytes"
-         * (see coder_rans::decode_line). Only a whole-block coder was decoded outright, into
-         * the staging buffer, and is copied from there instead.
-         */
+        /* Each row length is known, so records are taken by exact length (split_ch = UINT8_MAX); a whole-block coder is copied from staging. */
         const std::string seqCoder = fieldMeta["coder"]["magic"].asString();
         if (minBaseLength == maxBaseLength) {
             actualBaseLen = baseLengthBuffer[lineNo] == 0 ? maxBaseLength : baseLengthBuffer[lineNo];
@@ -6800,8 +5644,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             outputBlock->setDataLen(outputBlock->getDataLen() + 1);
         } else {
             if (CoderFactory::decoderIsWholeBlock(seqCoder)) {
-                /* A whole-block coder: its stream is already decoded into the staging buffer
-                   (see initDecoder), so this record is copied out of it up to its tab. */
+                /* A whole-block coder's stream is already decoded into staging; copy this record up to its tab. */
                 uint8_t* pBaseTmp = outputBlock->getCurrent();
                 uint8_t* ptr = pBaseOut;
                 uint8_t* pBaseEnd = outputBlock->getBuffer() + outputBlock->getBufferSize();
@@ -6816,13 +5659,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 outputBlock->setDataLen(outputBlock->getDataLen() + actualBaseLen);
                 actualBaseLen -= 1; // Remove \t length
             } else {
-                /* decode_line's split mode reports BUF_SMALL as soon as it has
-                   filled out_len characters without yet seeing the split char.
-                   A row whose SEQ is exactly maxBaseLength long still needs one
-                   more character for its trailing '\t', so the per-row limit
-                   must be maxBaseLength + 1 (the row text is stored with its
-                   terminating tab). Without this, a max-length row always
-                   fails with CODER_ERR_BUF_SMALL. */
+                /* The per-row limit must be maxBaseLength + 1: the row stores its terminating tab and split mode reports BUF_SMALL at out_len chars. */
                 int32_t decLen = fieldDecoders[fieldIdx]->decode_line(outputBlock->getCurrent(), maxBaseLength + 1, '\t', false);
                 if (decLen <= 0) {
                     LOG_ERROR("base decode failed in block %lld, line %d: %d", (long long)inBlockPtr->getBlockId(), lineNo, decLen);
@@ -6847,16 +5684,9 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             }
         }
         Json::Value& baseStream = fieldMeta["streams"];
-        /*
-         * A payload byte above the 2-bit range is one of the record's own characters, put there
-         * because the record does not use the reference (see the encoder). The two encodings do
-         * not overlap and the decoder knows which record is which by the same test the encoder
-         * applied, so no per-byte tag is needed. Without this member every byte is a 2-bit code,
-         * which is what an archive written before it carries.
-         */
+        /* A payload byte above 2-bit range is one of the record's own characters (record does not use the reference). */
         const bool litBases = fieldMeta.isMember("litbases");
-        /* `src` is the buffer this record's payload was read into: the two entry points below use
-           different staging buffers, and both call here. */
+        /* `src` is the buffer this record's payload was read into. */
         const auto writeDirectBases = [&](const uint8_t* src, int32_t len) {
             if (litBases) {
                 memcpy(outputBlock->getCurrent(), src, (size_t)len);
@@ -6866,10 +5696,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 }
             }
         };
-        /* The layout is identified by its sub-stream names, not by which coder
-           produced them: the run stream's coder follows the field selection
-           (BWT_CM or FC), and initDecoder has already expanded both halves into
-           buffers before this point. */
+        /* The layout is identified by its sub-stream names; initDecoder has already expanded both RLE halves. */
         if (baseStream[0]["sname"].asString() == "m") {
             int32_t decoderLen = 0;
             uint16_t mapFlag = mappedFlag.find(lineNo) == mappedFlag.end() ? 4 : mappedFlag[lineNo];
@@ -6882,22 +5709,11 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 }
                 writeDirectBases(baseSquashBuffer, decoderLen);
             } else {
-                /*
-                 * CIGAR-segment-based reference rebuild, mirroring the
-                 * compression side exactly: M/=/X segments are restored from
-                 * the reference (decode_line yields the per-base 2-bit XOR
-                 * against the reference), I/S segments are direct 2-bit codes,
-                 * and D/N only advance the reference position. Same refPos
-                 * progression, so the round-trip is lossless.
-                 */
+                /* CIGAR-segment reference rebuild, mirroring compression: M/=/X from the reference, I/S direct 2-bit, D/N advance the reference. */
                 bool findMappedPos = false;
                 int64_t refeMappedPos = 0;
                 if (isSelfReference) {
-                    /*
-                     * The consensus only covers the block's window, so the position is rebased
-                     * on it and the bound is the window's - the same decision the encoder took
-                     * (seqRecordUsesSquashWindow), which is what keeps the two sides in step.
-                     */
+                    /* The consensus covers only the block's window, so the position is rebased on it (see seqRecordUsesSquashWindow). */
                     const uint16_t chrIdx = mappedChr.find(lineNo) == mappedChr.end() ? 0xFFFF : mappedChr[lineNo];
                     const auto crlIt = cigarReadLen.find(lineNo);
                     const uint32_t refConsumed = (crlIt != cigarReadLen.end()) ? crlIt->second : 0;
@@ -6942,31 +5758,17 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                         return -1;
                     }
                     uint8_t* out = outputBlock->getCurrent();
-                    /*
-                     * No op list, or an empty one: there is nothing to walk, so this record took the
-                     * encoder's fallback and its bases are not reference-coded - the payload holds
-                     * either its characters (this build, see "litbases") or their 2-bit codes (an
-                     * older one), which is what writeDirectBases resolves. An empty list is
-                     * reachable with a valid mapping: a CIGAR of "*" on a record whose FLAG does not
-                     * say unmapped, so the empty case has to be spelled out rather than left to the
-                     * walk below, which would read the payload as XOR values.
-                     */
+                    /* No op list (or empty): the record took the encoder's fallback and its bases are not reference-coded. */
                     const bool hasOps = (lineNo < cigarOpList.size()) && !cigarOpList[lineNo].empty();
                     if (!hasOps) {
                         writeDirectBases(baseDiffSquashBuffer, (int32_t)actualBaseLen);
                     } else {
-                        /*
-                         * The same walk the writer runs, from the shared traversal (see
-                         * seqWalkCigar): every op that touches the read or the reference is handed
-                         * to the callbacks below, and the walk reports whether the ops described the
-                         * read at all.
-                         */
+                        /* The same shared CIGAR walk the writer runs (see seqWalkCigar). */
                         const std::vector<CigarOp>& ops = cigarOpList[lineNo];
                         const SeqWalkEnd end = seqWalkCigar(ops, actualBaseLen, refeMappedPos,
                             [&](uint32_t readPos, int64_t pos, uint32_t len) {
                                 if (isSelfReference) {
-                                    /* The consensus is read the same way the file's reference is,
-                                       only from the block's own buffer. */
+                                    /* The consensus is read the same way as the file's reference. */
                                     seqSquashStretch(baseSelfRefSquash.data(), refeStrecchBuffer, len,
                                                      (uint64_t)pos);
                                     for (uint32_t i = 0; i < len; ++i) {
@@ -6989,14 +5791,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                                 return SeqWalkAction::Continue;
                             },
                             [](uint32_t) { return SeqWalkAction::Continue; });
-                        /*
-                         * The ops did not describe this read - they ran past it, or did not consume
-                         * it exactly - and that is the case the writer answers by storing the bases
-                         * as they stand, so the whole payload is that form, including the part just
-                         * written above. This is what sharing the walk is for: the reader used to
-                         * clamp here instead and fill the rest from the payload's 2-bit codes, which
-                         * is not what the writer's fallback leaves in it.
-                         */
+                        /* The ops did not describe this read: the writer stores the bases as they stand, so the whole payload is that form. */
                         if (!end.complete) {
                             writeDirectBases(baseDiffSquashBuffer, (int32_t)actualBaseLen);
                         }
@@ -7004,11 +5799,7 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 }
             }
 
-            /*
-             * Write the exception characters back (see SeqExceptionClass): one cursor per
-             * stream, each a strictly increasing list of block offsets, and a position belongs
-             * to at most one stream because one character is not another.
-             */
+            /* Write the exception characters back, one cursor per stream (see SeqExceptionClass). */
             for (uint32_t n = 0; n < actualBaseLen; ++n) {
                 const uint32_t pos = totalBaseLen + n;
                 for (size_t s = 0; s < seqExc.size(); ++s) {
@@ -7035,24 +5826,13 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
 
 int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
     uint8_t* dst = outputBlock->getCurrent();
-    /*
-     * One call, whichever coder the stream says wrote this column: the record goes to dst,
-     * and the record's already-decoded SEQ (basePtr, corresponding to seqStart on the
-     * compression side) is the context. The strand direction travels with the stream itself,
-     * and the byte-stream coders need neither: they fetch as many values as this record asks
-     * for - the encoding side fed the same records one by one, with no delimiter in between.
-     */
+    /* One call, whichever coder wrote the column: the record goes to dst, with the record's decoded SEQ as context. */
     if (qualDecoder->decode_record(dst, actualBaseLen, basePtr, actualBaseLen) < 0) {
         LOG_ERROR("Decode quality failed, len = %u", actualBaseLen);
         return -1;
     }
 
-    /*
-     * Reads with missing quality (a single '*' in the original file) were
-     * expanded into seqLen '*' on the compression side; here they are folded
-     * back into a single '*', ensuring the reconstructed output matches the
-     * original.
-     */
+    /* Missing quality (single '*') was expanded to seqLen '*' on compression; fold it back here. */
     bool missing = true;
     for (uint32_t i = 0; i < actualBaseLen; ++i) {
         if (dst[i] != '*') {
@@ -7077,9 +5857,7 @@ int32_t SamCodecActuator::decompressCigar(uint32_t fieldIdx, uint8_t splitFlag, 
         LOG_ERROR("Decode cigar field(%u) failed: %d", fieldIdx, fieldLen);
         return -1;
     }
-    /* cigarOpList is indexed by the 0-based data line (lineIdx - headEndLine),
-       which is always non-negative here, so use an unsigned size_t index to
-       avoid signed/unsigned comparison warnings and resize clutter. */
+    /* cigarOpList is indexed by the 0-based data line, always non-negative here. */
     const size_t contentIdx = static_cast<size_t>(lineIdx - headEndLine);
     if (fieldLen > 1) {
         uint32_t seqLength = cigarSeqConsumed(outputBlock->getCurrent(), fieldLen);

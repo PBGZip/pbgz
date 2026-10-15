@@ -1,17 +1,26 @@
 /*
- * bam_actuator.h - column-wise BAM compression without SAM text
+ * bam_actuator.h - column-wise BAM compression without SAM text.
  *
- * BamCodecActuator consumes the BamColumns produced by BamBlockReader
- * (see bam_columns.h) instead of SAM text lines. Each column is encoded by the
- * very same coder that preprocessing selected for the corresponding SAM field
- * (makeFieldEncoder), so no field changes its encoder - only the representation
- * of the bytes fed to it:
+ * BamCodecActuator consumes the BamColumns produced by BamBlockReader (see bam_columns.h), encoding each column with the coder preprocessing selected for the matching SAM field.
+ * Copyright (C) 2025 PBGZip
  *
- *   - scalars stay scalars (FLAG u16, POS i32, MAPQ u8, RNEXT/PNEXT/TLEN i32),
- *     delta/varint transformed before entropy coding;
- *   - bases stay 4-bit packed (half the bytes of the textual SEQ column);
- *   - QUAL keeps the raw bytes and is still fed record by record, which is what
- *     fcv2 needs (per-record length + strand).
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -32,23 +41,15 @@ public:
     int32_t decompress() override;
 
 private:
-    /*
-     * Encode one already-serialised column with the coder preprocessing picked
-     * for fieldIdx, and append its meta to streamMeta. Used for every column
-     * whose payload can be handed to the coder as a single stream.
-     */
+    /* Encode one serialised column with the coder picked for fieldIdx and append its meta to streamMeta. */
     int32_t encodeColumn(uint32_t fieldIdx, CoderType fallback, const uint8_t* data, size_t size,
                          Json::Value& streamMeta, const char* name, const char* mode);
 
-    /* QNAME is a column-wise prefix/suffix-matching coder: it must be fed line
-       by line or it degrades to an ordinary context model, which loses the
-       shared-prefix compression of the textual path. */
+    /* QNAME must be fed line by line, or the prefix/suffix-matching coder degrades to a context model. */
     int32_t encodeQnameColumn(const uint8_t* qnameStream, size_t qnameStreamSize,
                               uint32_t nRecords, Json::Value& streamMeta);
 
-    /* Whole-column coding with a plain bwt_cm block, used for the columns whose
-       preselected coder (coder_fc / affix) has a fragile whole-block decoder on
-       the structured side. Deterministic and symmetric to decode. */
+    /* Whole-column coding with a plain bwt_cm block, for columns whose preselected coder has a fragile whole-block decoder. */
     int32_t encodeRawBwtColumn(uint32_t fieldIdx, const uint8_t* data, size_t size,
                                Json::Value& streamMeta, const char* name);
 
@@ -63,21 +64,12 @@ private:
     int32_t encodeCigarColumn(Json::Value& streamMeta);
     int32_t encodeQualColumn(Json::Value& streamMeta);
 
-    /* SEQ against a reference: per-base diff stream (0 = matches reference,
-       otherwise the read base character). Falls back to plain text SEQ when no
-       reference is usable. */
+    /* SEQ against a reference: per-base diff stream, or plain text SEQ when no reference is usable. */
     int32_t encodeSeqColumnRef(Json::Value& streamMeta);
 
     uint32_t pickedFor(uint32_t fieldIdx, CoderType fallback) const;
 
-    /*
-     * Whether the reference may be used for SEQ, i.e. whether the loaded FASTA is laid out the
-     * way the @SQ list addresses it (see referenceLinesUpWithHeader). seqRefEligible derives a
-     * record's reference position from the chromosome's cumulative @SQ length, which only names
-     * the right bases under that condition; a reference that fails is dropped for SEQ rather
-     * than read anyway. The verdict is taken on the first call - by then the header has been
-     * parsed - and cached for this block's actuator.
-     */
+    /* Whether the loaded FASTA is laid out the way the @SQ list addresses it; cached per actuator. */
     bool seqReferenceUsable();
 
     BamColumns* cols;

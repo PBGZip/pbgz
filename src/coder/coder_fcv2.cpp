@@ -1,18 +1,28 @@
 /*
- * coder_fcv2.cpp - Implementation of the quality-value context-mixing coder
+ * coder_fcv2.cpp - Implementation of the quality-value context-mixing coder.
  *
- * The entire implementation lives in this file; the header only exposes the
- * per-record call interface. See the note in coder_fcv2.h for the reason:
- * this file needs the binary range coder from fc/rangecoder.h, which conflicts
- * with the same-named class in clr.h, and the callers also need clr.h.
+ * A quality symbol is split by a Huffman tree into binary decisions; several
+ * models of differing granularity predict at each decision and their log-odds
+ * are mixed with gradient-descent-updated weights before range coding.
+ * Copyright (C) 2025 PBGZip
  *
- * Algorithm overview:
- *   A quality-value symbol is first split by a Huffman tree into a chain of
- *   binary decisions. At each decision point several probability models of
- *   differing granularity each predict, and the predictions are summed in the
- *   log-odds domain with weights before being handed to the range coder. The
- *   weights are updated by gradient descent; the loss is exactly the number of
- *   bits emitted, so the weights directly optimize the compression ratio.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "coder_fcv2.h"
@@ -33,27 +43,11 @@ const int TREE_CAP = FCV2_TREE_CAP;
 /* Weight-update step size as a shift, equivalent to a learning rate of 1/4096. */
 const int WEIGHT_LR_SHIFT = 12;
 
-/*
- * The mix is fixed at FCV2_MODEL_COUNT models (m0..m4, always all of them): it
- * is not a per-stream property anymore, so neither Fcv2Cfg nor the stream header
- * carries a count. The arrays below are sized by that constant. See coder_fcv2.h
- * for why the tail models (m5, m6) were dropped.
- */
+/* The mix is fixed at FCV2_MODEL_COUNT models; the arrays below are sized by it. */
 
-/* Legal range of the context parameter tiers. When the decoder reads back the
-   stream header it normalizes by the same rule, so that a corrupted stream
-   cannot cause an oversized model array to be allocated. Array sizes grow with
-   cfg, so an upper bound is required.
-
-   Every maximum here is also written into the stream header as a single byte, so
-   it has to fit in one - 255 is the largest value the field can carry, while 256
-   would be written as 0 and read back as the 8 that normalizeCfg clamps it to. A
-   larger maximum would therefore let normalizeCfg accept a value the header
-   cannot carry: the encoder would keep the untruncated value while the decoder
-   read back the truncated one, the two sides would disagree on the context
-   layout, and the stream would decode into garbage with nothing reported (the
-   header carries no checksum, and the model-layout comparison below only runs
-   when a prior is loaded). The static_assert pins the invariant. */
+/* Legal range of the context parameter tiers; the decoder normalizes by the same
+   rule so a corrupted stream cannot allocate an oversized model array. Every
+   maximum is written into the stream header as one byte. */
 const int CFG_CYCLE_MAX_MIN = 32;
 const int CFG_CYCLE_MAX_MAX = 128;
 const int CFG_CYCLE_BUCKET_MAX = 32;
@@ -66,11 +60,8 @@ static_assert(CFG_CYCLE_MAX_MAX <= 255 && CFG_CYCLE_BUCKET_MAX <= 255 &&
               "one byte each, so a maximum above 255 would be truncated on write and "
               "break decoding");
 
-/*
- * Normalizes an externally supplied cfg to the tiers actually used by the
- * coder. Both sides (encoder and decoder) must call this; if either side
- * diverges from it, encode/decode will misalign on the context indices.
- */
+/* Normalizes cfg to the tiers actually used; both sides must call this or the
+   context indices misalign. */
 Fcv2Cfg normalizeCfg(Fcv2Cfg cfg)
 {
     if (cfg.cycleMax < CFG_CYCLE_MAX_MIN) cfg.cycleMax = CFG_CYCLE_MAX_MIN;
@@ -90,16 +81,10 @@ const int BASE_STATES = 6;
    (unknown). Filled in initTables. */
 uint8_t g_baseSym[256];
 
-/*
- * The model snapshot is deliberately kept separate from the stream: the stream
- * format must not change because of the prior-model feature. The fixed header
- * below lets the snapshot be validated against the current array layout before
- * it is read; if any size constant changes, the node indices in an old snapshot
- * are no longer well-defined and must be rejected, rather than continuing to
- * encode with probabilities that look usable but are actually wrong.
- */
+/* Model snapshot header: lets a snapshot be validated against the current array
+   layout before it is read. */
 const uint8_t MODEL_MAGIC[] = { 'f', 'c', 'v', '2', 'p', 'r', 'i', 'o', 'r' };
-const uint16_t MODEL_FORMAT_VERSION = 9;  /* v9: models m5/m6 and their config tiers (deltaMax, deltaBucket, useDelta, useQa) removed, model count fixed at FCV2_MODEL_COUNT */
+const uint16_t MODEL_FORMAT_VERSION = 9;  /* v9: m5/m6 removed, model count fixed at FCV2_MODEL_COUNT */
 
 inline void appendU16(std::vector<uint8_t>& out, uint16_t value)
 {
@@ -119,13 +104,8 @@ inline void appendI32(std::vector<uint8_t>& out, int32_t value)
     appendU32(out, (uint32_t)value);
 }
 
-/*
- * The byte reader advances its position only when enough input remains, so a
- * truncated snapshot cannot cause an out-of-bounds read, nor can it expose a
- * half-restored model to the caller. All numbers are parsed byte-by-byte in
- * little-endian order, keeping host endianness and struct padding out of the
- * snapshot format.
- */
+/* Byte reader for the snapshot; advances only when enough input remains, so a
+   truncated blob cannot read out of bounds. All numbers are little-endian. */
 class ModelBlobReader {
 public:
     explicit ModelBlobReader(const std::vector<uint8_t>& blob) : data(blob), pos(0) {}
@@ -163,15 +143,8 @@ private:
     size_t pos;
 };
 
-/*
- * A probability and a count are packed into one uint16_t: the low 12 bits are
- * the probability (0..4095) and the high 4 bits are the update count (0..15).
- *
- * The count is capped at 15 rather than something larger because the adaptive
- * step-size table becomes constant once the count reaches 15, so recording
- * anything beyond that is pointless. This conveniently frees 4 bits to share a
- * single 16-bit integer with the probability, halving the model's memory.
- */
+/* A probability and a count packed into one uint16_t: low 12 bits probability
+   (0..4095), high 4 bits update count (0..15). */
 typedef uint16_t Counter;
 
 inline int counterProb(Counter c)  { return c & 0x0FFF; }
@@ -184,16 +157,8 @@ const Counter COUNTER_INIT = 2048;   /* probability 0.5, count 0 */
 short  g_stretch[4096];
 uint16_t g_squash[4096];
 
-/*
- * Adaptive step-size table.
- *
- * A freshly created counter has few updates and a large step, so a few updates
- * suffice to move it from the initial 0.5 toward the true value; as the update
- * count grows the step shrinks and the estimate gradually stabilizes. This
- * targets sparse contexts directly - the finer the context, the fewer times
- * each counter is accessed, and it sits exactly in the phase of fast convergence
- * with a large step.
- */
+/* Adaptive step-size table: large step when the update count is small, shrinking
+   as it grows. */
 uint8_t g_adaptShift[16];
 
 bool g_tablesReady = false;
@@ -248,16 +213,8 @@ inline void counterUpdate(Counter& c, int isZero)
     c = (Counter)(p | (n << 12));
 }
 
-/*
- * Huffman tree.
- *
- * The leaves are quality-value symbols; the path from root to leaf is a chain
- * of binary decisions. Building it by frequency gives high-frequency symbols
- * shorter paths, reducing the number of binary codings per symbol. This only
- * affects speed, not the compression ratio: the cost of arithmetic coding is
- * the sum of -log2(p) over the steps, and splitting a symbol into several
- * conditional decisions leaves the total cost unchanged.
- */
+/* Huffman tree: leaves are quality symbols; frequency-built so common symbols
+   get shorter paths. Affects speed only, not the compression ratio. */
 struct HuffTree {
     int alphaSize;
     int root;
@@ -330,30 +287,10 @@ private:
 };
 
 /*
- * Five context models of increasing granularity.
- *
- *   m0  only the tree node; the coarsest, always has enough samples, acts as a
- *       floor/baseline
- *   m1  position + tree node
- *   m2  previous symbol + position + tree node
- *   m3  previous two symbols + position bin + strand + tree node
- *   m4  current base + position + tree node
- *
- * The former m5 (in-read quality-transition count, strategy 1) and m6 (read
- * average-quality bin, strategy 4) models are gone, with the configuration
- * parameters that shaped them (deltaMax, deltaBucket, useDelta, useQa); see
- * coder_fcv2.h for the rationale. Their per-bit cost was one mix-and-update
- * each, so the remaining mix is both faster and, on most data, a little.
- * smaller.
- *
- * The base used by m4 is the base of "the sequencing cycle that produced this
- * quality value": position i on the forward strand, len-1-i in storage order on
- * the reverse strand. Quality values correlate strongly with the base
- * (mismatch positions and low-complexity regions are systematically lower in
- * quality), and this context dimension is largely orthogonal to the others
- * (previous symbols, strand), so it does not overlap m3.
- *
- * The sizes of the arrays are determined by Fcv2Cfg, see init().
+ * Five context models of increasing granularity:
+ *   m0 tree node; m1 position + node; m2 previous symbol + position + node;
+ *   m3 previous two symbols + position bin + strand + node; m4 base + position + node.
+ * Array sizes are determined by Fcv2Cfg; see init().
  */
 struct ContextModel {
     int alphaSize;
@@ -363,27 +300,10 @@ struct ContextModel {
     int cycleBucket;
     int prevShift;
     std::vector<Counter> m0, m1, m2, m3, m4;
-    /*
-     * The five tables as an array of base pointers. The mix is fixed at
-     * FCV2_MODEL_COUNT models, so table is always fully populated and the mix
-     * loops run over all five.
-     *
-     * The mix loop runs once per model per coded bit and needs each table's base; going through the
-     * switch in counterAt() made that a branch (and an unpredictable one at the point of use, since
-     * the model index is a loop variable) on the hottest path in the coder. The pointers are set
-     * once in init(), after the vectors are sized, and no table is ever reallocated afterwards, so
-     * they stay valid for the coder's lifetime.
-     */
+    /* The five tables as base pointers, set once in init() after sizing. */
     Counter* table[FCV2_MODEL_COUNT] = { nullptr, nullptr, nullptr, nullptr, nullptr };
 
-    /*
-     * Points `table` at the current buffers. Called by init(), and again by whoever moves a
-     * ContextModel into place - a vector move keeps its buffer, so the pointers survive the move,
-     * but a *copy* would leave the copy's table aimed at the source's memory. Copying is therefore
-     * deleted; moving is allowed and is what the prior loader uses (it builds a model, then moves
-     * it over the one the constructor made), and it calls this again so the invariant does not
-     * depend on the reader noticing that a move kept the buffers valid.
-     */
+    /* Points `table` at the current buffers; called after init() and after a move. */
     void rebindTables()
     {
         table[0] = m0.data();
@@ -409,16 +329,8 @@ struct ContextModel {
         cycleMax = cfg.cycleMax;
         cycleBucket = cfg.cycleBucket;
         prevShift = cfg.prevShift;
-        /*
-         * Using all symbol values for m3 is too sparse (39x39x16x2x64 = about
-         * 3.1M slots on this data, only ~9 accesses per block), so the order-2
-         * structure cannot be learned. Empirically, quantizing the previous
-         * quality value by >>1 to 22 tiers (quality value ~ symbol id) retains
-         * 55% of the order-2 conditional-entropy gain (3.66 vs 3.53 bits) while
-         * cutting the slot count to 1/3. The tier count is adjustable via
-         * prevShift: shift further right for coarser tiers with large
-         * alphabets, or skip quantization for small alphabets.
-         */
+        /* Quantizing the previous quality value by >>prevShift keeps the order-2
+           context from being too sparse. */
         prevQStates = (alpha >> prevShift) + 2;
         m0.assign((size_t)TREE_CAP, COUNTER_INIT);
         m1.assign((size_t)cycleMax * TREE_CAP, COUNTER_INIT);
@@ -427,17 +339,10 @@ struct ContextModel {
         m4.assign((size_t)BASE_STATES * cycleMax * TREE_CAP, COUNTER_INIT);
         /* The mix loop's fast path: see the note on `table`. */
         rebindTables();
-        /* Initial weights are 1<<14, i.e. fixed-point 0.25, so the five models
-           together start close to a simple average. */
+        /* Initial weights 1<<14 (fixed-point 0.25) start close to a simple average. */
         weight.assign((size_t)cycleBucket * TREE_CAP * FCV2_MODEL_COUNT, 1 << 14);
-        /*
-         * Precomputed cycle-index -> position-bin map. The bin is a pure
-         * function of the cycle index and the tier parameters, and the hot loop
-         * needs it once per symbol: both the m3 context and the weight row are
-         * indexed by it. Before this table the division ran once per coded bit,
-         * because the weight row was indexed by the cycle too; a 128-entry
-         * table turns that integer division into a single L1 load.
-         */
+        /* Precomputed cycle-index -> position-bin map, shared by m3 and the
+           weight row. */
         cycBucketTab.assign((size_t)cycleMax, 0);
         for (int c = 0; c < cycleMax; c++) {
             int b = c * cycleBucket / cycleMax;
@@ -474,10 +379,8 @@ struct ContextModel {
 
 } /* namespace */
 
-/*
- * The implementation body. It lives outside the anonymous namespace because
- * the header forward-declares it.
- */
+/* The implementation body; outside the anonymous namespace because the header
+   forward-declares it. */
 class fcv2_impl {
 public:
     coder_io* io;
@@ -486,43 +389,22 @@ public:
     RangeCoder rc;
 
     /*
-     * Probability model for the strand itself.
-     *
-     * The strand is written into the stream with each record, rather than being
-     * supplied again by the caller at decompression. This makes the coder fully
-     * self-contained: the decompression side need not care how far the FLAG
-     * field has been decoded in order to decode QUAL, nor maintain a
-     * per-record array of strands.
-     *
-     * The cost is about one bit per record. Empirically the reverse strand is
-     * 49.9%, close to maximum entropy, so it compresses poorly: a million
-     * records cost about 125 KB, which is 0.139% of 90 MB of quality values.
-     * Meanwhile the strand brings a gain of 0.372 percentage points, so after
-     * subtracting this cost the net gain is still 0.233 percentage points;
-     * worth it.
-     *
-     * An adaptive counter is still used instead of a fixed 0.5 because forward
-     * and reverse strands are not necessarily split evenly in a coordinate-
-     * sorted SAM; the model adapts to the actual ratio.
+     * Probability model for the strand. The strand is written into the stream
+     * with each record so the coder is self-contained; the cost (about one bit
+     * per record) is less than the gain it enables.
      */
     Counter revCounter;
 
-    /* Adjacent duplicate read dedup (strategy 3): the dup flag has its own
-       adaptive probability, maintained record by record. */
+    /* Adjacent duplicate read dedup flag, with its own adaptive probability. */
     Counter dupCounter;
-    /* The previous record's quality string (storage order), used for
-       comparison and for the decoder to restore it; kept across records. */
+    /* Previous record's quality string (storage order), kept for dedup. */
     std::vector<uint8_t> prevQual;
     uint32_t prevQualLen = 0;
 
     Fcv2Cfg cfg;             /* normalized context-parameter tiers */
 
-    /*
-     * Whether this coder's alphabet contains the given quality byte. The alphabet is fixed for the
-     * stream - by the frequency table, or by the prior when one is loaded - so the upper layer asks
-     * before handing over a block: a block carrying a value outside it cannot be coded (see
-     * coder_io::IO_UNCODABLE) and has to go through a codec that can.
-     */
+    /* Whether the fixed alphabet contains the given quality byte; values outside
+       it cannot be coded. */
     bool coversByte(uint8_t b) const { return symbolOf[b] >= 0; }
 
     int alphaSize;
@@ -544,16 +426,8 @@ public:
         memset(quantFreq, 0, sizeof(quantFreq));
     }
 
-    /*
-     * A single binary prediction: take each model's probability to log-odds,
-     * sum them weighted by the weights, then convert back to a probability.
-     *
-     * The linear combination is done in the log-odds domain rather than as a
-     * direct weighted average of probabilities because probability scales are
-     * not uniform: the difference between 0.50 and 0.51 and the difference
-     * between 0.98 and 0.99 are entirely different in coding cost. Log-odds is
-     * an additive evidence strength, so the combination semantics are correct.
-     */
+    /* Combine each model's log-odds prediction with the weights, then convert
+       back to a probability. */
     inline int predict(const size_t* base, int node, int wBucket,
                        Counter** slot, int* stretched, int*& wp)
     {
@@ -564,22 +438,12 @@ public:
             stretched[i] = g_stretch[counterProb(*slot[i])];
             dot += (long)wp[i] * stretched[i];
         }
-        /* squash() already clamps the result into [1, 4095], which is exactly
-           what the range coder needs (strictly inside (0, 4096)); no extra
-           clamping here. */
+        /* squash() already clamps to [1, 4095]. */
         return squash((int)(dot >> 16));
     }
 
-    /*
-     * Updates the weights and each model's counter.
-     *
-     * The weight update is gradient descent on the cross-entropy loss. Viewing
-     * the mixer as a logistic regression whose inputs are the log-odds given by
-     * each model and whose output is the final probability, the gradient of the
-     * loss w.r.t. a weight is exactly -(target - prediction) x input. Here the
-     * loss is the number of bits actually spent coding this bit, so the weights
-     * directly optimize the compression ratio.
-     */
+    /* Updates the weights (gradient descent on the coding-cost loss) and each
+       model's counter. */
     inline void update(Counter** slot, const int* stretched, int* wp, int p, int isZero)
     {
         int err = (isZero ? 4095 : 0) - p;
@@ -589,8 +453,8 @@ public:
         }
     }
 
-    /* Converts an in-record position to a sequencing-cycle index; the reverse
-       strand must flip it by the record length, see the header note. */
+    /* Converts an in-record position to a sequencing-cycle index (flipped on the
+       reverse strand). */
     inline int cycleOf(uint32_t i, uint32_t len, bool rev) const
     {
         uint32_t c = rev ? (len - 1 - i) : i;
@@ -668,18 +532,8 @@ public:
 
         Fcv2Cfg storedCfg = { (int)cycleMax, (int)cycleBucket, (int)prevShift, useDedup == 1 };
         storedCfg = normalizeCfg(storedCfg);
-        /*
-         * The prior is a cross-block training product, so its counter arrays
-         * follow the tier layout used during training. The loader (whether the
-         * compression or the decompression side) adopts the tiers carried by
-         * the prior itself as the effective tiers, rather than requiring the
-         * prior to match the tiers of construction: the prior always shares the
-         * tiers of the stream it is used with (training and compression use the
-         * same parameter set), so either side can safely treat "the prior
-         * decides the tiers". If they disagree with the stream header,
-         * begin_decode rejects on the tier mismatch, see its modelLoaded
-         * branch.
-         */
+        /* Adopt the prior's own tiers as the effective tiers; a later tier
+           mismatch with the stream header is rejected in begin_decode. */
         cfg = storedCfg;
 
         ContextModel restored;
@@ -781,8 +635,7 @@ private:
             prevStates * cfg.cycleMax * TREE_CAP +
             prevQStates * prevQStates * cfg.cycleBucket * 2 * TREE_CAP +
             (size_t)BASE_STATES * cfg.cycleMax * TREE_CAP;
-        /* header: 9 magic + 7 x u16 (version, cycleMax, cycleBucket, prevShift, useDedup,
-           treeCap, alpha) + 6 x u32 (m0..m4 and weight lengths) */
+        /* header: magic + 7 x u16 + 6 x u32 */
         return sizeof(MODEL_MAGIC) + 7 * 2 + 6 * 4 + (size_t)alpha +
             (size_t)alpha * 2 + 2 + 2 + counters * 2 +
             (size_t)cfg.cycleBucket * TREE_CAP * FCV2_MODEL_COUNT * 4;
@@ -805,9 +658,7 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, con
             continue;
         }
         if (alpha >= TREE_CAP) {
-            /* The alphabet exceeds the tree capacity; the caller should switch
-               to another coder. alphaSize is left at 0 so that calls beyond
-               supports() are noticed by the upper layer. */
+            /* Alphabet exceeds the tree capacity; leave alphaSize at 0 to signal another coder. */
             alpha = 0;
             break;
         }
@@ -817,16 +668,8 @@ coder_fcv2::coder_fcv2(coder_io* io, const std::vector<uint32_t>& freqTable, con
     }
     impl->alphaSize = alpha;
     if (alpha > 0) {
-        /*
-         * Frequencies are quantized to 1..65535 before building the tree,
-         * rather than using the raw counts directly.
-         *
-         * This is so that the encoder and decoder see exactly the same input
-         * when building the tree: the decoder only gets the quantized values
-         * written into the stream, and if the encoder built the tree from raw
-         * counts the two trees could diverge at some merge order. Using the
-         * quantized values uniformly avoids this problem.
-         */
+        /* Quantize frequencies to 1..65535 so encoder and decoder build the
+           same tree from the same values. */
         uint32_t maxFreq = 1;
         for (int s = 0; s < alpha; s++) {
             uint32_t f = freqTable[impl->byteOf[s]];
@@ -885,35 +728,15 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
     }
     if (!d->encodeStarted) {
         d->rc.InitEncoder(d->io->data, d->io->data_capacity);
-        /*
-         * The format version comes first, before any parameter: it is what tells a reader which
-         * layout the bytes that follow belong to (see FCV2_STREAM_VERSION).
-         */
+        /* Format version first, then the parameters. */
         d->rc.EncodeByte(FCV2_STREAM_VERSION);
         d->rc.EncodeByte((unsigned)d->alphaSize);
-        /*
-         * The context parameter tiers are written into the stream header. The
-         * model array layout is determined by them, and the decoder must read
-         * back the same set to align the context indices; this also lets each
-         * data block carry its own tier choice. See normalizeCfg(): both sides
-         * normalize by the same rule, so any legal value agrees on both sides.
-         */
+        /* Context parameter tiers, so the decoder can align its context indices. */
         d->rc.EncodeByte((unsigned)d->cfg.cycleMax);
         d->rc.EncodeByte((unsigned)d->cfg.cycleBucket);
         d->rc.EncodeByte((unsigned)d->cfg.prevShift);
         d->rc.EncodeByte((unsigned)(d->cfg.useDedup ? 1 : 0));
-        /*
-         * The alphabet is written into the stream together with each symbol's
-         * quantized frequency.
-         *
-         * The frequencies must be written out; the decoder must not be left to
-         * guess them. The shape of the Huffman tree is entirely determined by
-         * the frequencies, and if the trees built on the two sides differ in
-         * the slightest way the paths no longer match and the decoded symbol is
-         * a different one. After quantization to 16 bits each symbol takes two
-         * bytes; a few dozen symbols total under a hundred bytes, negligible
-         * relative to a whole block of data.
-         */
+        /* Alphabet plus quantized frequencies, so the decoder rebuilds the same tree. */
         for (int s = 0; s < d->alphaSize; s++) {
             d->rc.EncodeByte((unsigned)d->byteOf[s]);
             d->rc.EncodeByte((unsigned)(d->quantFreq[s] >> 8));
@@ -937,13 +760,7 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         counterUpdate(d->revCounter, !rv);
     }
 
-    /*
-     * Adjacent duplicate read dedup (strategy 3, fqzcomp's do_dedup): compare
-     * byte-by-byte with the previous record; if identical, write 1 bit and skip
-     * the whole quality string. When a duplicate is hit, this record's context
-     * state is not updated (prev/prev2 are all reset at the start of each
-     * record), so the next record starts from zero as usual on both sides.
-     */
+    /* Adjacent duplicate read dedup: 1 bit when identical, else the whole string. */
     if (d->cfg.useDedup) {
         bool isDup = (len == d->prevQualLen) &&
                      (d->prevQualLen == 0 || memcmp(qual, d->prevQual.data(), len) == 0);
@@ -972,27 +789,13 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
     for (uint32_t i = 0; i < len; i++) {
         int sym = d->symbolOf[qual[i]];
         if (sym < 0) {
-            /*
-             * A quality value outside the alphabet cannot be coded. The alphabet is fixed for the
-             * whole stream (by the frequency table, or by the prior when one is loaded, whose
-             * alphabet comes from the blocks it was trained on), so this does happen in practice:
-             * a file whose later blocks carry quality values the earlier ones never used. Dropping
-             * the byte would leave a stream one symbol short and the decoder - which has no way to
-             * know - would read every following symbol at the wrong offset, so the whole rest of the
-             * block is wrong; substituting one would change the data. Fail the stream instead: the
-             * caller falls back to a codec whose alphabet covers the block.
-             */
+            /* A value outside the fixed alphabet cannot be coded; fail the
+               stream so the caller falls back to another codec. */
             d->io->set_err(coder_io::IO_UNCODABLE);
             return;
         }
-        /*
-         * The base context takes the base of "the cycle that produced this
-         * quality value": i on the forward strand, len-1-i on the reverse
-         * strand, using the same mapping as cycleOf so both sides stay
-         * consistent. If the seq length is insufficient (abnormal data) the
-         * position falls into the "unknown" bin, and seq is never read
-         * out-of-bounds.
-         */
+        /* Base of the cycle that produced this quality value; unknown when seq
+           is missing or too short. */
         uint32_t mapped = rev ? (len - 1 - i) : i;
         int cyc = d->cycleOf(i, len, rev);
         int baseSym = (seq != nullptr && mapped < seqLen) ? g_baseSym[seq[mapped]] : (BASE_STATES - 1);
@@ -1039,19 +842,8 @@ int32_t coder_fcv2::encode_flush()
     return d->io->data_len;
 }
 
-/*
- * Reads one stream header layout from data, rewinding the range decoder first, and reports
- * whether the bytes fit it.
- *
- * The layout of this build is: version byte (FCV2_STREAM_VERSION), alphabet size, cycleMax,
- * cycleBucket, prevShift, useDedup. The model count is not in the header because it is fixed at
- * FCV2_MODEL_COUNT on both sides. Old layouts (deltaMax/deltaBucket/useDelta/useQa tiers, a
- * carried model count, or the pre-version layout) are deliberately not supported: compatibility
- * was dropped, so anything that does not fit this layout is refused with
- * CODER_ERR_UNSUPPORTED_VERSION rather than parsed on a guess. The parameter ranges are tight
- * enough to catch a misdirected stream (alphabet <= TREE_CAP, cycleBucket <= CFG_CYCLE_BUCKET_MAX,
- * prevShift <= CFG_PREV_SHIFT_MAX, useDedup boolean).
- */
+/* Reads the stream header, rewinding the range decoder first. Anything that
+   does not fit this build's layout is refused as an unsupported version. */
 static bool readStreamHeader(RangeCoder& rc, const uint8_t* data, int& alpha, Fcv2Cfg& cfg)
 {
     rc.InitDecoder(data);
@@ -1077,25 +869,14 @@ static bool readStreamHeader(RangeCoder& rc, const uint8_t* data, int& alpha, Fc
 int32_t coder_fcv2::begin_decode()
 {
     fcv2_impl* d = impl.get();
-    /*
-     * Read the header. A stream that does not fit this build's layout is refused as an
-     * unsupported version rather than parsed on a guess - that is what an archive from an unknown
-     * layout looks like from here (old fcv2 layouts wrote extra tiers), and saying so is more use
-     * than reporting it as corruption.
-     */
+    /* A stream that does not fit this build's layout is refused as unsupported. */
     int alpha = 0;
     Fcv2Cfg streamCfg;
     if (!readStreamHeader(d->rc, d->io->data, alpha, streamCfg)) {
         return coder_ns::CODER_ERR_UNSUPPORTED_VERSION;
     }
     streamCfg = normalizeCfg(streamCfg);
-    /*
-     * The prior comes from cross-block training, so its model layout is
-     * determined by the tiers used at training time; if it disagrees with the
-     * stream header, the counter arrays no longer line up and it can only be
-     * rejected (the same mismatch on the compression side makes loadModel
-     * return false).
-     */
+    /* A prior whose tiers disagree with the header can only be rejected. */
     if (d->modelLoaded && d->cfg != streamCfg) {
         return -1;
     }
@@ -1115,15 +896,8 @@ int32_t coder_fcv2::begin_decode()
         streamQuantFreq[s] = (uint16_t)freq[s];
     }
 
-    /*
-     * The counters in the prior are indexed by tree-node number, so they cannot
-     * be used to decode a stream built from a different tree. Even if two
-     * alphabets contain the same set of bytes, if the frequencies change and
-     * the merge order changes, a node number may now denote a different
-     * decision; therefore, after loading a prior, every item in the stream
-     * header must be verified, and the loaded learning state must be kept
-     * rather than overwritten by calling init again.
-     */
+    /* Prior counters are indexed by tree node, so every header item must match
+       the loaded prior. */
     if (d->modelLoaded) {
         if (d->alphaSize != alpha) return -1;
         for (int s = 0; s < alpha; s++) {
@@ -1174,9 +948,7 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
         counterUpdate(d->dupCounter, !isDup);
         if (isDup) {
             if (d->prevQualLen < len) {
-                /* The previous quality string is missing or too short, a
-                   corrupted stream; fall back to '!' to avoid an out-of-bounds
-                   read. */
+                /* Corrupt stream: previous string too short; fill with '!' to stay in bounds. */
                 memset(dst, '!', len);
             } else {
                 memcpy(dst, d->prevQual.data(), len);

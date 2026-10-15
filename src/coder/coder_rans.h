@@ -1,37 +1,32 @@
 /*
- * coder_rans.h - static order-0 entropy byte-stream coder for the fast path
+ * coder_rans.h - static order-0 entropy byte-stream coder for the fast path.
  *
- * Same external interface and buffering behaviour as coder_bwt_cm /
- * coder_arith (encode_line / encode_flush / decode_line / decode_inlen):
- * the caller caches the whole column with encode_line and commits it with a
- * single encode_flush, producing one independent coded block.
+ * Same external interface and buffering as the other coders. Fits one static
+ * order-0 frequency model per block (one O(n) counting pass) then codes each
+ * symbol in O(1), keeping per-symbol speed high. The model is fully written in
+ * the block header, so decode needs no side information.
  *
- * Why this exists: the fast preset fixes one coder per column and skips
- * preselection, so per-symbol speed is what matters. coder_arith rebuilds its
- * order-0 adaptive model per symbol by adding a step to every suffix of the
- * cumulative table, i.e. O(256) work per byte - fine for archive ratio, not a
- * fast coder. This coder instead fits one static order-0 frequency model per
- * block (a single O(n) counting pass plus an O(256) normalisation) and then
- * codes every symbol in O(1): the entropy backend is the carry-less range
- * coder used by coder_arith's current (htscodecs-style) backend, with all
- * per-symbol model updates removed. The model is fully described by the
- * 256 x uint16 weight table written in the block header, so the decoder needs
- * no prior state, no side information and no alphabet inference: decode is
- * deterministic from the block alone.
+ * Block format: [u32 LE length][u8 flags][payload]; flags 0x00 raw, 0x01 static
+ * order-0. Falls back to raw when not shorter.
+ * Copyright (C) 2025 PBGZip
  *
- * Bitstream block format (each block is independent):
- *   [u32 LE] source length N, 0 = end of stream
- *   [u8]     flags: 0x00 = raw, 0x01 = static order-0 coded
- *   [raw]    N source bytes                                  (flags 0x00)
- *   or
- *   [512B]   packed 256 x uint16 LE symbol weights           (flags 0x01)
- *   [payload] the entropy-coded stream (carry-less range coder, 5-byte flush)
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * The encoder falls back to raw when the coded stream is not shorter than the
- * plain block (incompressible input).
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- * Error convention is the same as the other coders: decode_line returns < 0 on
- * a corrupt/truncated stream, 0 on clean EOF and > 0 on the decoded length.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef _CODER_RANS_H_
@@ -199,11 +194,8 @@ public:
     }
 
 private:
-    /* ---- Carry-less range coder (htscodecs/CRAM-style arrangement) -----
-     * 32-bit range with a 2^24 renormalisation floor, a cached byte plus a
-     * run of pending 0xFFs for carries, and a 5-byte flush. The model total
-     * stays at 2^16, so range/total >= 2^8 at every symbol: the per-symbol
-     * 32x32 divide keeps enough precision and there is no coding-loss trap. */
+    /* Carry-less range coder: 32-bit range, 2^24 floor, cached byte plus pending
+       0xFF run, 5-byte flush. */
     static constexpr uint32_t kTop = 1u << 24;
     static constexpr uint32_t kThres = 255u * kTop;
 
@@ -297,10 +289,7 @@ private:
                 freq[i] = (uint32_t)i;
         }
 
-        /* Rebuild from the packed 256 x uint16 LE weight blob, scaled so the
-           total lands at kModelTotal and every weight is >= 1 (strictly
-           increasing table, no zero-size interval). An all-zero blob keeps
-           the uniform table. */
+        /* Rebuild from a 256 x uint16 LE weight blob; zero blob keeps uniform. */
         void init_from_weights(const uint8_t *w)
         {
             uint32_t wt[256];
@@ -351,8 +340,7 @@ private:
     };
 
 
-    /* Sparse order-1 header encoding (shared with the range order-1 path and
-       the rANS order-1 path): context = previous byte. */
+    /* Sparse order-1 header: one entry per context (previous byte). */
     static size_t makeO1Header(const uint32_t cnt[256][256], uint8_t* hdr, size_t cap)
     {
         size_t p = 0;
@@ -378,8 +366,7 @@ private:
         return p;
     }
 
-    /* Legacy range-coder order-1 model, kept to decode files whose flags are
-       0x02 (produced before the rANS backend replaced the range coder). */
+    /* Legacy range-coder order-1 model, kept to decode old flags=0x02 files. */
     struct Order1Model {
         std::vector<uint32_t> freq;   /* [ctx*257+sym] cumulative, total ~2^16 */
 
@@ -444,33 +431,18 @@ private:
         }
     };
 
-    /* ---- ryg-style rANS (order-0 / order-1) ------------------------------
-     * 32-bit state, L = 2^23, 8-bit renormalisation, frequency scale 2^12.
-     * Encoding runs symbols in reverse order (last to first) writing bytes to
-     * the end of a temp buffer; the final state is flushed as 4 LE bytes in
-     * front of the renorm bytes. Decoding is forward.
-     *   put : renorm while x >= x_max; x = (x/freq)<<12 + x%freq + cum
-     *   get : cum = x & 4095
-     *   adv : x = freq*(x>>12) + (x&4095) - cum; renorm by reading bytes
-     * Reference: Fabian 'ryg' Giesen, rans_byte.h (public domain).
-     */
+    /* ryg-style rANS (order-0/order-1): 32-bit state, L = 2^23, 8-bit
+       renormalisation, frequency scale 2^12. Encoding runs in reverse and
+       flushes the final state as 4 LE bytes in front of the renorm bytes. */
     static constexpr uint32_t kRansL = 1u << 23;
     static constexpr uint32_t kRansScaleBits = 12;
     static constexpr uint32_t kRansMask = (1u << kRansScaleBits) - 1;
 
-    /* Build a 4096-total cumulative table from raw weights: symbols with a
-       zero weight keep an empty interval (0 width), present symbols are scaled
-       so the total is exactly 4096 and every interval is >= 1. Both encoder
-       and decoder call this on the same stored weights, so it is the single
-       source of truth for the model. */
+    /* Build a 4096-total cumulative table from raw weights; zero-weight symbols
+       keep an empty interval, present symbols an interval >= 1. */
     static void cum4096(const uint32_t *w, uint32_t f[257])
     {
-        /* Every present symbol keeps an interval of width >= 1 and the widths
-           sum to exactly 2^12 (rANS requires total == scale). Naive last+1
-           scaling can overshoot 4096 when many rare symbols are forced to
-           width 1, which breaks the x&mask algebra; give each present symbol a
-           base width of 1 first and distribute the remaining budget by
-           weighted largest remainders. */
+        /* Give each present symbol width 1, then distribute the rest by largest remainders. */
         uint64_t tot = 0;
         uint32_t used[256];
         uint32_t base[256] = {0};
@@ -562,13 +534,8 @@ private:
         }
     };
 
-    /* Four-way interleaved rANS: symbol i goes to lane i&3; symbols of a lane
-       keep their original relative order, each lane is an independent rANS32
-       stream. Payload layout (as written/read by the caller):
-         [u32 LE lane0 len][lane1][lane2][lane3] then the four lane payloads
-       concatenated lane-major, each starting with its 4-byte flush state.
-       order1 uses the per-context models (ctx = the byte preceding the symbol
-       in the ORIGINAL stream); order0 uses the single global table. */
+    /* Four-way interleaved rANS: symbol i goes to lane i&3, each lane an
+       independent stream. Header: four u32 lane lengths, then the lane payloads. */
     void ransEncode4(bool order1, int32_t n, const RansModel0 &m0,
                      const RansModel1 &m1, uint32_t lens[4],
                      std::vector<uint8_t> &payload)
@@ -621,8 +588,7 @@ private:
         }
     }
 
-    /* Encode one order-0/order-1 run into `out` (prefix bytes). Returns the
-       number of coded bytes; the caller then compares with raw size. */
+    /* Encode one order-0/order-1 run into `out`; returns the coded byte count. */
     size_t ransEncode(const uint32_t *cum /* [s+1]=upper, cum[0]=0 */, size_t n,
                       std::vector<uint8_t> &out) const
     {
@@ -654,9 +620,7 @@ private:
         return len;
     }
 
-    /* One block of n source bytes plus its header. Candidates: order-0 rANS,
-       order-1 rANS, raw - the shortest is written (old range-encoded files
-       keep decoding through their own flags). */
+    /* One block plus header; writes the shortest of order-0 rANS, order-1 rANS, raw. */
     void encode_one_block(int32_t n)
     {
         put32((uint32_t)n);
@@ -704,9 +668,7 @@ private:
         RansModel1 m1;
         const bool o1ok = m1.init(hdr1.data(), hdr1Len);
 
-        /* order choice and coding: encode BOTH 4-way candidates and take the
-           shorter (4-way == single-stream in size; it only parallelises the
-           state machine, so single-stream candidates are not produced). */
+        /* Encode both 4-way candidates and take the shorter. */
         std::vector<uint8_t> p0, p1;
         uint32_t len4o0[4], len4o1[4];
         ransEncode4(false, n, m0, m1, len4o0, p0);
@@ -751,8 +713,7 @@ private:
             io->putc(coder_buff[i]);
     }
 
-    /* Decode one block from the code stream into coder_buff; returns the
-       source length, 0 on the end marker, < 0 on a corrupt stream. */
+    /* Decode one block into coder_buff; returns length, 0 at end, <0 on error. */
     int32_t decode_one_block()
     {
         if (io->err != coder_io::IO_OK)

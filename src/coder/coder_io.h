@@ -39,58 +39,33 @@ struct coder_io
     };
 
     /*
-     * Stream error flag. Both write overflow (buffer too small) and read-side
-     * exhaustion set it, so the higher-level coder can inspect it during decode
-     * and propagate the error to the actuator through the return value—instead of
-     * silently writing past the end and corrupting the heap, or silently returning
-     * '\0' and producing a "successful" file with wrong content.
-     *
-     * Read-side exhaustion cannot be signalled by the returned byte: '\0' is
-     * also real data (quality value '!'-'!'=0), so the return value alone cannot
-     * distinguish a real zero from "nothing left to read"; a flag carries it.
+     * Stream error flag, set by write overflow and read-side exhaustion so the
+     * higher-level coder can propagate the error through its return value.
      */
     enum io_err {
         IO_OK = 0,
         IO_BUF_FULL = -1,    // Write side: data_len has reached data_capacity; writing further overflows
         IO_READ_EMPTY = -2,  // Read side: data_len has reached data_capacity; no data left to read
-        /*
-         * Write side: a symbol outside the coder's alphabet. Codecs whose alphabet is narrower than
-         * the data (coder_fcv2's, which is fixed by the frequency table or by a loaded prior) cannot
-         * code such a symbol, and neither dropping it nor substituting it keeps the stream decodable:
-         * the decoder would read a stream that is one symbol short or one symbol different. The
-         * stream is failed instead, and the caller chooses another codec for the block.
-         */
+        /* Write side: a symbol outside the coder's alphabet; the stream is failed and the caller chooses another codec. */
         IO_UNCODABLE = -3,
     };
 
-    /*
-     * Constructor for standalone use: in contexts such as trial compression and
-     * unit tests, overflow only means "this codec cannot fit the data"; it is a
-     * selection criterion rather than a failure, so no aggregation point is
-     * attached.
-     */
+    /* Constructor for standalone use; overflow is a selection criterion, not a
+       failure, so no aggregation point is attached. */
     coder_io(const uint8_t *buff, int32_t buff_len)
     {
         init(buff, buff_len, nullptr, "");
     }
 
-    /*
-     * Constructor for ownership by a block-processing pass: overflow here means
-     * the block pass itself failed and must be reported to the aggregation point.
-     * name is the stream name, used to identify which stream overflowed on error.
-     */
+    /* Constructor for a block-processing pass; overflow is reported to the
+       aggregation point, with name identifying the stream. */
     coder_io(const uint8_t *buff, int32_t buff_len, coder_err_sink *sink, const char *name)
     {
         init(buff, buff_len, sink, name);
     }
 
-    /*
-     * The single error-setting entry point. err itself remains sticky (only the
-     * first error is recorded), and the aggregation point is notified at once—
-     * reporting happens at the moment the error is set rather than in the
-     * destructor, so whether coder_io is a local or a member, and regardless of
-     * destruction order, the error is always visible.
-     */
+    /* Single error-setting entry point; err is sticky and the aggregation point
+       is notified at once. */
     void set_err(int32_t e)
     {
         if (err != IO_OK) {
@@ -122,14 +97,7 @@ struct coder_io
         return meta["level"].asInt();
     }
 
-    /*
-     * Write one byte. When buf is full, nothing is written and IO_BUF_FULL is
-     * set—this is the root defense against heap overflow: the original
-     * implementation *(data+data_len++)=c performed no check and overflowed
-     * directly into the heap. The higher-level coder checks err at the end of
-     * decode and returns a negative value on error, prompting the actuator to
-     * grow the buffer and retry.
-     */
+    /* Write one byte; on a full buffer nothing is written and IO_BUF_FULL is set. */
     void putc(uint8_t c)
     {
         if (data_len >= data_capacity) {
@@ -139,13 +107,8 @@ struct coder_io
         *(data + data_len++) = c;
     }
 
-    /*
-     * Read one byte. On read-side exhaustion, returns '\0' (preserving the
-     * original behavior so the normal path is unaffected), but sets
-     * IO_READ_EMPTY so the higher level can tell a real zero from "nothing left
-     * to read". The old silent '\0' made the decompressor think data remained,
-     * producing wrong content that was still reported as "success".
-     */
+    /* Read one byte; on exhaustion returns '\0' but sets IO_READ_EMPTY so a real
+       zero can be told apart from "nothing left to read". */
     uint8_t getc()
     {
         if (data_len >= data_capacity) {
@@ -163,7 +126,7 @@ struct coder_io
     int32_t data_capacity;
     /* Currently processed length */
     int32_t data_len;
-    /* Stream error flag; see io_err. The coder checks it at the end of decode and returns the error code. */
+    /* Stream error flag; see io_err. */
     int32_t err;
     /* Encoder parameter input and output metadata interaction through meta */
     Json::Value meta;
@@ -189,24 +152,13 @@ private:
 };
 
 /*
- * Aggregation point for overflow errors.
- *
- * coder_io is a bounded view over the block buffer; processing one block opens
- * over a dozen views. "Did this block pass overflow?" is a property of the block
- * pass as a whole, not of any individual view. A per-view error value is only
- * reachable if the caller remembers to check it, which a newly added stream can
- * as easily forget, and then every stream has to repeat the same checks.
- *
- * The answer is therefore collected in one place: the moment a view sets its
+ * Aggregation point for overflow errors: the moment a coder_io view sets its
  * error it is reported here, and the caller asks once at the exit of the block
- * pass. The
- * aggregation point hangs off the Actuator, and since the executor is created
- * per block and destroyed after use, it is naturally "one per block,
- * thread-exclusive": no cleanup needed and never shared across threads.
+ * pass. One per block, thread-exclusive.
  */
 struct coder_err_sink
 {
-    /* First error, sticky; later errors are usually its knock-on effects, so keeping the first one is most useful for diagnosis */
+    /* First error, sticky. */
     int32_t err = coder_io::IO_OK;
     /* Name of the stream that errored */
     const char *what = "";

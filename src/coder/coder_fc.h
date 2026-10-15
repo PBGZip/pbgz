@@ -49,13 +49,6 @@ public:
         {
             this->ppHashSize = 17;
             this->ppMinLen = 28;
-            // 29 -> 123616168, better than 28
-            // 27 -> 75368634
-            // 26 -> 75365398
-            // 20 -> 75350908
-            // 18 -> 75347944
-            // 17 -> 75361248
-            // 16 -> 75540925
         }
         else
             check_exit(false,  coder_ns::CODER_ERR_INNER, "Currently level %d is not enabled", this->io->get_level());
@@ -70,11 +63,7 @@ public:
             encode_flush();
     }
 
-    /*
-     * coder_fc only supports whole-block compression: encode_line performs LZP,
-     * BWT and entropy coding in one shot internally; the check_exit on the first
-     * line blocks a second call, and the input length must also exceed FC_MIN_LEN.
-     */
+    /* Only supports whole-block compression, not line mode. */
     bool supportsLineMode() const override { return false; }
 
     void encode_line(const uint8_t *in, const uint32_t in_len, bool need2hold __attribute__ ((unused)) = false) override
@@ -151,7 +140,7 @@ public:
         flushed = true;
     }
 
-    /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
+    /* Decompress; returns actual length. */
     int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false) override
     {
         check_exit(io->m != coder_io::MDEC, coder_ns::CODER_ERR_MEM_ALLOC_FAIL, "only support block decompress, not support line method"); // Not yet extended to line method

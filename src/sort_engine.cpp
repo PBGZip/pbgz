@@ -120,7 +120,7 @@ void SortEngine::printTailInfo(Timer& costTimer) {
 }
 
 BlockReader* SortEngine::createBlockReader() {
-    /* Sorting needs each block to be self-contained with @SQ (SAMSortActuator parses chromosomes per block), so the header is not a standalone block */
+    /* Each block must carry its @SQ, so the header is not a standalone block. */
     BlockReader* blockReader = BlockFactory::createBlockReader(ioReader, parameter.compressLevel, false);
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");

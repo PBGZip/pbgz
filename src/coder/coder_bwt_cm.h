@@ -37,7 +37,7 @@
 class coder_bwt_cm: public coder
 {
 private:
-    template <int32_t RATE> /* Use count to represent probability, smaller RATE value means more sensitive and greater impact, i.e., high probability when each symbol arrives */
+    template <int32_t RATE> /* Smaller RATE = more sensitive probability adaptation */
     class _counter
     {
     private:
@@ -46,7 +46,7 @@ private:
     public:
         _counter()
         {
-            c = 1 << 15; /* 0.5, 32768, left shift by one (multiply by 2) is the maximum value */
+            c = 1 << 15; /* 0.5, max value */
         }
 
         inline void update_high()
@@ -59,17 +59,7 @@ private:
             c -= c >> RATE;
         }
 
-        /*
-         * One update for either outcome: towards 1 when the coded bit is set, towards 0 otherwise.
-         *
-         * The context model codes one bit at a time and the two directions used to be two branches,
-         * one per bit and four counter updates inside each. The bit being coded is essentially
-         * unpredictable to the branch predictor - it is the coder's own model, not the control
-         * flow, that knows the probability - so the misprediction was paid once per bit on the
-         * hottest path in the coder. Selecting the increment instead keeps the work identical:
-         * (c ^ 0xFFFF) >> RATE is what update_high adds and -(c >> RATE) is what update_low adds,
-         * both on the same 16-bit counter.
-         */
+        /* Update towards 1 when the bit is set, towards 0 otherwise. */
         inline void update(int32_t bit)
         {
             const uint16_t up = (uint16_t)((c ^ 0xFFFF) >> RATE);
@@ -112,7 +102,7 @@ private:
                 return;
             for (int32_t i = 0; i < 4; ++i)
             {
-                /* See the boundary note in encode_bit: once full, latch the error and abandon the remaining bytes; the exit reports them uniformly. */
+                /* On overflow, latch IO_BUF_FULL and abandon the rest. */
                 if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_BUF_FULL); break; }
                 *(io->data + io->data_len++) = (low >> 24);
                 low <<= 8;
@@ -123,7 +113,7 @@ private:
         template <int32_t P_LOG>
         inline void encode_bit(int32_t bit, uint32_t p)
         {
-            const uint32_t mid = low + ((uint64_t(high - low) * p) >> P_LOG); /* High probability symbols are placed first, low probability symbols last, P represents the probability of high probability symbols */
+            const uint32_t mid = low + ((uint64_t(high - low) * p) >> P_LOG); /* p is the probability of the high-probability symbol */
 
             if (bit)
                 high = mid;
@@ -133,16 +123,7 @@ private:
             /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
-                /*
-                 * The boundary check lives inside the byte pump, same as fqz/
-                 * arith_dynamic (RC_ShiftLowCheck): it is performed only once in
-                 * the normalization branch that actually emits bytes—a single
-                 * register comparison, zero cost at the symbol level. When full,
-                 * it latches io->err = IO_BUF_FULL and abandons this write-out;
-                 * the encoded result is meaningless from then on, and the
-                 * encode_flush exit checks err once and reports the error, so the
-                 * hot loop does no per-symbol checking.
-                 */
+                /* Boundary check inside the byte pump; on overflow latch IO_BUF_FULL. */
                 if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_BUF_FULL); return; }
                 *(io->data + io->data_len++) = (low >> 24);
                 low <<= 8;
@@ -164,14 +145,7 @@ private:
             /* Normalization */
             while ((low ^ high) < (1 << 24))
             {
-                /*
-                 * Read-side exhaustion sets IO_READ_EMPTY and returns: reading past
-                 * the end of the code stream would consume adjacent fields' data,
-                 * producing wrong content that is still reported as "success". After
-                 * latching, subsequent decode_bit calls spin harmlessly and the
-                 * decode_line exit checks err and reports the error (same as the
-                 * in_end check in RC_Decode).
-                 */
+                /* Read-side exhaustion latches IO_READ_EMPTY; the caller reports it. */
                 if (io->data_len >= io->data_capacity) { io->set_err(coder_io::IO_READ_EMPTY); return bit; }
                 low <<= 8;
                 high = (high << 8) + 255;
@@ -238,21 +212,7 @@ public:
             safe_free((void**)&coder_buff);
     }
 
-    /*
-     * Size the work buffers for at least n bytes of input, never above the chunk size
-     * bsize.
-     *
-     * bsize is what decides where the blocks inside the stream end, so it must not
-     * change with the data; the buffers, though, only ever hold what the caller feeds
-     * in. Allocating them for bsize costs 6x that (input + BWT output + suffix array)
-     * up front whatever the input is - 1.5 GB from level 8 up, where bsize is 256 MB -
-     * for streams of a few MB, and that dominates the peak memory of a run (measured
-     * on ERR14949932: 780 MB at -l5 against 1947 MB at -l8). Growing on demand keeps
-     * the emitted blocks identical and the peak proportional to the data.
-     *
-     * What is already cached is carried over: encode_line may be called again for the
-     * rest of the stream and the tail it left behind has to survive the move.
-     */
+    /* Size the work buffers for at least n bytes, never above bsize. Cached data is preserved. */
     void ensureCapacity(int32_t need)
     {
         if (need <= cap)
@@ -312,16 +272,7 @@ public:
             bsize = std::min(tab[level], BLOCK_SIZE);
         }
 
-        /*
-         * Feed the whole input without ever writing past coder_buff: an
-         * overlong single encode_line input must not copy more than bsize bytes
-         * and memcpy() the remainder on top of coder_buff (heap overflow), nor
-         * hand libsai_bwt a length >= bsize, which crashes inside
-         * libsais_main_8u.  Chunking on bsize boundaries keeps the stream
-         * format unchanged: every emitted block carries its own
-         * put32(len)+put32(idx) header, so old archives and the decode side
-         * (which loops over multiple blocks) are both unaffected.
-         */
+        /* Feed the whole input in bsize chunks without writing past coder_buff. */
         const auto emitBlock = [&](int32_t n) {
             const int32_t idx = libsais_bwt(coder_buff, buf_bwt, (int32_t *)buf_arr, n, 0, nullptr);
             check_exit(idx >= 1,  coder_ns::CODER_ERR_INNER, "coder transform failed: idx %d", idx);
@@ -397,20 +348,13 @@ public:
         flushed = true;
     }
 
-    /* External decompression interface, returns actual decompressed length, exits when encountering split_ch during decompression */
+    /* Decompress; returns actual length, stops at split_ch. */
     int32_t decode_line(uint8_t *out, uint32_t out_len, uint8_t split_ch = UINT8_MAX, bool need2hold __attribute__ ((unused)) = false) override
     {
         uint8_t ch;
         int32_t len = 0, n;
 
-        /*
-         * Error convention (uniform across all coders): a return value < 0 is an
-         * error (corrupt code stream / insufficient buffer), == 0 is clean EOF,
-         * and > 0 is the actual decoded length. A negative value from
-         * decode_one_block is propagated as-is and must not be confused with
-         * EOF—otherwise a corrupt stream would be treated as a normal end,
-         * producing a truncated yet "successful" file.
-         */
+        /* Error convention: <0 error, ==0 clean EOF, >0 decoded length. */
         if (io->err != coder_io::IO_OK)
             return coder_ns::CODER_ERR_STREAM_END;
 
@@ -419,10 +363,7 @@ public:
             decode_init();
             if (io->err != coder_io::IO_OK)
                 return coder_ns::CODER_ERR_STREAM_END;
-            /* A negative return from decode_one_block means a corrupt code stream
-               or insufficient memory; at this point coder_buff may still be a
-               null pointer, so it must be distinguished from normal EOF (returning
-               0) and propagated as-is. */
+            /* A negative return means a corrupt stream or OOM; propagate it. */
             int32_t ret = decode_one_block();
             if (ret < 0)
                 return ret;
@@ -451,10 +392,7 @@ public:
                         return len;
                     }
                     if (len >= (int32_t)out_len) {
-                        /* Filled up without finding the separator: the output
-                           buffer is too small. The original implementation
-                           silently returned len, and the caller would write the
-                           truncated line into the file as if it were complete. */
+                        /* Output buffer too small. */
                         curr_out_offset = ++n;
                         io->set_err(coder_io::IO_BUF_FULL);
                         return coder_ns::CODER_ERR_BUF_SMALL;
@@ -486,7 +424,7 @@ public:
         }
 
 stream_end:
-        /* The stream ending early (the _coder read side latched IO_READ_EMPTY) means the code stream is corrupt, not a normal end. */
+        /* An early stream end means corruption, not a normal end. */
         if (io->err != coder_io::IO_OK)
             return coder_ns::CODER_ERR_STREAM_END;
         return len;
@@ -505,7 +443,7 @@ stream_end:
         coder->decode_init();
     }
 
-    /* External interface to get the length of currently consumed data */
+    /* Length of currently consumed data. */
     int32_t decode_inlen()
     {
         return this->io->data_len;
@@ -530,13 +468,9 @@ private:
 
     inline void put(int32_t c)
     {
-        const int32_t f = (run > 2); /* run represents the number of consecutive repetitions of previous characters */
+        const int32_t f = (run > 2); /* run = consecutive repeats of the previous character */
 
-        /* c1/c2 are fixed for the whole byte, so their counter1 rows and the counter2
-           plane for this run factor out of the per-bit loop; counter2[f][ctx][j] is laid
-           out contiguously (a row of 17), so the [j] and [j+1] counts come out of one
-           unaligned 4-byte load. Every value is identical to the 3-D indexing and the two
-           2-byte loads it replaced. */
+        /* c1/c2 rows and this run's counter2 plane are fixed for the whole byte. */
         _counter<4>* const row1_c1 = counter1[c1];
         _counter<4>* const row1_c2 = counter1[c2];
         _counter<6>* const plane2 = &counter2[f][0][0];
@@ -550,7 +484,7 @@ private:
             const int32_t p = (((p0 + p1) * 7) + p2 + p2) >> 4;
 
             /* Get probability of auxiliary symbols through linear interpolation */
-            const int32_t j = p >> 12; /* j takes the highest 4 bits of mixed probability, uses SSE combined with ctx (i.e., current character c to be processed) to correct p_mixed, making another prediction on the probability itself using ctx */
+            const int32_t j = p >> 12; /* SSE index: highest 4 bits of mixed probability */
             _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
             uint32_t x12;
             memcpy(&x12, (const void*)(row2 + j), sizeof(uint32_t));
@@ -558,9 +492,7 @@ private:
             const int32_t x2 = (int32_t)(uint16_t)(x12 >> 16);
             const int32_t ssep = x1 + (((x2 - x1) * (p & 4095)) >> 12);
 
-            /* p + ssep + ssep + ssep represents the probability of high probability symbols, i.e.,
-               the probability that next bit is 1. The bit is coded and the four counters are updated
-               without branching on it: see _counter::update. */
+            /* p + 3*ssep is the probability that the next bit is 1. */
             const int32_t bit = (c & i) ? 1 : 0;
             coder->encode_bit<18>(bit, p + ssep + ssep + ssep);
 
@@ -572,10 +504,10 @@ private:
             ctx += ctx + bit; /* ctx left shift by one bit (+1 when the bit was 1) */
         }
 
-        c2 = c1;        /* c2 updates to ctx of previous byte, here ctx is the actual value of processed character */
-        c1 = ctx - 256; /* c1 updates to ctx of current processed byte. Other: after processing current byte, ctx is at least 256, because even in extreme case where current byte is all 0, ctx == 1 << 8 == 256 */
+        c2 = c1;        /* c2 = previous byte */
+        c1 = ctx - 256; /* c1 = current byte */
 
-        if (c1 == c2)   /* If current byte repeats with previous byte, then increment run */
+        if (c1 == c2)   /* Increment run if the byte repeats. */
             ++run;
         else
             run = 0;
@@ -585,8 +517,7 @@ private:
     {
         const int32_t f = (run > 2);
 
-        /* Same factoring as put(): the c1/c2 rows and the counter2 plane for this run
-           are fixed for the whole byte, and [j]/[j+1] load as one unaligned 4-byte. */
+        /* Same factoring as put(). */
         _counter<4>* const row1_c1 = counter1[c1];
         _counter<4>* const row1_c2 = counter1[c2];
         _counter<6>* const plane2 = &counter2[f][0][0];
@@ -608,7 +539,7 @@ private:
             const int32_t x2 = (int32_t)(uint16_t)(x12 >> 16);
             const int32_t ssep = x1 + (((x2 - x1) * (p & 0xFFF)) >> 12);
 
-            /* Same as put(): the decoded bit drives the four counter updates without a branch. */
+            /* Same counter updates as put(). */
             const int32_t bit = coder->decode_bit<18>(p + ssep + ssep + ssep);
             counter0[ctx].update(bit);
             row1_c1[ctx].update(bit);
@@ -634,7 +565,7 @@ private:
             return coder_ns::CODER_ERR_STREAM_END;
         bsize = get32();
         if (io->err != coder_io::IO_OK)
-            return coder_ns::CODER_ERR_STREAM_END;  // Stream exhausted while reading bsize: the code stream is truncated
+            return coder_ns::CODER_ERR_STREAM_END;  // stream truncated while reading bsize
         if (bsize == 0)
             return 0;
         // check_exit(bsize > 0,  coder_ns::CODER_ERR_INNER, "block size %d is invalid", bsize);
@@ -728,7 +659,7 @@ private:
             }
         }
         curr_out_offset = 0;
-        /* If the code stream is exhausted during the inverse transform (the _coder latched IO_READ_EMPTY), the result is garbage; report it as corruption. */
+        /* Stream exhausted during the inverse transform: report corruption. */
         if (io->err != coder_io::IO_OK)
             return coder_ns::CODER_ERR_STREAM_END;
         return bsize;
@@ -742,7 +673,7 @@ private:
     _counter<4> counter1[256][256];
     _counter<6> counter2[2][256][17];
 
-    uint8_t *coder_buff;  /* Buffer for caching original data, transform and process only when enough for one block */
+    uint8_t *coder_buff;  /* Cached original data, transformed once a full block is ready */
     int32_t curr_incache; /* Length of currently cached data */
     uint8_t *buf_bwt;
     uint32_t *buf_arr;

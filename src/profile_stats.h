@@ -1,21 +1,29 @@
 /*
  * profile_stats.h - lightweight pipeline phase profiler
  *
- * Header-only timer used to see where wall time goes in the
- * "read -> parallel compress -> write" pipeline. Every category is a pair of
- * atomic counters, so instrumentation is thread safe and cheap: only a couple
- * of clock reads per block, never per line.
+ * Header-only timer for the "read -> parallel compress -> write" pipeline. Each category
+ * is a pair of atomic counters, so instrumentation is thread safe and cheap (a couple of
+ * clock reads per block, never per line). Enabled at build time with -DPBGZ_PROFILE; when
+ * disabled the scope objects do not read the clock.
+ * Copyright (C) 2025 PBGZip
  *
- * Enabled at build time with -DPBGZ_PROFILE; when disabled the scope objects
- * do not read the clock at all, so a production build behaves like a normal one.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * Categories:
- *   READ_*   reader thread      (raw read/split, codec pre-selection, QUAL
- *                                prior accumulation and training)
- *   CODER_*  worker threads     (queue waits, actuator create/pre-analysis,
- *                                compression)
- *   WRITE_*  writer thread      (queue wait, reorder sort, write)
- *   FIELD_BASE + fieldIdx       per-column cost inside the SAM actuator
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #pragma once
@@ -133,8 +141,7 @@ inline Slot* slots()
 
 inline constexpr bool enabled()
 {
-    /* Phase profiling is a development aid: it is compiled in only with
-       -DPBGZ_PROFILE, so a production build carries none of its overhead. */
+    /* Compiled in only with -DPBGZ_PROFILE; a production build carries no overhead. */
 #ifdef PBGZ_PROFILE
     return true;
 #else
@@ -156,11 +163,8 @@ inline void add(int cat, uint64_t us)
     slots()[cat].cnt.fetch_add(1, std::memory_order_relaxed);
 }
 
-/* Adds the elapsed time since t0 to cat; used where a scope object would
-   hide declarations from the code that follows. A timer that was never started reads as the clock's
-   epoch, and "since the epoch" is not a duration anyone wants in a profile - it is reported as not
-   measured instead, so a path that forgets to start its timer under-reports rather than swamping
-   the table with the machine's uptime. */
+/* Add the elapsed time since t0 to cat; used where a scope object would hide declarations.
+   An unstarted timer (clock epoch) is treated as not measured. */
 inline void addSince(int cat, const std::chrono::steady_clock::time_point& t0)
 {
     if (!enabled() || t0 == std::chrono::steady_clock::time_point()) {
@@ -257,11 +261,8 @@ inline const char* catName(int cat)
     }
 }
 
-/*
- * Print every non-empty category, hottest first.
- * wallSec is the pipeline wall time used as the 100 percent reference; because
- * the stages run concurrently, per-thread numbers add up to more than it.
- */
+/* Print every non-empty category, hottest first. wallSec is the pipeline wall time used
+   as the 100% reference; stages run concurrently, so per-thread numbers exceed it. */
 inline void dump(FILE* f, double wallSec)
 {
     if (!enabled()) {

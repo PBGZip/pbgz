@@ -71,15 +71,8 @@ public:
         this->io->m = coder_io::MUNSET;
         this->io->appen_magic("coder_qual");
 
-        /*
-         * The base context is a five-symbol alphabet: A, C, G, T and one bucket for
-         * anything else. Every byte has to get a bucket: leaving the rest of L[] as it
-         * comes makes the encoder and the decoder read different indeterminate values for
-         * any SEQ character outside that set (IUPAC codes, '=', '.', ...), so their
-         * contexts disagree and the quality stream decodes into garbage. Mapping them all
-         * to the N bucket keeps the two sides consistent, and treats "ambiguous or
-         * unknown base" as one thing, which is what it is.
-         */
+        /* Base context is a five-symbol alphabet (A,C,G,T + a bucket for anything
+           else); every byte must get a bucket so both sides agree. */
         for (int i = 0; i < 256; ++i) {
             L[i] = 4;
         }
@@ -102,12 +95,7 @@ public:
     uint32_t get_context_gen2(uint8_t s, uint8_t q, uint32_t &s_prev_ctx, uint32_t &q_prev_ctx, uint32_t sse_ctx)
     {
 
-        /* Get quantized value of q, quantization method
-        * QUANT_Q == 1: (q + 1) / 2 , this quantization parameter is used here
-        * QUANT_Q == 2: (q + 2) / 4
-        * QUANT_Q == 3: (q + 4) / 8
-        * QUANT_Q == 4: (q + 8) / 16
-        * */
+        /* Quantize q: (q + ROUND_UP(QUANT_Q)) >> QUANT_Q. */
         //q = (q + ROUND_UP(QUANT_Q)) >> QUANT_Q;
         q = Q_QUANT_GEN2[q];
 
@@ -118,12 +106,7 @@ public:
 
     uint32_t get_context_gen3(uint8_t s, uint8_t q, uint32_t &s_prev_ctx, uint32_t &q_prev_ctx, uint32_t __attribute__ ((unused)) sse_ctx)
     {
-        /* Get quantized value of q, quantization method
-        * QUANT_Q == 1: (q + 1) / 2 , this quantization parameter is used here
-        * QUANT_Q == 2: (q + 2) / 4
-        * QUANT_Q == 3: (q + 4) / 8
-        * QUANT_Q == 4: (q + 8) / 16
-        * */
+        /* Quantize q: (q + ROUND_UP(QUANT_Q)) >> QUANT_Q. */
         q = (q + ROUND_UP(QUANT_Q)) >> QUANT_Q;
 
         q_prev_ctx = ((q_prev_ctx << Q_LOG) + q) & Q_MASK;
@@ -155,15 +138,9 @@ public:
             uint8_t q = (qual[i] - '!');
             model_qual->encodeSymbol(&rc, q, ctx);
 
-            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
-            // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
-
-            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
+            /* SSE context: running average of the qualities so far. */
             tot_qual += qual[i];
             sse_ctx_cur = tot_qual / (i + 1);
-
-            // 3) Based on 2, shifting sse_ctr_cur << 4 can slightly improve by 0.1% (34.906%->34.798%)
-            // sse_ctx_cur = sse_ctx_cur & 0x3FFF; // quality : 33928344/97500000 . ratio : 34.798%
 
             if (next_s < len)
                 ctx = get_context_gen2(seq[next_s], q, s_prev_ctx, q_prev_ctx, sse_ctx_cur);
@@ -190,16 +167,6 @@ public:
         for (i = 0; i < len; i++, next_s++) {
             uint8_t q = (qual[i] - '!');
             model_qual->encodeSymbol(&rc, q, ctx);
-
-            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
-            // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
-
-            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
-            // tot_qual += qual[i];
-            // sse_ctx_cur = tot_qual / (i + 1);
-
-            // 3) Based on 2, shifting sse_ctr_cur << 4 can slightly improve by 0.1% (34.906%->34.798%)
-            // sse_ctx_cur = sse_ctx_cur & 0x3FFF; // quality : 33928344/97500000 . ratio : 34.798%
 
             if (next_s < len)
                 ctx = get_context_gen3(seq[next_s], q, s_prev_ctx, q_prev_ctx, sse_ctx_cur);
@@ -236,14 +203,9 @@ public:
 
             uint32_t sse_ctx_cur = 0;
 
-            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
-            // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
-
-            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
+            /* SSE context: running average of the qualities so far. */
             tot_qual += q + '!';
             sse_ctx_cur = tot_qual / (i + 1);
-
-            // sse_ctx_cur = sse_ctx_cur & 0x3FFF;
 
             if (next_s < len)
                 ctx = get_context_gen2(seq[next_s], q, s_prev_ctx, q_prev_ctx, sse_ctx_cur);
@@ -281,15 +243,6 @@ public:
 
         for (i = 0; i < len; i++, next_s++) {
             uint8_t q = (uint8_t) (model_qual->decodeSymbol(&rc, ctx));
-
-            // 1) sse ctx 1, initializing context at start has improvement, but used for all contexts
-            // sse_ctx_cur = ((i+1) < qual_len) ? (this->base_match_vec[cur_len][i+1]) : 0;
-
-            // 2) sse ctx 2, take average of all quality rows before current symbol to be compressed, then quantize, obvious improvement
-            // tot_qual += q + '!';
-            // sse_ctx_cur = tot_qual / (i + 1);
-
-            // sse_ctx_cur = sse_ctx_cur & 0x3FFF;
 
             if (next_s < len)
                 ctx = get_context_gen3(seq[next_s], q, s_prev_ctx, q_prev_ctx, sse_ctx_cur);

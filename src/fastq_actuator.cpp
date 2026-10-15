@@ -64,16 +64,7 @@ namespace {
 const uint32_t MAPPED_THRESHOLD_GEN2 = 2;
 
 /*
- * Whether any byte of this read is outside A/C/G/T.
- *
- * Such a read - soft-masked lower case, an IUPAC ambiguity code - cannot be held in the two-bit
- * alphabet at all, so it can be neither coded against the reference nor two-bit coded, and it is
- * written with its own characters instead (see the literal form in compressBaseWithRef). Nothing
- * else on the reference path has to ask about a read's characters.
- *
- * allowN says whether an upper-case N is to be taken as ordinary: it is on a read's own line, where
- * the N's have not been cut out yet, and off once they have - a lower-case n is never cut out and
- * so has to be reported on either side (see compressBaseWithRef).
+ * Whether any byte is outside A/C/G/T; allowN treats an upper-case N as ordinary.
  */
 static bool seqHasNonAcgt(const uint8_t* p, uint32_t len, bool allowN)
 {
@@ -171,14 +162,7 @@ uint32_t FastqCodecActuator::countN_Optimized(const uint8_t* data, size_t length
 }
 
 int32_t FastqCodecActuator::compress() {
-    /*
-     * The same guard as preAnalysis() (which fails a block with no line position), for the
-     * callers that compress without running the pre-analysis first. A FASTQ record is four
-     * lines, all of them found through the reader's line positions, so a block with bytes but
-     * no line position cannot be coded as FASTQ: writing it would produce a block that decodes
-     * to nothing while its meta claims the md5 of the real data. Fail instead, which lets the
-     * pipeline store the block as binary rather than lose it (CompressEngine::actuatorPreProc).
-     */
+    /* Same guard as preAnalysis(): a block with bytes but no line position cannot be coded as FASTQ. */
     if (inBlockPtr->getDataLen() > 0 && inBlockPtr->getNpos().empty()) {
         LOG_ERROR("FASTQ block(%ld) carries %ld bytes but no line positions, not FASTQ text.",
                   (long)inBlockPtr->getBlockId(), (long)inBlockPtr->getDataLen());
@@ -229,9 +213,6 @@ int32_t FastqCodecActuator::compress() {
 }
 
 /// @brief Parse separators and their positions in the first line
-/// @param pBuffer    // Buffer for ID line
-/// @param bufLen     // Length of ID line
-/// @param idSplitSymbols    // List of separators
 /// @return 0 for success, -1 for failure
 int32_t FastqCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bufLen) {
     if (pBuffer == nullptr || bufLen == 0) {
@@ -243,8 +224,7 @@ int32_t FastqCodecActuator::preAnalysisIdFirstLine(uint8_t* pBuffer, uint32_t bu
         char ch = pBuffer[i];
         if (idSplitDefault.find(ch) != std::string::npos) {
             idSplitSymbols.push_back(ch);
-            /* The positions travel as bytes in the split layouts, so they are kept to what a
-               byte holds; a QNAME longer than that is not something those layouts describe. */
+            /* Positions travel as bytes in the split layouts, so keep to what a byte holds. */
             idSplitPos.push_back(static_cast<uint8_t>(i));
         }
     }
@@ -310,7 +290,7 @@ int32_t FastqCodecActuator::preAnalysisBase(uint8_t* pBuffer, uint32_t bufLen) {
         minBaseLength = baseLength;
     }
 
-    // Use SIMD-optimized N counting for better performance
+    // Use SIMD-optimized N counting
     uint32_t segmentLength = bufLen - 1;
     baseNCount += countN_Optimized(pBuffer, segmentLength);
 
@@ -440,13 +420,7 @@ int32_t FastqCodecActuator::initEncoder() {
     baseMappedLength = (isGen2) ? lmax : (lmax << 1);
 
     if (pReference) {
-       /* base pair + 4 base pair squash + 4 base squash + base mapped + base N pos in block +
-        * base delete N + mapped pos + mapped pair each line
-        *
-        * There is no fixed-width base-length area any more: the lengths go out as varints, built
-        * while the reads are walked (see compressBaseWithRef), so this layout only holds what is
-        * written per read rather than per read and per length.
-        */
+       /* Layout: base pair + squash buffers + base mapped + base N pos + stripped N + mapped pos + mapped pair. */
         uint32_t n = lmax + (lsquash << 3) + baseMappedLength + (baseNCount << 2);
         n += lmax + (line4 << 3) + line4;
         mappingBuffer = MemoryUtil::safeAlloc<uint8_t>(n);
@@ -475,8 +449,7 @@ int32_t FastqCodecActuator::initEncoder() {
         baseMappedPairBuffer = p;
         p += line4;
 
-        /* Gen3 has no mapper of its own: the base path routes it to compression without a
-           reference (see compressBase), so there is nothing here for it to point at. */
+        /* Gen3 has no mapper of its own: compressBase routes it without a reference. */
     }
 
     return 0;
@@ -515,11 +488,7 @@ void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLeng
     const auto mapSquash0 = pbgzprof::nowOrZero();
     actgPair(basePairBuffer, base, baseLength);
 
-    /*
-     * Calculate align4 squash buffer and pair squash buffer. Unlike the other timers around it,
-     * this one is restarted as each round begins (see the two assignments below), so it is the one
-     * marker here that is not const.
-     */
+    /* Calculate align4 squash and pair squash buffers. */
     auto mapPrep0 = pbgzprof::nowOrZero();
     for (uint32_t n = 0; n < 4; n++) {
         uint32_t squashLength[2];
@@ -535,7 +504,7 @@ void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLeng
         }
         actgSquash(pSeq[0] + n, total, baseSquashBuffer[n]);
 
-        squashLength[1] = (baseLength - n + 1) >> 2; /* Add a character to the right for 32-byte alignment; need to handle the last character when matching to mappingTable[0]'s pair and mappingTable[0] offset is 0 */
+        squashLength[1] = (baseLength - n + 1) >> 2; /* Add a character to the right for 32-byte alignment */
         total = squashLength[1] << 2;
         mappingTable[n].leftUnalignLen[1] = baseLength + 1 - n - total;
         for (uint32_t m = 0; m < mappingTable[n].leftUnalignLen[1]; m++) {
@@ -671,7 +640,7 @@ void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLeng
                     continue;
                 }
 
-                /*  Because this case adds a character to the right for 32-byte alignment: need to handle the last character when matching to mappingTable[0]'s pair and mappingTable[0] offset is 0 */
+            /* Adjust for the extra right character added for 32-byte alignment */
                 unmatches -= (matchPair && (mappingTable[align4Curr].offset == 0)) ? ((xSquashMatch & 0x80000000000000) != (xSquashMatchRefe & 0x80000000000000)) : 0;
 
                 /* left unalign */
@@ -746,9 +715,7 @@ void FastqCodecActuator::mappingFastqGen2(const uint8_t* base, uint32_t baseLeng
 
 
 /*
- * One ID sub-stream, fed line by line. The coder is the base class now: which one it is, is
- * decided by the field (see compressIdInSplit), and every candidate the FASTQ ID row lists is
- * fed the same way here.
+ * One ID sub-stream, fed line by line; the coder is decided by the field.
  */
 int32_t FastqCodecActuator::compressIdStream(coder_io* idIo, coder* idCoder, Json::Value& streamMeta, uint32_t& srcDataLen, int32_t splitSymIdx) {
     int32_t currLineOffset = 0;    // Line offset, start of each line
@@ -915,8 +882,7 @@ int32_t FastqCodecActuator::compressBase() {
     if (pReference != nullptr && isGen2) {
         return compressBaseWithRef();
     } else {
-        /* Once per run, not once per block - and atomically, since the blocks that reach this line
-           run on several threads at once. */
+        /* Once per run, atomically across threads. */
         static std::atomic<bool> noticePrinted{false};
         if (!isGen2 && pReference != nullptr && !noticePrinted.exchange(true)) {
             fprintf(stderr ,"This file is Gen3 FASTQ, compression will be performed without a reference genome.\n");
@@ -942,16 +908,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     Json::Value metaBase;
     uint32_t totalSrcLen = 0;
     uint32_t totalDstLen = 0;
-    /*
-     * Whether any read in this block carries a character the 2-bit alphabet cannot hold - anything
-     * but A/C/G/T once the N's are taken out, which in practice means soft-masked (lower case)
-     * reads or IUPAC ambiguity codes.
-     *
-     * The whole block is asked once, and only a block that answers yes pays for a per-read look:
-     * such a read cannot be coded against the reference and cannot be 2-bit coded either, so it is
-     * written with its own characters (see the literal form below and the "litbases" member the
-     * decoder dispatches on).
-     */
+    /* Whether any read carries a character the 2-bit alphabet cannot hold (soft-masked/IUPAC). */
     bool anyLiteral = false;
     for (uint32_t i = 1; i < line; i += 4) {
         const uint32_t endPos = inBlockPtr->getNpos()[i];
@@ -964,12 +921,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     bool blockHasLiteral = false;
     uint32_t literalReads = 0;
     const auto seqPrep0 = pbgzprof::nowOrZero();
-    /*
-     * The match stream is gathered whole before it is coded: whether it pays to replace it with
-     * zero runs and the values that follow them is a property of the completed stream, which
-     * cannot be known while the reads are still being mapped (see splitSeqMatchStream). The
-     * buffer is sized by the block's own byte count, which bounds the stripped base count above.
-     */
+    /* The match stream is gathered whole before coding, then split into runs/values. */
     std::vector<uint8_t> matchBuf;
     matchBuf.reserve(inBlockPtr->getDataLen());
     /* The per-read lengths, as varints, written only when they vary (see below). */
@@ -981,7 +933,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         uint32_t outLen = 0;
 
         const auto strip0 = pbgzprof::nowOrZero();
-        // Use SIMD-optimized N detection when processing base sequences
+        // Use SIMD-optimized N detection
         size_t segmentLength = endPos - startPos;
         const uint8_t* segmentStart = ptr + startPos;
         size_t simdIdx = 0;
@@ -1023,10 +975,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         const uint32_t strippedLen = (uint32_t)(pBuff - baseStripNBuffer);
         pbgzprof::addSince(pbgzprof::SEQ_STRIP, strip0);
         if (anyLiteral && seqHasNonAcgt(baseStripNBuffer, strippedLen, false)) {
-            /*
-             * This read's characters cannot survive the 2-bit alphabet, so it is written as it
-             * stands and marked as not coming from the reference (direction 2 below).
-             */
+            /* Cannot survive the 2-bit alphabet: write literally, marked no-match (direction 2). */
             memcpy(baseMappedBuffer, baseStripNBuffer, strippedLen);
             outLen = strippedLen;
             baseMappedPosBuffer[offset] = 0;
@@ -1039,12 +988,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
                              baseMappedBuffer, outLen, baseMappedPosBuffer[offset], baseMappedPairBuffer[offset]);
             pbgzprof::addSince(pbgzprof::SEQ_MAP, map0);
             if (anyLiteral && baseMappedPairBuffer[offset] == 2) {
-                /*
-                 * An ordinary read the mapper could not place. It is written literally as well,
-                 * not 2-bit: once a block holds one literal read the flag is on for all of them,
-                 * and the decoder has only that flag to go by (see initDecoder). The read's
-                 * characters are the same either way, so nothing is lost by the switch.
-                 */
+                /* A read the mapper could not place; written literally once the block flag is set. */
                 memcpy(baseMappedBuffer, baseStripNBuffer, strippedLen);
                 outLen = strippedLen;
                 blockHasLiteral = true;
@@ -1054,12 +998,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         matchBuf.insert(matchBuf.end(), baseMappedBuffer, baseMappedBuffer + outLen);
         pReference->updateMatchedGene(baseMappedPosBuffer[offset], outLen);
         if (encBaseLen) {
-            /*
-             * The length stream goes out as one varint per read, of its base count above the
-             * shortest read of the file. The fixed uint16 per read this replaces cost two bytes
-             * whatever the spread, and silently truncated a read longer than minBaseLength +
-             * 65535; a varint is one byte for the usual spread and has no ceiling.
-             */
+            /* Length stream: one varint per read, its base count above the shortest read. */
             appendVarint(baseLenBuf, endPos - startPos - minBaseLength);
         }
         offset++;
@@ -1068,13 +1007,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
 
     pbgzprof::addSince(pbgzprof::SEQ_PREP, seqPrep0);
     const auto seqCodec0 = pbgzprof::nowOrZero();
-    /*
-     * Sub-stream "m": the run-length half of the split stream, or the whole match stream when the
-     * split does not pay. Under the split the surviving values follow as sub-stream "mval" (see
-     * seq_stream_util.h for what makes the split worth taking); the decoder tells the two layouts
-     * apart by the "rle" member here, so a block written without the split stays byte-for-byte
-     * what it was.
-     */
+    /* Sub-stream "m": run-length half of the split stream, or the whole match stream when the split does not pay. */
     const SeqRleSplit rle = splitSeqMatchStream(matchBuf.data(), (uint32_t)matchBuf.size());
     const uint32_t matchSrcLen = (uint32_t)matchBuf.size();
     {
@@ -1095,8 +1028,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         metaSubs["coder"] = matchIo->meta;
         metaSubs["sname"] = "m";
         if (rle.useRle) {
-            /* orgrawlen = the match stream before the split, which is what the decoder rebuilds;
-               rlelen is this sub-stream's decoded length, i.e. the "srclen" above. */
+            /* orgrawlen is the pre-split length; rlelen is this sub-stream's decoded length. */
             metaSubs["rle"] = (Json::Value::UInt)1;
             metaSubs["orgrawlen"] = (Json::Value::UInt)matchSrcLen;
             metaSubs["rlelen"] = (Json::Value::UInt)rle.runLength;
@@ -1137,25 +1069,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     std::shared_ptr<coder_io> posIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ mapped pos");
     uint32_t line4 = inBlockPtr->getNpos().size() >> 2;
     int64_t srcLen = 0;
-    /*
-     * Where each read was matched in the reference, as forward deltas in varint, zigzagged because
-     * a FASTQ is not sorted by position and a read may well sit before the previous one (the sign
-     * goes into the low bit, see seq_stream_util.h).
-     *
-     * The deltas pay only where they carry less than the positions do. The layout they replace is
-     * one uint64 per read, eight bytes of which the three or four high ones are always zero -
-     * nearly free for the coder, since the zeros repeat at a fixed period - so a column of
-     * unrelated deltas can come out *larger* than the positions themselves once both are coded.
-     * Measured: with positions running in order the deltas are worth 3.3x on the column and 2.9x on
-     * the whole archive, while with the mapper finding no match for most reads (positions mostly 0
-     * and occasionally far away) they cost about 1% of the archive instead.
-     *
-     * Neither the order nor the size of the delta stream separates the two - 7% of the reads go
-     * backwards in the first case against 10% in the second, and the delta column comes out at 25%
-     * of the absolute one against 22% - so the choice is made on what the two would weigh in
-     * varints, byte for byte, which is what the coders are handed: the deltas only when the column
-     * of them is the smaller of the two.
-     */
+    /* Where each read matched in the reference: zigzag varint deltas, chosen when smaller than absolute positions. */
     std::vector<uint8_t> posBuf;
     posBuf.reserve((size_t)line4 * 4 + 16);
     uint64_t posDeltaVarBytes = 0;
@@ -1191,9 +1105,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     metaSubs["coder"] = posIo->meta;
     metaSubs["sname"] = "mpos";
     if (posUseDelta) {
-        /* The delta layout, and how many reads it covers. A stream without these holds the
-           absolute uint64 per read the layout above writes, which is also what an archive written
-           before the deltas carries. */
+        /* Delta layout marker and read count; a stream without them holds absolute positions. */
         metaSubs["delta"] = (Json::Value::UInt)1;
         metaSubs["count"] = (Json::Value::UInt)line4;
     }
@@ -1234,18 +1146,8 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
     if (baseNCount > 0) {
         std::shared_ptr<coder_io> nposIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
         /*
-         * Three ways to describe the positions, which only ever grow within a block, and the
-         * smallest source wins - the stream's own name says which one was taken (the decoder
-         * dispatches on it, so no marker is needed):
-         *   "nposd" forward deltas in varint, one entry per N - the general form, one byte per N
-         *           as long as consecutive N's are near each other;
-         *   "nposr" runs: one gap and one length per run of consecutive positions, which is what
-         *           poly-N stretches come out as (a run of 35 costs two varints instead of 35);
-         *   "npos"  the absolute four-byte offsets of the first layout, kept for the case where
-         *           neither of the others is smaller (it never wins by much, being four bytes per
-         *           N, but it is the form the old archives carry and stays readable).
-         * All three are built here rather than measured: they are a few bytes per N, and the
-         * choice is not close.
+         * Three forms for the N positions, smallest wins, name in the stream:
+         *   "nposd" forward varint deltas; "nposr" gap+length runs; "npos" absolute uint32.
          */
         std::vector<uint8_t> deltaBuf;
         std::vector<uint8_t> gapsBuf;
@@ -1306,9 +1208,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         metaSubs["dstlen"] = (Json::Value::Int)nposIo->data_len;
         metaSubs["coder"] = nposIo->meta;
         metaSubs["sname"] = nposName;
-        /* How many entries the stream holds: positions for the first two forms, runs for "nposr".
-           A "npos" stream without it is the same absolute form, written before this member
-           existed; a "npos" with "delta" is the delta form written before it had its own name. */
+        /* Entry count: positions for the first two forms, runs for "nposr". */
         metaSubs["count"] = (Json::Value::UInt)(strcmp(nposName, "nposr") == 0
                                                     ? lensBuf.size()
                                                     : (size_t)baseNCount);
@@ -1327,12 +1227,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
                   literalReads, line >> 2);
     }
     metaBase["ncount"] = (Json::Value::UInt)baseNCount;
-    /*
-     * The literal form: set when this block holds at least one record written with its own
-     * characters rather than two-bit codes, and then *every* record whose direction says "no
-     * match" carries its own characters (see the walk above). One member for the whole block is
-     * all the decoder needs, since that is exactly the set of records it applies to.
-     */
+    /* Literal form: set when the block holds at least one record written with its own characters. */
     if (blockHasLiteral) {
         metaBase["litbases"] = (Json::Value::UInt)1;
     }
@@ -1350,8 +1245,7 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
         metaSubs["dstlen"] = (Json::Value::Int)lenIo->data_len;
         metaSubs["coder"] = lenIo->meta;
         metaSubs["sname"] = "baselen";
-        /* The varint layout, and how many reads it covers. A stream without these holds the fixed
-           uint16 per read an older archive holds. */
+        /* Varint layout marker and read count; without them the stream holds fixed uint16s. */
         metaSubs["delta"] = (Json::Value::UInt)1;
         metaSubs["count"] = (Json::Value::UInt)line4;
         metaStreams.append(metaSubs);
@@ -1386,16 +1280,7 @@ int32_t FastqCodecActuator::compressBaseWithoutRef() {
         baseSrcLength += end - start + addLength;
     }
 
-    /*
-     * Two ways of feeding the column, and the coder decides which: coder_fc wants the whole
-     * column as one block - it is gathered into scratch space at the end of the output buffer
-     * first - while the others are fed line by line straight from the input block.
-     *
-     * coder_fc also only takes a column inside its size window. A column outside it falls back to
-     * coder_bwt_cm even when that is what preprocessing picked, because the size window is a
-     * property of the coder and not something the verdict can override - the verdict was reached
-     * on a sample that was inside it.
-     */
+    /* coder_fc takes the whole column in one block within its size window; others are fed line by line. */
     CoderType baseCoderType = pickedFastqCoder(FQ_SEQ, CoderType::BWT_CM);
     const bool fcSizeOk = (baseSrcLength > FC_MIN_LEN && baseSrcLength < FC_MAX_LEN);
     std::shared_ptr<coder_io> baseIo;
@@ -1494,22 +1379,7 @@ int32_t FastqCodecActuator::compressComment() {
 }
 
 /*
- * The QUAL column, through the same dedicated path SAM's QUAL column takes.
- *
- * A FASTQ record's quality is not just a byte stream: coder_qual codes it against the read's
- * bases, and coder_fcv2 against its sequencing cycle, so both have to be handed a record at a
- * time and both have to be trialled on records - which is what the FASTQ QUAL row of
- * kFastqFieldCoderConfig and QualSelector do. Which of them won is read off the verdict here and
- * turned into an encoder by the factory; all this side then does is hand over records (see
- * qual_record_encoder).
- *
- * When the mode's row runs no trial - fast leaves its list empty - there is no verdict to read,
- * and the column keeps the row's default, coder_qual: still a record-level coder, just not one
- * chosen by comparison.
- *
- * What a FASTQ record does not have is a FLAG, so the strand is always "forward": the cycle
- * fcv2 restores comes from the record's length, which a FASTQ gives it just as an aligned SAM
- * does.
+ * The QUAL column, through the same record-level path as SAM's: the coder is read off the verdict, strand always forward.
  */
 int32_t FastqCodecActuator::compressQuality() {
     std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
@@ -1522,12 +1392,7 @@ int32_t FastqCodecActuator::compressQuality() {
         pickedQualCoder = preInfo->coderFor(FQ_QUAL, pickedQualCoder);
     }
 
-    /*
-     * The prior is trained from the first blocks and written once per file; its absolute
-     * address travels in the stream's meta so the decoding side can retrieve the same snapshot.
-     * It is registered only when a snapshot was actually loaded, so the decoder is never
-     * promised one it cannot get.
-     */
+    /* The prior's absolute address travels in the stream meta; registered only when actually loaded. */
     AuxPayloadPtr qualPriorBlob = (pbgzEngine != nullptr) ? pbgzEngine->getQualPrior(0) : AuxPayloadPtr();
     bool qualPriorLoaded = false;
     int64_t qualPriorAddress = (pbgzEngine != nullptr) ? pbgzEngine->getQualPriorAddress() : -1;
@@ -1547,14 +1412,7 @@ int32_t FastqCodecActuator::compressQuality() {
                                       engineCompressLevel());
     pbgzprof::addSince(pbgzprof::QUAL_CTOR, qualCtor0);
 
-    /*
-     * The prior carries the alphabet of the blocks it was trained on, and a stream is coded with
-     * one alphabet from beginning to end. A later block whose quality values left that alphabet
-     * cannot be coded at all (see coder_io::IO_UNCODABLE), so rather than fail the block the prior
-     * is dropped for it: the coder then builds its alphabet from this block's own values, which is
-     * what the decoder does for a block with no prior. The prior's address is reported per block,
-     * so the decoder follows either way.
-     */
+    /* A block whose values left the prior's alphabet is coded without the prior rather than failed. */
     if (pickedQualCoder == CoderType::FCV2 && qualPriorBlob.get() != nullptr && qualityCoder != nullptr) {
         bool covered = true;
         for (size_t i = 0; i < qualityFreqTable.size(); ++i) {
@@ -1590,8 +1448,7 @@ int32_t FastqCodecActuator::compressQuality() {
         uint32_t end = inBlockPtr->getNpos()[idx];
         uint32_t start = inBlockPtr->getNpos()[idx - 1] + 1;
         uint32_t lineLength = end - start;
-        /* The record's own base line is the context; quality and bases are the same length in
-         * FASTQ, so the two lengths are one here. */
+        /* The record's base line is the context; quality and base lengths are equal in FASTQ. */
         qualityCoder->encode_record(inBlockPtr->getBuffer() + start, lineLength,
                                     inBlockPtr->getBuffer() + inBlockPtr->getNpos()[idx - 3] + 1,
                                     lineLength, false);
@@ -1599,12 +1456,7 @@ int32_t FastqCodecActuator::compressQuality() {
     }
     qualityCoder->flush();
     pbgzprof::addSince(pbgzprof::QUAL_CODEC, qualCodec0);
-    /*
-     * A stream that did not fit the space left in the block is truncated, and a stream that met a
-     * quality value its alphabet does not hold (coder_io::IO_UNCODABLE) is one symbol short. Both
-     * leave the decoder reading a stream whose tail it cannot reconstruct - it either runs off the
-     * end or decodes the rest of the block from the wrong offset - so neither is written out here.
-     */
+    /* A truncated or IO_UNCODABLE stream cannot be decoded, so it is not written out. */
     if (qualityIo->err != coder_io::IO_OK) {
         LOG_ERROR("QUAL stream is not complete (err=%d, wrote %u bytes, block %lld); "
                   "refusing to write a stream that cannot be decoded",
@@ -1669,8 +1521,7 @@ int32_t FastqCodecActuator::compressQuality() {
 }
 
 int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
-    /* The actuator is reused across blocks, so the match stream's layout is a per-block fact and
-       has to be cleared here: only the layout that says so is served from a rebuilt buffer. */
+    /* Clear per-block match-stream state; the actuator is reused across blocks. */
     baseMatchRle = false;
     baseLitBases = false;
     baseNPosVec.clear();
@@ -1682,12 +1533,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     }
 
     uint32_t readOffset = 0;
-    /*
-     * Initialize ID decoder. The coder is built from the magic the stream carries rather than
-     * named here: which coder won the trial is a per-file decision, and a stream says which one
-     * it is (see CoderFactory::makeFieldDecoder). The level is replayed from the same meta, so
-     * the decoder is on the model the encoder used.
-     */
+    /* Initialize ID decoders from the magic each stream carries; the level comes from the same meta. */
     for (uint32_t idx = 0; idx < idStreamMeta.size(); ++idx) {
         std::string coderName = idStreamMeta[idx]["coder"]["magic"].asString();
         uint32_t dstLen = idStreamMeta[idx]["dstlen"].asUInt();
@@ -1724,11 +1570,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             coder_fc baseDecoderFc(&baseIo);
             baseDecoderFc.decode_line(outputBlock->getBuffer() + outputBlock->getBufferSize() - srcBaseLen, srcBaseLen,  UINT8_MAX, false);
         } else {
-            /*
-             * Every other coder is built from the magic, as the ID column builds its
-             * decoders: the stream says which coder wrote it, and the level comes from
-             * the same meta. The column is then decoded line by line below.
-             */
+            /* Build the decoder from the stream magic; the level comes from the same meta. */
             std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstBaseLen, "SEQ");
             ioVecters.push_back(io);
 
@@ -1745,8 +1587,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         readOffset += dstBaseLen;
     } else {
         Json::Value metaStreams = baseMeta["streams"];
-        /* The literal form: when the block carries this member, a record whose direction says "no
-           match" holds its own characters rather than two-bit codes (see compressBaseWithRef). */
+        /* Literal form: a "no match" record holds its own characters rather than two-bit codes. */
         baseLitBases = baseMeta.isMember("litbases");
         uint32_t maxBaseLen = baseMeta["maxlen"].asUInt();
         uint32_t n = maxBaseLen;  /* sub stream 1, strip n  */
@@ -1768,13 +1609,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             return -1;
         }
         uint32_t baseDstLen = metaStreams[id]["dstlen"].asUInt();
-        /*
-         * Two layouts, told apart by the "rle" member the split one carries (see
-         * splitSeqMatchStream): a match stream split into runs and values, which is rebuilt whole
-         * here and then sliced per read, or the stream itself, which the coder hands out read by
-         * read. Blocks written before the split existed carry no "rle" and decode as they always
-         * did.
-         */
+        /* Two layouts: split into runs/values ("rle" member, rebuilt whole), or the stream itself read by read. */
         if (metaStreams[id].isMember("rle")) {
             if (initRleMatchStream(metaStreams, id, readOffset) != 0) {
                 return -1;
@@ -1801,12 +1636,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             LOG_ERROR("check sub stream failed: %s", metaStreams[id]["sname"].asString().c_str());
             return -1;
         }
-        /*
-         * The positions are expanded here, once per block, like the other two auxiliary columns:
-         * the per-read walk asks for one at a time, and the varint delta stream is only smaller
-         * while it stays in that form. Two layouts are read - the deltas this build writes (the
-         * "delta" member), or the absolute uint64 per read of an archive written before them.
-         */
+        /* Expand positions once per block: deltas ("delta" member) or absolute uint64 per read. */
         baseMappedPosVec.clear();
         temBuffer = inBlockPtr->getBuffer() + readOffset;
         srcLen = metaStreams[id]["srclen"].asUInt();
@@ -1886,10 +1716,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         baseNPosVec.clear();
         if (baseMeta["ncount"].asUInt()) {
             id++;
-            /* Three names for the same column, one per form it is written in (see
-               compressBaseWithRef): the deltas, the runs, and the absolute list of the first
-               layout. "npos" also covers the delta form written before it had a name of its own,
-               which is recognised by its "delta" member below. */
+            /* Three names, one per form: deltas, runs, absolute. */
             const std::string nposStreamName = metaStreams[id]["sname"].asString();
             if (nposStreamName != kSeqExcAbsName && nposStreamName != kSeqExcDeltaName && nposStreamName != kSeqExcRunName) {
                 LOG_ERROR("check sub stream failed: %s", nposStreamName.c_str());
@@ -1903,23 +1730,13 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             if (decodeWholeStream(metaStreams[id], temBuffer, dstLen, raw.data(), srcLen, "SEQ npos") != 0) {
                 return -1;
             }
-            /*
-             * The positions are expanded here, once per block, for the same reason the lengths
-             * are: the per-read walk asks for them one at a time, and a stream that only carries
-             * what changed is smaller than one the walk must parse. Which form it is comes from
-             * the stream's own name, and an archive written before the names carries the absolute
-             * uint32 per N - that is what a "npos" without "delta" is.
-             */
+            /* Expand positions once per block; the form comes from the stream name. */
             const std::string& nposName = metaStreams[id]["sname"].asString();
             const bool nposDelta = (nposName == kSeqExcDeltaName) || metaStreams[id].isMember("delta");
             const bool nposRuns = (nposName == kSeqExcRunName);
             baseNPosVec.reserve(ncount);
             if (nposRuns) {
-                /* One list of gaps, then one of lengths, both varints, both with the number of
-                   runs as their count; each run covers the positions [end of the previous run +
-                   gap, that + length). The lengths are read after the gaps, so the walk over the
-                   gaps has to finish before they start - which is why the two lists are read in
-                   one walk rather than by an offset. */
+                /* One list of gaps then one of lengths; both varints with runs as their count. */
                 const uint32_t runs = metaStreams[id]["count"].asUInt();
                 std::vector<uint32_t> gaps;
                 std::vector<uint32_t> lens;
@@ -2003,8 +1820,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             if (decodeWholeStream(metaStreams[id], temBuffer, dstLen, raw.data(), srcLen, "SEQ length") != 0) {
                 return -1;
             }
-            /* Absolute lengths here, not "length above the shortest read": the stores that read
-               this below ask for a length, and doing the addition once is doing it once. */
+            /* Absolute lengths here, not "above the shortest read". */
             if (metaStreams[id].isMember("delta")) {
                 uint32_t off = 0;
                 while (off < srcLen) {
@@ -2071,16 +1887,9 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
         auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
 
         uint32_t qualFreqSrcLen = streamsMeta[1]["srclen"].asUInt();
-        /*
-         * The element count must be uint32_t: the array is allocated by this count,
-         * while decode_line writes the untruncated qualFreqSrcLen bytes. A narrower
-         * count would wrap once the quality-value alphabet exceeds 127 symbols
-         * (qualFreqSrcLen > 510), shrinking the allocation while the write does not,
-         * which overflows the heap.
-         */
+        /* Element count must be uint32_t: a narrower count would wrap and overflow the heap. */
         uint32_t qualFreqArrLen = qualFreqSrcLen / sizeof(uint16_t);
-        /* A vector rather than new[]/delete[]: the decoder below has a failure return of its own, and
-           an early return between an allocation and its delete is a leak. */
+        /* A vector rather than new[]/delete[]: the decoder below may return early. */
         std::vector<uint16_t> qualFreqArray(qualFreqArrLen);
         uint32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArray.data(), qualFreqSrcLen, UINT8_MAX, false);
         if (qualFreq != qualFreqSrcLen) {
@@ -2092,12 +1901,7 @@ int32_t FastqCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
             qualityFreqTable.push_back(std::make_pair(qualFreqArray[idx], qualFreqArray[idx + 1]));
         }
 
-        /*
-         * The value stream's decoder is the one its magic names - the QUAL column is decided
-         * per file, so this side cannot name a coder class (see CoderFactory::makeQualDecoder).
-         * What it supplies is the alphabet just decoded above and, when the stream says the
-         * encoder started from one, the prior the engine holds.
-         */
+        /* The value decoder is named by the stream magic; it is given the alphabet and, if requested, the prior. */
         std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, qualityDstLen, "QUAL");
         ioVecters.push_back(io);
 
@@ -2155,11 +1959,7 @@ int32_t FastqCodecActuator::decodeWholeStream(const Json::Value& streamMeta, con
 int32_t FastqCodecActuator::initRleMatchStream(const Json::Value& metaStreams, uint32_t& id,
                                                uint32_t& readOffset)
 {
-    /*
-     * Sub-stream "m" is the zero runs, sub-stream "mval" the values that ended them. Both carry
-     * their own coder in their meta - the two halves are written independently - so each is
-     * decoded with the one it names, and an archive written under a different choice still reads.
-     */
+    /* "m" holds the zero runs, "mval" the ending values; each has its own coder in its meta. */
     {
         const uint32_t runDstLen = metaStreams[id]["dstlen"].asUInt();
         const uint32_t runLen = metaStreams[id]["srclen"].asUInt();
@@ -2185,18 +1985,10 @@ int32_t FastqCodecActuator::initRleMatchStream(const Json::Value& metaStreams, u
             }
             readOffset += valDstLen;
         } else {
-            /*
-             * No surviving values: every byte of the match stream was zero. A block whose reads
-             * all come from the reference is written this way, without the sub-stream at all, so
-             * the streams that follow are addressed as if it had never existed.
-             */
+            /* No surviving values: every byte of the match stream was zero. */
         }
 
-        /*
-         * Rebuild the stream the reads are served from: each run is followed by one surviving
-         * value. safeAlloc is a calloc, so the runs themselves - the zeros - are already there,
-         * and the trailing run after the last value needs no action either.
-         */
+        /* Rebuild the match stream: each run is followed by one surviving value; zeros are zeroed. */
         MemoryUtil::safeFree(baseMatchBlock);
         baseMatchBlock = MemoryUtil::safeAlloc<uint8_t>(matchLen + 1);
         if (baseMatchBlock == nullptr) {
@@ -2257,16 +2049,7 @@ int32_t FastqCodecActuator::decompress() {
         idSplitSymbols.push_back(idSplit.c_str()[i]);
     }
 
-    /*
-     * Pre-allocation at the block entry: block_size from the file header (the upper
-     * bound determined during compression) x 2 — a definite value, not an estimate.
-     * Same scheme as on the SAM side (see SamCodecActuator::decompress): header output
-     * <= block_size, and coder_fc's trailing SEQ staging <= block_size, exactly twice.
-     * When block_size is 0 (not written by old files), fall back to the default block
-     * size for the compression level.
-     * ensureCapacity must run before initDecoder: inside initDecoder, coder_fc writes
-     * the SEQ data at the end of the buffer, which would dangle after a realloc.
-     */
+    /* Pre-allocate block_size*2 before initDecoder: coder_fc writes SEQ at the buffer end, which would dangle after a realloc. */
     {
         size_t bs = pbgzEngine->getFileBlockSize();
         if (bs == 0) {
@@ -2331,15 +2114,8 @@ int32_t FastqCodecActuator::decompress() {
                     pBaseOut = pBaseOut + actualBaseLen;
                 } else {
                     /*
-                     * Read lengths vary, so the line has to be delimited: the encoding side
-                     * wrote each line with its trailing newline (see compressBaseWithoutRef),
-                     * and decode_line returns the length it read including that delimiter. The
-                     * newline is stripped below, exactly as the coder_fc branch above does.
-                     *
-                     * The capacity is the longest line plus its delimiter: decode_line fills
-                     * the buffer up to out_len and only then looks for the separator, so a
-                     * maxBaseLength-long line would hit the capacity check right before its
-                     * newline and be reported as a short buffer.
+                     * Varying lengths: lines are newline-delimited, so decode with a maxBaseLength+1
+                     * capacity to fit the longest line plus its delimiter.
                      */
                     int32_t decodedLen = baseDecoder->decode_line(basePtr, maxBaseLength + 1, '\n', false);
                     if (decodedLen <= 0) {
@@ -2353,9 +2129,8 @@ int32_t FastqCodecActuator::decompress() {
                 actualBaseLen -= 1;  // Remove newline character
             }
         } else {
-            /* decode base mapping stream with strip N */;
-            /* The length stream is only written when they vary (see compressBaseWithRef), so an
-               empty column of them means every read is the longest one. */
+            /* Decode the base mapping stream. */;
+            /* An empty length stream means every read is the longest one. */
             actualBaseLen = baseLengthVec.empty() ? maxBaseLength : baseLengthVec[baseLines];
             uint8_t* pout = outBlockPtr->getCurrent();
 
@@ -2383,8 +2158,7 @@ int32_t FastqCodecActuator::decompress() {
                 uint8_t* pdata;
                 if (2 == baseMappedPairBuffer[baseLines]) {
                     if (baseLitBases) {
-                        /* The read's own characters, written literally because it does not use the
-                           reference (see compressBaseWithRef); they are already decrypted. */
+                        /* The read's own characters, written literally. */
                         pdata = baseStripNBuffer;
                     } else {
                         for (o = 0; o < stripNLength; o++) {
@@ -2478,8 +2252,7 @@ int32_t FastqCodecActuator::decompress() {
                 break;
         }
 
-        // Decode quality values, one record at a time: the record's base line is the context,
-        // whichever coder the stream's magic named.
+        // Decode quality values one record at a time, with the base line as context.
         qualityDecoder->decode_record(outBlockPtr->getCurrent(), actualBaseLen, basePtr, actualBaseLen);
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + actualBaseLen);
         *outBlockPtr->getCurrent() = '\n';

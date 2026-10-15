@@ -1,38 +1,29 @@
 /*
- * coder_qname.h - Codec dedicated to QNAME
+ * coder_qname.h - Codec dedicated to QNAME.
  *
- * Background: in coordinate-sorted SAM files such as HG00106 assembled from
- * multiple runs, QNAMEs look like
- *   ERR015528.21801860
- * The fixed 9-character prefix takes only 5 distinct values (entropy ~2.3 bit),
- * while the QNAMEs of the R1/R2 records of the same fragment are identical and,
- * after coordinate sorting, usually adjacent (distance <64 for 99%+ of them).
- * coder_affix_match only matches shared prefixes between adjacent lines and is
- * essentially ineffective against random numeric ids; this codec targets those
- * two points:
+ * Cross-line dedup: a direct-mapped recent-line hash table lets a QNAME that
+ * occurred within RING_SIZE lines be coded as a 1-bit marker plus distance.
+ * Misses are coded per position (line length + one adaptive model per position).
+ * Input is the whole QNAME including the trailing '\t'.
+ * Copyright (C) 2025 PBGZip
  *
- *   1) Cross-line deduplication: it maintains a "recent-line hash table". When a
- *      QNAME has appeared before and the line distance is within RING_SIZE, it
- *      writes only a 1-bit marker plus the distance (distance entropy empirically
- *      ~5.1 bit) instead of repeating the whole string;
- *   2) Position-based modeling: for lines that miss, it writes each character
- *      using "line length + one adaptive model per position"; the prefix segment
- *      converges to a very small character set, and the numeric segment
- *      converges to entropy close to that of uniform digits.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * Hash table design (encoder-only; the decoder maintains only a ring buffer and
- * does not build the table):
- *   - Direct mapping: slot = hash & MASK, no linear probing, no deletion;
- *     naturally bounded and cannot loop forever.
- *   - Each slot stores the "most recent line number"; a hit requires a second
- *     verification (line within the window + identical content) to guard against
- *     hash-collision misjudgments.
- *   - The cost of a collision is only a lost copy opportunity (the slot is
- *     overwritten by another line within the window); when dist is small (median
- *     19 in this file), the hit-rate loss is negligible.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- * Input convention: the whole QNAME includes the trailing '\t' (consistent with
- * compressIdFieldInAll), and in_len<=255.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 #ifndef _CODER_QNAME_H_
 #define _CODER_QNAME_H_
@@ -176,7 +167,7 @@ public:
         }
         last_len = (int32_t)len;
 
-        /* Update the ring buffer consistently with the encoder (no hash table: decoding needs no probing). */
+        /* Update the ring buffer, as the encoder does. */
         uint32_t ridx = line_idx % RING_SIZE;
         rline[ridx] = line_idx;
         rlen[ridx] = (uint8_t)len;
