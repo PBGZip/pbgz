@@ -118,6 +118,10 @@ bool seqRecordUsesReference(uint16_t chrId, uint16_t flag, uint64_t startPos, ui
                             Reference* reference, int64_t& refPos)
 {
     refPos = 0;
+    if (reference == nullptr) {
+        /* No reference to address: every record stores its own bases as they stand. */
+        return false;
+    }
     if (chrId == SEQ_CHR_ID_NONE || chrId == SEQ_CHR_ID_UNKNOWN || (flag & SEQ_FLAG_UNMAPPED)) {
         return false;
     }

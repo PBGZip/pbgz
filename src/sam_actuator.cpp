@@ -839,6 +839,12 @@ CoderType SamCodecActuator::seqMatchCoderFor()
         if (pinned >= 0) {
             return (CoderType)pinned;
         }
+        /* No reference payload was trialled (a file with no reference): the pre-selection's verdict
+           for the SEQ column itself - coder_fc by default, coder_fc/coder_bwt_cm at -l9 - applies. */
+        const FieldCodecSelection* sel = preInfo->getField(SAM_SEQ);
+        if (sel != nullptr && sel->status == FieldStatus::SELECTED) {
+            return sel->selectedCoder;
+        }
     }
 
     /* No verdict covers this file; coder_bwt_cm is the fallback. */
@@ -2115,73 +2121,12 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
 }
 
 int32_t SamCodecActuator::compressBaseWithoutRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    std::vector<size_t>& npos = inBlockPtr->getNpos();
-    uint32_t lineNum = npos.size();
-    uint8_t* buffer = inBlockPtr->getBuffer();
-    fieldSrcLen = 0;
-    /* Pre-allocate by the actual block data length (SAM blocks may be split by read count and exceed the byte block_size). */
-    const auto seqT0 = pbgzprof::nowOrZero();
-    std::unique_ptr<uint8_t[]> tmpBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen());
-    // Process each line and extract the current field
-    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
-        uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
-        uint32_t lineEnd = npos[lineIdx] - lineStart;
-
-        uint8_t* line = buffer + lineStart;
-        // Skip header lines (starting with @)
-        if (*line == '@') {
-            continue;
-        }
-
-        uint32_t contentIdx = lineIdx - headEndLine;
-        // Middle fields: between tabs
-        const SamFieldRange field = samFieldRange(line, contentPos[contentIdx], fieldIdx, lineEnd);
-        uint8_t* fieldStart = field.start;
-        uint32_t fieldLength = field.lengthWithTab();
-
-        if (minBaseLength == maxBaseLength) {
-            // Remove trailing \t
-            memcpy(tmpBuffer.get() + fieldSrcLen, fieldStart, fieldLength - 1);
-            fieldSrcLen += fieldLength - 1;
-        } else {
-            // Encode the field data
-            memcpy(tmpBuffer.get() + fieldSrcLen, fieldStart, fieldLength);
-            fieldSrcLen += fieldLength;
-        }
-    }
-
-    // Create encoder for regular field compression
-    pbgzprof::addSince(pbgzprof::SEQ_PREP, seqT0);
-    const auto seqT1 = pbgzprof::nowOrZero();
-    std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ");
-    std::shared_ptr<coder> fieldCoder = makeFieldEncoder(fieldIdx, samFieldDefaultCoder(fieldIdx, CoderType::FC), fieldIo.get(), false);
-
-    pbgzprof::addSince(pbgzprof::SEQ_CTOR, seqT1);
-    const auto seqT2 = pbgzprof::nowOrZero();
-    fieldCoder->encode_line(tmpBuffer.get(), fieldSrcLen);
-    fieldCoder->encode_flush();
-    pbgzprof::addSince(pbgzprof::SEQ_CODEC, seqT2);
-    // Smart pointer automatically cleans up
-    if (fieldIo->err != coder_io::IO_OK) {
-        LOG_ERROR("Encode SEQ field overflow: output buffer too small");
-        return -1;
-    }
-
-    // Update output block data length
-    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + fieldIo->data_len);
-
-    // Set field metadata
-    fieldMeta["minlen"] = minBaseLength;
-    fieldMeta["maxlen"] = maxBaseLength;
-    fieldMeta["totalsrclen"] = fieldSrcLen;
-    fieldMeta["totaldstlen"] = fieldIo->data_len;;
-    fieldMeta["coder"] = fieldIo->meta;
-    fieldMeta["field"] = fieldIdx;
-
-    LOG_INFO("SAM base field compression completed: %u bytes -> %u bytes, compress ratio = %.2f%%",
-        fieldSrcLen, fieldIo->data_len, (double)(fieldIo->data_len * 100)/(double)fieldSrcLen);
-
-    return fieldIo->data_len;
+    /* Same layout and same coder selection as the reference path, only with no reference to address:
+       compressBaseWithRef sees a null file reference, so every record stores its own bases. */
+    seqNoReference = true;
+    const int32_t ret = compressBaseWithRef(fieldIdx, fieldSrcLen, fieldMeta);
+    seqNoReference = false;
+    return ret;
 }
 
 /* The SEQ match stream split into (run lengths, surviving values), or carried whole when the split would not pay. */
@@ -2269,9 +2214,11 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
         const uint32_t payLen = rle.useRle ? rle.runLength : matchLen;
         const uint8_t* payBuf = rle.useRle ? rle.run.get() : matchBuffer;
 
-        /* An all-ACGT whole match stream is coded with coder_arith_k (rANS order-1), faster than coder_fc's LZP+BWT+CM. */
+        /* An all-ACGT whole match stream is coded with coder_arith_k (rANS order-1), faster than coder_fc's LZP+BWT+CM. baseNCount is the pre-analysis's count of non-ACGT bases
+           (N/n) in this block: when it is non-zero the stream is not all-ACGT, so coder_arith_k cannot pack it and would only rANS its raw bytes, and coder_fc is kept.
+           At the extreme-ratio level (-l9) coder_arith_k is never taken: the pre-selection's verdict (coder_fc/coder_bwt_cm) is used as it stands. */
         CoderType payType = seqMatchCoderFor();
-        if (!rle.useRle) {
+        if (!rle.useRle && baseNCount == 0 && engineCompressLevel() < 9) {
             payType = CoderType::ARITH_K;
         }
         /* A pinned or sampled verdict can still name a segment too short for coder_fc (FC_MIN_LEN bytes or less). */
@@ -2526,11 +2473,10 @@ int32_t SamCodecActuator::compressBaseSelfRef(uint32_t fieldIdx, uint32_t& field
 }
 
 int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
-    /* Either the file's reference (pRefeGene) or a block-built consensus (seqSelfRef); only the absence of both is an error. */
-    if (pRefeGene == nullptr && seqSelfRef == nullptr) {
-        LOG_ERROR("Reference genome is not available for base compression with reference");
-        return -1;
-    }
+    /* The reference this block codes against: the file's reference, a block-built consensus
+       (seqSelfRef), or none at all (compressBaseWithoutRef) - with none every record stores its own
+       bases, and the "streams" layout still applies unchanged. */
+    Reference* fileRef = seqNoReference ? nullptr : pRefeGene;
 
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
@@ -2625,12 +2571,12 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
                                               seqSelfRef->windowStart, seqSelfRef->windowBases,
                                               baseMappedBuffer.get(), ref2bitBuf.get())
                 : buildSeqRecordPayload(chrId, flag, startPos, refConsumed, ops, seqStart, seqLength,
-                                        pRefeGene, baseMappedBuffer.get(), ref2bitBuf.get());
+                                        fileRef, baseMappedBuffer.get(), ref2bitBuf.get());
         const uint32_t outLen = payload.length;
         const bool rawBases = payload.rawBases;
         /* A consensus is not a file reference and carries no match statistics to update. */
-        if (payload.usedReference && seqSelfRef == nullptr) {
-            pRefeGene->updateMatchedGene((uint64_t)payload.refPos,
+        if (payload.usedReference && seqSelfRef == nullptr && fileRef != nullptr) {
+            fileRef->updateMatchedGene((uint64_t)payload.refPos,
                 (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
         }
         /* Characters the payload cannot carry are recorded, one list per character (see SeqExceptionClass). */
@@ -2714,6 +2660,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     /* Count of the 'N' stream, for older archives. */
     fieldMeta["ncount"] = (Json::Value::UInt)excClasses[(uint8_t)'N'].count;
     fieldMeta["litbases"] = (Json::Value::UInt)1;
+    /* No reference (file's or consensus): the decoder must not try to rebuild any record against one. */
+    if (fileRef == nullptr && seqSelfRef == nullptr) {
+        fieldMeta["noref"] = (Json::Value::UInt)1;
+    }
 
     /* How to read a payload byte above the 2-bit range: as one of the record's own characters. */
     fieldMeta["minlen"] = minBaseLength;
@@ -3653,9 +3603,16 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
     LOG_DEBUG("maxBaseLen = %d, minBaseLen = %d", maxBaseLength, minBaseLength);
     /* A block-consensus column uses the same layout as the reference one but needs no external reference. */
     baseSelfRefActive = false;
-    bool isUseReference = baseMeta.isMember("selfref") ||
-                          (pRefeGene != nullptr && baseMeta.isMember("streams"));
-    if (!isUseReference) {
+    /* The multi-stream layout is identified by the meta itself (a "selfref" consensus, or a reference
+       layout that may be a file reference or, when "noref", no reference at all). */
+    const bool usesStreams = baseMeta.isMember("selfref") || baseMeta.isMember("streams");
+    if (usesStreams && !baseMeta.isMember("selfref") &&
+        !(baseMeta.isMember("noref") && baseMeta["noref"].asUInt() != 0) && pRefeGene == nullptr) {
+        LOG_ERROR("SEQ block %lld was coded against a reference but none was supplied",
+                  (long long)inBlockPtr->getBlockId());
+        return -1;
+    }
+    if (!usesStreams) {
         /* One stream for the whole column; initSeqWholeBlockDecoder builds its decoder or decodes it outright. */
         const int32_t consumed = initSeqWholeBlockDecoder(baseMeta, idx, outputBlock);
         if (consumed < 0) {
@@ -5617,10 +5574,13 @@ int32_t SamCodecActuator::readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_
 int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& totalBaseLen, RoughIOBlock* outputBlock) {
     /* ensureCapacity must not be called here: the caller captured basePtr for QUAL, and a realloc would dangle it. */
-    /* Reference-coded two ways: the file's reference ("streams"), or a block-built consensus ("selfref"). */
+    /* Three layouts: the whole-column stream ("coder"), the multi-stream reference/consensus layout
+       ("streams"), and the same multi-stream layout with no reference at all ("streams" + "noref"). */
     const bool isSelfReference = baseSelfRefActive && fieldMeta.isMember("selfref");
-    bool isUserReference =
-        isSelfReference || (pRefeGene != nullptr && fieldMeta.isMember("streams"));
+    const bool isStreamsLayout = fieldMeta.isMember("streams");
+    const bool isNoRefBlock = isStreamsLayout && !isSelfReference &&
+                              fieldMeta.isMember("noref") && fieldMeta["noref"].asUInt() != 0;
+    const bool isUserReference = isSelfReference || isStreamsLayout;
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
         /* Each row length is known, so records are taken by exact length (split_ch = UINT8_MAX); a whole-block coder is copied from staging. */
@@ -5700,8 +5660,8 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
         if (baseStream[0]["sname"].asString() == "m") {
             int32_t decoderLen = 0;
             uint16_t mapFlag = mappedFlag.find(lineNo) == mappedFlag.end() ? 4 : mappedFlag[lineNo];
-            // Not matched
-            if (mapFlag & 0x04) {
+            // Not matched, or the block was coded with no reference at all: the payload is the bases themselves
+            if (isNoRefBlock || (mapFlag & 0x04)) {
                 decoderLen = readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
                 if ((uint32_t)decoderLen != actualBaseLen) {
                     LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);

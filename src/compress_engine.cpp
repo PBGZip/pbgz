@@ -779,7 +779,12 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
     refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
     refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
-    refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
+    /* The FASTA checksum pass runs in the background against the squash build. When the archive's
+       refe meta is written to the end-of-file dynamic meta (file output, not --refunpack) it is
+       filled in there after compression, so the load need not block on it; otherwise (stdout, or
+       --refunpack) the header must carry it and this waits for the pass. */
+    const bool deferFastaMd5 = !parameter.isUnpackRef && parameter.outputFile != STDOUT;
+    refeMeta["fasta_md5"] = deferFastaMd5 ? "" : pRefGene->getFastaChecksum();
     refeMeta["ni_name"] = "";
     refeMeta["max_block_len"] = 16 << 20;
     if (isPackRefeInHeader()) {

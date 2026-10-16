@@ -433,8 +433,11 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
                                          const std::vector<uint32_t>& freqByByte,
                                          uint8_t compressLevel)
 {
-    return select(records, freqByByte, compressLevel,
-                  samFieldCandidates(SAM_QUAL, PBGZ_MODE_ARCHIVE));
+    std::vector<CoderType> candidates = samFieldCandidates(SAM_QUAL, PBGZ_MODE_ARCHIVE);
+    const std::vector<CoderType> extra =
+        samFieldExtremeCandidates(SAM_QUAL, PBGZ_MODE_ARCHIVE, compressLevel);
+    candidates.insert(candidates.end(), extra.begin(), extra.end());
+    return select(records, freqByByte, compressLevel, candidates);
 }
 
 FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& records,

@@ -364,9 +364,12 @@ int32_t FileWriter::openIO() {
 }
 
 void FileWriter::closeIO() {
-    /* Check all msync/ftruncate/munmap/close results and latch errors. */
+    /* Check all msync/ftruncate/munmap/close results and latch errors.
+       Flush asynchronously here: a synchronous msync of the whole file (which can be many GB)
+       can stall for a long time on some filesystems (observed on ZFS). The fsync(fd) below is
+       what actually guarantees durability, so the write-back only needs to be scheduled now. */
     if (fo.mappedAddress != nullptr) {
-        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
+        if (0 != msyncMapped(fo.mappedAddress, fo.fileSize, MS_ASYNC)) {
             LOG_ERROR("msync %zu bytes failed: %s", fo.fileSize, strerror(errno));
             latchWriteError(errno);
         }

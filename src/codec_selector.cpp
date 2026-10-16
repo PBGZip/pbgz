@@ -970,7 +970,10 @@ static uint64_t parseDecimalField(const LineSample& field)
    registry's profile/level gate. Empty means a fixed strategy or none available. */
 static std::vector<CoderType> eligibleCandidates(uint32_t fieldIdx, uint8_t mode, uint8_t level)
 {
-    const std::vector<CoderType>& configured = samFieldCandidates(fieldIdx, mode);
+    /* The mode's configured list, plus whatever the extreme-ratio path (-l9) adds for this field. */
+    std::vector<CoderType> configured = samFieldCandidates(fieldIdx, mode);
+    const std::vector<CoderType> extra = samFieldExtremeCandidates(fieldIdx, mode, level);
+    configured.insert(configured.end(), extra.begin(), extra.end());
     std::vector<CoderType> candidates;
     for (size_t c = 0; c < configured.size(); ++c) {
         const CoderType type = configured[c];
@@ -987,7 +990,9 @@ static std::vector<CoderType> eligibleCandidates(uint32_t fieldIdx, uint8_t mode
 /* The same intersection for a FASTQ field, read off kFastqFieldCoderConfig. */
 static std::vector<CoderType> eligibleFastqCandidates(uint32_t fieldIdx, uint8_t mode, uint8_t level)
 {
-    const std::vector<CoderType>& configured = fastqFieldCandidates(fieldIdx, mode);
+    std::vector<CoderType> configured = fastqFieldCandidates(fieldIdx, mode);
+    const std::vector<CoderType> extra = fastqFieldExtremeCandidates(fieldIdx, mode, level);
+    configured.insert(configured.end(), extra.begin(), extra.end());
     std::vector<CoderType> candidates;
     for (size_t c = 0; c < configured.size(); ++c) {
         const CoderType type = configured[c];
@@ -1015,9 +1020,11 @@ static uint16_t chrIndexOf(const LineSample& field)
     return (idx != 65535) ? idx : 0xFFFF;
 }
 
-/* The SEQ match payload coder is coder_fc; with a single-entry list no trial runs.
-   Returned as a FieldCodecSelection with nothing measured. */
-static FieldCodecSelection seqMatchCoderChoice(uint32_t segmentLen)
+/* The SEQ match payload coder: coder_fc by default (single-entry list, no trial). At the
+   extreme-ratio level (-l9) coder_bwt_cm joins it and the smaller of the two is taken.
+   Returned as a FieldCodecSelection so the per-field table reports the choice. */
+static FieldCodecSelection seqMatchCoderChoice(const uint8_t* sample, uint32_t segmentLen,
+                                               uint8_t level)
 {
     FieldCodecSelection sel;
     sel.status = FieldStatus::SELECTED;
@@ -1025,6 +1032,29 @@ static FieldCodecSelection seqMatchCoderChoice(uint32_t segmentLen)
     sel.sampleLen = segmentLen;
     sel.decidedLen = segmentLen;
     sel.rounds = 1;
+
+    if (level < 9) {
+        return sel;
+    }
+
+    const CoderType kCandidates[2] = {CoderType::BWT_CM, CoderType::FC};
+    for (int i = 0; i < 2; ++i) {
+        const CoderType type = kCandidates[i];
+        /* coder_fc refuses inputs of FC_MIN_LEN bytes or less (and above its own maximum). */
+        if (type == CoderType::FC &&
+            (segmentLen <= FC_MIN_LEN || segmentLen >= (uint32_t)FC_MAX_LEN)) {
+            continue;
+        }
+        uint32_t outLen = 0, usec = 0;
+        if (!trialStream(type, sample, segmentLen, level, outLen, usec)) {
+            continue;   /* this coder cannot carry the segment */
+        }
+        sel.addTrial(type, outLen, usec);
+    }
+
+    uint32_t chosenLen = 0;
+    sel.selectedCoder = pickTrialWinner(sel, chosenLen);
+    sel.bestCompLen = chosenLen;
     return sel;
 }
 
@@ -1203,12 +1233,13 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
 
     /* Same RLE decision as the block pass, so the reported segment is the one encoded. */
     const SeqRleSplit rle = splitSeqMatchStream(match.data(), (uint32_t)match.size());
+    const uint8_t* payload = rle.useRle ? rle.run.get() : match.data();
     const uint32_t payloadLen = rle.useRle ? rle.runLength : (uint32_t)match.size();
     if (payloadLen == 0) {
         return false;
     }
 
-    const FieldCodecSelection verdict = seqMatchCoderChoice(payloadLen);
+    const FieldCodecSelection verdict = seqMatchCoderChoice(payload, payloadLen, level);
     info.fields[SAM_SEQ] = verdict;
 
     /* A caller-published verdict (>= 0) wins over this trial; -1 is undecided. */
@@ -1557,7 +1588,10 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, uint64_t inputTotalByte
                 info.fields[f].sampleLen = (uint32_t)buf.size();
                 continue;
             }
-            const std::vector<CoderType> qualCandidates = fastqFieldCandidates(FQ_QUAL, mode);
+            std::vector<CoderType> qualCandidates = fastqFieldCandidates(FQ_QUAL, mode);
+            const std::vector<CoderType> qualExtra =
+                fastqFieldExtremeCandidates(FQ_QUAL, mode, compressLevel);
+            qualCandidates.insert(qualCandidates.end(), qualExtra.begin(), qualExtra.end());
             if (qualCandidates.empty()) {
                 /* The mode's QUAL row lists no coder: nothing to compare, so mark it
                    skipped and let the row default apply. */

@@ -123,6 +123,21 @@ inline const std::vector<CoderType>& samFieldCandidates(uint32_t fieldIdx, uint8
     return (mode == PBGZ_MODE_FAST) ? cfg->fastCandidates : cfg->candidates;
 }
 
+/* Extra candidates a field takes on at the top compression level (-l9, the extreme-ratio path):
+   coder_bwt_cm for SEQ and QUAL, which do not list it in the default archive row. */
+inline std::vector<CoderType> samFieldExtremeCandidates(uint32_t fieldIdx, uint8_t mode, uint8_t level)
+{
+    std::vector<CoderType> extra;
+    if (level < 9 || mode != PBGZ_MODE_ARCHIVE || (fieldIdx != SAM_SEQ && fieldIdx != SAM_QUAL)) {
+        return extra;
+    }
+    const std::vector<CoderType>& base = samFieldCandidates(fieldIdx, mode);
+    if (std::find(base.begin(), base.end(), CoderType::BWT_CM) == base.end()) {
+        extra.push_back(CoderType::BWT_CM);
+    }
+    return extra;
+}
+
 /* Whether a field lists the given coder as a candidate in the given mode. */
 inline bool samFieldCandidate(uint32_t fieldIdx, CoderType type, uint8_t mode)
 {
@@ -165,6 +180,20 @@ inline bool fastqFieldCandidate(uint32_t fieldIdx, CoderType type, uint8_t mode)
 {
     const std::vector<CoderType>& list = fastqFieldCandidates(fieldIdx, mode);
     return std::find(list.begin(), list.end(), type) != list.end();
+}
+
+/* The FASTQ twin of samFieldExtremeCandidates: SEQ and QUAL take on coder_bwt_cm at -l9. */
+inline std::vector<CoderType> fastqFieldExtremeCandidates(uint32_t fieldIdx, uint8_t mode, uint8_t level)
+{
+    std::vector<CoderType> extra;
+    if (level < 9 || mode != PBGZ_MODE_ARCHIVE || (fieldIdx != FQ_SEQ && fieldIdx != FQ_QUAL)) {
+        return extra;
+    }
+    const std::vector<CoderType>& base = fastqFieldCandidates(fieldIdx, mode);
+    if (std::find(base.begin(), base.end(), CoderType::BWT_CM) == base.end()) {
+        extra.push_back(CoderType::BWT_CM);
+    }
+    return extra;
 }
 
 inline CoderType fastqFieldDefaultCoder(uint32_t fieldIdx, uint8_t mode, CoderType fallback)

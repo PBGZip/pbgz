@@ -585,6 +585,9 @@ private:
 
 private:
     uint32_t baseNCount;
+    /* Set while compressBaseWithoutRef drives the shared reference-path compressor: no reference is
+       consulted, so every record stores its own bases (the "streams" layout still applies). */
+    bool seqNoReference = false;
 
     /* A decoded SEQ exception stream for the current block: its character and its positions. */
     struct SeqExcStream {

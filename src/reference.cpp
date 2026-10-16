@@ -77,6 +77,8 @@ int32_t Reference::referencCheck() {
 }
 
 Reference::~Reference() {
+    /* Join the background checksum pass before teardown, or its thread would outlive the object. */
+    ensureFastaInfo();
     // Free allocated memory
     MemoryUtil::safeFree(refGeneSquash);
     MemoryUtil::safeFree(hashBucketCnt);
@@ -176,21 +178,30 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
 }
 
 bool Reference::initSquashFromFasta() {
-    std::string refGeneMd5;
-    int64_t refGeneLen;
-    calculateReferenceMd5(refGeneFile, refGeneMd5, refGeneLen);
-    fastaChecksum = refGeneMd5;
-    fastaLength = refGeneLen;
+    /* The FASTA is read twice - once for the file checksum and once for the squash - and the two
+       passes are independent, so the checksum runs on its own thread while this one builds the
+       squash. The result is published lazily by ensureFastaInfo(), so a caller that does not need
+       the checksum (e.g. the compression metadata, which carries it in the end-of-file meta) lets
+       it overlap the whole compression instead of blocking the load. */
+    md5Job = std::make_shared<Md5Job>();
+    const std::string md5Input = refGeneFile;
+    std::shared_ptr<Md5Job> job = md5Job;
+    job->thread = std::thread([job, md5Input]() {
+        calculateReferenceMd5(md5Input, job->value, job->len);
+    });
 
     std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
     if (reader == nullptr || reader->openIO() != 0) {
+        ensureFastaInfo();
         LOG_ERROR("Failed to open reference FASTA: %s", refGeneFile.c_str());
         return false;
     }
 
-    /* Build squash in memory: 4 bases per byte (2 bits each). */
+    /* Build squash in memory: 4 bases per byte (2 bits each). The checksum pass's exact content
+       length is not available yet, so reserve from the on-disk size (an upper bound for a plain
+       FASTA; a gzip reference just reallocates a little). */
     std::vector<uint8_t> squash;
-    squash.reserve(refGeneLen / 4 + 1024);
+    squash.reserve((size_t)(PathUtil::getFileSize(refGeneFile) / 4 + 1024));
 
     uint8_t cacheActg[4];
     uint32_t cacheLen = 0;
@@ -254,12 +265,26 @@ bool Reference::initSquashFromFasta() {
 
     refGeneSquashlen = (int64_t)squash.size();
     refGeneSquash = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashlen);
+    reader->closeIO();
     if (refGeneSquash == nullptr) {
         return false;
     }
     memcpy(refGeneSquash, squash.data(), refGeneSquashlen);
-    reader->closeIO();
     return true;
+}
+
+/* Join the background checksum pass (once) and publish its result into the members. */
+void Reference::ensureFastaInfo() {
+    if (!md5Job || md5Job->joined) {
+        return;
+    }
+    if (md5Job->thread.joinable()) {
+        md5Job->thread.join();
+    }
+    fastaChecksum = md5Job->value;
+    fastaLength = md5Job->len;
+    md5Job->joined = true;
+    md5Job.reset();
 }
 
 uint8_t* Reference::initSquashByStream(int64_t squashLength) {
@@ -269,8 +294,9 @@ uint8_t* Reference::initSquashByStream(int64_t squashLength) {
 }
 
 void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen) {
-    std::thread calc_md5([&refGeneFile, &refGeneMd5, &refGeneLen]() {
-        uint32_t bufferLen = 4096, len;
+    {
+        /* A 4 MB buffer keeps the per-read syscall overhead negligible against the MD5 cost. */
+        uint32_t bufferLen = 4u << 20, len;
         refGeneLen = 0;
         md5_ctx md5;
         uint8_t digest[16];
@@ -359,8 +385,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
         md5_final(digest, &md5);
         refGeneMd5 = md5_to_string(digest);
         MemoryUtil::safeFree(buffer);
-    });
-    calc_md5.join();
+    }
 }
 
 bool Reference::writeNiFileHeader(FileWriter& niWriter, int64_t& offset) {
@@ -403,6 +428,8 @@ bool Reference::writeNiFile(const std::string& niFile) {
         LOG_ERROR("Squash is not built yet, nothing to write into %s.", niFile.c_str());
         return false;
     }
+    /* The NI metadata carries the FASTA checksum and length; wait for the background pass. */
+    ensureFastaInfo();
 
     FileWriter niWriter(niFile);
     if (niWriter.openIO() != 0) {
@@ -960,13 +987,15 @@ const std::string& Reference::getFastaFileName() const {
     return this->refGeneFile;
 }
 
-/* Get fasta file content length */
-int64_t Reference::getFastaLength() const {
+/* Get fasta file content length (waits for the background checksum pass) */
+int64_t Reference::getFastaLength() {
+    ensureFastaInfo();
     return this->fastaLength;
 }
 
-/* Get fasta file content MD5 */
-const std::string& Reference::getFastaChecksum() const {
+/* Get fasta file content MD5 (waits for the background checksum pass) */
+const std::string& Reference::getFastaChecksum() {
+    ensureFastaInfo();
     return this->fastaChecksum;
 }
 

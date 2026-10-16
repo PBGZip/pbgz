@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <string>
 #include <memory>
+#include <thread>
 #include <vector>
 #include <json/json.h>
 #include "utils/guard_bar.h"
@@ -71,11 +72,11 @@ public:
     /// @brief Get the FASTA file name.
     const std::string& getFastaFileName() const;
 
-    /// @brief Get the FASTA file length.
-    int64_t getFastaLength() const;
+    /// @brief Get the FASTA file length. Waits for the background checksum pass if needed.
+    int64_t getFastaLength();
 
-    /// @brief Get the FASTA file MD5 checksum.
-    const std::string& getFastaChecksum() const;
+    /// @brief Get the FASTA file MD5 checksum. Waits for the background checksum pass if needed.
+    const std::string& getFastaChecksum();
 
     /* One FASTA record's name and base offset in the concatenated reference. */
     struct SequenceSpan {
@@ -156,7 +157,10 @@ private:
 
 private:
     /// @brief Compute the FASTA MD5 checksum and length.
-    void calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen);
+    static void calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen);
+
+    /// @brief Join the background checksum thread (if any) and publish its result.
+    void ensureFastaInfo();
 
     /// @brief Write the NI file header.
     bool writeNiFileHeader(FileWriter& niWriter, int64_t& offset);
@@ -176,6 +180,16 @@ private:
     std::string fastaChecksum;
     // FASTA file content length
     int64_t fastaLength;
+    /* Background FASTA checksum pass, started with the squash build and joined lazily. It sits
+       behind a shared handle so Reference stays copy-constructible (the tests return it by value
+       and rely on copy elision; a live std::thread would make the copy constructor unavailable). */
+    struct Md5Job {
+        std::thread thread;
+        std::string value;
+        int64_t len = 0;
+        bool joined = false;
+    };
+    std::shared_ptr<Md5Job> md5Job;
     // Per-record names and base offsets; empty when built from an NI index.
     std::vector<SequenceSpan> refSequences;
     // Base-group key length; must be odd.
