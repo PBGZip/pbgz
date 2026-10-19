@@ -263,6 +263,12 @@ bool Reference::initSquashFromFasta() {
         squash.push_back(ch);
     }
 
+    /* Fill each record's length now that the next record's offset (or the end) is known. */
+    for (size_t i = 0; i < refSequences.size(); ++i) {
+        const uint64_t end = (i + 1 < refSequences.size()) ? refSequences[i + 1].offset : baseCount;
+        refSequences[i].length = end - refSequences[i].offset;
+    }
+
     refGeneSquashlen = (int64_t)squash.size();
     refGeneSquash = MemoryUtil::safeAlloc<uint8_t>(refGeneSquashlen);
     reader->closeIO();

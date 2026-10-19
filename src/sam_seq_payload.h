@@ -55,8 +55,20 @@ inline constexpr uint8_t SEQ_FLAG_UNMAPPED = 0x04;
 bool seqRecordUsesReference(uint16_t chrId, uint16_t flag, uint64_t startPos, uint32_t refConsumed,
                             Reference* reference, int64_t& refPos);
 
-/* Whether the loaded reference is laid out the way the @SQ list addresses it. Returns true when
-   the correspondence holds or cannot be checked (an NI-loaded reference carries no names). */
+/* Recompute the BWA/calmd-style MD:Z and NM:i of a mapped record from its alignment and the
+   reference: `chrStart` is the chromosome's base offset in the reference (the same value the SEQ
+   column addresses), `pos` is the 1-based SAM POS, `seq` is the SEQ text as stored (already in the
+   alignment orientation). `md`/`nm` receive the values. Returns false when the record cannot be
+   derived (unmapped, empty CIGAR/SEQ, out of reference bounds, malformed CIGAR); the caller then
+   keeps the stored tag. `refScratch` is grown as needed. */
+bool deriveMdNm(Reference* reference, int64_t chrStart, uint64_t pos, uint16_t flag,
+                const std::vector<CigarOp>& ops, const uint8_t* seq, uint32_t seqLen,
+                std::vector<uint8_t>& refScratch, std::string& md, int64_t& nm);
+
+/* Whether the loaded reference is the assembly the @SQ list names: every @SQ sequence must exist
+   in the reference with the same length. The order need not match (a reordered FASTA still
+   decompresses correctly; see the definition). Returns true when this holds, and also when it
+   cannot be checked (an NI-loaded reference carries no names). */
 bool referenceLinesUpWithHeader(const Reference* reference);
 
 /* Tell the user, once per run, that the reference cannot be used for SEQ. */

@@ -78,12 +78,14 @@ public:
     /// @brief Get the FASTA file MD5 checksum. Waits for the background checksum pass if needed.
     const std::string& getFastaChecksum();
 
-    /* One FASTA record's name and base offset in the concatenated reference. */
+    /* One FASTA record's name, base offset and length in the concatenated reference. */
     struct SequenceSpan {
         std::string name;
         uint64_t offset;
+        uint64_t length;
 
-        SequenceSpan(const std::string& n, uint64_t o) : name(n), offset(o) {}
+        SequenceSpan(const std::string& n, uint64_t o, uint64_t l = 0)
+            : name(n), offset(o), length(l) {}
     };
 
     /// @brief Per-record names and base offsets of the FASTA.

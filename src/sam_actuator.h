@@ -659,14 +659,38 @@ private:
     /* Reads with missing QUAL (*), expanded to seqLen '*' on compression. */
     std::vector<uint8_t> qualMissingBuf;
 
-    /* OPTION tag-split columnization: decodes the whole block once and serves lines from cache. Currently disabled; code kept for future use. */
+    /* OPTION tag-split columnization: decodes the whole block once and serves lines from cache. */
     int32_t decodeOptionColumn(const Json::Value& fieldMeta);
+    /* Recompute a derived tag (MD:Z / NM:i) for the record currently being decoded. */
+    bool deriveOptionTagValue(uint32_t tagIdx, std::string& out);
     /* The decoded OPTION text of every record in the block, with optionRecOff giving each record's extent. */
     std::vector<uint8_t> optionRecText;
     std::vector<uint32_t> optionRecOff;
     /* Per record, whether it has an OPTION column at all (see decodeOptionStripColumn). */
     std::vector<uint8_t> optionRecPresent;
     bool optionCacheEmpty = true;
+
+    /* tag_split ("mode":"tag_split") state, decoded once per block and reassembled per line. */
+    struct OptionTagCol {
+        std::string enc;                    /* "text" / "varint" / "dvarint" / "derived" */
+        std::vector<std::string> vals;      /* normal columns, one entry per tag-bearing record */
+        std::vector<uint8_t> flags;         /* derived: per value, 0 = derive, 1 = stored */
+        std::vector<std::string> excs;      /* derived: stored values, in record order */
+        size_t cursor = 0;
+        size_t excCursor = 0;
+    };
+    std::vector<std::vector<uint8_t>> optionRecIds;     /* per line: tag ids present */
+    std::vector<std::string> optionTagNames;
+    std::vector<std::string> optionTagTypes;
+    std::vector<OptionTagCol> optionTagCols;
+    /* Current record's alignment, set by the decode loop for MD/NM regeneration. */
+    uint16_t optCtxChrId = 0xFFFF;
+    uint64_t optCtxPos = 0;
+    uint16_t optCtxFlag = 0;
+    const uint8_t* optCtxSeq = nullptr;
+    uint32_t optCtxSeqLen = 0;
+    int32_t optCtxContentIdx = -1;
+    std::vector<uint8_t> optMdScratch;
 
     const uint8_t atcg4[4] = {'A', 'C', 'T', 'G'};
 

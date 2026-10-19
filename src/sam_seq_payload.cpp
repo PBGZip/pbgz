@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include "seq_stream_util.h"   /* appendVarint, used by the payload writers */
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -149,19 +150,37 @@ bool referenceLinesUpWithHeader(const Reference* reference)
         return true;
     }
 
-    /* Where each name really starts, to compare with the @SQ running-sum offsets. */
-    std::unordered_map<std::string, uint64_t> offsetByName;
-    offsetByName.reserve(seqs.size() * 2);
+    /* The reference names (and lengths) are what have to agree with the @SQ list. The order need
+       not: both the encoder and the decoder address a chromosome at the running sum of the @SQ
+       lengths, so a reordered FASTA keeps decompression correct - only the affected contigs are
+       XORed against the wrong bases and compress less well. Requiring the same order made a
+       reference whose unplaced contigs are ordered differently fall back to no reference at all,
+       which costs far more than it protects. */
+    std::unordered_map<std::string, Reference::SequenceSpan> refByName;
+    refByName.reserve(seqs.size() * 2);
     for (const Reference::SequenceSpan& s : seqs) {
-        offsetByName.emplace(s.name, s.offset);
+        refByName.emplace(s.name, s);
     }
 
     const std::vector<ChromosomeInfo>& chrs = SamInfo::getInstance().getAllChromosomeInfo();
+    size_t reordered = 0;
     for (const ChromosomeInfo& c : chrs) {
-        const auto it = offsetByName.find(c.name);
-        if (it == offsetByName.end() || it->second != c.position) {
-            return false;
+        const auto it = refByName.find(c.name);
+        if (it == refByName.end()) {
+            return false;   /* the reference is not the assembly the header names */
         }
+        if (it->second.length != 0 && it->second.length != c.length) {
+            return false;   /* same name, different sequence length: not this assembly */
+        }
+        if (it->second.offset != c.position) {
+            ++reordered;
+        }
+    }
+    if (reordered > 0) {
+        LOG_WARNING("Reference and @SQ list hold the same sequences in a different order "
+                    "(%zu of %zu contigs); the reference is used with the @SQ layout, so those "
+                    "contigs compress less well (decompression is unaffected).",
+                    reordered, chrs.size());
     }
     return true;
 }
@@ -175,9 +194,9 @@ void warnReferenceNotUsableForSeq()
     /* Nothing else reports this: the reference loads and verifies, the SEQ column just stops
        improving. */
     LOG_WARNING("The reference does not line up with the file's @SQ list: its sequences are not "
-                "the ones the header names, in the header's order, so a read's position would "
-                "address the wrong bases. SEQ is compressed without it; supply a reference of "
-                "the same assembly as the alignment.");
+                "the ones the header names (a name is missing or its length differs), so a read's "
+                "position would address the wrong bases. SEQ is compressed without it; supply a "
+                "reference of the same assembly as the alignment.");
     fprintf(stderr, "warning: reference does not line up with the @SQ list; "
                     "SEQ falls back to compression without a reference\n");
 }
@@ -332,6 +351,119 @@ SeqRecordPayload buildSeqSquashRecordPayload(uint16_t chrId, uint16_t flag, uint
         out.rawBases = true;
     }
     return out;
+}
+
+/* Recompute MD:Z and NM:i exactly as BWA/samtools calmd do (see bam_fillmd1_core): mismatches and
+   deletions extend MD, insertions/deletions count toward NM, soft/hard clips and reference skips
+   do not, and an N/N or N/base comparison is a mismatch. Both sides run this same function on the
+   same record, so the encoder can validate a regenerated value against the stored one and only
+   keep an exception when they differ. */
+bool deriveMdNm(Reference* reference, int64_t chrStart, uint64_t pos, uint16_t flag,
+                const std::vector<CigarOp>& ops, const uint8_t* seq, uint32_t seqLen,
+                std::vector<uint8_t>& refScratch, std::string& md, int64_t& nm)
+{
+    md.clear();
+    nm = 0;
+    if (reference == nullptr || seq == nullptr || seqLen == 0 ||
+        ops.empty() || (flag & SEQ_FLAG_UNMAPPED) || pos == 0) {
+        return false;
+    }
+    int64_t rp = chrStart + (int64_t)pos - 1;
+    if (rp < 0) {
+        return false;
+    }
+    const uint64_t squashLen = (uint64_t)reference->getSquashLength();
+    uint32_t readPos = 0;
+    uint32_t matched = 0;
+    char num[16];
+    const auto appendNum = [&](uint32_t v) {
+        const int n = snprintf(num, sizeof(num), "%u", v);
+        md.append(num, (size_t)n);
+    };
+    /* getStretchActg writes 4-(pos&3) bytes even for a short read, so always fetch from a
+       4-aligned start and index past the lead. The scratch grows to the fetched length
+       (a deletion may be longer than the read). */
+    const auto fetchRef = [&](int64_t at, uint32_t len, uint32_t& lead) -> bool {
+        const int64_t aligned = at & ~(int64_t)3;
+        lead = (uint32_t)(at - aligned);
+        const uint32_t fetchLen = (lead + len + 3u) & ~3u;
+        if (aligned < 0 || ((uint64_t)(aligned >> 2)) + (fetchLen >> 2) > squashLen) {
+            return false;
+        }
+        if (refScratch.size() < fetchLen) {
+            refScratch.resize(fetchLen);
+        }
+        reference->getStretchActg(refScratch.data(), fetchLen, (uint64_t)aligned);
+        return true;
+    };
+
+    for (const CigarOp& op : ops) {
+        switch (op.op) {
+            case 'M': case '=': case 'X': {
+                uint32_t lead = 0;
+                if ((uint64_t)readPos + op.len > (uint64_t)seqLen ||
+                    !fetchRef(rp, op.len, lead)) {
+                    return false;
+                }
+                for (uint32_t i = 0; i < op.len; ++i) {
+                    const uint8_t rb = (uint8_t)std::toupper(refScratch[lead + i]);
+                    const uint8_t cb = (uint8_t)std::toupper(seq[readPos + i]);
+                    const bool isMatch = (cb == '=') || (cb == rb && cb != 'N' && rb != 'N');
+                    if (isMatch) {
+                        ++matched;
+                    } else {
+                        appendNum(matched);
+                        matched = 0;
+                        md.push_back((char)rb);
+                        ++nm;
+                    }
+                }
+                readPos += op.len;
+                rp += op.len;
+                break;
+            }
+            case 'I':
+                if ((uint64_t)readPos + op.len > (uint64_t)seqLen) {
+                    return false;
+                }
+                readPos += op.len;
+                nm += op.len;
+                break;
+            case 'S':
+                if ((uint64_t)readPos + op.len > (uint64_t)seqLen) {
+                    return false;
+                }
+                readPos += op.len;
+                break;
+            case 'D': {
+                uint32_t lead = 0;
+                if (!fetchRef(rp, op.len, lead)) {
+                    return false;
+                }
+                appendNum(matched);
+                matched = 0;
+                md.push_back('^');
+                for (uint32_t i = 0; i < op.len; ++i) {
+                    md.push_back((char)std::toupper(refScratch[lead + i]));
+                }
+                rp += op.len;
+                nm += op.len;
+                break;
+            }
+            case 'N':
+                rp += op.len;
+                break;
+            case 'H': case 'P':
+                break;
+            default:
+                return false;
+        }
+    }
+    if (readPos != seqLen) {
+        return false;
+    }
+    appendNum(matched);   /* calmd always appends the trailing match run, even when it is 0 */
+    return true;
 }
 
 void buildRunForm(const SeqExceptionClass& exc, std::vector<uint8_t>& out)
