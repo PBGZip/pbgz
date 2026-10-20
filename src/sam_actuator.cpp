@@ -82,6 +82,75 @@ namespace {
             samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, statObjectId, StatMetricIds::COMPRESSED_SIZE, fieldDstLen);
         }
     }
+
+    /* Basename used to compare an alignment's reference with the -r file. Both sides may be
+       gzip-compressed and one may be a path in an @PG command line. Only the actual -r file is
+       inspected for the gzip header's original name; a path parsed from the header is not opened. */
+    std::string referenceBaseName(const std::string& path, bool inspectGzipHeader = false) {
+        if (path.empty()) {
+            return path;
+        }
+        std::string name = (inspectGzipHeader && PathUtil::isGzFile(path))
+                               ? PathUtil::getFileNameFromGz(path)
+                               : PathUtil::getFileName(path);
+        if (name.size() > 3 && name.compare(name.size() - 3, 3, ".gz") == 0) {
+            name.resize(name.size() - 3);
+        }
+        return name;
+    }
+
+    /* bwa mem options that consume the following token when the value is not attached
+       (e.g. "-t 8", "-B 9", "-R @RG..."). Flags such as -M/-V/-Y/-q take no value. */
+    bool bwaMemOptionTakesValue(char opt) {
+        switch (opt) {
+            case 't': case 'k': case 'w': case 'd': case 'r': case 'y': case 'c':
+            case 'D': case 'W': case 'm': case 'A': case 'B': case 'O': case 'E':
+            case 'L': case 'U': case 'x': case 'R': case 'H': case 'o': case 'j':
+            case 'K': case 'v': case 'T': case 'h': case 'I':
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /* First positional argument of a "bwa mem ..." command line: the index/reference prefix.
+       Option values are skipped so a value such as the "8" in "-t 8" is not mistaken for it. */
+    std::string extractBwaMemReference(const std::string& command) {
+        std::stringstream ss(command);
+        std::string item;
+        std::vector<std::string> tokens;
+        while (std::getline(ss, item, ' ')) {
+            if (!item.empty()) {
+                tokens.push_back(item);
+            }
+        }
+        if (tokens.size() < 3 || tokens[0] != "bwa" || tokens[1] != "mem") {
+            return std::string();
+        }
+        for (size_t i = 2; i < tokens.size(); ++i) {
+            const std::string& token = tokens[i];
+            if (token.empty()) {
+                continue;
+            }
+            if (token[0] != '-') {
+                return token;
+            }
+            if (token == "--") {
+                continue;
+            }
+            if (token.size() > 2 && token[1] == '-') {
+                /* Long option: only the "--name=value" form is self-contained here. */
+                continue;
+            }
+            if (token.size() <= 1) {
+                continue;
+            }
+            if (bwaMemOptionTakesValue(token[1]) && token.size() == 2) {
+                ++i;   /* skip the option's value */
+            }
+        }
+        return std::string();
+    }
 }
 
 SamCodecActuator::SamCodecActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine, Reference* pReferene): CodecActuator(inPtr, outPtr, engine) {
@@ -190,18 +259,11 @@ int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
                     endPos = line.length();
                 }
                 std::string refFilePath = line.substr(pos, endPos - pos);
-                // Parse filename from refFilePath, compatible with local and network paths
-                std::string refFileName;
-                size_t lastSlash = refFilePath.find_last_of("/\\");
-                if (lastSlash != std::string::npos) {
-                    refFileName = refFilePath.substr(lastSlash + 1);
-                } else {
-                    refFileName = refFilePath;
-                }
+                std::string refFileName = referenceBaseName(refFilePath);
 
                 LOG_INFO("Reference fasta name: %s.", refFilePath.c_str());
                 if (pRefeGene != nullptr) {
-                    std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
+                    std::string inputFastq = referenceBaseName(pRefeGene->getFastaFileName(), true);
                     if (refFileName != inputFastq) {
                         fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s. \n", refFileName.c_str(), inputFastq.c_str());
                         isCheckUR = true;
@@ -222,41 +284,15 @@ int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
                 }
 
                 std::string command = line.substr(pos, endPos - pos);
-                // Split command by spaces and take the third as reference gene name
-                std::stringstream ss(command);
-                std::string item;
-                std::vector<std::string> tokens;
-                while (std::getline(ss, item, ' ')) {
-                    if (!item.empty()) {
-                        tokens.push_back(item);
-                    }
-                }
-                if (tokens.size() >= 3) {
-                    std::string refGeneName;
-                    if (tokens.size() >= 2 && tokens[0] == "bwa" && tokens[1] == "mem") {
-                        int nonOptionCount = 0;
-                        for (size_t i = 2; i < tokens.size(); i++) {
-                            if (tokens[i].substr(0, 1) != "-") {
-                                nonOptionCount++;
-                                if (nonOptionCount == 1) {
-                                    refGeneName = tokens[i];
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if (!refGeneName.empty()) {
-                        LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
-                        if (pRefeGene != nullptr) {
-                            std::string inputFastq = PathUtil::getFileName(pRefeGene->getFastaFileName());
-                            if (PathUtil::isGzFile(pRefeGene->getFastaFileName())) {
-                                inputFastq = PathUtil::getFileNameFromGz(pRefeGene->getFastaFileName());
-                            }
-                            if (refGeneName != inputFastq) {
-                                fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s \n", refGeneName.c_str(), inputFastq.c_str());
-                                isCheckPG = true;
-                            }
+                std::string refGeneName = extractBwaMemReference(command);
+                if (!refGeneName.empty()) {
+                    LOG_INFO("Reference gene name extracted from @PG CL: %s", refGeneName.c_str());
+                    if (pRefeGene != nullptr) {
+                        std::string inputFastq = referenceBaseName(pRefeGene->getFastaFileName(), true);
+                        const std::string samFasta = referenceBaseName(refGeneName);
+                        if (samFasta != inputFastq) {
+                            fprintf(stderr, "Warning: fasta file not match, SAM fasta is %s, input fasta is %s \n", samFasta.c_str(), inputFastq.c_str());
+                            isCheckPG = true;
                         }
                     }
                 }
