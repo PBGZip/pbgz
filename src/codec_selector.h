@@ -130,7 +130,7 @@ private:
        the candidates; on success fills info.fields[SAM_SEQ] and pins
        seqMatchCoder/nposForm. False when no record can use the reference. */
     static bool selectSeqReferenceCoder(RoughIOBlock* block, Reference* reference, uint8_t level,
-                                        PreprocessInfo& info);
+                                        uint8_t mode, PreprocessInfo& info);
 
     /* Collect SEQ reference records up to sampleBudget bases, plus the N offsets over
        the same sample. */

@@ -349,8 +349,14 @@ private:
             for (int sym = 0; sym < 256; ++sym)
                 if (cnt[ctx][sym] > 0)
                     ++n;
+            /* The header stores n in one byte. A context using all 256 symbols cannot be
+               represented; signal "no order-1 model" so encode_one_block falls back to
+               order-0/raw instead of writing a zero count and producing a model with a
+               zero-width interval (which would loop forever in ransEncode4). */
+            if (n >= 256)
+                return 0;
             if (p + 1 + (size_t)n * 3 > cap)
-                break;
+                return 0;
             hdr[p++] = (uint8_t)n;
             for (int sym = 0; sym < 256; ++sym) {
                 if (cnt[ctx][sym] == 0)

@@ -35,17 +35,20 @@ PbgzStat::~PbgzStat() {
 }
 
 int PbgzStat::init() {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     statUnits.clear();
     return 0;
 }
 
 void PbgzStat::registerStatUnit(uint16_t unitId, const std::string& unitName) {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     if (statUnits.find(unitId) == statUnits.end()) {
         statUnits[unitId] = StatUnit(unitId, unitName);
     }
 }
 
 void PbgzStat::addStatUnitMetric(uint16_t unitId, uint16_t metricId) {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     auto it = statUnits.find(unitId);
     if (it != statUnits.end()) {
         // Look up the metric definition in the global table
@@ -58,6 +61,7 @@ void PbgzStat::addStatUnitMetric(uint16_t unitId, uint16_t metricId) {
 }
 
 void PbgzStat::setMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metricId, uint64_t value) {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     auto unitIt = statUnits.find(unitId);
     if (unitIt != statUnits.end()) {
         StatObject* obj = unitIt->second.getStatObject(objectId);
@@ -68,6 +72,7 @@ void PbgzStat::setMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metri
 }
 
 void PbgzStat::addMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metricId, uint64_t value) {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     auto unitIt = statUnits.find(unitId);
     if (unitIt != statUnits.end()) {
         StatObject* obj = unitIt->second.getStatObject(objectId);
@@ -78,6 +83,7 @@ void PbgzStat::addMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metri
 }
 
 uint64_t PbgzStat::getMetricValue(uint16_t unitId, uint16_t objectId, uint16_t metricId) const {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     auto unitIt = statUnits.find(unitId);
     if (unitIt != statUnits.end()) {
         const StatUnit& unit = unitIt->second;
@@ -111,6 +117,7 @@ uint64_t PbgzStat::getMetricValue(uint16_t unitId, uint16_t objectId, uint16_t m
 }
 
 void PbgzStat::addStatObject(uint16_t unitId, uint16_t objectId, const std::string& objectName) {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     auto it = statUnits.find(unitId);
     if (it != statUnits.end()) {
         it->second.addStatObject(objectId, objectName);
@@ -118,6 +125,7 @@ void PbgzStat::addStatObject(uint16_t unitId, uint16_t objectId, const std::stri
 }
 
 std::map<uint16_t, uint64_t> PbgzStat::getUnitMetricValues(uint16_t unitId, uint16_t metricId) const {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     std::map<uint16_t, uint64_t> result;
     auto unitIt = statUnits.find(unitId);
     if (unitIt != statUnits.end()) {
@@ -131,6 +139,7 @@ std::map<uint16_t, uint64_t> PbgzStat::getUnitMetricValues(uint16_t unitId, uint
 }
 
 void PbgzStat::printStats() {
+    std::lock_guard<std::recursive_mutex> lock(statMutex);
     fprintf(stderr, "=== Statistics ===\n");
     
     if (statUnits.empty()) {

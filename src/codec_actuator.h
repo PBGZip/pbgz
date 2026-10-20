@@ -55,6 +55,12 @@ protected:
         return (pbgzEngine != nullptr) ? pbgzEngine->getParameter().compressLevel : 0;
     }
 
+    /* Active -m mode; archive when there is no engine (e.g. unit tests). */
+    uint8_t compressMode() const {
+        return (pbgzEngine != nullptr) ? pbgzEngine->getParameter().mode
+                                       : (uint8_t)PBGZ_MODE_ARCHIVE;
+    }
+
     /* Create a SAM field encoder, type taken from preprocessing's trial result and
        falling back to the field's registered default when there is no usable result.
        Level comes from engineCompressLevel. */

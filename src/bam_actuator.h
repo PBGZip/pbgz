@@ -41,9 +41,11 @@ public:
     int32_t decompress() override;
 
 private:
-    /* Encode one serialised column with the coder picked for fieldIdx and append its meta to streamMeta. */
+    /* Encode one serialised column with the coder picked for fieldIdx and append its meta to streamMeta.
+       statFieldIdx attributes auxiliary streams (CIGAR_N, L_SEQ, TAGS_N) to their logical field. */
     int32_t encodeColumn(uint32_t fieldIdx, CoderType fallback, const uint8_t* data, size_t size,
-                         Json::Value& streamMeta, const char* name, const char* mode);
+                         Json::Value& streamMeta, const char* name, const char* mode,
+                         uint32_t statFieldIdx = UINT32_MAX);
 
     /* QNAME must be fed line by line, or the prefix/suffix-matching coder degrades to a context model. */
     int32_t encodeQnameColumn(const uint8_t* qnameStream, size_t qnameStreamSize,

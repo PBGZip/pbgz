@@ -27,6 +27,7 @@
 #include <string>
 #include <map>
 #include <functional>
+#include <mutex>
 
 enum class MetricType {
     VALUE,           // Set value
@@ -155,6 +156,8 @@ protected:
     // Three-layer structure:
     // Layer 1: statistic unit (StatUnit), containing metrics and objects
     std::map<uint16_t, StatUnit> statUnits;
+    /* Compression workers update field/object metrics concurrently. */
+    mutable std::recursive_mutex statMutex;
 };
 
 namespace StatUnitIds{

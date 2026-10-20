@@ -354,21 +354,17 @@ private:
     /* Only counts CIGAR operations that consume reference sequence (M/D/N/=/X); used for TLEN reconstruction. */
 
     /* PNEXT's exception stream: (contentIdx, delta) pairs of records that cannot be rebuilt from their mate. */
-    template<typename CoderType>
     uint32_t writePnextExceptions(const std::vector<std::pair<uint32_t, int64_t>>& exc,
                                   Json::Value& fieldMeta, Json::Value& metaStreams,
                                   uint32_t& totalDstLen);
 
     /* PNEXT is compressed as (PNEXT - POS) delta text; the deltas of consecutive lines are far smaller than the raw values, so bwt_cm compresses them better. */
-    template<typename CoderType>
     int32_t compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     /* POS is compressed as unsigned varint (LEB128) deltas against the previous line's POS; the baseline resets at each chromosome switch and the decoder reads byte-by-byte. */
-    template<typename CoderType>
     int32_t compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     /* TLEN is not stored verbatim; it is reconstructed from POS/PNEXT/CIGAR on decompression, storing exceptions only for lines that cannot be reconstructed. */
-    template<typename CoderType>
     int32_t compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     template<typename T>
@@ -379,8 +375,9 @@ private:
 
         // Create encoder for regular field compression
         std::shared_ptr<coder_io> numberIo = std::make_shared<coder_io>(outBlockPtr->getCurrent(), outBlockPtr->getRemain());
-        std::shared_ptr<coder_bwt_cm> numberCoder = std::make_shared<coder_bwt_cm>(numberIo.get());
-        CoderFactory::applyLevel(numberIo.get(), CoderType::BWT_CM, engineCompressLevel());
+        std::shared_ptr<coder> numberCoder =
+            CoderFactory::makeProfileEncoder(fieldIdx, compressMode(), numberIo.get(),
+                                             CoderType::BWT_CM, true, engineCompressLevel());
 
         fieldSrcLen = 0;
         uint32_t srcLen = 0;

@@ -579,8 +579,9 @@ int32_t SamCodecActuator::compressSamHeader() {
     headerSrcLen = 0;
     // Create SAM file header compressor
     std::shared_ptr<coder_io> headerIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SAM header");
-    std::shared_ptr<coder_bwt_cm> headerCoder = std::make_shared<coder_bwt_cm>(headerIo.get());
-    CoderFactory::applyLevel(headerIo.get(), CoderType::BWT_CM, engineCompressLevel());
+    std::shared_ptr<coder> headerCoder =
+        CoderFactory::makeProfileEncoder(SAM_QNAME, compressMode(), headerIo.get(),
+                                         CoderType::BWT_CM, true, engineCompressLevel());
 
     // Process SAM file header line by line
     for (uint32_t lineId = 0; lineId < headEndLine; ++lineId) {
@@ -627,6 +628,13 @@ int32_t SamCodecActuator::encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& 
     // ID field: compress based on analysis result
     if (idAnalysis.posLength == UINT32_MAX) {
         LOG_DEBUG("Id will compress in all.");
+        return compressIdFieldInAll(fieldSrcLen, fieldMeta);
+    }
+
+    /* Fast mode writes QNAME as one column through coder_rans; the affix/qname layouts are
+       archive-profile coders and would be rejected at encoder construction anyway. */
+    if (compressMode() == PBGZ_MODE_FAST) {
+        LOG_DEBUG("Id will compress in all (fast mode).");
         return compressIdFieldInAll(fieldSrcLen, fieldMeta);
     }
 
@@ -721,11 +729,7 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 3: // POS
                 /* POS as unsigned varint (LEB128) deltas against the previous line, baseline reset at each chromosome switch. */
-                if (pickedCoderFor(fieldIdx, CoderType::BWT_CM) == CoderType::ARITH) {
-                    fieldDstLen = compressPosFieldDelta<coder_arith>(fieldIdx, fieldSrcLen, fieldMeta);
-                } else {
-                    fieldDstLen = compressPosFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
-                }
+                fieldDstLen = compressPosFieldDelta(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 4: // MAPQ
                 if (pickedCoderFor(fieldIdx, CoderType::BWT_CM) == CoderType::AFFIX_MATCH) {
@@ -742,11 +746,11 @@ int32_t SamCodecActuator::compressSamByFields() {
                 break;
             case 7: // PNEXT
                 /* PNEXT as the delta against POS; always the delta path, excluded from coder selection. */
-                fieldDstLen = compressPNextFieldDelta<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressPNextFieldDelta(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 8: // TLEN
                 /* TLEN reconstructed from POS/PNEXT/CIGAR on decompression, with exceptions only for lines that cannot be rebuilt. */
-                fieldDstLen = compressTLen<coder_bwt_cm>(fieldIdx, fieldSrcLen, fieldMeta);
+                fieldDstLen = compressTLen(fieldIdx, fieldSrcLen, fieldMeta);
                 break;
             case 9: // SEQ
                 /* A reference the @SQ list cannot address is dropped for SEQ; the verdict is taken after the header is parsed. */
@@ -847,26 +851,30 @@ PreprocessInfo* SamCodecActuator::preprocessInfoMut() const
 /* The coder for the SEQ match stream, decided once per file by the codec pre-selection; coder_bwt_cm is the fallback. */
 CoderType SamCodecActuator::seqMatchCoderFor()
 {
+    const CoderType modeFallback =
+        CoderFactory::fieldCoderForMode(SAM_SEQ, compressMode(), CoderType::BWT_CM);
     PreprocessInfo* preInfo = preprocessInfoMut();
     if (preInfo != nullptr) {
         const int32_t pinned = preInfo->seqMatchCoder.load(std::memory_order_relaxed);
         if (pinned >= 0) {
-            return (CoderType)pinned;
+            const CoderType pinnedType = (CoderType)pinned;
+            return CoderFactory::eligibleProfile(pinnedType, compressMode())
+                       ? pinnedType : modeFallback;
         }
         /* No reference payload was trialled (a file with no reference): the pre-selection's verdict
            for the SEQ column itself - coder_fc by default, coder_fc/coder_bwt_cm at -l9 - applies. */
         const FieldCodecSelection* sel = preInfo->getField(SAM_SEQ);
-        if (sel != nullptr && sel->status == FieldStatus::SELECTED) {
+        if (sel != nullptr && sel->status == FieldStatus::SELECTED &&
+            CoderFactory::eligibleProfile(sel->selectedCoder, compressMode())) {
             return sel->selectedCoder;
         }
     }
 
-    /* No verdict covers this file; coder_bwt_cm is the fallback. */
-    return CoderType::BWT_CM;
+    /* No verdict covers this file; the mode's fast vector or coder_bwt_cm. */
+    return modeFallback;
 }
 
 /* Encode PNEXT's exception stream: (contentIdx, delta) pairs of records that cannot be rebuilt from their mate. */
-template<typename CoderType>
 uint32_t SamCodecActuator::writePnextExceptions(const std::vector<std::pair<uint32_t, int64_t>>& exc,
                                                   Json::Value& fieldMeta, Json::Value& metaStreams,
                                                   uint32_t& totalDstLen)
@@ -874,7 +882,9 @@ uint32_t SamCodecActuator::writePnextExceptions(const std::vector<std::pair<uint
     Json::Value metaSubs;
     if (!exc.empty()) {
         std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "PNEXT exceptions");
-        std::shared_ptr<CoderType> excCoder = std::make_shared<CoderType>(excIo.get());
+        std::shared_ptr<coder> excCoder =
+            CoderFactory::makeProfileEncoder(SAM_PNEXT, compressMode(), excIo.get(),
+                                             CoderType::BWT_CM, false, /* compressLevel */ 0);
 
         /* contentIdx as forward deltas, delta as zigzag varints; a constant delta moves into the meta and the column is dropped. */
         std::vector<uint8_t> excStream;
@@ -916,7 +926,6 @@ uint32_t SamCodecActuator::writePnextExceptions(const std::vector<std::pair<uint
     return totalDstLen;
 }
 
-template<typename CoderType>
 int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
@@ -1071,7 +1080,7 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
     uint32_t totalDstLen = 0;
 
     /* (see writePnextExceptions) */
-    totalDstLen = writePnextExceptions<CoderType>(pnextExceptions, fieldMeta, metaStreams, totalDstLen);
+    totalDstLen = writePnextExceptions(pnextExceptions, fieldMeta, metaStreams, totalDstLen);
 
     // fieldSrcLen is the original PNEXT byte length (with trailing tab)
     // summed over all lines; the exception-stream size is only in the sub-stream meta.
@@ -1090,14 +1099,18 @@ int32_t SamCodecActuator::compressPNextFieldDelta(uint32_t fieldIdx, uint32_t& f
     return (int32_t)totalDstLen;
 }
 
-template<typename CoderType>
 int32_t SamCodecActuator::compressPosFieldDelta(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
     uint8_t* buffer = inBlockPtr->getBuffer();
 
     std::shared_ptr<coder_io> fieldIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "POS delta");
-    std::shared_ptr<CoderType> fieldCoder = std::make_shared<CoderType>(fieldIo.get());
+    const CoderType archiveCoder =
+        (pickedCoderFor(fieldIdx, CoderType::BWT_CM) == CoderType::ARITH)
+            ? CoderType::ARITH : CoderType::BWT_CM;
+    std::shared_ptr<coder> fieldCoder =
+        CoderFactory::makeProfileEncoder(fieldIdx, compressMode(), fieldIo.get(), archiveCoder,
+                                         true, /* compressLevel */ 0);
     /* The arithmetic backend takes the file-level delta prior to skip the model cold start; bwt_cm ignores it. */
     if (coder_arith* arithCoder = dynamic_cast<coder_arith*>(fieldCoder.get())) {
         const PreprocessInfo* preInfo =
@@ -1724,7 +1737,9 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
             idStream.push_back('\n');
         }
         std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "OPTION ids");
-        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
+        std::shared_ptr<coder> c =
+            CoderFactory::makeProfileEncoder(SAM_FIELD_COUNT, compressMode(), io.get(),
+                                             CoderType::BWT_CM, true, /* compressLevel */ 0);
         size_t pos = 0;
         for (size_t r = 0; r < opt.recIds.size(); ++r) {
             /* Feed line by line to preserve bwt_cm's line-mode semantics. */
@@ -1754,8 +1769,10 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         const int64_t saved = outBlockPtr->getDataLen();
         std::shared_ptr<coder_io> io =
             makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "OPTION tag");
-        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
-        /* coder_bwt_cm is a byte-stream coder, so feeding the whole blob is correct. */
+        std::shared_ptr<coder> c =
+            CoderFactory::makeProfileEncoder(SAM_FIELD_COUNT, compressMode(), io.get(),
+                                             CoderType::BWT_CM, false, /* compressLevel */ 0);
+        /* A byte-stream coder, so feeding the whole blob is correct. */
         c->encode_line(blob.data(), (uint32_t)blob.size());
         c->encode_flush();
         const bool ok = (io->err == coder_io::IO_OK);
@@ -2247,7 +2264,6 @@ int32_t SamCodecActuator::computeTLEN(uint32_t lineIdx, bool minusOne) {
     return (int32_t)samTemplateLen(in.pos, in.pnext, in.refSpan, in.mateRefSpan, minusOne);
 }
 
-template<typename CoderType>
 int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
@@ -2336,7 +2352,9 @@ int32_t SamCodecActuator::compressTLen(uint32_t fieldIdx, uint32_t& fieldSrcLen,
 
     if (!tlenExceptions.empty()) {
         std::shared_ptr<coder_io> tlenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "TLEN exceptions");
-        std::shared_ptr<CoderType> tlenCoder = std::make_shared<CoderType>(tlenIo.get());
+        std::shared_ptr<coder> tlenCoder =
+            CoderFactory::makeProfileEncoder(SAM_TLEN, compressMode(), tlenIo.get(),
+                                             CoderType::BWT_CM, false, /* compressLevel */ 0);
 
         /* Worst case is 5 bytes per varint (32-bit value, 7 payload bits each). */
         const uint32_t cap = (uint32_t)(tlenExceptions.size() * 2 * 5);
@@ -2444,8 +2462,9 @@ int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::
             appendVarint(lenBuf, entry.second);
         }
 
-        CoderFactory::applyLevel(lenIo.get(), CoderType::BWT_CM, engineCompressLevel());
-        std::shared_ptr<coder_bwt_cm> lenCoder = std::make_shared<coder_bwt_cm>(lenIo.get());
+        std::shared_ptr<coder> lenCoder =
+            CoderFactory::makeProfileEncoder(SAM_SEQ, compressMode(), lenIo.get(),
+                                             CoderType::BWT_CM, false, engineCompressLevel());
         lenCoder->encode_line(lenBuf.data(), (uint32_t)lenBuf.size());
         lenCoder->encode_flush();
         if (lenIo->err != coder_io::IO_OK) {
@@ -2484,12 +2503,13 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
         /* An all-ACGT whole match stream is coded with coder_arith_k (rANS order-1), faster than coder_fc's LZP+BWT+CM. baseNCount is the pre-analysis's count of non-ACGT bases
            (N/n) in this block: when it is non-zero the stream is not all-ACGT, so coder_arith_k cannot pack it and would only rANS its raw bytes, and coder_fc is kept.
            At the extreme-ratio level (-l9) coder_arith_k is never taken: the pre-selection's verdict (coder_fc/coder_bwt_cm) is used as it stands. */
+        const bool fastMode = (compressMode() == PBGZ_MODE_FAST);
         CoderType payType = seqMatchCoderFor();
-        if (!rle.useRle && baseNCount == 0 && engineCompressLevel() < 9) {
+        if (!fastMode && !rle.useRle && baseNCount == 0 && engineCompressLevel() < 9) {
             payType = CoderType::ARITH_K;
         }
         /* A pinned or sampled verdict can still name a segment too short for coder_fc (FC_MIN_LEN bytes or less). */
-        if (payType == CoderType::FC &&
+        if (!fastMode && payType == CoderType::FC &&
             (payLen <= FC_MIN_LEN || payLen >= (uint32_t)FC_MAX_LEN)) {
             payType = CoderType::BWT_CM;
         }
@@ -2526,12 +2546,13 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
     /* Second sub-stream: the surviving non-zero values (RLE only). */
     if (rle.useRle && rle.valLength > 0) {
         std::shared_ptr<coder_io> valIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match val");
-        /* This half stays pinned to BWT_CM; decoding dispatches on the recorded magic. */
+        /* Decoding dispatches on the recorded magic, so the mode picks the coder here too. */
         {
-            CoderFactory::applyLevel(valIo.get(), CoderType::BWT_CM, engineCompressLevel());
-            std::shared_ptr<coder_bwt_cm> bwt = std::make_shared<coder_bwt_cm>(valIo.get());
-            bwt->encode_line(rle.val.get(), rle.valLength);
-            bwt->encode_flush();
+            std::shared_ptr<coder> valCoder =
+                CoderFactory::makeProfileEncoder(SAM_SEQ, compressMode(), valIo.get(),
+                                                 CoderType::BWT_CM, false, engineCompressLevel());
+            valCoder->encode_line(rle.val.get(), rle.valLength);
+            valCoder->encode_flush();
         }
         if (valIo->err != coder_io::IO_OK) {
             LOG_ERROR("Encode SEQ match value stream overflow: output buffer too small");
@@ -2902,8 +2923,9 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     if (seqSelfRef != nullptr) {
         std::shared_ptr<coder_io> selfIo = makeCoderIo(outBlockPtr->getCurrent(),
                                                        outBlockPtr->getRemain(), "SEQ selfref");
-        CoderFactory::applyLevel(selfIo.get(), CoderType::BWT_CM, engineCompressLevel());
-        std::shared_ptr<coder_bwt_cm> selfCoder = std::make_shared<coder_bwt_cm>(selfIo.get());
+        std::shared_ptr<coder> selfCoder =
+            CoderFactory::makeProfileEncoder(SAM_SEQ, compressMode(), selfIo.get(),
+                                             CoderType::BWT_CM, false, engineCompressLevel());
         selfCoder->encode_line(seqSelfRef->squash.data(), (uint32_t)seqSelfRef->squash.size());
         selfCoder->encode_flush();
         if (selfIo->err != coder_io::IO_OK) {
@@ -2955,8 +2977,9 @@ int32_t SamCodecActuator::writeSeqExceptionStream(SeqExceptionClass& exc, uint8_
                                                    uint32_t& totalDstLen)
 {
     std::shared_ptr<coder_io> excIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ npos");
-    CoderFactory::applyLevel(excIo.get(), CoderType::BWT_CM, engineCompressLevel());
-    std::shared_ptr<coder_bwt_cm> subCoder = std::make_shared<coder_bwt_cm>(excIo.get());
+    std::shared_ptr<coder> subCoder =
+        CoderFactory::makeProfileEncoder(SAM_SEQ, compressMode(), excIo.get(),
+                                         CoderType::BWT_CM, false, engineCompressLevel());
     subCoder->encode_line(src, srcLen);
     subCoder->encode_flush();
     if (excIo->err != coder_io::IO_OK) {
@@ -3099,8 +3122,9 @@ int32_t SamCodecActuator::writeQualFreqStream(Json::Value& subMeta, Json::Value&
                                                uint32_t& totalSrcLength, uint32_t& totalDstLength)
 {
     std::shared_ptr<coder_io> qualityFreqIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL freq table");
-    std::shared_ptr<coder_bwt_cm> qualityFreqCoder = std::make_shared<coder_bwt_cm>(qualityFreqIo.get());
-    CoderFactory::applyLevel(qualityFreqIo.get(), CoderType::BWT_CM, engineCompressLevel());
+    std::shared_ptr<coder> qualityFreqCoder =
+        CoderFactory::makeProfileEncoder(SAM_QUAL, compressMode(), qualityFreqIo.get(),
+                                         CoderType::BWT_CM, false, engineCompressLevel());
     std::shared_ptr<uint16_t[]> qualityFreqArray(new uint16_t[qualFreqTable.size() << 1]);
     for (uint32_t i = 0; i < qualFreqTable.size(); ++i) {
         int idx = i << 1;
@@ -3139,13 +3163,18 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     // Create quality encoder similar to FastqActuator
     std::shared_ptr<coder_io> qualityIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL");
 
-    /* QUAL may use coder_qual (with SEQ context) or coder_fcv2 (context mixing); the pre-selection's trial decides. */
+    /* QUAL may use coder_qual (with SEQ context) or coder_fcv2 (context mixing); the pre-selection's
+       trial decides. In fast mode the trial picks the fast default (coder_rans). */
     int64_t qualPriorAddress = -1;
-    CoderType pickedQualCoder = CoderType::QUAL;
+    CoderType pickedQualCoder = samFieldDefaultCoder(SAM_QUAL, compressMode(), CoderType::QUAL);
     const PreprocessInfo* qualPreInfo =
         (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
     if (qualPreInfo != nullptr) {
-        pickedQualCoder = qualPreInfo->coderFor(SAM_QUAL, samFieldDefaultCoder(SAM_QUAL, CoderType::QUAL));
+        const CoderType picked =
+            qualPreInfo->coderFor(SAM_QUAL, pickedQualCoder);
+        if (CoderFactory::eligibleProfile(picked, compressMode())) {
+            pickedQualCoder = picked;
+        }
     }
     /* Turning the verdict into an encoder is CoderFactory::makeQualEncoder's job; the prior's absolute address goes into the meta. */
     AuxPayloadPtr qualPriorBlob =
@@ -3568,19 +3597,21 @@ int32_t SamCodecActuator::decompressHeader(RoughIOBlock* outputBlock) {
         return -1;
     }
 
-    if (headerMeta["coder"]["magic"].asString() != "coder_bwt_cm") {
-        return -1;
-    }
-
     uint32_t dstLen = headerMeta["dstlen"].asUInt();
     if (refPosChrIndex == 65535) {  // not set position paramter
-        // Create SAM file header decompressor
+        // Create SAM file header decompressor from the magic the writer recorded.
         std::shared_ptr<coder_io> headerIo = makeCoderIo(inBlockPtr->getBuffer(), dstLen, "SAM header");
-        std::shared_ptr<coder_bwt_cm> headerDecoder = std::make_shared<coder_bwt_cm>(headerIo.get());
-
-        // Set decoder level
+        FieldDecoderArgs headerArgs;
         if (headerMeta["coder"].isMember("level")) {
-            headerDecoder->set_level(headerMeta["coder"]["level"].asInt());
+            headerArgs.level = headerMeta["coder"]["level"].asInt();
+        }
+        std::shared_ptr<coder> headerDecoder =
+            CoderFactory::makeFieldDecoder(headerMeta["coder"]["magic"].asString(),
+                                           headerIo.get(), headerArgs);
+        if (headerDecoder == nullptr) {
+            LOG_ERROR("Unsupported SAM header coder: %s",
+                      headerMeta["coder"]["magic"].asString().c_str());
+            return -1;
         }
 
         // Decompress SAM file header data
@@ -3693,24 +3724,23 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
         } else if (isInt || isIntu) {
             /* The payload is the value-domain stream itself (no outer coder). */
             idDecoders.push_back(nullptr);
-        } else if (coderName == "coder_affix_match" || coderName == "coder_bwt_cm") {
-            /* The sub-stream's decoder comes from its own meta (see CoderFactory::makeFieldDecoder). */
+        } else {
+            /* The sub-stream's decoder comes from its own meta (see CoderFactory::makeFieldDecoder).
+               This covers the archive layouts and the fast profile's coder_rans alike. */
             FieldDecoderArgs idArgs;
-            idArgs.level = idStreamMeta[i]["coder"]["level"].asInt();
+            if (idStreamMeta[i]["coder"].isMember("level")) {
+                idArgs.level = idStreamMeta[i]["coder"]["level"].asInt();
+            }
             std::shared_ptr<coder> idDec =
                 CoderFactory::makeFieldDecoder(coderName, io.get(), idArgs);
             if (idDec == nullptr) {
                 LOG_ERROR("Unsupport coder name:%s", coderName.c_str());
                 return -1;
             }
+            if (coderName == "coder_qname") {
+                idUsesQnameCoder = true;
+            }
             idDecoders.push_back(idDec);
-        } else if (coderName == "coder_qname") {
-            idUsesQnameCoder = true;
-            idDecoders.push_back(CoderFactory::makeFieldDecoder(coderName, io.get(),
-                                                                FieldDecoderArgs()));
-        } else {
-            LOG_ERROR("Unsupport coder name:%s", coderName.c_str());
-            return -1;
         }
 
         /* Numeric sub-streams have no per-line terminator, so the whole varint stream is decoded once and served per line. */
@@ -4190,16 +4220,28 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
 
     /* Decode the id-sequence column (line-wise text, comma-separated). */
     uint32_t idStreamDst = 0;
+    const Json::Value* idsMeta = nullptr;
     for (uint32_t i = 0; i < streams.size(); ++i) {
         if (streams[i]["sname"].asString() == "ids") {
             idStreamDst = streams[i]["dstlen"].asUInt();
+            idsMeta = &streams[i];
             break;
         }
     }
     {
         std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + optBase, idStreamDst, "OPTION ids");
         ioVector.push_back(io);
-        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
+        FieldDecoderArgs args;
+        if (idsMeta != nullptr && (*idsMeta)["coder"].isMember("level")) {
+            args.level = (*idsMeta)["coder"]["level"].asInt();
+        }
+        const std::string magic = (idsMeta != nullptr)
+                                      ? (*idsMeta)["coder"]["magic"].asString() : std::string();
+        std::shared_ptr<coder> c = CoderFactory::makeFieldDecoder(magic, io.get(), args);
+        if (c == nullptr) {
+            LOG_ERROR("Unsupported OPTION ids coder: %s", magic.c_str());
+            return -1;
+        }
         uint8_t tmp[1 << 16];
         int32_t n;
         std::string line;
@@ -4232,7 +4274,16 @@ int32_t SamCodecActuator::decodeOptionColumn(const Json::Value& fieldMeta) {
         uint32_t dstlen = s["dstlen"].asUInt();
         std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + optBase, dstlen, "OPTION tag");
         ioVector.push_back(io);
-        std::shared_ptr<coder_bwt_cm> c = std::make_shared<coder_bwt_cm>(io.get());
+        FieldDecoderArgs args;
+        if (s["coder"].isMember("level")) {
+            args.level = s["coder"]["level"].asInt();
+        }
+        const std::string magic = s["coder"]["magic"].asString();
+        std::shared_ptr<coder> c = CoderFactory::makeFieldDecoder(magic, io.get(), args);
+        if (c == nullptr) {
+            LOG_ERROR("Unsupported OPTION tag coder: %s", magic.c_str());
+            return -1;
+        }
         const std::string enc = s["enc"].isString() ? s["enc"].asString() : std::string("text");
         OptionTagCol& col = optionTagCols[tagIdx];
         col.enc = enc;
@@ -4773,19 +4824,22 @@ int32_t SamCodecActuator::predecodeSeqBaseLengthStream(const Json::Value& stream
     const uint32_t srclen = streams[streamId]["srclen"].asUInt();
     uint8_t* baseLenBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
 
-    if (streams[streamId]["coder"]["magic"].asString() == "coder_bwt_cm") {
+    {
         coder_io baseLenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ length");
-        auto baseLenCoder = std::make_unique<coder_bwt_cm>(&baseLenIo);
-        if (baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false) < 0) {
+        FieldDecoderArgs args;
+        if (streams[streamId]["coder"].isMember("level")) {
+            args.level = streams[streamId]["coder"]["level"].asInt();
+        }
+        std::shared_ptr<coder> baseLenCoder =
+            CoderFactory::makeFieldDecoder(streams[streamId]["coder"]["magic"].asString(),
+                                           &baseLenIo, args);
+        if (baseLenCoder == nullptr ||
+            baseLenCoder->decode_line((uint8_t*)baseLenBuffer, srclen, UINT8_MAX, false) < 0) {
             MemoryUtil::safeFree(baseLenBuffer);
-            LOG_ERROR("Decode base lengths failed");
+            LOG_ERROR("Decode base lengths failed (coder %s)",
+                      streams[streamId]["coder"]["magic"].asString().c_str());
             return -1;
         }
-    } else {
-        MemoryUtil::safeFree(baseLenBuffer);
-        LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
-            streams[streamId]["coder"]["magic"].asString().c_str());
-        return -1;
     }
 
     if (streams[streamId]["delta"].isUInt()) {
@@ -4876,18 +4930,19 @@ int32_t SamCodecActuator::predecodeSeqExceptionStreams(const Json::Value& baseMe
         const uint8_t ch = layout.ch;
         const uint32_t dstlen = streams[streamId]["dstlen"].asUInt();
         const uint32_t srclen = streams[streamId]["srclen"].asUInt();
-        if (streams[streamId]["coder"]["magic"].asString() != "coder_bwt_cm") {
-            LOG_ERROR("check sub stream failed. coder not match. coder = %s.",
-                streams[streamId]["coder"]["magic"].asString().c_str());
-            return -1;
-        }
-
         coder_io excIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "SEQ npos");
-        auto excCoder = std::make_unique<coder_bwt_cm>(&excIo);
+        FieldDecoderArgs args;
+        if (streams[streamId]["coder"].isMember("level")) {
+            args.level = streams[streamId]["coder"]["level"].asInt();
+        }
+        std::shared_ptr<coder> excCoder =
+            CoderFactory::makeFieldDecoder(streams[streamId]["coder"]["magic"].asString(),
+                                           &excIo, args);
         /* The payload carries positions alone; the character is in the stream meta's "ch". */
         std::vector<uint8_t> raw(srclen);
         std::vector<uint32_t> pos;
-        if (excCoder->decode_line(raw.data(), srclen, UINT8_MAX, false) < 0 ||
+        if (excCoder == nullptr ||
+            excCoder->decode_line(raw.data(), srclen, UINT8_MAX, false) < 0 ||
             !seqExcDecodePositions(layout, raw.data(), srclen, pos)) {
             LOG_ERROR("Decode SEQ exception positions failed: %u bytes, %u positions, form %d",
                       srclen, layout.count, (int)layout.form);
@@ -4913,20 +4968,24 @@ int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
         LOG_ERROR("quality streams check failded, size = %d", qualStreamMeta.size());
         return -1;
     }
-    if (qualStreamMeta[1]["coder"]["magic"] != "coder_bwt_cm") {
-        LOG_ERROR("Unsupport coder type: %s", qualStreamMeta[1]["coder"]["magic"].asString().c_str());
-        return -1;
-    }
-
     const uint32_t qualDstLength = qualStreamMeta[0]["dstlen"].asUInt();
     const uint32_t freqDstLength = qualStreamMeta[1]["dstlen"].asUInt();
     coder_io qualFreqIo(inBlockPtr->getBuffer() + readOffset + qualDstLength, freqDstLength, &ioErrSink, "QUAL freq table");
-    auto qualFreqCoder = std::make_unique<coder_bwt_cm>(&qualFreqIo);
+    FieldDecoderArgs freqArgs;
+    if (qualStreamMeta[1]["coder"].isMember("level")) {
+        freqArgs.level = qualStreamMeta[1]["coder"]["level"].asInt();
+    }
+    std::shared_ptr<coder> qualFreqCoder =
+        CoderFactory::makeFieldDecoder(qualStreamMeta[1]["coder"]["magic"].asString(),
+                                       &qualFreqIo, freqArgs);
     const uint32_t qualFreqSrcLength = qualStreamMeta[1]["srclen"].asUInt();
     /* Counting with uint8_t wraps when the alphabet exceeds 127 symbols. */
     const uint32_t qualFreqArrLength = qualFreqSrcLength / sizeof(uint16_t);
     uint16_t* qualFreqArr = new uint16_t[qualFreqArrLength];
-    const int32_t qualFreq = qualFreqCoder->decode_line((uint8_t*)qualFreqArr, qualFreqSrcLength, UINT8_MAX, false);
+    const int32_t qualFreq = (qualFreqCoder == nullptr)
+                                 ? -1
+                                 : qualFreqCoder->decode_line((uint8_t*)qualFreqArr,
+                                                             qualFreqSrcLength, UINT8_MAX, false);
     if (qualFreq < 0 || (uint32_t)qualFreq != qualFreqSrcLength) {
         LOG_ERROR("Decode quality frequncy failed");
         delete [] qualFreqArr;
@@ -5001,22 +5060,22 @@ int32_t SamCodecActuator::decodeTlenExceptionStream(const Json::Value& stream,
 {
     const uint32_t srclen = stream["srclen"].asUInt();
     const uint32_t dstlen = stream["dstlen"].asUInt();
-    if (stream["coder"]["magic"].asString() != "coder_bwt_cm") {
-        LOG_ERROR("Unsupported TLEN exception coder type: %s", stream["coder"]["magic"].asString().c_str());
-        return -1;
-    }
     uint8_t* excBuffer = MemoryUtil::safeAlloc<uint8_t>(srclen);
     if (excBuffer == nullptr) {
         return -1;
     }
     coder_io tlenIo(inBlockPtr->getBuffer() + readOffset, dstlen, &ioErrSink, "TLEN exceptions");
+    FieldDecoderArgs args;
     if (stream["coder"].isMember("level")) {
-        tlenIo.meta["level"] = stream["coder"]["level"].asInt();
+        args.level = stream["coder"]["level"].asInt();
     }
-    coder_bwt_cm tlenDecoder(&tlenIo);
-    if (tlenDecoder.decode_line(excBuffer, srclen, UINT8_MAX, false) < 0) {
+    std::shared_ptr<coder> tlenDecoder =
+        CoderFactory::makeFieldDecoder(stream["coder"]["magic"].asString(), &tlenIo, args);
+    if (tlenDecoder == nullptr ||
+        tlenDecoder->decode_line(excBuffer, srclen, UINT8_MAX, false) < 0) {
         MemoryUtil::safeFree(excBuffer);
-        LOG_ERROR("Decode TLEN exceptions failed");
+        LOG_ERROR("Decode TLEN exceptions failed (coder %s)",
+                  stream["coder"]["magic"].asString().c_str());
         return -1;
     }
 
@@ -5065,13 +5124,17 @@ int32_t SamCodecActuator::initTlenFieldDecoders(const Json::Value& tlenMeta, uin
 
     const std::string coderName = tlenMeta["coder"]["magic"].asString();
     const uint32_t dstLen = tlenMeta["dstlen"].asUInt();
-    if (coderName != "coder_bwt_cm") {
+    std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "TLEN");
+    ioVector.push_back(io);
+    FieldDecoderArgs args;
+    if (tlenMeta["coder"].isMember("level")) {
+        args.level = tlenMeta["coder"]["level"].asInt();
+    }
+    fieldDecoders[fieldIdx] = CoderFactory::makeFieldDecoder(coderName, io.get(), args);
+    if (fieldDecoders[fieldIdx] == nullptr) {
         LOG_ERROR("Unsupported TLEN coder type: %s", coderName.c_str());
         return -1;
     }
-    std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "TLEN");
-    ioVector.push_back(io);
-    fieldDecoders[fieldIdx] = std::make_shared<coder_bwt_cm>(io.get());
     readOffset += dstLen;
     return 0;
 }
@@ -5092,17 +5155,12 @@ int32_t SamCodecActuator::predecodeIdStreams(IdPredecodeState& state)
             streams[0]["streams"][si]["coder"].isMember("level")) {
             lvl = streams[0]["streams"][si]["coder"]["level"].asInt();
         }
-        if (idStreamCoders[si] == "coder_affix_match" || idStreamCoders[si] == "coder_bwt_cm") {
-            FieldDecoderArgs idPreArgs;
+        FieldDecoderArgs idPreArgs;
+        if (lvl >= 0) {
             idPreArgs.level = lvl;
-            state.decoders.push_back(
-                CoderFactory::makeFieldDecoder(idStreamCoders[si], io.get(), idPreArgs));
-        } else if (idStreamCoders[si] == "coder_qname") {
-            state.decoders.push_back(CoderFactory::makeFieldDecoder(idStreamCoders[si], io.get(),
-                                                                    FieldDecoderArgs()));
-        } else {
-            state.decoders.push_back(nullptr);
         }
+        state.decoders.push_back(
+            CoderFactory::makeFieldDecoder(idStreamCoders[si], io.get(), idPreArgs));
     }
 
     state.numericBufs.assign(idStreamOffsets.size(), nullptr);

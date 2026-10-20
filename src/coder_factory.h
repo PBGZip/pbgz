@@ -187,6 +187,17 @@ public:
      */
     static std::shared_ptr<coder> makeEncoder(CoderType type, coder_io* io);
 
+    /* Resolve a field's encoder for the active -m mode: fast always uses the field's fast
+       default (coder_rans), archive keeps the caller's historical coder. */
+    static CoderType fieldCoderForMode(uint32_t fieldIdx, uint8_t mode, CoderType archiveCoder);
+
+    /* Build an encoder through fieldCoderForMode(), applying the level and replacing a coder
+       that cannot be fed line by line with the mode's line fallback. This is the single entry
+       point for the SAM field paths that used to instantiate coder_bwt_cm/coder_arith directly. */
+    static std::shared_ptr<coder> makeProfileEncoder(uint32_t fieldIdx, uint8_t mode, coder_io* io,
+                                                     CoderType archiveCoder, bool lineMode,
+                                                     uint8_t compressLevel);
+
     /*
      * Decompression side: create a decoder by the magic recorded in the bitstream. Returns null
      * rather than a fallback on an unknown magic (the file is newer or corrupt); the caller must

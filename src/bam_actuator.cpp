@@ -32,6 +32,8 @@
 #include <vector>
 
 #include "coder/coder_json.h"
+#include "compress_engine.h"
+#include "pbgz_stat.h"
 #include "coder_factory.h"
 #include "sam_field_rules.h"
 #include "sam_info.h"
@@ -48,6 +50,48 @@ void appendLe(std::vector<uint8_t>& out, uint32_t v, size_t n)
 {
     for (size_t i = 0; i < n; ++i) {
         out.push_back((uint8_t)((v >> (8 * i)) & 0xff));
+    }
+}
+
+/* BAM columns use the SAM field ids, so the -s report has the same rows as the text path. */
+uint16_t bamStatObjectId(uint32_t fieldIdx)
+{
+    switch (fieldIdx) {
+        case SAM_QNAME: return StatObjectId::SAM_QNAME;
+        case SAM_FLAG: return StatObjectId::SAM_FLAG;
+        case SAM_RNAME: return StatObjectId::SAM_RNAME;
+        case SAM_POS: return StatObjectId::SAM_POS;
+        case SAM_MAPQ: return StatObjectId::SAM_MAPQ;
+        case SAM_CIGAR: return StatObjectId::SAM_CIGAR;
+        case SAM_RNEXT: return StatObjectId::SAM_RNEXT;
+        case SAM_PNEXT: return StatObjectId::SAM_PNEXT;
+        case SAM_TLEN: return StatObjectId::SAM_TLEN;
+        case SAM_SEQ: return StatObjectId::SAM_SEQ;
+        case SAM_QUAL: return StatObjectId::SAM_QUAL;
+        case SAM_FIELD_COUNT: return StatObjectId::SAM_OPTION;
+        default: return 0;
+    }
+}
+
+void recordBamFieldStats(PbgzEngine* engine, uint32_t fieldIdx, uint32_t srcLen, uint32_t dstLen)
+{
+    if (engine == nullptr) {
+        return;
+    }
+    auto compressEngine = dynamic_cast<CompressEngine*>(engine);
+    if (compressEngine == nullptr || compressEngine->getStats() == nullptr) {
+        return;
+    }
+    auto samStat = dynamic_cast<SamStat*>(compressEngine->getStats());
+    if (samStat == nullptr) {
+        return;
+    }
+    const uint16_t objectId = bamStatObjectId(fieldIdx);
+    if (objectId != 0) {
+        samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, objectId,
+                                StatMetricIds::ORIGINAL_SIZE, srcLen);
+        samStat->addMetricValue(StatUnitIds::COMPRESSION_RATIO, objectId,
+                                StatMetricIds::COMPRESSED_SIZE, dstLen);
     }
 }
 
@@ -169,7 +213,7 @@ uint32_t BamCodecActuator::pickedFor(uint32_t fieldIdx, CoderType fallback) cons
 
 int32_t BamCodecActuator::encodeColumn(uint32_t fieldIdx, CoderType fallback, const uint8_t* data,
                                        size_t size, Json::Value& streamMeta, const char* name,
-                                       const char* mode)
+                                       const char* mode, uint32_t statFieldIdx)
 {
     if (size == 0) {
         return 0;
@@ -192,6 +236,8 @@ int32_t BamCodecActuator::encodeColumn(uint32_t fieldIdx, CoderType fallback, co
     m["dstlen"] = (Json::Value::UInt)io->data_len;
     m["coder"] = io->meta;
     streamMeta.append(m);
+    recordBamFieldStats(pbgzEngine, (statFieldIdx == UINT32_MAX) ? fieldIdx : statFieldIdx,
+                        (uint32_t)size, (uint32_t)io->data_len);
     return (int32_t)io->data_len;
 }
 
@@ -225,6 +271,7 @@ int32_t BamCodecActuator::encodeRawBwtColumn(uint32_t fieldIdx, const uint8_t* d
     m["dstlen"] = (Json::Value::UInt)io->data_len;
     m["coder"] = io->meta;
     streamMeta.append(m);
+    recordBamFieldStats(pbgzEngine, fieldIdx, (uint32_t)size, (uint32_t)io->data_len);
     return (int32_t)io->data_len;
 }
 
@@ -356,7 +403,7 @@ int32_t BamCodecActuator::encodeCigarColumn(Json::Value& streamMeta)
     for (size_t i = 0; i < cols->cigarLen.size(); ++i) {
         putUvarint(lens, cols->cigarLen[i]);
     }
-    if (encodeColumn(SAM_FIELD_COUNT, CoderType::BWT_CM, lens.data(), lens.size(), streamMeta, "CIGAR_N", "varint") < 0) {
+    if (encodeColumn(SAM_FIELD_COUNT, CoderType::BWT_CM, lens.data(), lens.size(), streamMeta, "CIGAR_N", "varint", SAM_CIGAR) < 0) {
         return -1;
     }
     return encodeColumn(SAM_CIGAR, CoderType::BWT_CM, buf.data(), buf.size(), streamMeta, "CIGAR", "varint");
@@ -579,7 +626,7 @@ int32_t BamCodecActuator::compress()
         putUvarint(lseqStream, (uint64_t)cols->lSeq[i]);
     }
     if (encodeColumn(SAM_FIELD_COUNT, CoderType::BWT_CM, lseqStream.data(), lseqStream.size(), streamMeta,
-                     "L_SEQ", "varint") < 0) {
+                     "L_SEQ", "varint", SAM_SEQ) < 0) {
         return -1;
     }
 

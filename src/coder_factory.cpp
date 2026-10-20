@@ -188,6 +188,31 @@ std::shared_ptr<coder> CoderFactory::makeEncoder(CoderType type, coder_io* io)
     return std::make_shared<coder_bwt_cm>(io);
 }
 
+CoderType CoderFactory::fieldCoderForMode(uint32_t fieldIdx, uint8_t mode, CoderType archiveCoder)
+{
+    if (mode != PBGZ_MODE_FAST) {
+        return archiveCoder;
+    }
+    /* Fast lists are RANS for every generic SAM field; POS/PNEXT/TLEN and QUAL have no
+       generic fast candidate, and the table's fast fallback supplies RANS for them too. */
+    return samFieldDefaultCoder(fieldIdx, mode, CoderType::RANS);
+}
+
+std::shared_ptr<coder> CoderFactory::makeProfileEncoder(uint32_t fieldIdx, uint8_t mode, coder_io* io,
+                                                        CoderType archiveCoder, bool lineMode,
+                                                        uint8_t compressLevel)
+{
+    CoderType type = fieldCoderForMode(fieldIdx, mode, archiveCoder);
+    applyLevel(io, type, compressLevel);
+    std::shared_ptr<coder> enc = makeEncoder(type, io);
+    if (lineMode && !enc->supportsLineMode()) {
+        const CoderType fallback = (mode == PBGZ_MODE_FAST) ? CoderType::RANS : CoderType::BWT_CM;
+        applyLevel(io, fallback, compressLevel);
+        enc = makeEncoder(fallback, io);
+    }
+    return enc;
+}
+
 std::shared_ptr<coder> CoderFactory::makeDecoder(const std::string& magic, coder_io* io)
 {
     const CoderDescriptor* d = descriptorByMagic(magic);

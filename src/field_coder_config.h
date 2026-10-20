@@ -53,9 +53,10 @@ struct FieldCoderConfig {
 /* Number of SAM fields participating in coder selection: 11 mandatory fields + the 12th OPTION column. */
 static const uint32_t SAM_FIELD_COUNT_SELECT = SAM_FIELD_COUNT + 1;
 
-/* The fast lists are speed-oriented (coder_rans). Every field's fast fallback is coder_rans;
+/* The fast lists are speed-oriented (coder_rans). Every SAM field's fast fallback is coder_rans;
    POS and the inferred fields (PNEXT/TLEN) have no generic fast candidate list, and QUAL's
-   fast list is empty (its dedicated selector uses the archive row). */
+   fast list is empty: SAM QUAL takes its fastFallback (coder_rans) without a trial, while
+   FASTQ QUAL keeps coder_qual as its default. */
 #define PBGZ_FQ_RANS   std::vector<CoderType>{CoderType::RANS}
 #define PBGZ_FQ_NONE   std::vector<CoderType>{}
 

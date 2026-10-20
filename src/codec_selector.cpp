@@ -250,6 +250,20 @@ static const SpeedTrade& speedTrade()
     return t;
 }
 
+/* Fixed verdict for a field whose fast path has exactly one coder: no trial is run, so no
+   archive-profile coder is exercised during preprocessing. */
+static FieldCodecSelection fixedSelection(CoderType type, uint32_t sampleLen)
+{
+    FieldCodecSelection sel;
+    sel.status = FieldStatus::SELECTED;
+    sel.selectedCoder = type;
+    sel.sampleLen = sampleLen;
+    sel.decidedLen = sampleLen;
+    sel.bestCompLen = 0;
+    sel.rounds = 1;
+    return sel;
+}
+
 /* Winner among the trialled candidates: smallest output unless a clearly faster coder
    is close enough. outLen receives the chosen coder's measured length. */
 static CoderType pickTrialWinner(const FieldCodecSelection& sel, uint32_t& outLen)
@@ -1137,15 +1151,16 @@ uint32_t CodecSelector::extractSeqReferenceSamples(RoughIOBlock* block,
 
 /* Compressed size of one form of a class's N positions (0 if uncodable); only the size
    is wanted, so the bytes go to a scratch buffer. */
-static uint32_t nposFormSize(const uint8_t* data, uint32_t len, uint8_t level)
+static uint32_t nposFormSize(const uint8_t* data, uint32_t len, uint8_t level, uint8_t mode)
 {
     if (len == 0) {
         return 0;
     }
     std::vector<uint8_t> scratch((size_t)len * 2 + 65536);
     coder_io trialIo(scratch.data(), (int32_t)scratch.size());
-    CoderFactory::applyLevel(&trialIo, CoderType::BWT_CM, level);
-    std::shared_ptr<coder> trialCoder = CoderFactory::makeEncoder(CoderType::BWT_CM, &trialIo);
+    const CoderType type = CoderFactory::fieldCoderForMode(SAM_SEQ, mode, CoderType::BWT_CM);
+    CoderFactory::applyLevel(&trialIo, type, level);
+    std::shared_ptr<coder> trialCoder = CoderFactory::makeEncoder(type, &trialIo);
     trialCoder->encode_line(data, len);
     trialCoder->encode_flush();
     return (trialIo.err == coder_io::IO_OK && trialIo.data_len > 0) ? (uint32_t)trialIo.data_len : 0;
@@ -1153,17 +1168,17 @@ static uint32_t nposFormSize(const uint8_t* data, uint32_t len, uint8_t level)
 
 /* Best of the three N-position forms (0 absolute, 1 deltas, 2 runs); ties keep the
    earlier form. `exc` must have keepForms set. */
-static int32_t pickSeqExcForm(SeqExceptionClass& exc, uint8_t level)
+static int32_t pickSeqExcForm(SeqExceptionClass& exc, uint8_t level, uint8_t mode)
 {
     exc.closeRun();   /* close the open run so it is measurable */
 
     const uint32_t absSize = nposFormSize((const uint8_t*)exc.abs.data(),
-                                          (uint32_t)(exc.abs.size() * sizeof(uint32_t)), level);
-    const uint32_t varSize = nposFormSize(exc.varint.data(), (uint32_t)exc.varint.size(), level);
+                                          (uint32_t)(exc.abs.size() * sizeof(uint32_t)), level, mode);
+    const uint32_t varSize = nposFormSize(exc.varint.data(), (uint32_t)exc.varint.size(), level, mode);
     std::vector<uint8_t> runBuf;
     runBuf.reserve((exc.runGaps.size() << 1) + 16);
     buildRunForm(exc, runBuf);
-    const uint32_t runSize = nposFormSize(runBuf.data(), (uint32_t)runBuf.size(), level);
+    const uint32_t runSize = nposFormSize(runBuf.data(), (uint32_t)runBuf.size(), level, mode);
 
     int32_t best = 0;
     uint32_t bestSize = absSize;
@@ -1178,7 +1193,7 @@ static int32_t pickSeqExcForm(SeqExceptionClass& exc, uint8_t level)
 }
 
 bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* reference, uint8_t level,
-                                            PreprocessInfo& info)
+                                            uint8_t mode, PreprocessInfo& info)
 {
     if (block == nullptr || reference == nullptr) {
         return false;
@@ -1239,7 +1254,10 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
         return false;
     }
 
-    const FieldCodecSelection verdict = seqMatchCoderChoice(payload, payloadLen, level);
+    const FieldCodecSelection verdict =
+        (mode == PBGZ_MODE_FAST)
+            ? fixedSelection(CoderType::RANS, payloadLen)
+            : seqMatchCoderChoice(payload, payloadLen, level);
     info.fields[SAM_SEQ] = verdict;
 
     /* A caller-published verdict (>= 0) wins over this trial; -1 is undecided. */
@@ -1256,7 +1274,7 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
         for (size_t i = 0; i < nPositions.size(); ++i) {
             exc.add(nPositions[i]);
         }
-        info.setNposForm(pickSeqExcForm(exc, level));
+        info.setNposForm(pickSeqExcForm(exc, level, mode));
     }
 
     LOG_DEBUG("SEQ payload: %u of %u records reference-coded, payload %u -> %s (match %u), "
@@ -1408,10 +1426,10 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             const uint32_t sampleLen = (uint32_t)buf.size();
             const std::vector<LineSample>* sampleLines = &fieldLines[f];
             std::vector<CoderType> seqCandidates = eligibleCandidates(f, mode, compressLevel);
-            trials.push_back([block, reference, compressLevel, &info, f, sampleData, sampleLen,
-                              sampleLines, seqCandidates]() {
+            trials.push_back([block, reference, compressLevel, mode, &info, f, sampleData,
+                              sampleLen, sampleLines, seqCandidates]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
-                if (selectSeqReferenceCoder(block, reference, compressLevel, info)) {
+                if (selectSeqReferenceCoder(block, reference, compressLevel, mode, info)) {
                     return;
                 }
                 if (seqCandidates.empty()) {
@@ -1431,9 +1449,15 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             const uint32_t sampleLen = (uint32_t)buf.size();
             const std::vector<LineSample>* sampleLines = &fieldLines[f];
             std::vector<CoderType> qnameCandidates = eligibleCandidates(f, mode, compressLevel);
-            trials.push_back([block, &info, f, sampleData, sampleLen, sampleLines,
+            trials.push_back([block, mode, &info, f, sampleData, sampleLen, sampleLines,
                               qnameCandidates]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + f);
+                /* Fast mode has one coder for QNAME: skip the affix/qname layout trial. */
+                if (mode == PBGZ_MODE_FAST) {
+                    info.fields[f] = fixedSelection(CoderType::RANS, sampleLen);
+                    info.setQnameUseAffix(0);
+                    return;
+                }
                 if (selectQnameLayout(block, info)) {
                     return;
                 }
@@ -1460,9 +1484,18 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
                block up to QUAL_TRIAL_MAX. */
             const uint32_t qualBudget = (uint32_t)block->getDataLen();
             const uint64_t bufSize = buf.size();
-            trials.push_back([block, qualBudget, compressLevel, &info, &qualSelectedFcv2,
+            trials.push_back([block, qualBudget, compressLevel, mode, &info, &qualSelectedFcv2,
                               &qualSampleBytes, bufSize]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + SAM_QUAL);
+                /* Fast mode uses coder_rans for QUAL; the dedicated QUAL trial only
+                   chooses among archive-profile coders (qual/fcv2/qcm). */
+                if (mode == PBGZ_MODE_FAST) {
+                    info.fields[SAM_QUAL] =
+                        fixedSelection(CoderType::RANS, (uint32_t)bufSize);
+                    qualSampleBytes = bufSize;
+                    qualSelectedFcv2 = false;
+                    return;
+                }
                 std::vector<QualSampleRecord> qualRecs;
                 std::vector<uint32_t> qualFreq;
                 {
@@ -1483,8 +1516,17 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
         /* POS has its own trial on the rebuilt delta-varint stream
            (selectPosDeltaCoder), not on raw text. */
         if (f == (uint32_t)SAM_POS) {
-            trials.push_back([block, compressLevel, &info, &fieldLines, &posCounts, &posSampleBytes]() {
+            const uint32_t posSampleLen = (uint32_t)fieldBufs[SAM_POS].size();
+            trials.push_back([block, compressLevel, mode, posSampleLen, &info, &fieldLines,
+                              &posCounts, &posSampleBytes]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + SAM_POS);
+                /* Fast mode has no POS candidate trial: the delta stream is coded with rans. */
+                if (mode == PBGZ_MODE_FAST) {
+                    info.fields[SAM_POS] =
+                        fixedSelection(CoderType::RANS, posSampleLen);
+                    posSampleBytes = posSampleLen;
+                    return;
+                }
                 std::vector<LineSample> posLines, chrLines;
                 uint32_t posTrialLines = BlockFactory::samReadsPerBlockOfLevel(compressLevel);
                 /* Trial at block granularity, but cap the trial cost (see POS_TRIAL_MAX_LINES). */
