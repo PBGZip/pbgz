@@ -29,6 +29,7 @@
 
 #include "actuator.h"
 #include "coder/coder_io.h"
+#include "coder/coder.h"
 #include "coder/coder_bwt_cm.h"
 
 class IndexActuator : public Actuator {
@@ -58,11 +59,20 @@ private:
 
     int64_t headEndLine;
 
-    // Decoder objects
+    // Decoder objects (the coder is taken from each stream's meta)
     std::shared_ptr<coder_io> flagIo, chrIo, posIo;
-    coder_bwt_cm* flagDecoder;
-    coder_bwt_cm* chrDecoder;
-    coder_bwt_cm* posDecoder;
+    std::shared_ptr<coder> flagDecoder;
+    std::shared_ptr<coder> chrDecoder;
+    std::shared_ptr<coder> posDecoder;
+
+    /* FLAG/POS are either fixed-width numbers or text lines. */
+    bool flagStringMode = false;
+    bool posStringMode = false;
+    bool posDeltaMode = false;
+
+    /* POS delta baseline, reset when RNAME changes (mirrors compressPosFieldDelta). */
+    int64_t posDeltaPrev = 0;
+    uint16_t posLastChr = 0xFFFF;
 
     // For sorting validation
     struct SortKey {

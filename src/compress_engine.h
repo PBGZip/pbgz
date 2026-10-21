@@ -142,7 +142,8 @@ protected:
 private:
     bool initReference();
 
-    int64_t packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef = true);
+    int64_t packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef = true,
+                          bool syncAux = false);
 
     uint32_t calcPackRefeBlockSize();
 

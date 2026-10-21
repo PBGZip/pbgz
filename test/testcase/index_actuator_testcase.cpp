@@ -136,9 +136,9 @@ TEST_F(IndexActuatorTest, Constructor_ValidPointers_Success) {
     IndexActuator actuator(pInBlock, pOutBlock);
     EXPECT_EQ(pInBlock, actuator.inBlockPtr);
     EXPECT_EQ(pOutBlock, actuator.outBlockPtr);
-    EXPECT_EQ(nullptr, actuator.flagDecoder);
-    EXPECT_EQ(nullptr, actuator.chrDecoder);
-    EXPECT_EQ(nullptr, actuator.posDecoder);
+    EXPECT_EQ(nullptr, actuator.flagDecoder.get());
+    EXPECT_EQ(nullptr, actuator.chrDecoder.get());
+    EXPECT_EQ(nullptr, actuator.posDecoder.get());
     EXPECT_EQ(0, actuator.headEndLine);
 }
 
@@ -166,9 +166,9 @@ TEST_F(IndexActuatorTest, Destructor_CleansUpDecoders) {
     actuator->flagIo = flagIo;
     actuator->chrIo = chrIo;
     actuator->posIo = posIo;
-    actuator->flagDecoder = new coder_bwt_cm(actuator->flagIo.get());
-    actuator->chrDecoder = new coder_bwt_cm(actuator->chrIo.get());
-    actuator->posDecoder = new coder_bwt_cm(actuator->posIo.get());
+    actuator->flagDecoder = std::make_shared<coder_bwt_cm>(actuator->flagIo.get());
+    actuator->chrDecoder = std::make_shared<coder_bwt_cm>(actuator->chrIo.get());
+    actuator->posDecoder = std::make_shared<coder_bwt_cm>(actuator->posIo.get());
 
     delete actuator;
 
@@ -275,9 +275,9 @@ TEST_F(IndexActuatorTest, Initial_DecodersInitialized_AfterCall) {
     IndexActuator actuator(pInBlock, pOutBlock);
 
     // Before successful initialization, decoders are nullptr
-    EXPECT_EQ(nullptr, actuator.flagDecoder);
-    EXPECT_EQ(nullptr, actuator.chrDecoder);
-    EXPECT_EQ(nullptr, actuator.posDecoder);
+    EXPECT_EQ(nullptr, actuator.flagDecoder.get());
+    EXPECT_EQ(nullptr, actuator.chrDecoder.get());
+    EXPECT_EQ(nullptr, actuator.posDecoder.get());
 }
 
 TEST_F(IndexActuatorTest, Initial_MultiBlockHandling_DifferentBlockIds) {

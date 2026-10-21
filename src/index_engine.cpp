@@ -44,6 +44,33 @@ BlockReader* IndexEngine::createBlockReader() {
         MemoryUtil::safeDeleteClass(pbgzReader);
         return nullptr;
     }
+
+    /* coder_arith POS delta streams start from the prior stored in the dynamic file meta. */
+    PbgzFileMeta dynamicMeta = pbgzReader->getDynamicFileMeta();
+    if (dynamicMeta.getMetaData().isMember("pos_prior")) {
+        const std::string& hex = dynamicMeta.getMetaData("pos_prior").asString();
+        auto nib = [](char ch) -> int {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+            return -1;
+        };
+        std::vector<uint8_t> prior;
+        prior.reserve(hex.size() / 2);
+        bool ok = (hex.size() % 2 == 0);
+        for (size_t i = 0; ok && i + 1 < hex.size(); i += 2) {
+            const int hi = nib(hex[i]);
+            const int lo = nib(hex[i + 1]);
+            if (hi < 0 || lo < 0) {
+                ok = false;
+                break;
+            }
+            prior.push_back((uint8_t)((hi << 4) | lo));
+        }
+        if (ok && !prior.empty()) {
+            posPriorBlob = std::make_shared<const std::vector<uint8_t>>(std::move(prior));
+        }
+    }
     return pbgzReader;
 }
 

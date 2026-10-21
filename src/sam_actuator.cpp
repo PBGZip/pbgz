@@ -337,9 +337,6 @@ int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, ui
                     /* Mapped read: build the (rare) name only to look it up. */
                     std::string chrName(chrBegin, chrLen);
                     if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
-                        if (headEndLine >= 0) {
-                            SamInfo::getInstance().clearChromosomeInfo();
-                        }
                         return -1;
                     }
                 }
@@ -363,9 +360,6 @@ int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, ui
                     }
                 } else {
                     if (baseFieldLen != baseLen) {
-                        if (headEndLine >= 0) {
-                            SamInfo::getInstance().clearChromosomeInfo();
-                        }
                         return -1;
                     }
                 }
@@ -403,9 +397,6 @@ int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, ui
     // Each line must have at least 10 tabs, less than 10 means not a SAM file
     if (linePos.size() < 10) {
         LOG_ERROR("Sam field line invalid, size = %d", linePos.size());
-        if (headEndLine >= 0) {
-            SamInfo::getInstance().clearChromosomeInfo();
-        }
         return -1;
     }
     if (linePos.size() > maxFieldSize) {
@@ -6233,9 +6224,12 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                                 return SeqWalkAction::Continue;
                             },
                             [](uint32_t) { return SeqWalkAction::Continue; });
-                        /* The ops did not describe this read: the writer stores the bases as they stand, so the whole payload is that form. */
+                        /* The ops did not describe this read: the writer fell back to actgEncode()
+                           for the whole payload, so the bytes are 2-bit base codes, not ASCII. */
                         if (!end.complete) {
-                            writeDirectBases(baseDiffSquashBuffer, (int32_t)actualBaseLen);
+                            for (int32_t i = 0; i < (int32_t)actualBaseLen; ++i) {
+                                out[i] = atcg4[baseDiffSquashBuffer[i] & 0x3];
+                            }
                         }
                     }
                 }

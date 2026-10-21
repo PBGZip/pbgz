@@ -620,7 +620,8 @@ uint32_t CompressEngine::calcPackRefeBlockSize() {
 
 
 /*  Save reference genome */
-int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef) {
+int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen, bool isSanitizeRef,
+                                      bool syncAux) {
     int64_t block = 0, offset = 0;
     std::vector<std::thread> tpools;
 
@@ -641,7 +642,7 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
 
     // Start threads
     for (uint32_t idx = 0; idx < pcnt; ++idx) {
-        tpools.push_back(std::thread([&inputPool, &m, &freeOutput, &outputPool, &refe, &each, &maxBlockLen, &totalEncLen, &isSanitizeRef, &count]() {
+        tpools.push_back(std::thread([&inputPool, &m, &freeOutput, &outputPool, &refe, &each, &maxBlockLen, &totalEncLen, &isSanitizeRef, &count, syncAux]() {
             uint8_t* output = MemoryUtil::safeAlloc<uint8_t>(each);
             while(true) {
                 RefeInfo refe2do = inputPool.get();
@@ -674,7 +675,10 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 /* Write compressed stream of current block's meta */
                 outBlock->reset();
                 int64_t currBlockLen = metaString.length() + refeIo.data_len;
-                if ((size_t)currBlockLen >= outBlock->getRemain()) {
+                /* A 16 MB reference chunk can compress past the pool block's initial size
+                   (which follows -l), so grow it instead of failing the pack. */
+                if (outBlock->ensureCapacity((size_t)currBlockLen + 1) != 0 ||
+                    (size_t)currBlockLen >= outBlock->getRemain()) {
                     LOG_ERROR("reference block pack failed");
                     break;
                 }
@@ -684,6 +688,9 @@ int64_t CompressEngine::packReference(int64_t &maxBlockLen, int64_t &totalEncLen
                 outBlock->setMetaLen(metaString.length());
                 outBlock->setBlockType(REFERENCE);
                 outBlock->setBlockId(count + refe2do.first.first);
+                /* Header packing (stdout) must reach the writer before any data block; sync-aux
+                   blocks bypass block-id ordering, whose ids would otherwise collide with data. */
+                outBlock->setSyncAux(syncAux);
                 outputPool->push(outBlock);
 
                 m.lock();
@@ -806,7 +813,7 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
 
     int64_t maxRefLen = 0;
     int64_t totolEncLen = 0;
-    (void)packReference(maxRefLen, totolEncLen, false);
+    (void)packReference(maxRefLen, totolEncLen, false, /* syncAux */ true);
 
     return 0;
  }

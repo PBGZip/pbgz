@@ -50,8 +50,14 @@ protected:
 
     virtual int32_t startEnginePostProc() override;
 
+    /* POS delta streams written by coder_arith need the file-level prior, exactly as the
+       decompression path does. */
+    AuxPayloadPtr getPosPrior() override { return posPriorBlob; }
+
 private:
     std::map<uint32_t, int64_t> blockFileOffset;
+
+    std::shared_ptr<const std::vector<uint8_t>> posPriorBlob;
 
     /* Start offset of the current block in the source file; reader-thread only. */
     int64_t pendingBlockOffset = 0;

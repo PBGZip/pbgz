@@ -23,15 +23,19 @@
 
 #include <vector>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 
 #include "index_actuator.h"
+#include "pbgz_engine.h"
 #include "pbgz_index.h"   /* SamIndex, used by the index paths below */
 #include "sam_info.h"
 #include "log/logger.h"
 #include "coder/coder_io.h"
 #include "coder/coder_json.h"
 #include "coder/coder_bwt_cm.h"
+#include "coder_factory.h"
 
 IndexActuator::IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngine* engine)
     : Actuator(inPtr, outPtr, engine), flagDecoder(nullptr), chrDecoder(nullptr), posDecoder(nullptr) {
@@ -39,18 +43,9 @@ IndexActuator::IndexActuator(RoughIOBlock* inPtr, RoughIOBlock* outPtr, PbgzEngi
 }
 
 IndexActuator::~IndexActuator() {
-    if (flagDecoder != nullptr) {
-        delete flagDecoder;
-        flagDecoder = nullptr;
-    }
-    if (chrDecoder != nullptr) {
-        delete chrDecoder;
-        chrDecoder = nullptr;
-    }
-    if (posDecoder != nullptr) {
-        delete posDecoder;
-        posDecoder = nullptr;
-    }
+    flagDecoder.reset();
+    chrDecoder.reset();
+    posDecoder.reset();
 }
 
 int32_t IndexActuator::initial() {
@@ -117,27 +112,29 @@ int32_t IndexActuator::parseHeader(Json::Value& meta) {
         return -1;
     }
 
-    if (headerMeta["coder"]["magic"].asString() != "coder_bwt_cm") {
-        return -1;
-    }
-
     headEndLine = headerMeta["lines"].asInt64();
     uint32_t dstLen = headerMeta["dstlen"].asUInt();
 
-    // Create SAM file header decompressor
+    // Create SAM file header decompressor from the recorded magic (BWT in archive, RANS in fast).
     coder_io headerIo(inBlockPtr->getBuffer(), dstLen, &ioErrSink, "SAM header");
-    coder_bwt_cm headerDecoder(&headerIo);
-
-    // Set decoder level
+    FieldDecoderArgs headerArgs;
     if (headerMeta["coder"].isMember("level")) {
-        headerDecoder.set_level(headerMeta["coder"]["level"].asInt());
+        headerArgs.level = headerMeta["coder"]["level"].asInt();
+    }
+    std::shared_ptr<coder> headerDecoder =
+        CoderFactory::makeFieldDecoder(headerMeta["coder"]["magic"].asString(), &headerIo,
+                                       headerArgs);
+    if (headerDecoder == nullptr) {
+        LOG_ERROR("Unsupported SAM header coder: %s",
+                  headerMeta["coder"]["magic"].asString().c_str());
+        return -1;
     }
 
     // Decompress SAM file header data and parse chromosome info
     uint32_t lineCount = 0;
     uint8_t tempBuffer[1024];
     while (lineCount < headEndLine) {
-        uint32_t decodedLen = headerDecoder.decode_line(tempBuffer, sizeof(tempBuffer), '\n', false);
+        uint32_t decodedLen = headerDecoder->decode_line(tempBuffer, sizeof(tempBuffer), '\n', false);
         if (decodedLen == 0) {
             break;
         }
@@ -152,47 +149,70 @@ int32_t IndexActuator::parseHeader(Json::Value& meta) {
 }
 
 int32_t IndexActuator::initDecoders(const Json::Value& streams, int32_t& readOffset) {
+    auto openField = [&](const Json::Value& fieldMeta, const char* name,
+                         std::shared_ptr<coder_io>& io) -> std::shared_ptr<coder> {
+        if (!fieldMeta.isMember("coder")) {
+            LOG_ERROR("Index: field %s has no coder meta", name);
+            return nullptr;
+        }
+        const uint32_t dstLen = fieldMeta["dstlen"].asUInt();
+        io = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, name);
+        FieldDecoderArgs args;
+        if (fieldMeta["coder"].isMember("level")) {
+            args.level = fieldMeta["coder"]["level"].asInt();
+        }
+        AuxPayloadPtr posPrior;
+        if (fieldMeta["coder"]["magic"].asString() == "coder_arith" && pbgzEngine != nullptr) {
+            posPrior = pbgzEngine->getPosPrior();
+            args.posPrior = posPrior.get();
+        }
+        std::shared_ptr<coder> dec =
+            CoderFactory::makeFieldDecoder(fieldMeta["coder"]["magic"].asString(), io.get(), args);
+        if (dec == nullptr) {
+            LOG_ERROR("Index: unsupported coder %s for field %s",
+                      fieldMeta["coder"]["magic"].asString().c_str(), name);
+            return nullptr;
+        }
+        readOffset += dstLen;
+        return dec;
+    };
+
     // Initialize ID field decoders if needed (field 0)
     if (streams.size() > 0 && streams[0]["field"].asUInt() == 0) {
         const Json::Value& idMeta = streams[0];
         const Json::Value& idStreamMeta = idMeta["streams"];
         for (uint32_t i = 0; i < idStreamMeta.size(); ++i) {
-            uint32_t dstLength = idStreamMeta[i]["dstlen"].asUInt();
-            readOffset += dstLength;
+            readOffset += idStreamMeta[i]["dstlen"].asUInt();
         }
     }
 
-    // Initialize FLAG decoder (field 1)
+    // FLAG (field 1): fixed-width number or text lines.
     if (streams.size() > 1 && streams[1]["field"].asUInt() == 1) {
-        uint32_t dstLen = streams[1]["dstlen"].asUInt();
-        flagIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "FLAG");
-        flagDecoder = new coder_bwt_cm(flagIo.get());
-        if (streams[1]["coder"].isMember("level")) {
-            flagDecoder->set_level(streams[1]["coder"]["level"].asInt());
+        flagStringMode = streams[1].isMember("mode") && streams[1]["mode"].asString() == "string";
+        flagDecoder = openField(streams[1], "FLAG", flagIo);
+        if (flagDecoder == nullptr) {
+            return -1;
         }
-        readOffset += dstLen;
     }
 
-    // Initialize RNAME decoder (field 2)
+    // RNAME (field 2): chromosome index, one uint16 per record.
     if (streams.size() > 2 && streams[2]["field"].asUInt() == 2) {
-        uint32_t dstLen = streams[2]["dstlen"].asUInt();
-        chrIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "RNAME");
-        chrDecoder = new coder_bwt_cm(chrIo.get());
-        if (streams[2]["coder"].isMember("level")) {
-            chrDecoder->set_level(streams[2]["coder"]["level"].asInt());
+        chrDecoder = openField(streams[2], "RNAME", chrIo);
+        if (chrDecoder == nullptr) {
+            return -1;
         }
-        readOffset += dstLen;
     }
 
-    // Initialize POS decoder (field 3)
+    // POS (field 3): delta-varint, text, or fixed uint32 depending on the writer's mode.
     if (streams.size() > 3 && streams[3]["field"].asUInt() == 3) {
-        uint32_t dstLen = streams[3]["dstlen"].asUInt();
-        posIo = makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "POS");
-        posDecoder = new coder_bwt_cm(posIo.get());
-        if (streams[3]["coder"].isMember("level")) {
-            posDecoder->set_level(streams[3]["coder"]["level"].asInt());
+        const std::string mode = streams[3].isMember("mode")
+                                     ? streams[3]["mode"].asString() : std::string();
+        posStringMode = (mode == "string");
+        posDeltaMode = (mode == "pos_delta");
+        posDecoder = openField(streams[3], "POS", posIo);
+        if (posDecoder == nullptr) {
+            return -1;
         }
-        readOffset += dstLen;
     }
 
     return 0;
@@ -247,12 +267,27 @@ int32_t IndexActuator::decodeAndBuildIndex(uint32_t lineNum) {
         uint16_t flag = 0;
         uint32_t mapPos = 0;
 
-        // Decode FLAG (field 1)
+        // Decode FLAG (field 1): text lines or fixed uint16.
         if (flagDecoder != nullptr) {
-            uint8_t tempBuffer[2];
-            int32_t decodedLen = flagDecoder->decode_line(tempBuffer, sizeof(tempBuffer), UINT8_MAX, false);
-            if (decodedLen == sizeof(uint16_t)) {
-                flag = *(uint16_t*)tempBuffer;
+            if (flagStringMode) {
+                uint8_t tempBuffer[64];
+                int32_t decodedLen = flagDecoder->decode_line(tempBuffer, sizeof(tempBuffer), '\t', false);
+                if (decodedLen > 0) {
+                    size_t textLen = (size_t)decodedLen;
+                    if (tempBuffer[textLen - 1] == '\t' || tempBuffer[textLen - 1] == '\n') {
+                        --textLen;
+                    }
+                    if (textLen > 0) {
+                        flag = (uint16_t)strtoul(std::string((char*)tempBuffer, textLen).c_str(),
+                                                 nullptr, 10);
+                    }
+                }
+            } else {
+                uint8_t tempBuffer[2];
+                int32_t decodedLen = flagDecoder->decode_line(tempBuffer, sizeof(tempBuffer), UINT8_MAX, false);
+                if (decodedLen == sizeof(uint16_t)) {
+                    memcpy(&flag, tempBuffer, sizeof(uint16_t));
+                }
             }
         }
 
@@ -261,16 +296,61 @@ int32_t IndexActuator::decodeAndBuildIndex(uint32_t lineNum) {
             uint8_t tempBuffer[2];
             int32_t decodedLen = chrDecoder->decode_line(tempBuffer, sizeof(tempBuffer), UINT8_MAX, false);
             if (decodedLen == sizeof(uint16_t)) {
-                chrIndex = *(uint16_t*)tempBuffer;
+                memcpy(&chrIndex, tempBuffer, sizeof(uint16_t));
             }
         }
 
-        // Decode POS (field 3) - mapping position
+        // Decode POS (field 3): delta-varint (current layout), text, or fixed uint32.
         if (posDecoder != nullptr) {
-            uint8_t tempBuffer[4];
-            int32_t decodedLen = posDecoder->decode_line(tempBuffer, sizeof(tempBuffer), UINT8_MAX, false);
-            if (decodedLen == sizeof(uint32_t)) {
-                mapPos = *(uint32_t*)tempBuffer;
+            if (posDeltaMode) {
+                if (chrIndex != posLastChr) {
+                    posDeltaPrev = 0;
+                    posLastChr = chrIndex;
+                }
+                uint64_t delta = 0;
+                int shift = 0;
+                bool ok = true;
+                for (;;) {
+                    uint8_t b = 0;
+                    if (posDecoder->decode_line(&b, 1, UINT8_MAX, false) != 1) {
+                        ok = false;
+                        break;
+                    }
+                    delta |= (uint64_t)(b & 0x7f) << shift;
+                    if ((b & 0x80) == 0) {
+                        break;
+                    }
+                    shift += 7;
+                    if (shift >= 64) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    LOG_ERROR("Index: POS delta stream truncated at line %u", lineNo);
+                    return -1;
+                }
+                posDeltaPrev += (int64_t)delta;
+                mapPos = (uint32_t)posDeltaPrev;
+            } else if (posStringMode) {
+                uint8_t tempBuffer[32];
+                int32_t decodedLen = posDecoder->decode_line(tempBuffer, sizeof(tempBuffer), '\t', false);
+                if (decodedLen > 0) {
+                    size_t textLen = (size_t)decodedLen;
+                    if (tempBuffer[textLen - 1] == '\t' || tempBuffer[textLen - 1] == '\n') {
+                        --textLen;
+                    }
+                    if (textLen > 0) {
+                        mapPos = (uint32_t)strtoul(std::string((char*)tempBuffer, textLen).c_str(),
+                                                   nullptr, 10);
+                    }
+                }
+            } else {
+                uint8_t tempBuffer[4];
+                int32_t decodedLen = posDecoder->decode_line(tempBuffer, sizeof(tempBuffer), UINT8_MAX, false);
+                if (decodedLen == sizeof(uint32_t)) {
+                    memcpy(&mapPos, tempBuffer, sizeof(uint32_t));
+                }
             }
         }
 
