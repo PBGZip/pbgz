@@ -290,6 +290,109 @@ int64_t DecompressEngine::readBlocks(BlockReader* blockReader)  {
     }
 }
 
+/*
+ * -b conversion stage. The writer thread used to parse every SAM text line and build BAM
+ * records itself; with a small -t the conversion budget collapsed to one, so that thread
+ * sat at 100% while the coder workers blocked on the output pool. Here the conversion runs
+ * on its own thread (mirroring the BAM-read render stage), and the writer only frames the
+ * finished records into BGZF.
+ */
+void DecompressEngine::dispatchOutputBlock(RoughIOBlock* blockPtr) {
+    if (bamConvertPool != nullptr) {
+        bamConvertPool->push(blockPtr);
+    } else {
+        outputDataPool->push(blockPtr);
+    }
+}
+
+int32_t DecompressEngine::startOutputStage() {
+    if (!parameter.isDecToBam) {
+        return 0;
+    }
+    bamConvertPool = std::make_unique<BlockingQueueType>();
+    /* Keep the in-flight window at least as wide as the worker set, so coder threads do
+       not stall waiting for the converter's queue. */
+    bamConvertPool->setCapility((parameter.threadNum << 1) + 2);
+    bamConvertThreads.emplace_back(&DecompressEngine::bamConvertWorker, this);
+    if (parameter.verbose) {
+        fprintf(stderr, "[pipeline] SAM->BAM conversion stage up (1 thread)\n");
+    }
+    return 0;
+}
+
+void DecompressEngine::drainOutputStage() {
+    if (bamConvertPool == nullptr || bamConvertThreads.empty()) {
+        return;
+    }
+    bamConvertPool->push(nullptr);
+    for (auto& t : bamConvertThreads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    bamConvertThreads.clear();
+}
+
+void DecompressEngine::bamConvertWorker() {
+    pthread_setname_np(pthread_self(), "sam2bam");
+    /* The per-block line conversion keeps its own small budget; the stage itself is the
+       dedicated thread that decouples it from the writer. */
+    SamToBamConverter converter(bamBgzfThreadNum(parameter.threadNum));
+    std::map<int64_t, RoughIOBlock*> pending;
+    bool headerDone = false;
+
+    auto forward = [this, &converter](RoughIOBlock* block) {
+        if (converter.convert(block) != 0) {
+            LOG_ERROR("SAM->BAM conversion failed for block(%ld)", (long)block->getBlockId());
+            taskFailed.store(true);
+        }
+        outputDataPool->push(block);
+    };
+    auto flushPending = [&]() {
+        for (auto& entry : pending) {
+            forward(entry.second);
+        }
+        pending.clear();
+    };
+
+    while (true) {
+        RoughIOBlock* block = bamConvertPool->get();
+        if (block == nullptr) {
+            break;
+        }
+
+        if (!headerDone) {
+            const bool alignment = BlockUtil::isSAMBlock(block->getBlockType()) ||
+                                   BlockUtil::isBAMBlock(block->getBlockType());
+            /* Block 0 carries the SAM header; a data block can still overtake it in the
+               completion queue, so hold such blocks until the header is converted. */
+            const bool headerCandidate = block->getBlockId() == 0 ||
+                (alignment && block->getDataLen() > 0 && block->getBuffer()[0] == '@');
+            if (alignment && !headerCandidate) {
+                pending[block->getBlockId()] = block;
+                /* Region/partial streams may have no header block; after an in-flight
+                   window, synthesize one instead of waiting forever. */
+                if (pending.size() >= (size_t)parameter.threadNum + 1) {
+                    headerDone = true;
+                    auto it = pending.begin();
+                    RoughIOBlock* first = it->second;
+                    pending.erase(it);
+                    forward(first);
+                    flushPending();
+                }
+                continue;
+            }
+            headerDone = true;
+        }
+
+        forward(block);
+        if (!pending.empty()) {
+            flushPending();
+        }
+    }
+    flushPending();
+}
+
 int64_t DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
     if (blockReader == nullptr) {
         return -1;

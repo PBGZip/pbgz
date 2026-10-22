@@ -1924,6 +1924,75 @@ namespace {
         return line.substr(valStart, end - valStart);
     }
 
+    /*
+     * Parse the leading SAM header lines and append the BAM header byte stream to `out`.
+     * dataStart is the offset of the first data line; refIndex is filled with the @SQ order.
+     */
+    int32_t buildBamHeaderPayload(const uint8_t* data, size_t len, size_t& dataStart,
+                                  std::map<std::string, int32_t>& refIndex,
+                                  std::vector<uint8_t>& out)
+    {
+        refIndex.clear();
+        std::vector<BamRef> refs;
+        std::string headerText;
+
+        size_t pos = 0;
+        while (pos < len && data[pos] == '@') {
+            size_t nl = pos;
+            while (nl < len && data[nl] != '\n') {
+                ++nl;
+            }
+            size_t lineLen = nl - pos;
+            if (lineLen > 0 && data[pos + lineLen - 1] == '\r') {
+                --lineLen;
+            }
+            if (lineLen >= 3 && memcmp(data + pos, "@SQ", 3) == 0) {
+                const std::string line((const char*)data + pos, lineLen);
+                const std::string sn = sqFieldValue(line, "SN:");
+                const std::string ln = sqFieldValue(line, "LN:");
+                if (!sn.empty()) {
+                    int32_t refLen = 0;
+                    if (!ln.empty()) {
+                        try {
+                            refLen = std::stoi(ln);
+                        } catch (...) {
+                            refLen = 0;
+                        }
+                    }
+                    refs.push_back({sn, refLen});
+                }
+            }
+            headerText.append((const char*)data + pos, lineLen);
+            headerText += '\n';
+            pos = nl + 1;
+        }
+        if (headerText.empty()) {
+            headerText = "@HD\tVN:1.6\n";
+        }
+        for (size_t i = 0; i < refs.size(); ++i) {
+            refIndex[refs[i].name] = (int32_t)i;
+        }
+
+        out.clear();
+        out.reserve(64 + headerText.size() + refs.size() * 32);
+        out.push_back('B');
+        out.push_back('A');
+        out.push_back('M');
+        out.push_back(1);
+        bamrec::putI32(out, (int32_t)headerText.size());
+        out.insert(out.end(), headerText.begin(), headerText.end());
+        bamrec::putI32(out, (int32_t)refs.size());
+        for (const BamRef& r : refs) {
+            bamrec::putI32(out, (int32_t)(r.name.size() + 1));
+            out.insert(out.end(), r.name.begin(), r.name.end());
+            out.push_back(0);
+            bamrec::putI32(out, r.len);
+        }
+
+        dataStart = pos;
+        return 0;
+    }
+
 }  // namespace
 
 namespace {
@@ -2053,169 +2122,19 @@ int32_t bgzfCompressRange(const uint8_t* src, size_t total, uint32_t maxThreads,
     return failed.load() ? -1 : 0;
 }
 
-}  // namespace
-
-BamWriter::BamWriter(IOWriter* pIoWriter, uint32_t maxThreads)
-    : BlockWriter(pIoWriter), maxThreads(maxThreads) {
-    headerWritten = false;
-    passThrough = false;
-    finished = false;
-}
-
-BamWriter::~BamWriter() {
-    if (!finished && !passThrough) {
-        (void)finish();   // Fallback: flush the trailing block and the EOF marker
-    }
-}
-
-int32_t BamWriter::writeRaw(const void* data, size_t len) {
-    if (ioWriter == nullptr || len == 0) {
-        return 0;
-    }
-    const size_t n = ioWriter->writeIO(data, len);
-    if (n != len) {
-        ioWriter->latchWriteError(-1);
-        return -1;
-    }
-    return 0;
-}
-
-int32_t BamWriter::bgzfWrite(const void* data, size_t len) {
-    if (len == 0) {
-        return 0;
-    }
-    /* Accumulate, then frame every complete 64KB block into one parallel batch; the remainder stays buffered. */
-    const size_t base = bgzfPending.size();
-    bgzfPending.resize(base + len);
-    memcpy(bgzfPending.data() + base, data, len);
-
-    const size_t consumed = (bgzfPending.size() / kBgzfBlockBytes) * kBgzfBlockBytes;
-    if (consumed == 0) {
-        return 0;
-    }
-    std::vector<std::vector<uint8_t>> blocks;
-    if (0 != bgzfCompressRange(bgzfPending.data(), consumed, maxThreads, blocks)) {
-        return -1;
-    }
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        if (0 != writeRaw(blocks[i].data(), blocks[i].size())) {
-            return -1;
-        }
-    }
-    bgzfPending.erase(bgzfPending.begin(), bgzfPending.begin() + (std::ptrdiff_t)consumed);
-    return 0;
-}
-
-int32_t BamWriter::bgzfFlushRemaining() {
-    if (bgzfPending.empty()) {
-        return 0;
-    }
-    /* The final block may be shorter than 64KB, allowed only at end of stream. */
-    std::vector<std::vector<uint8_t>> blocks;
-    if (0 != bgzfCompressRange(bgzfPending.data(), bgzfPending.size(), maxThreads, blocks)) {
-        return -1;
-    }
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        if (0 != writeRaw(blocks[i].data(), blocks[i].size())) {
-            return -1;
-        }
-    }
-    bgzfPending.clear();
-    return 0;
-}
-
-int32_t BamWriter::finish() {
-    if (finished) {
-        return 0;
-    }
-    finished = true;
-    if (passThrough) {
-        return 0;   // Pass-through mode has no BGZF state
-    }
-    if (0 != bgzfFlushRemaining()) {
-        return -1;
-    }
-    /* BGZF EOF marker (empty block), the terminating block of a standard BAM */
-    static const uint8_t kEofBlock[28] = {
-        0x1f, 0x8b, 0x08, 0x04, 0, 0, 0, 0, 0, 0xff,
-        0x06, 0x00, 0x42, 0x43, 0x02, 0x00, 0x1b, 0x00,
-        0x03, 0x00, 0, 0, 0, 0, 0, 0, 0, 0
-    };
-    return writeRaw(kEofBlock, sizeof(kEofBlock));
-}
-
-int32_t BamWriter::writeBamHeader(const uint8_t* data, size_t len, size_t& dataStart) {
-    refs.clear();
-    refIndex.clear();
-    std::string headerText;
-
-    size_t pos = 0;
-    while (pos < len && data[pos] == '@') {
-        size_t nl = pos;
-        while (nl < len && data[nl] != '\n') {
-            ++nl;
-        }
-        size_t lineLen = nl - pos;
-        if (lineLen > 0 && data[pos + lineLen - 1] == '\r') {
-            --lineLen;
-        }
-        if (lineLen >= 3 && memcmp(data + pos, "@SQ", 3) == 0) {
-            const std::string line((const char*)data + pos, lineLen);
-            const std::string sn = sqFieldValue(line, "SN:");
-            const std::string ln = sqFieldValue(line, "LN:");
-            if (!sn.empty()) {
-                int32_t refLen = 0;
-                if (!ln.empty()) {
-                    try {
-                        refLen = std::stoi(ln);
-                    } catch (...) {
-                        refLen = 0;
-                    }
-                }
-                refs.push_back({sn, refLen});
-            }
-        }
-        headerText.append((const char*)data + pos, lineLen);
-        headerText += '\n';
-        pos = nl + 1;
-    }
-    if (headerText.empty()) {
-        headerText = "@HD\tVN:1.6\n";
-    }
-    for (size_t i = 0; i < refs.size(); ++i) {
-        refIndex[refs[i].name] = (int32_t)i;
-    }
-
-    std::vector<uint8_t> hdr;
-    hdr.reserve(64 + headerText.size() + refs.size() * 32);
-    hdr.push_back('B');
-    hdr.push_back('A');
-    hdr.push_back('M');
-    hdr.push_back(1);
-    bamrec::putI32(hdr, (int32_t)headerText.size());
-    hdr.insert(hdr.end(), headerText.begin(), headerText.end());
-    bamrec::putI32(hdr, (int32_t)refs.size());
-    for (const BamRef& r : refs) {
-        bamrec::putI32(hdr, (int32_t)(r.name.size() + 1));
-        hdr.insert(hdr.end(), r.name.begin(), r.name.end());
-        hdr.push_back(0);
-        bamrec::putI32(hdr, r.len);
-    }
-
-    dataStart = pos;
-    return bgzfWrite(hdr.data(), hdr.size());
-}
-
-int32_t BamWriter::writeDataLines(const uint8_t* buffer, size_t start, size_t end) {
+/*
+ * Convert a span of SAM text lines into the raw BAM record stream, preserving line order.
+ * Chunks are aligned to line boundaries and converted in parallel; `out` is appended to.
+ */
+int32_t convertSamDataToBam(const uint8_t* buffer, size_t start, size_t end,
+                            const std::map<std::string, int32_t>& refIndex,
+                            uint32_t maxThreads, std::vector<uint8_t>& out)
+{
     if (start >= end) {
         return 0;
     }
     const size_t len = end - start;
 
-    /*
-     * Split the span at line boundaries and convert the pieces in parallel; each owns its output and pieces are concatenated in order.
-     * One chunk per 512KB, clamped to the thread budget.
-     */
     uint32_t budget = maxThreads;
     if (budget == 0) {
         budget = std::thread::hardware_concurrency();
@@ -2256,7 +2175,7 @@ int32_t BamWriter::writeDataLines(const uint8_t* buffer, size_t start, size_t en
         bamrec::BamRecordScratch scratch;
         const uint8_t* p = buffer + bounds[i];
         const uint8_t* e = buffer + bounds[i + 1];
-        std::vector<uint8_t>& out = parts[i];
+        std::vector<uint8_t>& part = parts[i];
         while (p < e) {
             const uint8_t* nl = (const uint8_t*)memchr(p, '\n', (size_t)(e - p));
             const size_t lineLen = (nl != nullptr) ? (size_t)(nl - p) : (size_t)(e - p);
@@ -2267,7 +2186,7 @@ int32_t BamWriter::writeDataLines(const uint8_t* buffer, size_t start, size_t en
                     return;
                 }
                 if (built > 0) {
-                    out.insert(out.end(), scratch.rec.begin(), scratch.rec.end());
+                    part.insert(part.end(), scratch.rec.begin(), scratch.rec.end());
                 }
             }
             p += lineLen + 1;
@@ -2277,7 +2196,6 @@ int32_t BamWriter::writeDataLines(const uint8_t* buffer, size_t start, size_t en
         return -1;
     }
 
-    /* Hand the whole record stream to BGZF at once, for the largest possible deflate batch. */
     size_t total = 0;
     for (size_t i = 0; i < parts.size(); ++i) {
         total += parts[i].size();
@@ -2285,10 +2203,192 @@ int32_t BamWriter::writeDataLines(const uint8_t* buffer, size_t start, size_t en
     if (total == 0) {
         return 0;
     }
-    std::vector<uint8_t> joined;
-    joined.reserve(total);
+    out.reserve(out.size() + total);
     for (size_t i = 0; i < parts.size(); ++i) {
-        joined.insert(joined.end(), parts[i].begin(), parts[i].end());
+        out.insert(out.end(), parts[i].begin(), parts[i].end());
+    }
+    return 0;
+}
+
+}  // namespace
+
+int32_t SamToBamConverter::convert(RoughIOBlock* blockPtr)
+{
+    if (blockPtr == nullptr) {
+        return -1;
+    }
+    if (blockPtr->getDataLen() <= 0 || blockPtr->isBamPrebuilt()) {
+        return 0;
+    }
+
+    const BlockType type = blockPtr->getBlockType();
+    const bool isAlignment =
+        BlockUtil::isSAMBlock(type) || BlockUtil::isBAMBlock(type);
+    if (!isAlignment) {
+        /* Non-alignment input (-b on FASTQ/binary): let BamWriter pass it through. */
+        if (!headerWritten) {
+            passThrough = true;
+        }
+        return 0;
+    }
+    if (passThrough) {
+        return 0;
+    }
+
+    const uint8_t* data = blockPtr->getBuffer();
+    const size_t dataLen = (size_t)blockPtr->getDataLen();
+    size_t dataStart = 0;
+    std::vector<uint8_t> bam;
+
+    if (!headerWritten) {
+        if (0 != buildBamHeaderPayload(data, dataLen, dataStart, refIndex, bam)) {
+            return -1;
+        }
+        headerWritten = true;
+    }
+    if (dataStart < dataLen &&
+        0 != convertSamDataToBam(data, dataStart, dataLen, refIndex, maxThreads, bam)) {
+        return -1;
+    }
+
+    if (bam.empty()) {
+        blockPtr->setDataLen(0);
+        return 0;
+    }
+    if (0 != blockPtr->ensureCapacity(bam.size())) {
+        LOG_ERROR("SamToBamConverter: output buffer grow failed");
+        return -1;
+    }
+    memcpy(blockPtr->getBuffer(), bam.data(), bam.size());
+    blockPtr->setDataLen((int64_t)bam.size());
+    blockPtr->setBamPrebuilt(true);
+    return 0;
+}
+
+BamWriter::BamWriter(IOWriter* pIoWriter, uint32_t maxThreads)
+    : BlockWriter(pIoWriter), bgzfEncoderReady(false), maxThreads(maxThreads) {
+    headerWritten = false;
+    passThrough = false;
+    finished = false;
+    /* Mirror the read-side BgzfParallelDecoder: deflate runs on its own worker pool. */
+    bgzfEncoderReady = bgzfEncoder.start((int)maxThreads, bgzfCompressBlock,
+                                         this, &BamWriter::bgzfSink);
+    if (!bgzfEncoderReady) {
+        LOG_ERROR("BamWriter: failed to start BGZF deflate pool, using serial fallback.");
+    }
+}
+
+BamWriter::~BamWriter() {
+    if (!finished && !passThrough) {
+        (void)finish();   // Fallback: flush the trailing block and the EOF marker
+    }
+}
+
+int32_t BamWriter::writeRaw(const void* data, size_t len) {
+    if (ioWriter == nullptr || len == 0) {
+        return 0;
+    }
+    const size_t n = ioWriter->writeIO(data, len);
+    if (n != len) {
+        ioWriter->latchWriteError(-1);
+        return -1;
+    }
+    return 0;
+}
+
+int32_t BamWriter::bgzfSink(void* ctx, const uint8_t* data, size_t len) {
+    BamWriter* writer = static_cast<BamWriter*>(ctx);
+    return (writer != nullptr) ? writer->writeRaw(data, len) : -1;
+}
+
+int32_t BamWriter::bgzfWrite(const void* data, size_t len) {
+    if (len == 0) {
+        return 0;
+    }
+    /* Normal path: hand the bytes to the independent deflate pool; it owns the 64KB
+       membering and writes completed BGZF blocks back through bgzfSink. */
+    if (bgzfEncoderReady) {
+        return bgzfEncoder.write(data, len);
+    }
+    /* Serial fallback when the pool could not be started. */
+    /* Accumulate, then frame every complete 64KB block into one parallel batch; the remainder stays buffered. */
+    const size_t base = bgzfPending.size();
+    bgzfPending.resize(base + len);
+    memcpy(bgzfPending.data() + base, data, len);
+
+    const size_t consumed = (bgzfPending.size() / kBgzfBlockBytes) * kBgzfBlockBytes;
+    if (consumed == 0) {
+        return 0;
+    }
+    std::vector<std::vector<uint8_t>> blocks;
+    if (0 != bgzfCompressRange(bgzfPending.data(), consumed, maxThreads, blocks)) {
+        return -1;
+    }
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (0 != writeRaw(blocks[i].data(), blocks[i].size())) {
+            return -1;
+        }
+    }
+    bgzfPending.erase(bgzfPending.begin(), bgzfPending.begin() + (std::ptrdiff_t)consumed);
+    return 0;
+}
+
+int32_t BamWriter::bgzfFlushRemaining() {
+    if (bgzfEncoderReady) {
+        return bgzfEncoder.finish();
+    }
+    if (bgzfPending.empty()) {
+        return 0;
+    }
+    /* The final block may be shorter than 64KB, allowed only at end of stream. */
+    std::vector<std::vector<uint8_t>> blocks;
+    if (0 != bgzfCompressRange(bgzfPending.data(), bgzfPending.size(), maxThreads, blocks)) {
+        return -1;
+    }
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (0 != writeRaw(blocks[i].data(), blocks[i].size())) {
+            return -1;
+        }
+    }
+    bgzfPending.clear();
+    return 0;
+}
+
+int32_t BamWriter::finish() {
+    if (finished) {
+        return 0;
+    }
+    finished = true;
+    if (passThrough) {
+        return 0;   // Pass-through mode has no BGZF state
+    }
+    if (0 != bgzfFlushRemaining()) {
+        return -1;
+    }
+    /* BGZF EOF marker (empty block), the terminating block of a standard BAM */
+    static const uint8_t kEofBlock[28] = {
+        0x1f, 0x8b, 0x08, 0x04, 0, 0, 0, 0, 0, 0xff,
+        0x06, 0x00, 0x42, 0x43, 0x02, 0x00, 0x1b, 0x00,
+        0x03, 0x00, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+    return writeRaw(kEofBlock, sizeof(kEofBlock));
+}
+
+int32_t BamWriter::writeBamHeader(const uint8_t* data, size_t len, size_t& dataStart) {
+    std::vector<uint8_t> hdr;
+    if (0 != buildBamHeaderPayload(data, len, dataStart, refIndex, hdr)) {
+        return -1;
+    }
+    return bgzfWrite(hdr.data(), hdr.size());
+}
+
+int32_t BamWriter::writeDataLines(const uint8_t* buffer, size_t start, size_t end) {
+    std::vector<uint8_t> joined;
+    if (0 != convertSamDataToBam(buffer, start, end, refIndex, maxThreads, joined)) {
+        return -1;
+    }
+    if (joined.empty()) {
+        return 0;
     }
     return bgzfWrite(joined.data(), joined.size());
 }
@@ -2304,13 +2404,12 @@ int32_t BamWriter::writeBlock(RoughIOBlock* blockPtr) {
     }
 
     /*
-     * Prebuilt block: the decompression worker already produced BAM binary, so only frame it into BGZF here.
+     * Prebuilt block: the conversion stage (or a structured-BAM worker) already produced
+     * BAM bytes, so only frame them into BGZF here. The first prebuilt block carries the
+     * BAM header built by SamToBamConverter.
      */
     if (!passThrough && blockPtr->isBamPrebuilt()) {
-        if (!headerWritten) {
-            LOG_ERROR("BamWriter: prebuilt BAM block arrived before the SAM header block.");
-            return -1;
-        }
+        headerWritten = true;
         return bgzfWrite(buffer, (size_t)dataLen);
     }
 

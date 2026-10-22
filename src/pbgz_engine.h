@@ -128,6 +128,17 @@ protected:
         inputDataPool->push(blockPtr);
     }
 
+    /* Coder thread's hand-off of a finished block; override to insert a post-process stage. */
+    virtual void dispatchOutputBlock(RoughIOBlock* blockPtr) {
+        outputDataPool->push(blockPtr);
+    }
+
+    /* Start an optional post-processing stage between the coder workers and the writer. */
+    virtual int32_t startOutputStage() { return 0; }
+
+    /* Stop and join the optional post-processing stage; must be safe to call twice. */
+    virtual void drainOutputStage() { }
+
     /* Called once after the read loop ends, before the coder end markers are pushed. */
     virtual void renderStageDrain() { }
 

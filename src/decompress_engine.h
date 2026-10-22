@@ -24,7 +24,10 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 #include "codec_engine.h"
 #include "actuator.h"
@@ -81,6 +84,13 @@ protected:
 
     int64_t readBlocks(BlockReader* blockReader) override;
 
+    /* -b: route decoded SAM blocks through a dedicated SAM->BAM conversion stage. */
+    virtual int32_t startOutputStage() override;
+
+    virtual void drainOutputStage() override;
+
+    virtual void dispatchOutputBlock(RoughIOBlock* blockPtr) override;
+
     virtual void printTailInfo(Timer& costTimer) override {
         PbgzManager::getInstance().printTailInfo(costTimer, false);
         if (parameter.verbose) {
@@ -99,6 +109,9 @@ protected:
     virtual Actuator* createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
 private:
+    /* SAM->BAM conversion worker: consumes decoded text blocks, emits BAM byte blocks. */
+    void bamConvertWorker();
+
     bool initRefGene(PbgzBlockReader* blockReader);
 
     bool initRefeIndex();
@@ -116,6 +129,9 @@ private:
 private:
     bool readHeadBlockFlag;
     QualPriorConsumer qualPriorConsumer;
+    /* -b conversion stage: decoded SAM text -> BAM, off the writer thread. */
+    std::unique_ptr<BlockingQueueType> bamConvertPool;
+    std::vector<std::thread> bamConvertThreads;
     /* File-level POS delta prior, parsed once from the dynamic file meta (hex-encoded
        512-byte weight table); read-only after engine init. */
     AuxPayloadPtr posPriorBlob;

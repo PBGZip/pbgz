@@ -445,4 +445,336 @@ private:
     std::vector<std::thread> inflaters_;
 };
 
+
+/*
+ * Parallel BGZF encoder for the BAM write path.
+ *
+ * The writer acts as producer/consumer: it submits raw 64 KiB members, N deflate
+ * workers compress them, and completed members are written back in order through a
+ * sink callback. The writer thread only copies/submits and calls the sink, so the
+ * deflate CPU cost no longer sits on it (the mirror of BgzfParallelDecoder).
+ */
+class BgzfParallelEncoder {
+public:
+    typedef int32_t (*CompressFn)(const uint8_t* src, size_t srcLen, std::vector<uint8_t>& out);
+    typedef int32_t (*WriteFn)(void* ctx, const uint8_t* data, size_t len);
+
+    static constexpr size_t kMaxBlock = 1 << 16;  /* uncompressed payload per BGZF member */
+    static constexpr int kRingSize = 96;          /* members in flight (~12 MiB incl. output) */
+
+    BgzfParallelEncoder() = default;
+    ~BgzfParallelEncoder() { stop(); }
+
+    BgzfParallelEncoder(const BgzfParallelEncoder&) = delete;
+    BgzfParallelEncoder& operator=(const BgzfParallelEncoder&) = delete;
+
+    /* Start the deflate worker pool. threads <= 0 means hardware_concurrency; capped at 8. */
+    bool start(int threads, CompressFn compress, void* ctx, WriteFn sink)
+    {
+        if (started_ || compress == nullptr || sink == nullptr) {
+            return false;
+        }
+        compress_ = compress;
+        ctx_ = ctx;
+        sink_ = sink;
+        if (threads <= 0) {
+            threads = (int)std::thread::hardware_concurrency();
+            if (threads <= 0) {
+                threads = 2;
+            }
+        }
+        if (threads > 8) {
+            threads = 8;
+        }
+
+        ring_.resize(kRingSize);
+        produced_ = 0;
+        consumed_ = 0;
+        failed_ = false;
+        stopped_ = false;
+        pending_.clear();
+        pendingPos_ = 0;
+
+        workers_.clear();
+        workers_.reserve((size_t)threads);
+        /* Mark started before spawning: if a spawn throws, stop() must join the
+           workers that did get created. */
+        started_ = true;
+        try {
+            for (int i = 0; i < threads; ++i) {
+                workers_.emplace_back(&BgzfParallelEncoder::deflateLoop, this, i);
+            }
+        } catch (...) {
+            stop();
+            return false;
+        }
+        return true;
+    }
+
+    /* Append raw BAM bytes; full members are submitted and ready output is written via sink. */
+    int32_t write(const void* data, size_t len)
+    {
+        if (!started_ || stopped_) {
+            return -1;
+        }
+        if (len != 0) {
+            const uint8_t* p = static_cast<const uint8_t*>(data);
+            pending_.insert(pending_.end(), p, p + len);
+        }
+        int32_t rc = submitPending(false);
+        if (rc != 0) {
+            return rc;
+        }
+        drainReady();
+        return failed_ ? -1 : 0;
+    }
+
+    /* Submit the trailing partial member and write every remaining compressed member. */
+    int32_t finish()
+    {
+        if (!started_ || stopped_) {
+            return -1;
+        }
+        int32_t rc = submitPending(true);
+        if (rc != 0) {
+            return rc;
+        }
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if (consumed_ >= produced_) {
+                    break;
+                }
+                if (failed_) {
+                    return -1;
+                }
+            }
+            rc = takeOneAndWrite();
+            if (rc != 0) {
+                return rc;
+            }
+        }
+        pending_.clear();
+        pendingPos_ = 0;
+        return failed_ ? -1 : 0;
+    }
+
+    void stop()
+    {
+        bool expected = false;
+        if (!stopped_.compare_exchange_strong(expected, true)) {
+            return;   /* already stopping / stopped */
+        }
+        if (!started_) {
+            return;
+        }
+        cvWork_.notify_all();
+        cvReady_.notify_all();
+        for (auto& t : workers_) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+        workers_.clear();
+        started_ = false;
+    }
+
+private:
+    struct Member {
+        std::vector<uint8_t> raw;   /* uncompressed payload */
+        std::vector<uint8_t> comp;  /* complete BGZF bytes */
+        bool ready = false;
+        bool failed = false;
+    };
+
+    size_t pendingSize() const { return pending_.size() - pendingPos_; }
+
+    /* Compact the producer-side pending buffer after its consumed prefix grows. */
+    void compactPending()
+    {
+        if (pendingPos_ == pending_.size()) {
+            pending_.clear();
+            pendingPos_ = 0;
+        } else if (pendingPos_ >= (1u << 20)) {
+            pending_.erase(pending_.begin(), pending_.begin() + (std::ptrdiff_t)pendingPos_);
+            pendingPos_ = 0;
+        }
+    }
+
+    /* Submit full members (and the tail when final). Waits for a free slot by draining. */
+    int32_t submitPending(bool final)
+    {
+        while (true) {
+            const size_t avail = pendingSize();
+            if (avail == 0) {
+                break;
+            }
+            size_t take = 0;
+            if (avail >= kMaxBlock) {
+                take = kMaxBlock;
+            } else if (final) {
+                take = avail;
+            } else {
+                break;
+            }
+
+            if (!trySubmit(pending_.data() + pendingPos_, take)) {
+                const int32_t rc = takeOneAndWrite();
+                if (rc != 0) {
+                    return rc;
+                }
+                continue;
+            }
+            pendingPos_ += take;
+        }
+        compactPending();
+        return 0;
+    }
+
+    /* Copy one member into the ring; false when every slot is still in flight. */
+    bool trySubmit(const uint8_t* data, size_t len)
+    {
+        uint64_t seq = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (stopped_ || produced_ >= consumed_ + (uint64_t)kRingSize) {
+                return false;
+            }
+            seq = produced_++;
+            Member& m = ring_[seq % kRingSize];
+            m.raw.assign(data, data + len);
+            m.comp.clear();
+            m.ready = false;
+            m.failed = false;
+            jobQ_.push_back(seq);
+        }
+        cvWork_.notify_one();
+        return true;
+    }
+
+    /* Write every member that is already compressed, without waiting. */
+    void drainReady()
+    {
+        while (true) {
+            std::vector<uint8_t> block;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if (stopped_ || consumed_ >= produced_) {
+                    return;
+                }
+                Member& m = ring_[consumed_ % kRingSize];
+                if (!m.ready) {
+                    return;
+                }
+                if (m.failed) {
+                    failed_ = true;
+                    return;
+                }
+                block.swap(m.comp);
+                m.ready = false;
+                m.raw.clear();
+                ++consumed_;
+            }
+            if (!block.empty() && sink_(ctx_, block.data(), block.size()) != 0) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                failed_ = true;
+                return;
+            }
+        }
+    }
+
+    /* Wait for the next in-order member, then write it via the sink. */
+    int32_t takeOneAndWrite()
+    {
+        std::vector<uint8_t> block;
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cvReady_.wait(lk, [this] {
+                return stopped_ || failed_ || consumed_ >= produced_ ||
+                       ring_[consumed_ % kRingSize].ready;
+            });
+            if (stopped_ || failed_) {
+                return -1;
+            }
+            if (consumed_ >= produced_) {
+                return 0;
+            }
+            Member& m = ring_[consumed_ % kRingSize];
+            if (!m.ready) {
+                return 0;
+            }
+            if (m.failed) {
+                failed_ = true;
+                return -1;
+            }
+            block.swap(m.comp);
+            m.ready = false;
+            m.raw.clear();
+            ++consumed_;
+        }
+        if (!block.empty() && sink_(ctx_, block.data(), block.size()) != 0) {
+            std::lock_guard<std::mutex> lk(mtx_);
+            failed_ = true;
+            return -1;
+        }
+        return 0;
+    }
+
+    void deflateLoop(int idx)
+    {
+        pthread_setname_np(pthread_self(),
+                           std::string("bgzfdeflate_").append(std::to_string(idx)).c_str());
+        for (;;) {
+            uint64_t seq = 0;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cvWork_.wait(lk, [this] { return stopped_ || !jobQ_.empty(); });
+                if (stopped_) {
+                    return;
+                }
+                seq = jobQ_.front();
+                jobQ_.pop_front();
+            }
+
+            Member& m = ring_[seq % kRingSize];
+            std::vector<uint8_t> comp;
+            const int32_t rc = compress_(m.raw.data(), m.raw.size(), comp);
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if (rc != 0) {
+                    m.failed = true;
+                    failed_ = true;
+                } else {
+                    m.comp.swap(comp);
+                }
+                m.ready = true;
+            }
+            cvReady_.notify_all();
+        }
+    }
+
+private:
+    CompressFn compress_ = nullptr;
+    WriteFn sink_ = nullptr;
+    void* ctx_ = nullptr;
+
+    std::vector<Member> ring_;
+    std::deque<uint64_t> jobQ_;
+    std::vector<std::thread> workers_;
+
+    std::mutex mtx_;
+    std::condition_variable cvWork_;   /* deflaters wait for jobs */
+    std::condition_variable cvReady_;  /* producer waits for the next in-order member */
+
+    uint64_t produced_ = 0;   /* members submitted */
+    uint64_t consumed_ = 0;   /* members written */
+    bool started_ = false;
+    std::atomic<bool> stopped_{false};
+    std::atomic<bool> failed_{false};
+
+    /* Producer-side partial member; only touched by the writer thread. */
+    std::vector<uint8_t> pending_;
+    size_t pendingPos_ = 0;
+};
+
 #endif

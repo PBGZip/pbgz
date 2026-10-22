@@ -435,8 +435,29 @@ private:
 };
 
 /*
- * BAM output writer (-b): converts decompressed SAM text blocks into standard BAM (BGZF) and writes them.
- * The first block yields the BAM header; later blocks are converted line by line; a non-SAM first block is passed through.
+ * Convert a decompressed SAM text block into BAM records in place, off the writer thread.
+ * The first block also emits the BAM header; blocks already carrying BAM bytes (structured
+ * BAM) are left untouched. Single-threaded by contract: one converter instance is used by
+ * exactly one stage thread.
+ */
+class SamToBamConverter {
+public:
+    explicit SamToBamConverter(uint32_t maxThreads = 1) : maxThreads(maxThreads) { }
+
+    /* Returns 0 on success. On success the block is marked bamPrebuilt when it now holds BAM bytes. */
+    int32_t convert(RoughIOBlock* blockPtr);
+
+private:
+    bool headerWritten = false;
+    bool passThrough = false;              /* First block was not SAM: leave the stream untouched. */
+    std::map<std::string, int32_t> refIndex;
+    uint32_t maxThreads;                   /* Data-line conversion budget inside a block. */
+};
+
+/*
+ * BAM output writer (-b): frames BAM byte blocks into BGZF and writes them.
+ * With the -b conversion stage blocks arrive prebuilt; text blocks are still handled
+ * here as a fallback (the first block yields the BAM header).
  */
 class BamWriter : public BlockWriter {
 public:
@@ -473,13 +494,10 @@ private:
      */
     int32_t bgzfFlushRemaining();
 
-private:
-    struct BamRef {
-        std::string name;
-        int32_t len;
-    };
+    /* Sink called by the deflate pool (on the writer thread) for each completed BGZF block. */
+    static int32_t bgzfSink(void* ctx, const uint8_t* data, size_t len);
 
-    std::vector<BamRef> refs;              /* BAM reference sequence list (matching @SQ) */
+private:
     std::map<std::string, int32_t> refIndex;  /* Reference name -> refID */
 
     bool headerWritten;
@@ -487,9 +505,14 @@ private:
     bool finished;                         /* finish() has been executed (prevents duplicate EOF markers) */
 
     /*
-     * Uncompressed BAM bytes not yet framed into BGZF blocks; kept across writeBlock calls.
+     * Uncompressed BAM bytes not yet framed into BGZF blocks; kept across writeBlock
+     * calls when the deflate pool could not be started (serial fallback).
      */
     std::vector<uint8_t> bgzfPending;
+
+    /* Independent BGZF deflate worker pool; the writer only submits/copies and writes results. */
+    BgzfParallelEncoder bgzfEncoder;
+    bool bgzfEncoderReady;
 
     uint32_t maxThreads;   /* 0 = hardware_concurrency (see the constructor) */
 };

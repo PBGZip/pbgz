@@ -225,6 +225,12 @@ int32_t PbgzEngine::start() {
         return ret;
     }
 
+    ret = startOutputStage();
+    if (ret != 0) {
+        LOG_ERROR("call startOutputStage failed, ret = %d", ret);
+        return ret;
+    }
+
     ret =startWorkTask();
     if (ret != 0) {
         LOG_ERROR("call startWorkTask failed, ret = %d", ret);
@@ -245,8 +251,18 @@ int32_t PbgzEngine::start() {
         for (uint32_t i = 0; i < parameter.threadNum; ++i) {
             inputDataPool->push(nullptr);
         }
+        /* Let the workers finish and flush the optional output stage before the end marker. */
+        for (auto& th : workThreads) {
+            if (th.joinable()) {
+                th.join();
+            }
+        }
+        drainOutputStage();
         // Output termination symbol
         outputDataPool->push(nullptr);
+        if (writeThread.joinable()) {
+            writeThread.join();
+        }
         return ret;
     }
 
@@ -255,6 +271,9 @@ int32_t PbgzEngine::start() {
             th.join();
         }
     }
+
+    /* Flush the optional post-processing stage before the writer's end marker. */
+    drainOutputStage();
 
     ret = startEnginePostProc();
     if (ret != 0) {
@@ -611,7 +630,7 @@ int32_t PbgzEngine::startWorkTask() {
                 outBlockPtr->reset();
                 outBlockPtr->setBlockId(failedBlockId);
                 // Push a zero-length block with the correct id to keep the writer advancing
-                outputDataPool->push(outBlockPtr);
+                dispatchOutputBlock(outBlockPtr);
                 MemoryUtil::safeDeleteClass(pActuator);
                 continue;
             }
@@ -626,7 +645,7 @@ int32_t PbgzEngine::startWorkTask() {
             MemoryUtil::safeDeleteClass(pActuator);
 
             freeInputPool->push(inBlockPtr);
-            outputDataPool->push(outBlockPtr);
+            dispatchOutputBlock(outBlockPtr);
         }
     };
     for (uint32_t i = 0; i < parameter.threadNum; ++i) {
