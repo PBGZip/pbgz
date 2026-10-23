@@ -96,9 +96,10 @@ CompressEngine::~CompressEngine() {
 BlockReader* CompressEngine::createBlockReader() {
     const bool bamStruct = (parameter.mode == PBGZ_MODE_FAST);
     /* pbgzAsOpaque: read a pbgz file as opaque binary instead of decoding it. bgzfThreads
-       sizes the parallel BAM inflate stage (a quarter of -t, see bamBgzfThreadNum). */
+       sizes the parallel BAM inflate stage (one per six coding threads, see
+       bamInflateThreadNum). */
     BlockReader* blockReader = BlockFactory::createBlockReader(
-        ioReader, parameter.compressLevel, true, bamStruct, true, bamBgzfThreadNum(parameter.threadNum));
+        ioReader, parameter.compressLevel, true, bamStruct, true, bamInflateThreadNum(parameter.threadNum));
     if (blockReader == nullptr) {
         LOG_ERROR("Create block reader failed.");
         return nullptr;
@@ -225,7 +226,7 @@ void CompressEngine::engineReaderReady(BlockReader* blockReader) {
     if (!isBam) {
         return;
     }
-    renderThreadNum = bamBgzfThreadNum(parameter.threadNum);
+    renderThreadNum = bamConvertThreadNum(parameter.threadNum);
     renderStageEnabled = true;
     renderInputPool = std::make_unique<BlockingQueueType>();
     renderInputPool->setCapility(parameter.threadNum + 1);

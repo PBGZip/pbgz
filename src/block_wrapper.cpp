@@ -1688,7 +1688,7 @@ BlockReader* BlockFactory::createBlockReader(IOReader* ioReader, uint8_t compres
                 bamReader->setStructMode(true);
             }
             if (bamReader != nullptr && bgzfThreads > 0) {
-                /* Parallel inflate workers, derived from -t by the caller (see bamBgzfThreadNum). */
+                /* Parallel inflate workers, derived from -t by the caller (see bamInflateThreadNum). */
                 bamReader->setParThreads((int)bgzfThreads);
             }
             reader = bamReader;

@@ -109,10 +109,10 @@ BlockReader* DecompressEngine::createBlockReader() {
 
 BlockWriter* DecompressEngine::createBlockWriter() {
     if (parameter.isDecToBam) {
-        /* -b: write BAM. SAM->BAM conversion and BGZF deflate run in parallel on the
-           same -t-derived budget as the compression side's inflate (see bamBgzfThreadNum). */
+        /* -b: write BAM. BGZF deflate workers are sized at one per three coding
+           threads, rounded up (see bamDeflateThreadNum). */
         BlockWriter* blockWriter = MemoryUtil::safeNewClass<BamWriter>(
-            ioWriter, bamBgzfThreadNum(parameter.threadNum));
+            ioWriter, bamDeflateThreadNum(parameter.threadNum));
         if (blockWriter == nullptr) {
             LOG_ERROR("Failed to create bam writer.");
             return nullptr;
@@ -337,7 +337,7 @@ void DecompressEngine::bamConvertWorker() {
     pthread_setname_np(pthread_self(), "sam2bam");
     /* The per-block line conversion keeps its own small budget; the stage itself is the
        dedicated thread that decouples it from the writer. */
-    SamToBamConverter converter(bamBgzfThreadNum(parameter.threadNum));
+    SamToBamConverter converter(bamConvertThreadNum(parameter.threadNum));
     std::map<int64_t, RoughIOBlock*> pending;
     bool headerDone = false;
 

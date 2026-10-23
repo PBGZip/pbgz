@@ -302,12 +302,30 @@ class BlockWriter;
 class PbgzBlockWriter;
 
 /*
- * Thread budget for the BAM parallel BGZF stage: a quarter of -t, at least one.
+ * BGZF inflate workers on the compression read path: one per six coding threads,
+ * rounded up (at least one).
  */
-inline uint32_t bamBgzfThreadNum(uint32_t threadNum)
+inline uint32_t bamInflateThreadNum(uint32_t threadNum)
 {
-    const uint32_t quarter = threadNum / 4;
-    return (quarter > 0) ? quarter : 1;
+    return (threadNum > 0) ? ((threadNum + 5) / 6) : 1;
+}
+
+/*
+ * BGZF deflate workers on the decompression write path: one per three coding
+ * threads, rounded up (at least one).
+ */
+inline uint32_t bamDeflateThreadNum(uint32_t threadNum)
+{
+    return (threadNum > 0) ? ((threadNum + 2) / 3) : 1;
+}
+
+/*
+ * BAM<->SAM conversion helper budget (BAM-read render stage and the -b sam2bam
+ * stage): one per eight coding threads, rounded up (at least one).
+ */
+inline uint32_t bamConvertThreadNum(uint32_t threadNum)
+{
+    return (threadNum > 0) ? ((threadNum + 7) / 8) : 1;
 }
 
 /*
