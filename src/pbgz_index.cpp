@@ -86,7 +86,7 @@ int32_t SamIndex::getSamBlockByRef(uint16_t chrIndex, int64_t beginRefPos, int64
 }
 
 void SamIndex::dumpToFile(std::string& fileName) {
-    FileWriter fileWriter(fileName);
+    DefaultFileWriter fileWriter(fileName);
     fileWriter.openIO();
 
     char buffer[256];
@@ -104,7 +104,7 @@ void SamIndex::dumpToFile(std::string& fileName) {
 
 void SamIndex::loadFromFile(std::string& fileName) {
     LOG_DEBUG("Load index file : %s", fileName.c_str());
-    FileReader fileReader(fileName);
+    DefaultFileReader fileReader(fileName);
     fileReader.openIO();
 
     samIndexList.clear();

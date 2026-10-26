@@ -2,6 +2,9 @@
 
 set -e # Exit immediately if a command exits with a non-zero status
 
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$ROOT_DIR/prepare-build-env.sh"
+
 buildtype=release
 
 # build type
@@ -34,8 +37,15 @@ export C_INCLUDE_PATH=$buildpath/libdeflate/include:$buildpath/bzip2/include
 
 # start to build
  if [ $buildtype == "release" ] ; then
+    # Supply an explicit build triplet so autoconf does not depend on
+    # config.guess (which can fail on some AMD hosts).
+    build_triplet=$(bash "$ROOT_DIR/detect-build-triplet.sh")
+    build_flag=""
+    if [ -n "$build_triplet" ]; then
+        build_flag="--build=$build_triplet"
+    fi
     autoreconf -i
-    ./configure CFLAGS=-fPIC --prefix=$buildpath/hts --disable-lzma --with-libdeflate --enable-bz2 --disable-libcurl --disable-s3 --disable-ref-cache
+    ./configure $build_flag CFLAGS=-fPIC --prefix=$buildpath/hts --disable-lzma --with-libdeflate --enable-bz2 --disable-libcurl --disable-s3 --disable-ref-cache
     make -j $(nproc) # Using nproc instead of cat /proc/cpuinfo for better portability
     make install 
 else

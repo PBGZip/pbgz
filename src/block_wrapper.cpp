@@ -1850,7 +1850,7 @@ void PbgzBlockWriter::updateHeadExt(){
         return;
     }
 
-    FileWriter* pFileWrite = dynamic_cast<FileWriter*>(ioWriter);
+    SeekableWriter* pFileWrite = dynamic_cast<SeekableWriter*>(ioWriter);
     if (pFileWrite == nullptr) {
         return;
     }

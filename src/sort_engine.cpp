@@ -167,7 +167,7 @@ int32_t SortEngine::startEnginePostProc() {
     SamCombineOutputBlockWriter blockWriter (freeOutputPool.get(), outputDataPool.get());
     blockWriter.initial(writeBlockId);
     if (PathUtil::fileExists(headFileName)) {
-        FileReader headReader(headFileName);
+        DefaultFileReader headReader(headFileName);
         headReader.openIO();
         std::string readLine;
         while (size_t readed = headReader.readLine(readLine)) {
@@ -251,9 +251,9 @@ int32_t SortEngine::combineSamFile(std::vector<std::string> fileList, SamCombine
     }
 
     uint32_t combineFileSize = fileList.size();
-    std::map<uint32_t, std::unique_ptr<FileReader>> sortedFileReader;
+    std::map<uint32_t, std::unique_ptr<DefaultFileReader>> sortedFileReader;
     for (uint32_t fileIdx =0; fileIdx < combineFileSize; ++fileIdx) {
-        sortedFileReader[fileIdx] = std::make_unique<FileReader>(fileList[fileIdx]);
+        sortedFileReader[fileIdx] = std::make_unique<DefaultFileReader>(fileList[fileIdx]);
         sortedFileReader[fileIdx]->openIO();
         LOG_DEBUG("Open file : %s", fileList[fileIdx].c_str());
     }

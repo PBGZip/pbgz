@@ -138,8 +138,8 @@ int32_t PbgzEngine::init() {
         if (PathUtil::isGzFile(parameter.inputFile)) {
             /* BAM is a BGZF stream, but must bypass transparent gz decompression so the block type stays BAM. */
             if (BlockUtil::isBamFile(parameter.inputFile)) {
-                ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
-                LOG_INFO("Create FileReader (BAM).");
+                ioReader = MemoryUtil::safeNewClass<DefaultFileReader>(parameter.inputFile);
+                LOG_INFO("Create DefaultFileReader (BAM).");
             } else {
                 bool isSupportSimd = false;
 #ifdef __SSE4_2__
@@ -154,8 +154,8 @@ int32_t PbgzEngine::init() {
                 }
             }
         } else {
-            ioReader = MemoryUtil::safeNewClass<FileReader>(parameter.inputFile);
-            LOG_INFO("Create FileReader.");
+            ioReader = MemoryUtil::safeNewClass<DefaultFileReader>(parameter.inputFile);
+            LOG_INFO("Create DefaultFileReader.");
 
         }
     }
@@ -178,8 +178,8 @@ int32_t PbgzEngine::init() {
             ioWriter = MemoryUtil::safeNewClass<GzFileWriter>(parameter.outputFile, parameter.threadNum);
             LOG_INFO("Create GzFileWriter.");
         } else {
-            ioWriter = MemoryUtil::safeNewClass<FileWriter>(parameter.outputFile);
-            LOG_INFO("Create FileWriter.");
+            ioWriter = MemoryUtil::safeNewClass<DefaultFileWriter>(parameter.outputFile);
+            LOG_INFO("Create DefaultFileWriter.");
         }
     }
     if (ioWriter == nullptr) {
@@ -499,7 +499,7 @@ void PbgzEngine::writeOneBlock(BlockWriter* blockWriter, RoughIOBlock* outblockP
 
 void PbgzEngine::completeSyncAuxBlock(BlockWriter* blockWriter, RoughIOBlock* block) {
     /* Capture the write position before writeBlock: it is the container-header offset. */
-    FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+    SeekableWriter* fileWriter = dynamic_cast<SeekableWriter*>(ioWriter);
     const int64_t offset = (fileWriter != nullptr) ? (int64_t)fileWriter->getCurrentPos() : -1;
 
     blockWriter->writeBlock(block);

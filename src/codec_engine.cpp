@@ -60,7 +60,7 @@ void CodecEngine::writeBlockPreProc(BlockWriter*, RoughIOBlock* outBlockPtr) {
     if (outBlockPtr->getBlockType() == REFERENCE) {
         /* Must run on the writer thread after blockId sorting and before writeBlock,
            so refe.offset reflects blocks already on disk. */
-        FileWriter* fileWriter =  dynamic_cast<FileWriter*>(ioWriter);
+        SeekableWriter* fileWriter =  dynamic_cast<SeekableWriter*>(ioWriter);
         if (fileWriter != nullptr) {
             updateReferenceOffset(fileWriter->getCurrentPos());
         }

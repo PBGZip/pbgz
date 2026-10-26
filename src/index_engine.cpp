@@ -107,7 +107,7 @@ Actuator* IndexEngine::createActuator(RoughIOBlock* inBlockPtr, RoughIOBlock* ou
 
 
 void IndexEngine::readBlockPreProc(BlockReader* /*blockReader*/) {
-    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* fileReader = dynamic_cast<SeekableReader*>(ioReader);
     pendingBlockOffset = (fileReader != nullptr) ? fileReader->getCurrentPos() : 0;
 }
 
@@ -125,7 +125,7 @@ PbgzEngine::BlockIntake IndexEngine::intakeBlock(BlockReader* /*blockReader*/, R
 }
 
 int32_t IndexEngine::startEnginePostProc() {
-    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* fileReader = dynamic_cast<SeekableReader*>(ioReader);
     if (fileReader == nullptr) {
         return 0;
     }

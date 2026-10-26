@@ -295,7 +295,7 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
     /* Total input length in the units the samples were taken in (uncompressed); 0 means
        unknown (piped input). Only the reader thread knows it. */
     uint64_t inputTotalBytes = 0;
-    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* fileReader = dynamic_cast<SeekableReader*>(ioReader);
     if (fileReader != nullptr && fileReader->getFileSize() > 0) {
         inputTotalBytes = (uint64_t)fileReader->getFileSize();
     } else if (parameter.inputFile != STDIN) {
@@ -492,7 +492,7 @@ void CompressEngine::emitQualPrior() {
     }
 
     /* Piped output is not seekable, so the prior could never be retrieved. */
-    FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+    SeekableWriter* fileWriter = dynamic_cast<SeekableWriter*>(ioWriter);
     if (fileWriter == nullptr) {
         return;
     }
@@ -741,7 +741,7 @@ int32_t CompressEngine::startEnginePostProc() {
             std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
             dynamicFileMeta.setMetaData("refe", refeMeta);
         }
-        FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+        SeekableWriter* fileWriter = dynamic_cast<SeekableWriter*>(ioWriter);
         if (fileWriter != nullptr) {
             int64_t refBlockCount = packReference(maxRefLen, totolEncLen);
             std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
@@ -754,7 +754,7 @@ int32_t CompressEngine::startEnginePostProc() {
 }
 
 void CompressEngine::setDataBlockPosition(uint32_t blockId) {
-    FileWriter* fileWriter = dynamic_cast<FileWriter*>(ioWriter);
+    SeekableWriter* fileWriter = dynamic_cast<SeekableWriter*>(ioWriter);
     if (fileWriter == nullptr) {
         return;
     }

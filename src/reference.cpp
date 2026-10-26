@@ -102,7 +102,7 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
         return false;
     };
 
-    FileReader niReader(niFile);
+    DefaultFileReader niReader(niFile);
     if (0 != niReader.openIO()) {
         return reject("cannot be opened");
     }
@@ -368,7 +368,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
             }
         } else {
             // Plain text reader
-            FileReader fileReader(refGeneFile);
+            DefaultFileReader fileReader(refGeneFile);
             if (fileReader.openIO() == 0) {
                 for (;;) {
                     len = fileReader.readIO(buffer, bufferLen);
@@ -394,7 +394,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
     }
 }
 
-bool Reference::writeNiFileHeader(FileWriter& niWriter, int64_t& offset) {
+bool Reference::writeNiFileHeader(DefaultFileWriter& niWriter, int64_t& offset) {
     niWriter.writeIO(PBGZ_FILE_MAGIC.c_str(), PBGZ_FILE_MAGIC.length());
     niWriter.writeIO(PbgzManager::getInstance().getVersionAsArray().data(), 3);
     niWriter.writeIO((uint8_t *)"ni", 2);
@@ -424,7 +424,7 @@ std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName)
         }
     } else {
         // Plain text reader
-        return std::make_unique<FileReader>(fileName);
+        return std::make_unique<DefaultFileReader>(fileName);
     }
 }
 
@@ -437,7 +437,7 @@ bool Reference::writeNiFile(const std::string& niFile) {
     /* The NI metadata carries the FASTA checksum and length; wait for the background pass. */
     ensureFastaInfo();
 
-    FileWriter niWriter(niFile);
+    DefaultFileWriter niWriter(niFile);
     if (niWriter.openIO() != 0) {
         LOG_ERROR("Failed to open NI file for writing: %s", niFile.c_str());
         return false;
@@ -472,7 +472,7 @@ bool Reference::writeNiFile(const std::string& niFile) {
     return true;
 }
 
-bool Reference::writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5) {
+bool Reference::writeNiFileMetadata(DefaultFileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5) {
     std::string refename = PathUtil::getFileName(refGeneFile);
     Json::Value meta;
     meta["refe_name"] = refename;

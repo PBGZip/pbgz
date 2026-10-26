@@ -147,7 +147,7 @@ bool DecompressEngine::unpackQualPrior(PbgzBlockReader* blockReader, Json::Value
         return false;
     }
 
-    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* fileReader = dynamic_cast<SeekableReader*>(ioReader);
     if (fileReader == nullptr) {
         LOG_DEBUG("Input is not seekable, qual prior stays on the streaming path");
         return false;
@@ -443,7 +443,7 @@ int64_t DecompressEngine::readBlockByPostition(BlockReader* blockReader) {
     std::set<std::pair<uint32_t, int64_t>> blockList;
     SamIndex::getInstance().getSamBlockByRef(chrIndex, refPosBegin, refPosEnd, blockList);
 
-    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* fileReader = dynamic_cast<SeekableReader*>(ioReader);
     if (fileReader != nullptr) {
         BlockType fileType = TYPE_UNKNOW;
         for (auto block : blockList) {
@@ -561,10 +561,10 @@ bool DecompressEngine::unpackReference(PbgzBlockReader* blockReader, Json::Value
         LOG_INFO("Reference offset = %lld", offset);
     }
 
-    FileReader* fileReader = nullptr;
+    SeekableReader* fileReader = nullptr;
     size_t readPos = 0;
     if (offset > 0) {
-        fileReader = dynamic_cast<FileReader*>(ioReader);
+        fileReader = dynamic_cast<SeekableReader*>(ioReader);
         if (fileReader == nullptr) {
             return false;
         }

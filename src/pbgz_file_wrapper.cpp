@@ -91,7 +91,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
 
     /* Record the start position of this package in the input stream. */
     uint64_t fileStartPos = 0;
-    FileReader* posReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* posReader = dynamic_cast<SeekableReader*>(ioReader);
     if (posReader != nullptr) {
         const uint64_t curPos = (uint64_t)posReader->getCurrentPos();
         const uint64_t realPos = (curPos >= preReadSize) ? (curPos - preReadSize) : 0;
@@ -162,7 +162,7 @@ int32_t PbgzFileReader::initFileHeadAndMeta(bool isCheckMagic) {
         return 0;
     }
     uint64_t dynamicOffset = fileHeader.getDynamicMetaOffset();
-    FileReader* fileReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* fileReader = dynamic_cast<SeekableReader*>(ioReader);
     if (fileReader == nullptr) {
         return 0;   // If reading from pipe, conversion will fail, this is normal
     }
@@ -308,7 +308,7 @@ int32_t PbgzFileReader::readDataBlock(PbgzDataBlock& dataBlock, RoughIOBlock* ds
         return -1; // Memory allocation error
     }
 
-    FileReader* seekableReader = dynamic_cast<FileReader*>(ioReader);
+    SeekableReader* seekableReader = dynamic_cast<SeekableReader*>(ioReader);
     if (seekableReader != nullptr) {
         const uint64_t curPos = (uint64_t)seekableReader->getCurrentPos();
         currentBlockStart = (curPos >= preReadSize) ? (curPos - preReadSize) : 0;
@@ -550,7 +550,7 @@ int32_t PbgzFileWriter::writeBlockData(PbgzDataBlock& dataBlock) {
 }
 
 void PbgzFileWriter::updateMetaOffset(uint64_t dynamicMetaOffset) {
-    FileWriter* pFileWrite = dynamic_cast<FileWriter*>(ioWriter);
+    SeekableWriter* pFileWrite = dynamic_cast<SeekableWriter*>(ioWriter);
     if (pFileWrite == nullptr) {
         return;
     }

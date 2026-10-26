@@ -16,6 +16,7 @@ echo "----[build type: $buildtype]----"
 
 # build path
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$ROOT_DIR/prepare-build-env.sh"
 
 buildpath=$ROOT_DIR/../3rd_party/$buildtype
 
@@ -40,10 +41,17 @@ rm -frf $buildpath/tools || true
 export PATH=$buildpath/tools/bin:$PATH
 export LD_LIBRARY_PATH=$buildpath/tools/lib:$LD_LIBRARY_PATH
 
-# Check whether the current system is aarch64
-
-if [ "$(uname -m)" == "aarch64" ]; then
-    other_configure_flags="--build=aarch64-unknown-linux"
+# Provide an explicit build triplet instead of relying on autoconf's
+# config.guess.  On some hosts (notably newer AMD servers) config.guess can
+# return an empty result, making every bundled ./configure fail with
+# "cannot guess build type; you must specify one".  The compiler reports a
+# config.sub-compatible triplet on both x86_64 and aarch64; fall back to the
+# common uname values only when it cannot.
+build_triplet=$(bash "$ROOT_DIR/detect-build-triplet.sh")
+other_configure_flags=""
+if [ -n "$build_triplet" ]; then
+    other_configure_flags="--build=$build_triplet"
+    echo "----[info: using build triplet $build_triplet]----"
 fi
 
 # install m4
@@ -104,7 +112,8 @@ cd $path/
 echo "----[info: installing libtool 2.4.6]----"
 rm -rf libtool-2.4.6 || true
 #wget http://mirrors.ustc.edu.cn/gnu/libtool/libtool-2.4.6.tar.gz
-tar zxvf libtool-2.4.6.tar.gz && cd libtool-2.4.6
+tar zxvf libtool-2.4.6.tar.gz
+cd libtool-2.4.6
 ./configure $other_configure_flags --prefix=$buildpath/tools && make && $supper_execute make install && cd .. && { rm -rf $path/libtool-2.4.6 || true; }
 
 

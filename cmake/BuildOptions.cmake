@@ -106,6 +106,13 @@ set(CMAKE_C_FLAGS_RELEASEPROFILE "${OPTIMIZATION_RELEASE} -g -DNDEBUG")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${PBGZ_COMMON_FLAGS} ${PBGZ_ARCH_FLAGS} ${COMPILER_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${PBGZ_COMMON_FLAGS} ${PBGZ_ARCH_FLAGS} ${COMPILER_FLAGS_C}")
 
+# File I/O backend: streaming (bounded memory) by default; the original mmap
+# implementation remains available on POSIX with -DPBGZ_USE_MMAP_IO=ON.
+option(PBGZ_USE_MMAP_IO "Use mmap-backed file I/O instead of streaming I/O (POSIX only)" OFF)
+if(PBGZ_USE_MMAP_IO)
+    add_definitions(-DPBGZ_USE_MMAP_IO=1)
+endif()
+
 # Address Sanitizer option
 option(ENABLE_SANITIZER "Enable Address Sanitizer" OFF)
 
@@ -138,6 +145,7 @@ message(STATUS "Architecture: ${PBGZ_ARCH}")
 message(STATUS "Compiler: ${PBGZ_COMPILER}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Address Sanitizer: ${ENABLE_SANITIZER}")
+message(STATUS "Use mmap file I/O: ${PBGZ_USE_MMAP_IO}")
 message(STATUS "Third-party include paths added to compilation")
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "C++ flags: ${CMAKE_CXX_FLAGS}")

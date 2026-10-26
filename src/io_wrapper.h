@@ -24,15 +24,21 @@
 
 #pragma once
 
+#include "io_interface.h"
+#include "portable_file_io.h"
+
 #include <string>
-#include <fcntl.h>
-#include <sys/mman.h>
 #include <stdint.h>
 #include <cerrno>
 #include <htslib/bgzf.h>
 #include <isa-l/igzip_lib.h>
 #include <zlib.h>
 #include <cstring>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/mman.h>
+#endif
 
 // Architecture detection - header only, no optimizations yet
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86) || defined(_X86_)
@@ -43,55 +49,7 @@
     #include <arm_neon.h>
 #endif
 
-enum class IOWhence {
-    IO_WHENCE_SET = 0,
-    IO_WHENCE_CUR = 1,
-    IO_WHENCE_END = 2,
-};
-
-class IOReader {
-public:
-    IOReader() {
-        eofFlag = false;
-    }
-    virtual int32_t openIO() = 0;
-
-    virtual void closeIO() = 0;
-
-    virtual size_t readIO(void* pBuffer, size_t readSize) = 0;
-
-    virtual ~IOReader() {};
-
-    virtual size_t readLine(std::string& line) = 0;
-
-    virtual bool isEOF() { return eofFlag; }
-
-protected:
-    bool eofFlag;
-};
-
-class IOWriter {
-public:
-    virtual int32_t openIO() = 0;
-
-    virtual void closeIO() = 0;
-
-    virtual size_t writeIO(const void* pBuffer, size_t writeLen) = 0;
-
-    virtual ~IOWriter() {}
-
-    /*
-     * Sticky write error: writes run on a separate thread and closeIO() returns
-     * void, so the first error is latched here for the writer thread to pick up.
-     */
-    void latchWriteError(int32_t e) { if (writeErr == 0) writeErr = e; }
-
-    int32_t getWriteError() const { return writeErr; }
-
-protected:
-    int32_t writeErr = 0;
-};
-
+#if !defined(_WIN32)
 class FileOperator {
 public:
     friend class FileReader;
@@ -112,7 +70,7 @@ public:
         closeIO();
     }
 
-    int32_t seekIO(size_t seekOffset, IOWhence whence);
+    int32_t seekIO(uint64_t seekOffset, IOWhence whence);
 
 protected:
     int32_t mmapFile(size_t mapFileSize);
@@ -127,7 +85,7 @@ protected:
     int32_t openMode;
 };
 
-class FileReader : public IOReader {
+class FileReader : public IOReader, public SeekableReader {
 
 public:
     int32_t openIO() override;
@@ -145,15 +103,16 @@ public:
 
     void* getAt(size_t pos);
 
-    int32_t seekIO(uint64_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
+    int32_t seekIO(uint64_t seekOffset,
+                   IOWhence whence = IOWhence::IO_WHENCE_SET) override {
         return fo.seekIO(seekOffset, whence);
     }
 
-    size_t getFileSize() {
+    size_t getFileSize() override {
         return fo.fileSize;
     }
 
-    size_t getCurrentPos() {
+    size_t getCurrentPos() override {
         return fo.position;
     }
 
@@ -161,7 +120,7 @@ private:
     FileOperator fo;
 };
 
-class FileWriter : public IOWriter {
+class FileWriter : public IOWriter, public SeekableWriter {
 public:
     int32_t openIO();
 
@@ -176,17 +135,18 @@ public:
         initialMapSize = 0;
     }
 
-    int32_t seekIO(size_t seekOffset, IOWhence whence = IOWhence::IO_WHENCE_SET) {
+    int32_t seekIO(uint64_t seekOffset,
+                   IOWhence whence = IOWhence::IO_WHENCE_SET) override {
         return fo.seekIO(seekOffset, whence);
     }
 
-    int32_t seekToEnd() {
+    int32_t seekToEnd() override {
         return fo.seekIO(fo.fileSize, IOWhence::IO_WHENCE_SET);
     }
 
-    int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen);
+    int32_t writeIOAt(size_t seekOffset, const void* pBuffer, size_t writeLen) override;
 
-    void flushIO() {
+    void flushIO() override {
         if (fo.mappedAddress != nullptr && fo.fileSize > 0) {
             /* Synchronous write-back: data must be durable before the call returns. */
             if (0 != msync(fo.mappedAddress, fo.fileSize, MS_SYNC)) {
@@ -202,8 +162,12 @@ public:
 
     size_t calculateNextMapSize();
 
-    size_t getCurrentPos() {
+    size_t getCurrentPos() override {
         return fo.position;
+    }
+
+    size_t getFileSize() override {
+        return fo.fileSize;
     }
 
 protected:
@@ -211,6 +175,21 @@ protected:
     size_t mapSize;
     size_t initialMapSize;
 };
+
+#endif  /* !_WIN32 */
+
+/*
+ * Default file implementation used by the engines.  Streaming is the default so
+ * resident memory stays bounded; define PBGZ_USE_MMAP_IO=1 to use the original
+ * mmap implementation on POSIX platforms.
+ */
+#if !defined(_WIN32) && defined(PBGZ_USE_MMAP_IO) && (PBGZ_USE_MMAP_IO)
+using DefaultFileReader = FileReader;
+using DefaultFileWriter = FileWriter;
+#else
+using DefaultFileReader = BufferedFileReader;
+using DefaultFileWriter = BufferedFileWriter;
+#endif
 
 class PipeReader : public IOReader {
 public:
@@ -325,7 +304,7 @@ public:
 
 private:
     std::string gzFileName;
-    FileReader fileReader;
+    DefaultFileReader fileReader;
 
     struct inflate_state isalState;
     struct isal_gzip_header isalHeader;

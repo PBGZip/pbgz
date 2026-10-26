@@ -165,12 +165,12 @@ private:
     void ensureFastaInfo();
 
     /// @brief Write the NI file header.
-    bool writeNiFileHeader(FileWriter& niWriter, int64_t& offset);
+    bool writeNiFileHeader(DefaultFileWriter& niWriter, int64_t& offset);
 
     /// @brief Process the FASTA and write compressed data to the NI file.
     bool writeNiFile(const std::string& niFile);
     /// @brief Generate and write metadata to the NI file.
-    bool writeNiFileMetadata(FileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5);
+    bool writeNiFileMetadata(DefaultFileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5);
 
 private:
     // Progress bar

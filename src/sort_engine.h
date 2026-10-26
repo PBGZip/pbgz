@@ -52,7 +52,7 @@ public:
     virtual void close() override { fileWriter.closeIO(); }
 
 private:
-    FileWriter fileWriter;
+    DefaultFileWriter fileWriter;
 };
 
 class SamCombineOutputBlockWriter : public SamCombineOutputWriter {

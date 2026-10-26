@@ -111,7 +111,7 @@ int32_t SAMSortActuator::process() {
         if (inBlockPtr->getBlockId() == 0) {
             std::remove(headName.c_str());
         }
-        FileWriter headFileWrite(headName);
+        DefaultFileWriter headFileWrite(headName);
         headFileWrite.openIO();
         headFileWrite.seekToEnd();
         for (uint32_t lineId = 0; lineId < headLineNum; ++lineId) {
@@ -125,7 +125,7 @@ int32_t SAMSortActuator::process() {
     /// Write the sorted data to a temporary file
     std::string sortSamName = getSortedSamFileName(0, inBlockPtr->getBlockId());
     std::remove(sortSamName.c_str());
-    FileWriter fileWrite(sortSamName);
+    DefaultFileWriter fileWrite(sortSamName);
     fileWrite.openIO();
     fileWrite.seekToEnd();
     for (auto item = mappedSamItem.begin(); item < mappedSamItem.end(); ++item) {
