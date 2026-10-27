@@ -31,6 +31,7 @@
 #include <vector>
 #include <json/json.h>
 #include "utils/guard_bar.h"
+#include "utils/checksum.h"
 #include "io_wrapper.h"
 
 typedef std::vector<std::pair<std::pair<uint32_t*, uint32_t>, uint32_t>> HashTable;
@@ -44,7 +45,8 @@ private:
     } BaseGroupHash;
 
 public:
-    Reference(const std::string& fasqaName, uint32_t threadNum);
+    Reference(const std::string& fasqaName, uint32_t threadNum,
+              ChecksumType checksumType = ChecksumType::FarmHash64);
 
     virtual ~Reference();
 
@@ -75,8 +77,14 @@ public:
     /// @brief Get the FASTA file length. Waits for the background checksum pass if needed.
     int64_t getFastaLength();
 
-    /// @brief Get the FASTA file MD5 checksum. Waits for the background checksum pass if needed.
+    /// @brief Get the FASTA checksum. Waits for the background checksum pass if needed.
     const std::string& getFastaChecksum();
+
+    /// @brief Algorithm used by getFastaChecksum().
+    ChecksumType getFastaChecksumType() const { return fastaChecksumType; }
+
+    /// @brief True when the reference was loaded from an NI index (no FASTA file pass ran).
+    bool loadedFromNiFile() const { return loadedFromNi; }
 
     /* One FASTA record's name, base offset and length in the concatenated reference. */
     struct SequenceSpan {
@@ -158,8 +166,11 @@ private:
     void makeIndexSortHashTable();
 
 private:
-    /// @brief Compute the FASTA MD5 checksum and length.
-    static void calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen);
+    /// @brief Compute the FASTA checksum and length with the selected algorithm.
+    static void calculateReferenceChecksum(const std::string& refGeneFile,
+                                           ChecksumType type,
+                                           std::string& refGeneHash,
+                                           int64_t& refGeneLen);
 
     /// @brief Join the background checksum thread (if any) and publish its result.
     void ensureFastaInfo();
@@ -170,7 +181,9 @@ private:
     /// @brief Process the FASTA and write compressed data to the NI file.
     bool writeNiFile(const std::string& niFile);
     /// @brief Generate and write metadata to the NI file.
-    bool writeNiFileMetadata(DefaultFileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5);
+    bool writeNiFileMetadata(DefaultFileWriter& niWriter, ChecksumType niChecksumType,
+                             const std::string& niDataHash, ChecksumType refeChecksumType,
+                             const std::string& refeHash, int64_t refGeneLen);
 
 private:
     // Progress bar
@@ -178,20 +191,22 @@ private:
     int64_t gbCurrent;
     int64_t gbTotal;
 
-    // FASTA MD5 checksum
+    // FASTA checksum and the algorithm that produced it
     std::string fastaChecksum;
+    ChecksumType fastaChecksumType;
+    bool loadedFromNi = false;
     // FASTA file content length
     int64_t fastaLength;
     /* Background FASTA checksum pass, started with the squash build and joined lazily. It sits
        behind a shared handle so Reference stays copy-constructible (the tests return it by value
        and rely on copy elision; a live std::thread would make the copy constructor unavailable). */
-    struct Md5Job {
+    struct ChecksumJob {
         std::thread thread;
         std::string value;
         int64_t len = 0;
         bool joined = false;
     };
-    std::shared_ptr<Md5Job> md5Job;
+    std::shared_ptr<ChecksumJob> checksumJob;
     // Per-record names and base offsets; empty when built from an NI index.
     std::vector<SequenceSpan> refSequences;
     // Base-group key length; must be odd.

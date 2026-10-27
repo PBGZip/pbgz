@@ -41,7 +41,7 @@
 #include "log/logger.h"
 #include "preprocess_info.h"
 #include "profile_stats.h"
-#include "utils/md5_util.h"
+#include "utils/checksum.h"
 
 namespace {
 
@@ -663,18 +663,19 @@ int32_t BamCodecActuator::compress()
         return -1;
     }
 
-    std::string md5;
+    std::string blockHash;
     if (inBlockPtr->hasMd5()) {
-        md5 = inBlockPtr->getMd5();
+        blockHash = inBlockPtr->getMd5();
     } else {
-        calcMd5sum(md5, inBlockPtr->getBuffer(), (uint32_t)inBlockPtr->getDataLen());
+        blockHash = checksumHex(ChecksumType::FarmHash64,
+                                inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
     }
 
     Json::Value bamMeta;
     bamMeta["records"] = cols->nRecords;
     bamMeta["streams"] = streamMeta;
     meta["bam"] = bamMeta;
-    meta["md5"] = md5;
+    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
 
     coder_json metaCoder;
     const int32_t metaLen = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());

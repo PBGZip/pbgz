@@ -31,6 +31,7 @@
 #include "pbgz_types.h"
 #include "codec_actuator_adapter.h"
 #include "sam_info.h"
+#include "utils/checksum.h"
 
 #include <bzlib.h>
 
@@ -203,6 +204,20 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     std::string fastaName = metaRefe["fasta_name"].asString();
     int64_t fastaLength = metaRefe["fasta_len"].asInt64();
 
+    /* Reference checksum algorithm: new files mark it explicitly; old files
+       without a marker (or with "md5") keep the legacy MD5 behavior. */
+    const std::string refeHashName = metaRefe.isMember("hashmethod")
+                                         ? metaRefe["hashmethod"].asString()
+                                         : (baseFileMeta.getMetaData().isMember("hashmethod")
+                                                ? baseFileMeta.getMetaData("hashmethod").asString()
+                                                : std::string());
+    const ChecksumType refeChecksumType = checksumTypeFromName(refeHashName);
+    const char* refeHashKey = (refeChecksumType == ChecksumType::FarmHash64)
+                                  ? "fasta_hash" : "fasta_md5";
+    const std::string expectedRefeHash = metaRefe.isMember(refeHashKey)
+                                             ? metaRefe[refeHashKey].asString()
+                                             : std::string();
+
     LOG_DEBUG("Reference blocks = %d", metaRefe["blocks"].asInt64());
 
     if (metaRefe["blocks"].asInt64() > 0) {
@@ -234,7 +249,8 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
         return false;
     }
 
-    pRefGene = MemoryUtil::safeNewClass<Reference>(parameter.referenceGenic, parameter.threadNum);
+    pRefGene = MemoryUtil::safeNewClass<Reference>(parameter.referenceGenic, parameter.threadNum,
+                                                   refeChecksumType);
     if (pRefGene == nullptr) {
         return false;
     }
@@ -266,6 +282,21 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
         return false;
     }
 
+    /* Verify the supplied FASTA when the file carries a checksum.  NI-backed
+       references were already verified by the NI payload checksum. */
+    if (!expectedRefeHash.empty() && !pRefGene->loadedFromNiFile()) {
+        const std::string actualRefeHash = pRefGene->getFastaChecksum();
+        if (actualRefeHash.empty() || actualRefeHash != expectedRefeHash) {
+            printFastqFileNotMatchInfo(metaRefe);
+            LOG_ERROR("initialize reference failed: %s checksum mismatch (expected %s, got %s)",
+                      checksumTypeName(refeChecksumType), expectedRefeHash.c_str(),
+                      actualRefeHash.c_str());
+            MemoryUtil::safeDeleteClass(pRefGene);
+            pRefGene = nullptr;
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -273,7 +304,11 @@ void DecompressEngine::printFastqFileNotMatchInfo(const Json::Value& metaRefe) {
     fprintf(stderr, "need to specify the following FASTA file:\n\n");
     fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
     fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
-    fprintf(stderr, "\t%-12s : %s\n", "File MD5", metaRefe["fasta_md5"].asString().c_str());
+    const ChecksumType infoType = checksumTypeFromName(
+        metaRefe.isMember("hashmethod") ? metaRefe["hashmethod"].asString() : std::string());
+    const char* infoKey = (infoType == ChecksumType::FarmHash64) ? "fasta_hash" : "fasta_md5";
+    fprintf(stderr, "\t%-12s : %s\n", "File Hash",
+            metaRefe.isMember(infoKey) ? metaRefe[infoKey].asString().c_str() : "");
 }
 
 bool DecompressEngine::initRefeIndex() {

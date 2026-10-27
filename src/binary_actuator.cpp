@@ -25,7 +25,7 @@
 #include "coder_io.h"
 #include "coder_fc.h"
 #include "coder_bwt_cm.h"
-#include "utils/md5_util.h"
+#include "utils/checksum.h"
 #include "coder_json.h"
 #include "log/logger.h"
 
@@ -57,9 +57,9 @@ int32_t BinaryCodecActuator::compress() {
     subMeta["coder"] = io.meta;
     meta["streams"] = subMeta;
 
-    std::string md5;
-    calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
-    meta["md5"] = md5;
+    const std::string blockHash = checksumHex(
+        ChecksumType::FarmHash64, inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
+    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
 
     // Compress meta information
     coder_json metaCoder;
@@ -111,11 +111,14 @@ int32_t BinaryCodecActuator::decompress() {
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
     outBlockPtr->setBlockType(inBlockPtr->getBlockType());
     
-    // Check checksum of source content
-    std::string md5;
-    calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
-    if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("check md5 failed, blockid = %d", outBlockPtr->getBlockId());
+    // Check checksum of source content (MD5 for old files, FarmHash64 for new ones)
+    ChecksumType checksumType = ChecksumType::MD5;
+    const std::string expected = getChecksumMeta(meta, checksumType);
+    const std::string actual = checksumHex(
+        checksumType, outBlockPtr->getBuffer(), (size_t)outBlockPtr->getDataLen());
+    if (expected.empty() || actual != expected) {
+        LOG_ERROR("checksum check failed, blockid = %d, method = %s",
+                  outBlockPtr->getBlockId(), checksumTypeName(checksumType));
         return -1;
     }
 

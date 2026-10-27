@@ -24,7 +24,7 @@
 
 #include "compress_engine.h"
 #include "profile_stats.h"
-#include "utils/md5_util.h"
+#include "utils/checksum.h"
 #include "utils/path_util.h"
 #include "coder_ppmd.h"
 #include "coder_json.h"
@@ -206,9 +206,8 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
         return;
     }
     PBGZ_PROF_SCOPE(pbgzprof::READ_MD5);
-    std::string md5;
-    calcMd5sum(md5, blockPtr->getBuffer(), (uint32_t)blockPtr->getDataLen());
-    blockPtr->setMd5(md5);
+    blockPtr->setMd5(checksumHex(ChecksumType::FarmHash64, blockPtr->getBuffer(),
+                                 (size_t)blockPtr->getDataLen()));
 }
 
 /* Archive-mode BAM render stage: BAM->SAM conversion and per-block MD5 run on a
@@ -734,7 +733,13 @@ int32_t CompressEngine::startEnginePostProc() {
         refeMeta["squash_len"] = (Json::Value::Int64)(pRefGene->getSquashLength());
         refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
         refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
-        refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
+        const ChecksumType refeHashType = pRefGene->getFastaChecksumType();
+        refeMeta["hashmethod"] = checksumTypeName(refeHashType);
+        if (refeHashType == ChecksumType::FarmHash64) {
+            refeMeta["fasta_hash"] = pRefGene->getFastaChecksum();
+        } else {
+            refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
+        }
         refeMeta["ni_name"] = "";
         refeMeta["offset"]= 0;
         {
@@ -792,7 +797,13 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
        filled in there after compression, so the load need not block on it; otherwise (stdout, or
        --refunpack) the header must carry it and this waits for the pass. */
     const bool deferFastaMd5 = !parameter.isUnpackRef && parameter.outputFile != STDOUT;
-    refeMeta["fasta_md5"] = deferFastaMd5 ? "" : pRefGene->getFastaChecksum();
+    const ChecksumType refeHashType = pRefGene->getFastaChecksumType();
+    refeMeta["hashmethod"] = checksumTypeName(refeHashType);
+    if (refeHashType == ChecksumType::FarmHash64) {
+        refeMeta["fasta_hash"] = deferFastaMd5 ? "" : pRefGene->getFastaChecksum();
+    } else {
+        refeMeta["fasta_md5"] = deferFastaMd5 ? "" : pRefGene->getFastaChecksum();
+    }
     refeMeta["ni_name"] = "";
     refeMeta["max_block_len"] = 16 << 20;
     if (isPackRefeInHeader()) {

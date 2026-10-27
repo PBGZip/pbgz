@@ -335,7 +335,7 @@ TEST_F(ReferenceTest, MakeIndexFetchBaseGroupTest) {
     }
 }
 
-// Test gzip file support in calculateReferenceMd5
+// Test gzip file support in calculateReferenceChecksum
 TEST_F(ReferenceTest, CalculateReferenceMd5GzipSupport) {
     // Create a simple FASTA file
     std::string textFastaFile = "test_text.fasta";
@@ -360,7 +360,7 @@ TEST_F(ReferenceTest, CalculateReferenceMd5GzipSupport) {
     int64_t textLength, gzipLength, gzipNoExtLength;
 
     Reference textRef(textFastaFile, 1);
-    textRef.calculateReferenceMd5(textFastaFile, textMd5, textLength);
+    textRef.calculateReferenceChecksum(textFastaFile, ChecksumType::MD5, textMd5, textLength);
 
     // Verify text file MD5 is calculated correctly
     EXPECT_FALSE(textMd5.empty());
@@ -368,7 +368,7 @@ TEST_F(ReferenceTest, CalculateReferenceMd5GzipSupport) {
 
     // Test 2: Gzip file with .gz extension
     Reference gzipRef(gzipFastaFile, 1);
-    gzipRef.calculateReferenceMd5(gzipFastaFile, gzipMd5, gzipLength);
+    gzipRef.calculateReferenceChecksum(gzipFastaFile, ChecksumType::MD5, gzipMd5, gzipLength);
 
     // Verify gzip file MD5 is calculated correctly
     EXPECT_FALSE(gzipMd5.empty());
@@ -376,7 +376,7 @@ TEST_F(ReferenceTest, CalculateReferenceMd5GzipSupport) {
 
     // Test 3: Gzip file without .gz extension (content-based detection)
     Reference gzipNoExtRef(gzipNoExtFile, 1);
-    gzipNoExtRef.calculateReferenceMd5(gzipNoExtFile, gzipNoExtMd5, gzipNoExtLength);
+    gzipNoExtRef.calculateReferenceChecksum(gzipNoExtFile, ChecksumType::MD5, gzipNoExtMd5, gzipNoExtLength);
 
     // Verify gzip file without extension is detected correctly
     EXPECT_FALSE(gzipNoExtMd5.empty());

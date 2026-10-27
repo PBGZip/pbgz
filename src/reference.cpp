@@ -42,7 +42,8 @@
 #include "hardware.h"
 #endif
 
-Reference::Reference(const std::string& fastaName, uint32_t threadNum) {
+Reference::Reference(const std::string& fastaName, uint32_t threadNum, ChecksumType checksumType)
+    : fastaChecksumType(checksumType) {
     // Initialize pointers to nullptr
     refGeneSquash = nullptr;
     refGeneSquashlen = 0;
@@ -152,25 +153,35 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
         return reject("was built from '" + haveName + "', not from '" + wantName + "'");
     }
 
-    const std::string expectMd5 = niMeta["ni_data_md5"].asString();
-    if (expectMd5.empty()) {
+    /* Old indexes have no marker: use MD5 for them. */
+    ChecksumType niChecksumType = checksumTypeFromName(
+        niMeta.isMember("hashmethod") ? niMeta["hashmethod"].asString() : std::string());
+    const char* niHashKey = (niChecksumType == ChecksumType::FarmHash64)
+                                ? "ni_data_hash" : "ni_data_md5";
+    const std::string expectHash =
+        niMeta.isMember(niHashKey) ? niMeta[niHashKey].asString() : std::string();
+    if (expectHash.empty()) {
         return reject("carries no payload checksum");
     }
-
-    md5_ctx dataMd5;
-    uint8_t digest[16];
-    md5_init(&dataMd5);
-    md5_update(&dataMd5, image + headerLen, dataLen);
-    md5_final(digest, &dataMd5);
-    if (expectMd5 != std::string(md5_to_string(digest).c_str())) {
+    const std::string actualHash =
+        checksumHex(niChecksumType, image + headerLen, (size_t)dataLen);
+    if (expectHash != actualHash) {
         return reject("failed its own checksum, it was modified or written concurrently");
     }
 
     memmove(image, image + headerLen, dataLen);
     refGeneSquash = image;
     refGeneSquashlen = dataLen;
-    fastaChecksum = niMeta["refe_orgfile_md5"].asString();
+    const ChecksumType refeChecksumType = checksumTypeFromName(
+        niMeta.isMember("refe_hashmethod") ? niMeta["refe_hashmethod"].asString()
+                                           : std::string());
+    fastaChecksumType = refeChecksumType;
+    const char* fastaHashKey = (refeChecksumType == ChecksumType::FarmHash64)
+                                   ? "refe_orgfile_hash" : "refe_orgfile_md5";
+    fastaChecksum = niMeta.isMember(fastaHashKey) ? niMeta[fastaHashKey].asString()
+                                                  : std::string();
     fastaLength = niMeta["refe_len"].asInt64();
+    loadedFromNi = true;
 
     fprintf(stderr, "Using index %s for reference %s (verified in memory).\n",
             niFile.c_str(), refGeneFile.c_str());
@@ -183,11 +194,12 @@ bool Reference::initSquashFromFasta() {
        squash. The result is published lazily by ensureFastaInfo(), so a caller that does not need
        the checksum (e.g. the compression metadata, which carries it in the end-of-file meta) lets
        it overlap the whole compression instead of blocking the load. */
-    md5Job = std::make_shared<Md5Job>();
-    const std::string md5Input = refGeneFile;
-    std::shared_ptr<Md5Job> job = md5Job;
-    job->thread = std::thread([job, md5Input]() {
-        calculateReferenceMd5(md5Input, job->value, job->len);
+    checksumJob = std::make_shared<ChecksumJob>();
+    const std::string checksumInput = refGeneFile;
+    const ChecksumType checksumType = fastaChecksumType;
+    std::shared_ptr<ChecksumJob> job = checksumJob;
+    job->thread = std::thread([job, checksumInput, checksumType]() {
+        calculateReferenceChecksum(checksumInput, checksumType, job->value, job->len);
     });
 
     std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
@@ -281,16 +293,16 @@ bool Reference::initSquashFromFasta() {
 
 /* Join the background checksum pass (once) and publish its result into the members. */
 void Reference::ensureFastaInfo() {
-    if (!md5Job || md5Job->joined) {
+    if (!checksumJob || checksumJob->joined) {
         return;
     }
-    if (md5Job->thread.joinable()) {
-        md5Job->thread.join();
+    if (checksumJob->thread.joinable()) {
+        checksumJob->thread.join();
     }
-    fastaChecksum = md5Job->value;
-    fastaLength = md5Job->len;
-    md5Job->joined = true;
-    md5Job.reset();
+    fastaChecksum = checksumJob->value;
+    fastaLength = checksumJob->len;
+    checksumJob->joined = true;
+    checksumJob.reset();
 }
 
 uint8_t* Reference::initSquashByStream(int64_t squashLength) {
@@ -299,15 +311,14 @@ uint8_t* Reference::initSquashByStream(int64_t squashLength) {
     return refGeneSquash;
 }
 
-void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::string& refGeneMd5, int64_t& refGeneLen) {
+void Reference::calculateReferenceChecksum(const std::string& refGeneFile, ChecksumType type,
+                                           std::string& refGeneHash, int64_t& refGeneLen) {
     {
-        /* A 4 MB buffer keeps the per-read syscall overhead negligible against the MD5 cost. */
+        /* A 4 MB buffer keeps the per-read syscall overhead negligible against the checksum cost. */
         uint32_t bufferLen = 4u << 20, len;
         refGeneLen = 0;
-        md5_ctx md5;
-        uint8_t digest[16];
+        ChecksumStream stream(type);
         uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
-        md5_init(&md5);
 
         // Detect gzip input
         bool isGzFile = PathUtil::isGzFile(refGeneFile);
@@ -326,13 +337,13 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                         len = fastGzReader.readIO(buffer, bufferLen);
                         if (len == 0 && bufferLen > 0) { // Check error return value - 0 means read failed or file ended
                             LOG_ERROR("Failed to read gzip file with FastGzFileReader: %s", refGeneFile.c_str());
-                            refGeneMd5 = "";
+                            refGeneHash = "";
                             refGeneLen = 0;
                             MemoryUtil::safeFree(buffer);
                             return;
                         }
                         refGeneLen += len;
-                        md5_update(&md5, buffer, len);
+                        stream.update(buffer, len);
                         if (len != bufferLen) {
                             break;
                         }
@@ -340,7 +351,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                     fastGzReader.closeIO();
                 } else {
                     LOG_ERROR("Failed to open gzip file with FastGzFileReader: %s", refGeneFile.c_str());
-                    refGeneMd5 = "";
+                    refGeneHash = "";
                     refGeneLen = 0;
                     MemoryUtil::safeFree(buffer);
                     return;
@@ -352,7 +363,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                     for (;;) {
                         len = gzReader.readIO(buffer, bufferLen);
                         refGeneLen += len;
-                        md5_update(&md5, buffer, len);
+                        stream.update(buffer, len);
                         if (len != bufferLen) {
                             break;
                         }
@@ -360,7 +371,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                     gzReader.closeIO();
                 } else {
                     LOG_ERROR("Failed to open gzip file: %s", refGeneFile.c_str());
-                    refGeneMd5 = "";
+                    refGeneHash = "";
                     refGeneLen = 0;
                     MemoryUtil::safeFree(buffer);
                     return;
@@ -373,7 +384,7 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                 for (;;) {
                     len = fileReader.readIO(buffer, bufferLen);
                     refGeneLen += len;
-                    md5_update(&md5, buffer, len);
+                    stream.update(buffer, len);
                     if (len != bufferLen) {
                         break;
                     }
@@ -381,15 +392,14 @@ void Reference::calculateReferenceMd5(const std::string& refGeneFile, std::strin
                 fileReader.closeIO();
             } else {
                 LOG_ERROR("Failed to open file: %s", refGeneFile.c_str());
-                refGeneMd5 = "";
+                refGeneHash = "";
                 refGeneLen = 0;
                 MemoryUtil::safeFree(buffer);
                 return;
             }
         }
 
-        md5_final(digest, &md5);
-        refGeneMd5 = md5_to_string(digest);
+        refGeneHash = stream.finish();
         MemoryUtil::safeFree(buffer);
     }
 }
@@ -452,14 +462,11 @@ bool Reference::writeNiFile(const std::string& niFile) {
     niWriter.writeIO(refGeneSquash, refGeneSquashlen);
     niWriter.writeIOAt(offset, (uint8_t *)(&refGeneSquashlen), sizeof(refGeneSquashlen));
 
-    md5_ctx md5;
-    uint8_t digest[16];
-    md5_init(&md5);
-    md5_update(&md5, refGeneSquash, refGeneSquashlen);
-    md5_final(digest, &md5);
-    std::string md5String = md5_to_string(digest);
+    const std::string niDataHash = checksumHex(
+        ChecksumType::FarmHash64, refGeneSquash, (size_t)refGeneSquashlen);
 
-    if (!writeNiFileMetadata(niWriter, fastaChecksum, fastaLength, md5String)) {
+    if (!writeNiFileMetadata(niWriter, ChecksumType::FarmHash64, niDataHash,
+                             fastaChecksumType, fastaChecksum, fastaLength)) {
         niWriter.closeIO();
         return false;
     }
@@ -472,15 +479,30 @@ bool Reference::writeNiFile(const std::string& niFile) {
     return true;
 }
 
-bool Reference::writeNiFileMetadata(DefaultFileWriter& niWriter, const std::string& refGeneMd5, int64_t refGeneLen, std::string& md5) {
+bool Reference::writeNiFileMetadata(DefaultFileWriter& niWriter, ChecksumType niChecksumType,
+                                    const std::string& niDataHash, ChecksumType refeChecksumType,
+                                    const std::string& refeHash, int64_t refGeneLen) {
     std::string refename = PathUtil::getFileName(refGeneFile);
     Json::Value meta;
     meta["refe_name"] = refename;
     meta["refe_len"] = Json::Value::UInt64(refGeneLen);
-    meta["refe_orgfile_md5"] = refGeneMd5; /* MD5 of the reference file as read. */
-    meta["ni_data_md5"] = md5;  /* MD5 of the NI file payload. */
+    /* NI payload checksum and the reference-file checksum can use different
+       algorithms when an old index is rebuilt. */
+    meta["hashmethod"] = checksumTypeName(niChecksumType);
+    if (niChecksumType == ChecksumType::FarmHash64) {
+        meta["ni_data_hash"] = niDataHash;
+    } else {
+        meta["ni_data_md5"] = niDataHash;
+    }
+    meta["refe_hashmethod"] = checksumTypeName(refeChecksumType);
+    if (refeChecksumType == ChecksumType::FarmHash64) {
+        meta["refe_orgfile_hash"] = refeHash;
+    } else {
+        meta["refe_orgfile_md5"] = refeHash;
+    }
     fastaLength = refGeneLen;
-    fastaChecksum = refGeneMd5;
+    fastaChecksum = refeHash;
+    fastaChecksumType = refeChecksumType;
 
     coder_json cmeta;
     std::string metaStr;

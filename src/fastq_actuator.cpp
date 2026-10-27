@@ -36,7 +36,7 @@
 #include "coder_fc.h"
 #include "sam_field_layout.h"   /* kSeqExc*Name: the names the reader and both writers must agree on */
 #include "seq_stream_util.h"
-#include "utils/md5_util.h"
+#include "utils/checksum.h"
 #include "coder_json.h"
 #include "actg.h"
 #include "city.h"
@@ -194,10 +194,10 @@ int32_t FastqCodecActuator::compress() {
         return -1;
     }
 
-    // Calculate MD5 of data block
-    std::string md5;
-    calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
-    meta["md5"] = md5;
+    // Calculate block checksum (FarmHash64; old files are still accepted on read)
+    const std::string blockHash = checksumHex(
+        ChecksumType::FarmHash64, inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
+    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
     meta["idlines"] = static_cast<uint32_t>(inBlockPtr->getNpos().size() >> 2);
 
     // Compress meta information
@@ -2259,12 +2259,15 @@ int32_t FastqCodecActuator::decompress() {
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + 1);
     }
 
-    // Check file MD5
-    std::string md5;
-    calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
-    if (md5 != meta["md5"].asString()) {
-        LOG_ERROR("Md5 check failed for block(%d), expect %s, got %s.", inBlockPtr->getBlockId(),
-                meta["md5"].asCString(), md5.c_str());
+    // Verify with the algorithm recorded in the block meta (absent/md5 => legacy MD5)
+    ChecksumType checksumType = ChecksumType::MD5;
+    const std::string expected = getChecksumMeta(meta, checksumType);
+    const std::string actual = checksumHex(
+        checksumType, outBlockPtr->getBuffer(), (size_t)outBlockPtr->getDataLen());
+    if (expected.empty() || actual != expected) {
+        LOG_ERROR("checksum check failed for block(%d), method = %s, expect %s, got %s.",
+                  inBlockPtr->getBlockId(), checksumTypeName(checksumType),
+                  expected.c_str(), actual.c_str());
         return -1;
     }
 

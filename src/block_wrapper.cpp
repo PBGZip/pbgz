@@ -34,7 +34,7 @@
 #include <zlib.h>
 
 #include "bam_record.h"
-#include "utils/md5_util.h"
+#include "utils/checksum.h"
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -1062,10 +1062,9 @@ int32_t bamRenderRawBlockToText(RoughIOBlock* blockPtr) {
     blockPtr->setDataLen((int64_t)text.size());
     blockPtr->getNpos().swap(newNpos);
 
-    /* MD5 of the rendered text: the reader skipped hashing raw blocks, so it is computed here. */
-    std::string md5;
-    calcMd5sum(md5, blockPtr->getBuffer(), (uint32_t)blockPtr->getDataLen());
-    blockPtr->setMd5(md5);
+    /* Checksum of the rendered text: the reader skipped hashing raw blocks, so it is computed here. */
+    blockPtr->setMd5(checksumHex(ChecksumType::FarmHash64, blockPtr->getBuffer(),
+                                 (size_t)blockPtr->getDataLen()));
     blockPtr->setRawBam(false);
 
     /* Count the rendered (text) size for the file-level ratio. */
@@ -1832,7 +1831,8 @@ int32_t PbgzBlockWriter::writeBaseFileMeta() {
         return -1;
     }
     pbgzFileWriter->getBaseFileMeta().setMetaData("writer", "pbgz_writer_v" + PbgzManager::getInstance().getVersion());
-    pbgzFileWriter->getBaseFileMeta().setMetaData("hashmethod", "md5");
+    pbgzFileWriter->getBaseFileMeta().setMetaData("hashmethod",
+        checksumTypeName(ChecksumType::FarmHash64));
     pbgzFileWriter->writeBaseFileMeta();
     return 0;
 }

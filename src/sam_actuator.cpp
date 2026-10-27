@@ -33,7 +33,7 @@
 #include "coder/coder_fc.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_arith.h"
-#include "utils/md5_util.h"
+#include "utils/checksum.h"
 #include "city.h"
 #include "coder/coder_json.h"
 
@@ -547,15 +547,16 @@ int32_t SamCodecActuator::compress() {
     if (inBlockPtr->getNpos().size() <= (size_t)headEndLine) {
         LOG_DEBUG("SAM head only");
         // For header-only case, we still need to write the metadata
-        // Calculate MD5 of original data (header only)
-        std::string md5;
+        // Calculate checksum of original data (header only)
+        std::string blockHash;
         if (inBlockPtr->hasMd5()) {
             /* Already hashed by the reader thread (CompressEngine::preDispatchBlock). */
-            md5 = inBlockPtr->getMd5();
+            blockHash = inBlockPtr->getMd5();
         } else {
-            calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
+            blockHash = checksumHex(ChecksumType::FarmHash64,
+                                    inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
         }
-        meta["md5"] = md5;
+        setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
 
         // Compress and write metadata
         coder_json metaCoder;
@@ -693,15 +694,16 @@ int32_t SamCodecActuator::finalizeSamBlockMeta(Json::Value& samMeta,
 
     PBGZ_PROF_SCOPE(pbgzprof::FIELD_META);
 
-    // Calculate MD5 of original data
-    std::string md5;
+    // Calculate checksum of original data
+    std::string blockHash;
     if (inBlockPtr->hasMd5()) {
         /* Already hashed by the reader thread (CompressEngine::preDispatchBlock). */
-        md5 = inBlockPtr->getMd5();
+        blockHash = inBlockPtr->getMd5();
     } else {
-        calcMd5sum(md5, inBlockPtr->getBuffer(), inBlockPtr->getDataLen());
+        blockHash = checksumHex(ChecksumType::FarmHash64,
+                                inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
     }
-    meta["md5"] = md5;
+    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
 
     // Compress metadata
     coder_json metaCoder;
@@ -3420,12 +3422,15 @@ int32_t SamCodecActuator::decompress() {
     }
 
     if (refPosChrIndex == 65535) {
-        // Verify checksum of decompressed content
-        std::string md5;
-        calcMd5sum(md5, outBlockPtr->getBuffer(), outBlockPtr->getDataLen());
-        if (md5 != meta["md5"].asString()) {
-            LOG_ERROR("MD5 check failed for SAM data, blockid = %d, expected: %s, got: %s", outBlockPtr->getBlockId(),
-                meta["md5"].asString().c_str(), md5.c_str());
+        // Verify with the algorithm recorded in the block meta (absent/md5 => legacy MD5)
+        ChecksumType checksumType = ChecksumType::MD5;
+        const std::string expected = getChecksumMeta(meta, checksumType);
+        const std::string actual = checksumHex(
+            checksumType, outBlockPtr->getBuffer(), (size_t)outBlockPtr->getDataLen());
+        if (expected.empty() || actual != expected) {
+            LOG_ERROR("checksum check failed for SAM data, blockid = %d, method = %s, expected: %s, got: %s",
+                      outBlockPtr->getBlockId(), checksumTypeName(checksumType),
+                      expected.c_str(), actual.c_str());
             return -1;
         }
     }
