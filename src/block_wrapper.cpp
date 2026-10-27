@@ -34,10 +34,10 @@
 #include <zlib.h>
 
 #include "bam_record.h"
+#include "utils/md5_util.h"
 
 #if defined(__x86_64__)
 #include <immintrin.h>
-#include "utils/md5_util.h"
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 #endif

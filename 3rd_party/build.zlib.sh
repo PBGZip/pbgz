@@ -33,7 +33,7 @@ cd $libname
   # -O3 and leaving deflate/crc at unoptimized speed (measured: 17.7 MB/s vs
   # 33.6 MB/s on the same 236MB BAM stream). Keep -O3.
   CFLAGS="-O3 -fPIC" ./configure --prefix=$buildpath/zlib
-  make -j $(nproc) # Using nproc instead of cat /proc/cpuinfo for better portability
+  make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
   make install 
 else
     echo "----[error type: build type $buildtype not defined]----"

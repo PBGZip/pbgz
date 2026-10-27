@@ -31,7 +31,7 @@ cd $libname
 # start to build
 if [ $buildtype == "release" ] ; then
   # Use nproc for better portability and correctness in getting CPU count
-  make -j `nproc`
+  make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
   # Use cp -f instead of yes|cp
   cp -f $root/$libname/lib/libzstd.a $installpath/lib/
   cp -f $root/$libname/lib/zstd.h $installpath/include/

@@ -30,7 +30,7 @@ cd $libname
 # start to build
 export INSTALL_PATH=$buildpath/libdeflate
  if [ $buildtype == "release" ] ; then
-    make -j $(nproc) # Using nproc instead of cat /proc/cpuinfo for better portability
+    make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
     make install 
 else
     echo "----[error type: build type $buildtype not defined]----"

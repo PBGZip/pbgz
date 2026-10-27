@@ -46,7 +46,7 @@ export C_INCLUDE_PATH=$buildpath/libdeflate/include:$buildpath/bzip2/include
     fi
     autoreconf -i
     ./configure $build_flag CFLAGS=-fPIC --prefix=$buildpath/hts --disable-lzma --with-libdeflate --enable-bz2 --disable-libcurl --disable-s3 --disable-ref-cache
-    make -j $(nproc) # Using nproc instead of cat /proc/cpuinfo for better portability
+    make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
     make install 
 else
     echo "----[error type: build type $buildtype not defined]----"

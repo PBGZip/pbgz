@@ -29,7 +29,7 @@ cd $libname
 mkdir -p build/$buildtype
 cd build/$buildtype
 cmake -DCMAKE_BUILD_TYPE=$buildtype -DBUILD_STATIC_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX=$installpath/jsoncpp -G "Unix Makefiles" ../..
-make -j $(nproc) # Using nproc instead of cat /proc/cpuinfo for better portability
+make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
 make install
 
 cd $root && rm -rf $root/$libname || true # Ignore errors from rm command

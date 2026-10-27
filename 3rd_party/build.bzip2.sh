@@ -29,7 +29,7 @@ cd $libname
 
 # start to build
  if [ $buildtype == "release" ] ; then
-  make -j $(nproc) # Using nproc instead of cat /proc/cpuinfo | grep "physical id" | wc -l for better CPU count detection
+  make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo | grep "physical id" | wc -l for better CPU count detection
   make install PREFIX=$buildpath/bzip2
 else
   echo "----[error type: build type $buildtype not defined]----"

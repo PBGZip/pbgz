@@ -147,7 +147,7 @@ static inline bool arm(const uint8_t *in, uint32_t n, uint8_t *out)
                                          vandq_u16(vshrq_n_u16(c16, 6), vdupq_n_u16(0x000C)));
         const uint32x4_t n32 = vreinterpretq_u32_u16(nib);
         const uint32x4_t byt = vorrq_u32(vandq_u32(n32, vdupq_n_u32(0x0000000Fu)),
-                                         vandq_u32(vshrq_n_u32(n32, 4), vdupq_n_u32(0x000000F0u)));
+                                         vandq_u32(vshrq_n_u32(n32, 12), vdupq_n_u32(0x000000F0u)));
         const uint16x4_t t16 = vmovn_u32(byt);
         const uint8x8_t t8 = vmovn_u16(vcombine_u16(t16, t16));
         vst1_lane_u32(reinterpret_cast<uint32_t *>(out + o), vreinterpret_u32_u8(t8), 0);
