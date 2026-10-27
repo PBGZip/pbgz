@@ -387,10 +387,10 @@ int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, ui
                     baseNCount++;
                 }
             } else if (linePos.size() == 10) {
-                char ch = line[i];
-                if (ch >= 0) {
-                    qualityFrequnce[(uint8_t)ch].second++;
-                }
+                /* Index by uint8_t: quality bytes are histogrammed in a 256-entry
+                   table and char signedness differs between targets. */
+                const uint8_t ch = line[i];
+                qualityFrequnce[ch].second++;
             }
         }
     }
