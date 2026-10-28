@@ -194,10 +194,10 @@ int32_t FastqCodecActuator::compress() {
         return -1;
     }
 
-    // Calculate block checksum (FarmHash64; old files are still accepted on read)
+    // Calculate block checksum (FarmHash128; old files are still accepted on read)
     const std::string blockHash = checksumHex(
-        ChecksumType::FarmHash64, inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
-    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
+        ChecksumType::FarmHash128, inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
+    setChecksumMeta(meta, ChecksumType::FarmHash128, blockHash);
     meta["idlines"] = static_cast<uint32_t>(inBlockPtr->getNpos().size() >> 2);
 
     // Compress meta information

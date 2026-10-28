@@ -46,7 +46,7 @@ private:
 
 public:
     Reference(const std::string& fasqaName, uint32_t threadNum,
-              ChecksumType checksumType = ChecksumType::FarmHash64);
+              ChecksumType checksumType = ChecksumType::FarmHash128);
 
     virtual ~Reference();
 

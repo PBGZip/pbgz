@@ -58,8 +58,8 @@ int32_t BinaryCodecActuator::compress() {
     meta["streams"] = subMeta;
 
     const std::string blockHash = checksumHex(
-        ChecksumType::FarmHash64, inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
-    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
+        ChecksumType::FarmHash128, inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
+    setChecksumMeta(meta, ChecksumType::FarmHash128, blockHash);
 
     // Compress meta information
     coder_json metaCoder;
@@ -111,7 +111,7 @@ int32_t BinaryCodecActuator::decompress() {
     outBlockPtr->setBlockId(inBlockPtr->getBlockId());
     outBlockPtr->setBlockType(inBlockPtr->getBlockType());
     
-    // Check checksum of source content (MD5 for old files, FarmHash64 for new ones)
+    // Check checksum of source content (MD5 for old files, FarmHash128 for new ones)
     ChecksumType checksumType = ChecksumType::MD5;
     const std::string expected = getChecksumMeta(meta, checksumType);
     const std::string actual = checksumHex(

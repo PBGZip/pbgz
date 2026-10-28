@@ -155,8 +155,9 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
 
     /* Old indexes have no marker: use MD5 for them. */
     ChecksumType niChecksumType = checksumTypeFromName(
-        niMeta.isMember("hashmethod") ? niMeta["hashmethod"].asString() : std::string());
-    const char* niHashKey = (niChecksumType == ChecksumType::FarmHash64)
+        niMeta.isMember(kChecksumMethodKey) ? niMeta[kChecksumMethodKey].asString()
+                                            : std::string());
+    const char* niHashKey = (niChecksumType == ChecksumType::FarmHash128)
                                 ? "ni_data_hash" : "ni_data_md5";
     const std::string expectHash =
         niMeta.isMember(niHashKey) ? niMeta[niHashKey].asString() : std::string();
@@ -176,7 +177,7 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
         niMeta.isMember("refe_hashmethod") ? niMeta["refe_hashmethod"].asString()
                                            : std::string());
     fastaChecksumType = refeChecksumType;
-    const char* fastaHashKey = (refeChecksumType == ChecksumType::FarmHash64)
+    const char* fastaHashKey = (refeChecksumType == ChecksumType::FarmHash128)
                                    ? "refe_orgfile_hash" : "refe_orgfile_md5";
     fastaChecksum = niMeta.isMember(fastaHashKey) ? niMeta[fastaHashKey].asString()
                                                   : std::string();
@@ -313,95 +314,117 @@ uint8_t* Reference::initSquashByStream(int64_t squashLength) {
 
 void Reference::calculateReferenceChecksum(const std::string& refGeneFile, ChecksumType type,
                                            std::string& refGeneHash, int64_t& refGeneLen) {
-    {
-        /* A 4 MB buffer keeps the per-read syscall overhead negligible against the checksum cost. */
-        uint32_t bufferLen = 4u << 20, len;
-        refGeneLen = 0;
-        ChecksumStream stream(type);
-        uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
+    /* A 4 MB buffer keeps the per-read syscall overhead negligible against the checksum cost. */
+    uint32_t bufferLen = 4u << 20, len;
+    refGeneLen = 0;
+    uint8_t *buffer = MemoryUtil::safeAlloc<uint8_t>(bufferLen);
+    const bool isGzFile = PathUtil::isGzFile(refGeneFile);
 
-        // Detect gzip input
-        bool isGzFile = PathUtil::isGzFile(refGeneFile);
-        // Choose a reader based on file type
-        if (isGzFile) {
-            // Choose gzip reader based on SIMD support
-            bool useFastGzReader = false;
-#ifdef __SSE4_2__
-            useFastGzReader = Hardware::isSupportSimd();
-#endif
-            if (useFastGzReader) {
-                // Intel ISA-L accelerated reader
-                FastGzFileReader fastGzReader(refGeneFile);
-                if (fastGzReader.openIO() == 0) {
-                    for (;;) {
-                        len = fastGzReader.readIO(buffer, bufferLen);
-                        if (len == 0 && bufferLen > 0) { // Check error return value - 0 means read failed or file ended
-                            LOG_ERROR("Failed to read gzip file with FastGzFileReader: %s", refGeneFile.c_str());
-                            refGeneHash = "";
-                            refGeneLen = 0;
-                            MemoryUtil::safeFree(buffer);
-                            return;
-                        }
-                        refGeneLen += len;
-                        stream.update(buffer, len);
-                        if (len != bufferLen) {
-                            break;
-                        }
-                    }
-                    fastGzReader.closeIO();
-                } else {
-                    LOG_ERROR("Failed to open gzip file with FastGzFileReader: %s", refGeneFile.c_str());
-                    refGeneHash = "";
-                    refGeneLen = 0;
-                    MemoryUtil::safeFree(buffer);
-                    return;
-                }
-            } else {
-                // Standard gzip reader
-                GzFileReader gzReader(refGeneFile, 1); // Use single thread reading
-                if (gzReader.openIO() == 0) {
-                    for (;;) {
-                        len = gzReader.readIO(buffer, bufferLen);
-                        refGeneLen += len;
-                        stream.update(buffer, len);
-                        if (len != bufferLen) {
-                            break;
-                        }
-                    }
-                    gzReader.closeIO();
-                } else {
-                    LOG_ERROR("Failed to open gzip file: %s", refGeneFile.c_str());
-                    refGeneHash = "";
-                    refGeneLen = 0;
-                    MemoryUtil::safeFree(buffer);
-                    return;
+    /* Fingerprint128 mixes in the input length, so it must be known before the
+       first byte is hashed.  A plain file reports its size directly; for gzip,
+       ISIZE covers single-member files below 4 GiB. */
+    int64_t totalLen = isGzFile ? PathUtil::getGzUncompressedSize(refGeneFile)
+                                : PathUtil::getFileSize(refGeneFile);
+    if (!isGzFile && totalLen < 0) {
+        LOG_ERROR("Failed to stat file: %s", refGeneFile.c_str());
+        MemoryUtil::safeFree(buffer);
+        return;
+    }
+    const bool lengthFromTrailer = isGzFile && totalLen > 0;
+    if (isGzFile && totalLen <= 0) {
+        /* ISIZE is missing or untrustworthy (multi-member, wrapped past 4 GiB):
+           count the decompressed bytes once. */
+        GzFileReader counter(refGeneFile, 1);
+        totalLen = 0;
+        if (counter.openIO() == 0) {
+            for (;;) {
+                len = (uint32_t)counter.readIO(buffer, bufferLen);
+                totalLen += len;
+                if (len != bufferLen) {
+                    break;
                 }
             }
-        } else {
-            // Plain text reader
-            DefaultFileReader fileReader(refGeneFile);
-            if (fileReader.openIO() == 0) {
+            counter.closeIO();
+        }
+    }
+
+    bool useFastGzReader = false;
+#ifdef __SSE4_2__
+    useFastGzReader = isGzFile && Hardware::isSupportSimd();
+#endif
+
+    auto runPass = [&](int64_t declaredLen, int64_t& bytesRead) -> std::string {
+        ChecksumStream stream(type, (uint64_t)declaredLen);
+        bytesRead = 0;
+        if (isGzFile) {
+            if (useFastGzReader) {
+                FastGzFileReader reader(refGeneFile);
+                if (reader.openIO() != 0) {
+                    LOG_ERROR("Failed to open gzip file with FastGzFileReader: %s",
+                              refGeneFile.c_str());
+                    return std::string();
+                }
                 for (;;) {
-                    len = fileReader.readIO(buffer, bufferLen);
-                    refGeneLen += len;
+                    len = (uint32_t)reader.readIO(buffer, bufferLen);
+                    if (len == 0) {
+                        break;
+                    }
+                    bytesRead += len;
                     stream.update(buffer, len);
                     if (len != bufferLen) {
                         break;
                     }
                 }
-                fileReader.closeIO();
+                reader.closeIO();
             } else {
-                LOG_ERROR("Failed to open file: %s", refGeneFile.c_str());
-                refGeneHash = "";
-                refGeneLen = 0;
-                MemoryUtil::safeFree(buffer);
-                return;
+                GzFileReader reader(refGeneFile, 1);
+                if (reader.openIO() != 0) {
+                    LOG_ERROR("Failed to open gzip file: %s", refGeneFile.c_str());
+                    return std::string();
+                }
+                for (;;) {
+                    len = (uint32_t)reader.readIO(buffer, bufferLen);
+                    bytesRead += len;
+                    stream.update(buffer, len);
+                    if (len != bufferLen) {
+                        break;
+                    }
+                }
+                reader.closeIO();
             }
+        } else {
+            DefaultFileReader reader(refGeneFile);
+            if (reader.openIO() != 0) {
+                LOG_ERROR("Failed to open file: %s", refGeneFile.c_str());
+                return std::string();
+            }
+            for (;;) {
+                len = (uint32_t)reader.readIO(buffer, bufferLen);
+                bytesRead += len;
+                stream.update(buffer, len);
+                if (len != bufferLen) {
+                    break;
+                }
+            }
+            reader.closeIO();
         }
+        return stream.finish();
+    };
 
-        refGeneHash = stream.finish();
-        MemoryUtil::safeFree(buffer);
+    int64_t bytesRead = 0;
+    refGeneHash = runPass(totalLen, bytesRead);
+    if (isGzFile && bytesRead != totalLen) {
+        if (lengthFromTrailer) {
+            /* ISIZE described only the last member or wrapped past 4 GiB:
+               hash again with the length that was actually read. */
+            refGeneHash = runPass(bytesRead, bytesRead);
+        } else {
+            LOG_ERROR("Reference %s changed while it was being hashed", refGeneFile.c_str());
+            refGeneHash.clear();
+        }
     }
+    refGeneLen = refGeneHash.empty() ? 0 : bytesRead;
+    MemoryUtil::safeFree(buffer);
 }
 
 bool Reference::writeNiFileHeader(DefaultFileWriter& niWriter, int64_t& offset) {
@@ -463,9 +486,9 @@ bool Reference::writeNiFile(const std::string& niFile) {
     niWriter.writeIOAt(offset, (uint8_t *)(&refGeneSquashlen), sizeof(refGeneSquashlen));
 
     const std::string niDataHash = checksumHex(
-        ChecksumType::FarmHash64, refGeneSquash, (size_t)refGeneSquashlen);
+        ChecksumType::FarmHash128, refGeneSquash, (size_t)refGeneSquashlen);
 
-    if (!writeNiFileMetadata(niWriter, ChecksumType::FarmHash64, niDataHash,
+    if (!writeNiFileMetadata(niWriter, ChecksumType::FarmHash128, niDataHash,
                              fastaChecksumType, fastaChecksum, fastaLength)) {
         niWriter.closeIO();
         return false;
@@ -488,14 +511,14 @@ bool Reference::writeNiFileMetadata(DefaultFileWriter& niWriter, ChecksumType ni
     meta["refe_len"] = Json::Value::UInt64(refGeneLen);
     /* NI payload checksum and the reference-file checksum can use different
        algorithms when an old index is rebuilt. */
-    meta["hashmethod"] = checksumTypeName(niChecksumType);
-    if (niChecksumType == ChecksumType::FarmHash64) {
+    meta[kChecksumMethodKey] = checksumTypeTag(niChecksumType);
+    if (niChecksumType == ChecksumType::FarmHash128) {
         meta["ni_data_hash"] = niDataHash;
     } else {
         meta["ni_data_md5"] = niDataHash;
     }
-    meta["refe_hashmethod"] = checksumTypeName(refeChecksumType);
-    if (refeChecksumType == ChecksumType::FarmHash64) {
+    meta["refe_hashmethod"] = checksumTypeTag(refeChecksumType);
+    if (refeChecksumType == ChecksumType::FarmHash128) {
         meta["refe_orgfile_hash"] = refeHash;
     } else {
         meta["refe_orgfile_md5"] = refeHash;

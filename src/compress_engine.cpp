@@ -206,7 +206,7 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
         return;
     }
     PBGZ_PROF_SCOPE(pbgzprof::READ_MD5);
-    blockPtr->setMd5(checksumHex(ChecksumType::FarmHash64, blockPtr->getBuffer(),
+    blockPtr->setMd5(checksumHex(ChecksumType::FarmHash128, blockPtr->getBuffer(),
                                  (size_t)blockPtr->getDataLen()));
 }
 
@@ -734,8 +734,8 @@ int32_t CompressEngine::startEnginePostProc() {
         refeMeta["fasta_name"] = PathUtil::getFileName(pRefGene->getFastaFileName());
         refeMeta["fasta_len"] = (Json::Value::Int64)(PathUtil::getFileSize(pRefGene->getFastaFileName()));
         const ChecksumType refeHashType = pRefGene->getFastaChecksumType();
-        refeMeta["hashmethod"] = checksumTypeName(refeHashType);
-        if (refeHashType == ChecksumType::FarmHash64) {
+        refeMeta[kChecksumMethodKey] = checksumTypeTag(refeHashType);
+        if (refeHashType == ChecksumType::FarmHash128) {
             refeMeta["fasta_hash"] = pRefGene->getFastaChecksum();
         } else {
             refeMeta["fasta_md5"] = pRefGene->getFastaChecksum();
@@ -798,8 +798,8 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
        --refunpack) the header must carry it and this waits for the pass. */
     const bool deferFastaMd5 = !parameter.isUnpackRef && parameter.outputFile != STDOUT;
     const ChecksumType refeHashType = pRefGene->getFastaChecksumType();
-    refeMeta["hashmethod"] = checksumTypeName(refeHashType);
-    if (refeHashType == ChecksumType::FarmHash64) {
+    refeMeta[kChecksumMethodKey] = checksumTypeTag(refeHashType);
+    if (refeHashType == ChecksumType::FarmHash128) {
         refeMeta["fasta_hash"] = deferFastaMd5 ? "" : pRefGene->getFastaChecksum();
     } else {
         refeMeta["fasta_md5"] = deferFastaMd5 ? "" : pRefGene->getFastaChecksum();

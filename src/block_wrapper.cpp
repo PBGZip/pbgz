@@ -1063,7 +1063,7 @@ int32_t bamRenderRawBlockToText(RoughIOBlock* blockPtr) {
     blockPtr->getNpos().swap(newNpos);
 
     /* Checksum of the rendered text: the reader skipped hashing raw blocks, so it is computed here. */
-    blockPtr->setMd5(checksumHex(ChecksumType::FarmHash64, blockPtr->getBuffer(),
+    blockPtr->setMd5(checksumHex(ChecksumType::FarmHash128, blockPtr->getBuffer(),
                                  (size_t)blockPtr->getDataLen()));
     blockPtr->setRawBam(false);
 
@@ -1831,8 +1831,8 @@ int32_t PbgzBlockWriter::writeBaseFileMeta() {
         return -1;
     }
     pbgzFileWriter->getBaseFileMeta().setMetaData("writer", "pbgz_writer_v" + PbgzManager::getInstance().getVersion());
-    pbgzFileWriter->getBaseFileMeta().setMetaData("hashmethod",
-        checksumTypeName(ChecksumType::FarmHash64));
+    pbgzFileWriter->getBaseFileMeta().setMetaData(kChecksumMethodKey,
+        checksumTypeTag(ChecksumType::FarmHash128));
     pbgzFileWriter->writeBaseFileMeta();
     return 0;
 }

@@ -667,7 +667,7 @@ int32_t BamCodecActuator::compress()
     if (inBlockPtr->hasMd5()) {
         blockHash = inBlockPtr->getMd5();
     } else {
-        blockHash = checksumHex(ChecksumType::FarmHash64,
+        blockHash = checksumHex(ChecksumType::FarmHash128,
                                 inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
     }
 
@@ -675,7 +675,7 @@ int32_t BamCodecActuator::compress()
     bamMeta["records"] = cols->nRecords;
     bamMeta["streams"] = streamMeta;
     meta["bam"] = bamMeta;
-    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
+    setChecksumMeta(meta, ChecksumType::FarmHash128, blockHash);
 
     coder_json metaCoder;
     const int32_t metaLen = metaCoder.encoder(meta, outBlockPtr->getMetaBuffer(), outBlockPtr->getRemain());

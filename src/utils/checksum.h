@@ -34,19 +34,31 @@
 /*
  * Checksum algorithm recorded in metadata.  Files written before the marker
  * existed (or files marked "md5") are verified with MD5; new files use
- * FarmHash's portable Fingerprint64.
+ * FarmHash's portable 128-bit Fingerprint128.
  */
 enum class ChecksumType {
     MD5 = 0,
-    FarmHash64 = 1,
+    FarmHash128 = 1,
 };
 
+/*
+ * The marker sits in every block header, so its key and value are short:
+ *   {"hm":"f", ...}  FarmHash128, {"hm":"m", ...}  MD5
+ * Files written before the marker existed carry no "hm" (only {"md5":"..."})
+ * and are verified with MD5.
+ */
+constexpr const char* kChecksumMethodKey = "hm";
+
+/* Human-readable name for logs and error messages. */
 const char* checksumTypeName(ChecksumType type);
 
-/* Unknown/absent names fall back to MD5 for backward compatibility. */
+/* Short on-disk tag: "f" for FarmHash128, "m" for MD5. */
+const char* checksumTypeTag(ChecksumType type);
+
+/* "f" selects FarmHash128; anything else (including absent) selects MD5. */
 ChecksumType checksumTypeFromName(const std::string& name);
 
-/* Hex string: 32 chars for MD5, 16 chars for FarmHash64. */
+/* Hex string: 32 chars for both MD5 and FarmHash128. */
 std::string checksumHex(ChecksumType type, const uint8_t* data, size_t len);
 
 inline std::string checksumHex(ChecksumType type, const std::string& data) {
@@ -55,13 +67,14 @@ inline std::string checksumHex(ChecksumType type, const std::string& data) {
 
 /*
  * Incremental checksum for streaming inputs.  MD5 uses the existing
- * incremental implementation; FarmHash64 is a streaming form of
- * Fingerprint64 (farmhashna::Hash64) so large reference files never need to
- * be resident in memory.
+ * incremental implementation; FarmHash128 streams FarmHash's Fingerprint128
+ * (CityHash128) with a bounded buffer, so large reference files never need to
+ * be resident in memory.  Fingerprint128 encodes the total input length in its
+ * state, so FarmHash128 callers must pass the exact total length up front.
  */
 class ChecksumStream {
 public:
-    explicit ChecksumStream(ChecksumType type);
+    explicit ChecksumStream(ChecksumType type, uint64_t totalLen = 0);
     ~ChecksumStream();
 
     void update(const uint8_t* data, size_t len);
@@ -75,8 +88,8 @@ private:
 };
 
 /*
- * Block metadata: new files carry {"hashmethod":"farmhash64","hash":"..."};
- * old files carry only {"md5":"..."} or {"hashmethod":"md5","md5":"..."}.
+ * Block metadata: new files carry {"hm":"f","hash":"..."};
+ * old files carry only {"md5":"..."} and no marker, and stay on MD5.
  */
 void setChecksumMeta(Json::Value& meta, ChecksumType type, const std::string& value);
 

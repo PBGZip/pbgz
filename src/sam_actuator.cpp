@@ -553,10 +553,10 @@ int32_t SamCodecActuator::compress() {
             /* Already hashed by the reader thread (CompressEngine::preDispatchBlock). */
             blockHash = inBlockPtr->getMd5();
         } else {
-            blockHash = checksumHex(ChecksumType::FarmHash64,
+            blockHash = checksumHex(ChecksumType::FarmHash128,
                                     inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
         }
-        setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
+        setChecksumMeta(meta, ChecksumType::FarmHash128, blockHash);
 
         // Compress and write metadata
         coder_json metaCoder;
@@ -700,10 +700,10 @@ int32_t SamCodecActuator::finalizeSamBlockMeta(Json::Value& samMeta,
         /* Already hashed by the reader thread (CompressEngine::preDispatchBlock). */
         blockHash = inBlockPtr->getMd5();
     } else {
-        blockHash = checksumHex(ChecksumType::FarmHash64,
+        blockHash = checksumHex(ChecksumType::FarmHash128,
                                 inBlockPtr->getBuffer(), (size_t)inBlockPtr->getDataLen());
     }
-    setChecksumMeta(meta, ChecksumType::FarmHash64, blockHash);
+    setChecksumMeta(meta, ChecksumType::FarmHash128, blockHash);
 
     // Compress metadata
     coder_json metaCoder;

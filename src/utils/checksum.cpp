@@ -35,15 +35,13 @@
 namespace {
 
 /*
- * Streaming form of FarmHash Fingerprint64 (farmhashna::Hash64).
- * The algorithm and constants are derived from Google FarmHash, which is
- * distributed under the MIT license (see src/farmhash/COPYING).  Fingerprint64
- * itself has no incremental API, so this keeps the algorithm's rolling state
- * and at most one partial block in memory.
+ * Streaming form of FarmHash Fingerprint128 (CityHash128).  The algorithm and
+ * constants are derived from Google FarmHash, which is distributed under the
+ * MIT license (see src/farmhash/COPYING).  Fingerprint128 has no incremental
+ * API, so this keeps the rolling 128-bit state and at most one partial block.
  */
 static const uint64_t k0 = 0xc3a5c85c97cb3127ULL;
 static const uint64_t k1 = 0xb492b66fbe98f273ULL;
-static const uint64_t k2 = 0x9ae16a3b2f90404fULL;
 
 inline uint64_t fetch64(const uint8_t* p)
 {
@@ -60,18 +58,15 @@ inline uint64_t rotate64(uint64_t v, int shift)
     return (v >> shift) | (v << (64 - shift));
 }
 
-inline uint64_t shiftMix(uint64_t v)
+/* Hash128to64() from FarmHash: Murmur-inspired 128-bit to 64-bit mixing. */
+inline uint64_t hashLen16(uint64_t u, uint64_t v)
 {
-    return v ^ (v >> 47);
-}
-
-inline uint64_t hashLen16Mul(uint64_t u, uint64_t v, uint64_t mul)
-{
-    uint64_t a = (u ^ v) * mul;
+    const uint64_t kMul = 0x9ddfea08eb382d69ULL;
+    uint64_t a = (u ^ v) * kMul;
     a ^= (a >> 47);
-    uint64_t b = (v ^ a) * mul;
+    uint64_t b = (v ^ a) * kMul;
     b ^= (b >> 47);
-    b *= mul;
+    b *= kMul;
     return b;
 }
 
@@ -94,112 +89,162 @@ inline std::pair<uint64_t, uint64_t> weakHashLen32WithSeeds(
                                   fetch64(s + 16), fetch64(s + 24), a, b);
 }
 
-struct FarmState {
+struct Farm128State {
+    bool mainLoop = false;   /* body length >= 128: CityHash128's block path */
     bool started = false;
+    bool finished = false;
+    uint64_t totalLen = 0;   /* length declared at construction */
+    uint64_t accepted = 0;   /* bytes accepted so far (never exceeds totalLen) */
+    uint64_t bodyLen = 0;    /* bytes hashed by the block loop plus the tail */
+    uint64_t bodyDone = 0;   /* bytes already consumed by the block loop */
     uint64_t x = 0;
     uint64_t y = 0;
     uint64_t z = 0;
     std::pair<uint64_t, uint64_t> v{0, 0};
     std::pair<uint64_t, uint64_t> w{0, 0};
-    uint64_t totalLen = 0;
+    /* Input before the state is initialised, then the trailing partial block. */
     std::vector<uint8_t> pending;
-    std::vector<uint8_t> last64;
+    /* First 16 bytes, consumed as the seed by begin(). */
+    uint8_t seed[16] = {0};
+    bool hasSeed = false;
+    /* Last 32 processed bytes: the tail loop may read back into them. */
+    std::vector<uint8_t> history;
 
-    void init(const uint8_t* firstBlock)
+    void init(uint64_t length)
     {
-        x = 81;
-        y = 81 * k1 + 113;
-        z = shiftMix(y * k2 + 113) * k2;
-        v = std::make_pair(0ULL, 0ULL);
-        w = std::make_pair(0ULL, 0ULL);
-        x = x * k2 + fetch64(firstBlock);
+        totalLen = length;
+        bodyLen = (totalLen >= 16) ? totalLen - 16 : totalLen;
+        mainLoop = bodyLen >= 128;
+    }
+
+    /* CityHash128 consumes the first 16 bytes as the seed. */
+    void begin()
+    {
+        const uint8_t* head = pending.data();
+        const uint8_t* body = head + 16;
+        memcpy(seed, head, sizeof(seed));
+        hasSeed = true;
+        x = fetch64(head);
+        y = fetch64(head + 8) + k0;
+        z = bodyLen * k1;
+        v.first = rotate64(y ^ k1, 49) * k1 + fetch64(body);
+        v.second = rotate64(v.first, 42) * k1 + fetch64(body + 8);
+        w.first = rotate64(y + z, 35) * k1 + x;
+        w.second = rotate64(x + fetch64(body + 88), 53) * k1;
+        pending.erase(pending.begin(), pending.begin() + 16);
         started = true;
     }
 
+    /* The two 64-byte halves of one CityHash128 block, as in the vendored code. */
     void processBlock(const uint8_t* s)
     {
-        x = rotate64(x + y + v.first + fetch64(s + 8), 37) * k1;
-        y = rotate64(y + v.second + fetch64(s + 48), 42) * k1;
-        x ^= w.second;
-        y += v.first + fetch64(s + 40);
-        z = rotate64(z + w.first, 33) * k1;
-        v = weakHashLen32WithSeeds(s, v.second * k1, x + w.first);
-        w = weakHashLen32WithSeeds(s + 32, z + w.second, y + fetch64(s + 16));
-        std::swap(z, x);
+        for (int half = 0; half < 2; ++half) {
+            x = rotate64(x + y + v.first + fetch64(s + 8), 37) * k1;
+            y = rotate64(y + v.second + fetch64(s + 48), 42) * k1;
+            x ^= w.second;
+            y += v.first + fetch64(s + 40);
+            z = rotate64(z + w.first, 33) * k1;
+            v = weakHashLen32WithSeeds(s, v.second * k1, x + w.first);
+            w = weakHashLen32WithSeeds(s + 32, z + w.second, y + fetch64(s + 16));
+            std::swap(z, x);
+            s += 64;
+        }
     }
 
-    void update(const uint8_t* data, size_t len)
+    void consume()
     {
-        if (len == 0) {
-            return;
-        }
-        totalLen += len;
-
-        /* Keep the last 64 bytes for the finalization step. */
-        if (len >= 64) {
-            last64.assign(data + len - 64, data + len);
-        } else {
-            const size_t excess = last64.size() + len > 64 ? last64.size() + len - 64 : 0;
-            if (excess > 0) {
-                last64.erase(last64.begin(), last64.begin() + (std::ptrdiff_t)excess);
-            }
-            last64.insert(last64.end(), data, data + len);
-        }
-
-        pending.insert(pending.end(), data, data + len);
-
-        if (!started && pending.size() >= 65) {
-            init(pending.data());
-        }
-        if (!started) {
-            return;
-        }
-
         size_t pos = 0;
-        while (pending.size() - pos >= 65) {
+        while (bodyLen - bodyDone >= 128 && pending.size() - pos >= 128) {
             processBlock(pending.data() + pos);
-            pos += 64;
+            pos += 128;
+            bodyDone += 128;
+            history.assign(pending.data() + pos - 32, pending.data() + pos);
         }
         if (pos > 0) {
             pending.erase(pending.begin(), pending.begin() + (std::ptrdiff_t)pos);
         }
     }
 
-    uint64_t finish() const
+    void update(const uint8_t* data, size_t len)
     {
-        if (!started) {
-            /* The whole input fits in one HashLen0to64 call. */
-            return util::Fingerprint64(reinterpret_cast<const char*>(pending.data()),
-                                       pending.size());
+        if (finished || len == 0 || accepted >= totalLen) {
+            return;
+        }
+        if ((uint64_t)len > totalLen - accepted) {
+            len = (size_t)(totalLen - accepted);
+        }
+        accepted += len;
+
+        if (!mainLoop) {
+            /* The whole input is shorter than 144 bytes; keep it for finish(). */
+            pending.insert(pending.end(), data, data + len);
+            return;
         }
 
-        const uint8_t* s = last64.data();
-        const uint64_t mul = k1 + ((z & 0xff) << 1);
-        std::pair<uint64_t, uint64_t> vv = v;
-        std::pair<uint64_t, uint64_t> ww = w;
-        ww.first += ((totalLen - 1) & 63);
-        vv.first += ww.first;
-        ww.first += vv.first;
+        pending.insert(pending.end(), data, data + len);
+        if (!started) {
+            /* Seed (16) plus the 96 bytes the state initialisation reads. */
+            if (pending.size() < 112) {
+                return;
+            }
+            begin();
+        }
+        consume();
+    }
 
-        uint64_t xx = rotate64(x + y + vv.first + fetch64(s + 8), 37) * mul;
-        uint64_t yy = rotate64(y + vv.second + fetch64(s + 48), 42) * mul;
-        xx ^= ww.second * 9;
-        yy += vv.first * 9 + fetch64(s + 40);
-        uint64_t zz = rotate64(z + ww.first, 33) * mul;
-        vv = weakHashLen32WithSeeds(s, vv.second * mul, xx + ww.first);
-        ww = weakHashLen32WithSeeds(s + 32, zz + ww.second, yy + fetch64(s + 16));
-        std::swap(zz, xx);
+    std::pair<uint64_t, uint64_t> finish()
+    {
+        finished = true;
+        if (bodyDone == 0) {
+            /* Fewer than 128 body bytes were consumed (short input, or the
+               caller declared more than it supplied): hash what actually
+               arrived instead of running the block/tail path. */
+            std::vector<uint8_t> actual;
+            if (hasSeed) {
+                actual.insert(actual.end(), seed, seed + sizeof(seed));
+            }
+            actual.insert(actual.end(), pending.begin(), pending.end());
+            auto value = util::Fingerprint128(reinterpret_cast<const char*>(actual.data()),
+                                              actual.size());
+            return std::make_pair(util::Uint128Low64(value), util::Uint128High64(value));
+        }
 
-        return hashLen16Mul(hashLen16Mul(vv.first, ww.first, mul) +
-                                shiftMix(yy) * k0 + zz,
-                            hashLen16Mul(vv.second, ww.second, mul) + xx, mul);
+        /* The tail loop may read up to 31 bytes before the trailing block. */
+        uint64_t tailLen = pending.size();
+        x += rotate64(v.first + z, 49) * k0;
+        y = y * k0 + rotate64(w.second, 37);
+        z = z * k0 + rotate64(w.first, 27);
+        w.first *= 9;
+        v.first *= k0;
+
+        std::vector<uint8_t> tail;
+        tail.reserve(history.size() + tailLen);
+        tail.insert(tail.end(), history.begin(), history.end());
+        tail.insert(tail.end(), pending.begin(), pending.end());
+        const uint8_t* s = tail.data() + history.size();
+        for (size_t tailDone = 0; tailDone < tailLen; ) {
+            tailDone += 32;
+            y = rotate64(x + y, 42) * k0 + v.second;
+            w.first += fetch64(s + tailLen - tailDone + 16);
+            x = x * k0 + w.first;
+            z += w.second + fetch64(s + tailLen - tailDone);
+            w.second += v.first;
+            v = weakHashLen32WithSeeds(s + tailLen - tailDone, v.first + z, v.second);
+            v.first *= k0;
+        }
+
+        x = hashLen16(x, v.first);
+        y = hashLen16(y + z, w.first);
+        return std::make_pair(hashLen16(x + v.second, w.second) + y,
+                              hashLen16(x + w.second, y + v.second));
     }
 };
 
-std::string farmHashHex(uint64_t value)
+std::string farm128Hex(uint64_t low, uint64_t high)
 {
-    char buffer[17];
-    snprintf(buffer, sizeof(buffer), "%016llx", (unsigned long long)value);
+    char buffer[33];
+    snprintf(buffer, sizeof(buffer), "%016llx%016llx",
+             (unsigned long long)high, (unsigned long long)low);
     return std::string(buffer);
 }
 
@@ -207,18 +252,24 @@ std::string farmHashHex(uint64_t value)
 
 const char* checksumTypeName(ChecksumType type)
 {
-    return (type == ChecksumType::FarmHash64) ? "farmhash64" : "md5";
+    return (type == ChecksumType::FarmHash128) ? "farmhash128" : "md5";
+}
+
+const char* checksumTypeTag(ChecksumType type)
+{
+    return (type == ChecksumType::FarmHash128) ? "f" : "m";
 }
 
 ChecksumType checksumTypeFromName(const std::string& name)
 {
-    return (name == "farmhash64") ? ChecksumType::FarmHash64 : ChecksumType::MD5;
+    return (name == "f") ? ChecksumType::FarmHash128 : ChecksumType::MD5;
 }
 
 std::string checksumHex(ChecksumType type, const uint8_t* data, size_t len)
 {
-    if (type == ChecksumType::FarmHash64) {
-        return farmHashHex(util::Fingerprint64(reinterpret_cast<const char*>(data), len));
+    if (type == ChecksumType::FarmHash128) {
+        auto value = util::Fingerprint128(reinterpret_cast<const char*>(data), len);
+        return farm128Hex(util::Uint128Low64(value), util::Uint128High64(value));
     }
 
     uint8_t digest[16];
@@ -229,20 +280,22 @@ std::string checksumHex(ChecksumType type, const uint8_t* data, size_t len)
 }
 
 struct ChecksumStream::Impl {
-    explicit Impl(ChecksumType t) : type(t) {
+    Impl(ChecksumType t, uint64_t totalLen) : type(t) {
         if (type == ChecksumType::MD5) {
             md5_init(&md5);
+        } else {
+            farm.init(totalLen);
         }
     }
 
     ChecksumType type;
     md5_ctx md5;
-    FarmState farm;
+    Farm128State farm;
     bool finished = false;
 };
 
-ChecksumStream::ChecksumStream(ChecksumType t)
-    : type(t), impl(std::make_unique<Impl>(t)) {
+ChecksumStream::ChecksumStream(ChecksumType t, uint64_t totalLen)
+    : type(t), impl(std::make_unique<Impl>(t, totalLen)) {
 }
 
 ChecksumStream::~ChecksumStream() = default;
@@ -272,13 +325,14 @@ std::string ChecksumStream::finish()
         md5_to_hex(digest, hex);
         return std::string(hex);
     }
-    return farmHashHex(impl->farm.finish());
+    std::pair<uint64_t, uint64_t> value = impl->farm.finish();
+    return farm128Hex(value.first, value.second);
 }
 
 void setChecksumMeta(Json::Value& meta, ChecksumType type, const std::string& value)
 {
-    meta["hashmethod"] = checksumTypeName(type);
-    if (type == ChecksumType::FarmHash64) {
+    meta[kChecksumMethodKey] = checksumTypeTag(type);
+    if (type == ChecksumType::FarmHash128) {
         meta["hash"] = value;
         if (meta.isMember("md5")) {
             meta.removeMember("md5");
@@ -293,18 +347,9 @@ void setChecksumMeta(Json::Value& meta, ChecksumType type, const std::string& va
 
 std::string getChecksumMeta(const Json::Value& meta, ChecksumType& type)
 {
-    type = checksumTypeFromName(meta.isMember("hashmethod")
-                                    ? meta["hashmethod"].asString()
+    type = checksumTypeFromName(meta.isMember(kChecksumMethodKey)
+                                    ? meta[kChecksumMethodKey].asString()
                                     : std::string());
-    if (type == ChecksumType::FarmHash64) {
-        if (meta.isMember("hash")) {
-            return meta["hash"].asString();
-        }
-        /* Tolerate a marker with the older value key. */
-        return meta.isMember("md5") ? meta["md5"].asString() : std::string();
-    }
-    if (meta.isMember("md5")) {
-        return meta["md5"].asString();
-    }
-    return meta.isMember("hash") ? meta["hash"].asString() : std::string();
+    const char* key = (type == ChecksumType::FarmHash128) ? "hash" : "md5";
+    return meta.isMember(key) ? meta[key].asString() : std::string();
 }

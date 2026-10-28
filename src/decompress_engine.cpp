@@ -205,14 +205,15 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
     int64_t fastaLength = metaRefe["fasta_len"].asInt64();
 
     /* Reference checksum algorithm: new files mark it explicitly; old files
-       without a marker (or with "md5") keep the legacy MD5 behavior. */
-    const std::string refeHashName = metaRefe.isMember("hashmethod")
-                                         ? metaRefe["hashmethod"].asString()
-                                         : (baseFileMeta.getMetaData().isMember("hashmethod")
-                                                ? baseFileMeta.getMetaData("hashmethod").asString()
-                                                : std::string());
+       without a marker keep the legacy MD5 behavior. */
+    const std::string refeHashName =
+        metaRefe.isMember(kChecksumMethodKey)
+            ? metaRefe[kChecksumMethodKey].asString()
+            : (baseFileMeta.getMetaData().isMember(kChecksumMethodKey)
+                   ? baseFileMeta.getMetaData(kChecksumMethodKey).asString()
+                   : std::string());
     const ChecksumType refeChecksumType = checksumTypeFromName(refeHashName);
-    const char* refeHashKey = (refeChecksumType == ChecksumType::FarmHash64)
+    const char* refeHashKey = (refeChecksumType == ChecksumType::FarmHash128)
                                   ? "fasta_hash" : "fasta_md5";
     const std::string expectedRefeHash = metaRefe.isMember(refeHashKey)
                                              ? metaRefe[refeHashKey].asString()
@@ -305,8 +306,10 @@ void DecompressEngine::printFastqFileNotMatchInfo(const Json::Value& metaRefe) {
     fprintf(stderr, "\t%-12s : %s\n", "File Name", metaRefe["fasta_name"].asString().c_str());
     fprintf(stderr, "\t%-12s : %ld\n", "File Length", metaRefe["fasta_len"].asInt64());
     const ChecksumType infoType = checksumTypeFromName(
-        metaRefe.isMember("hashmethod") ? metaRefe["hashmethod"].asString() : std::string());
-    const char* infoKey = (infoType == ChecksumType::FarmHash64) ? "fasta_hash" : "fasta_md5";
+        metaRefe.isMember(kChecksumMethodKey)
+            ? metaRefe[kChecksumMethodKey].asString()
+            : std::string());
+    const char* infoKey = (infoType == ChecksumType::FarmHash128) ? "fasta_hash" : "fasta_md5";
     fprintf(stderr, "\t%-12s : %s\n", "File Hash",
             metaRefe.isMember(infoKey) ? metaRefe[infoKey].asString().c_str() : "");
 }
