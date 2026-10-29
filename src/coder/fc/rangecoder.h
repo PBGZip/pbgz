@@ -36,7 +36,7 @@ See also the bsc and libbsc web site:
 #include <memory.h>
 #include "fc_header.h"
 
-class RangeCoder
+class FcRangeCoder
 {
 
 private:

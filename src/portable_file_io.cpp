@@ -22,6 +22,7 @@
  */
 
 #include "portable_file_io.h"
+#include "utils/checksum.h"
 
 #include <cerrno>
 #include <cstring>
@@ -92,6 +93,9 @@ int32_t BufferedFileReader::openIO() {
         LOG_ERROR("IO Open failed, file name = %s, errno = %d", fileName.c_str(), errno);
         return -1;
     }
+    /* Fewer syscalls for sequential reads (line-based reference parsing still
+       goes through stdio); a failure here only loses the optimization. */
+    (void)setvbuf(fp, nullptr, _IOFBF, 1u << 20);
 
     if (0 != seekFile(fp, 0, SEEK_END)) {
         LOG_ERROR("Failed to seek %s to end: %s", fileName.c_str(), strerror(errno));
@@ -141,6 +145,10 @@ size_t BufferedFileReader::readIO(void* pBuffer, size_t readSize) {
 }
 
 size_t BufferedFileReader::readLine(std::string& line) {
+    return readLine(line, nullptr);
+}
+
+size_t BufferedFileReader::readLine(std::string& line, ChecksumStream* sink) {
     line.clear();
     if (fp == nullptr) {
         eofFlag = true;
@@ -150,6 +158,9 @@ size_t BufferedFileReader::readLine(std::string& line) {
     char buffer[8192];
     while (fgets(buffer, (int)sizeof(buffer), fp) != nullptr) {
         const size_t n = strlen(buffer);
+        if (sink != nullptr) {
+            sink->update(reinterpret_cast<const uint8_t*>(buffer), n);
+        }
         position += n;
 
         if (n > 0 && buffer[n - 1] == '\n') {
@@ -234,6 +245,7 @@ int32_t BufferedFileWriter::openIO() {
         latchWriteError(errno);
         return -1;
     }
+    (void)setvbuf(fp, nullptr, _IOFBF, 1u << 20);
     fileSize = 0;
     position = 0;
     return 0;

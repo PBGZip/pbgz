@@ -1481,16 +1481,17 @@ int32_t SamCodecActuator::compressRegularField(uint32_t fieldIdx, uint32_t& fiel
 }
 
 /* The OPTION field (column 12 on) is compressed by CRAM-style tag columnization. */
-/* Parse the OPTION column: tag dictionary (first-seen order), each line's tag sequence, each tag's value column. */
-int32_t SamCodecActuator::collectOptionTags(OptionParseState& st)
+/* Parse the OPTION column: tag dictionary (first-seen order), each line's tag sequence, each tag's value column.
+   Takes the block views explicitly so the file-level layout trial can share it. */
+static int32_t parseOptionTags(const uint8_t* buffer, const std::vector<size_t>& npos,
+                               uint32_t headEndLine, const std::vector<LineTabs>& contentPos,
+                               OptionParseState& st)
 {
-    std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
-    uint8_t* buffer = inBlockPtr->getBuffer();
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
         uint32_t lineEnd = npos[lineIdx] - lineStart;
-        uint8_t* line = buffer + lineStart;
+        const uint8_t* line = buffer + lineStart;
         if (*line == '@') {
             continue;
         }
@@ -1512,50 +1513,77 @@ int32_t SamCodecActuator::collectOptionTags(OptionParseState& st)
         st.srcLen += fieldLen;
 
         std::vector<uint8_t> ids;
+        ids.reserve(fieldLen / 5 + 1);
         const uint8_t* p = line + fieldStartPos;
         uint32_t segStart = 0;
         for (uint32_t i = 0; i <= fieldLen; ++i) {
-            bool isEnd = (i == fieldLen) || (p[i] == '\t');
-            if (isEnd) {
-                uint32_t segLen = i - segStart;
-                if (segLen > 0 && p[segStart] != '\n') {
-                    const uint8_t* ts = p + segStart;
-                    const uint8_t* colon1 = nullptr, *colon2 = nullptr;
-                    for (uint32_t j = 1; j < segLen; ++j) {
-                        if (ts[j] == ':' && colon1 == nullptr) colon1 = ts + j;
-                        else if (ts[j] == ':' && colon2 == nullptr) colon2 = ts + j;
+            if (i != fieldLen && p[i] != '\t') {
+                continue;
+            }
+
+            const uint32_t segLen = i - segStart;
+            if (segLen > 0 && p[segStart] != '\n') {
+                const uint8_t* ts = p + segStart;
+                const uint8_t* segEnd = ts + segLen;
+                const uint8_t* colon1 = nullptr;
+                const uint8_t* colon2 = nullptr;
+                if (segLen > 1) {
+                    colon1 = static_cast<const uint8_t*>(
+                        memchr(ts + 1, ':', (size_t)(segLen - 1)));
+                }
+                if (colon1 != nullptr) {
+                    colon2 = static_cast<const uint8_t*>(
+                        memchr(colon1 + 1, ':', (size_t)(segEnd - (colon1 + 1))));
+                }
+                if (colon2 == nullptr) {
+                    /* Not TAG:TYPE:VALUE: the per-tag layout cannot represent it losslessly. */
+                    return -1;
+                }
+
+                const size_t nameLen = (size_t)(colon1 - ts);
+                const size_t typeLen = (size_t)(colon2 - colon1 - 1);
+                const char* namePtr = reinterpret_cast<const char*>(ts);
+                const char* typePtr = reinterpret_cast<const char*>(colon1 + 1);
+
+                /* The tag set is small; a direct comparison avoids a temporary
+                   std::string and a hash-map lookup for every tag of every line. */
+                int id = -1;
+                for (size_t t = 0; t < st.tagDict.size(); ++t) {
+                    const std::string& known = st.tagDict[t].first;
+                    if (known.size() == nameLen &&
+                        memcmp(known.data(), namePtr, nameLen) == 0) {
+                        id = (int)t;
+                        break;
                     }
-                    if (colon2 != nullptr) {
-                        std::string name((char*)ts, colon1 - ts);
-                        std::string type((char*)(colon1 + 1), colon2 - colon1 - 1);
-                        std::string value((char*)(colon2 + 1), ts + segLen - colon2 - 1);
-                        int id;
-                        auto it = st.tagId.find(name);
-                        if (it == st.tagId.end()) {
-                            id = (int)st.tagDict.size();
-                            st.tagDict.push_back({name, type});
-                            st.tagId[name] = id;
-                            st.tagVals.push_back({});
-                        } else {
-                            id = it->second;
-                            if (st.tagDict[id].second != type) {
-                                /* Same tag name with two types cannot share one column. */
-                                return -1;
-                            }
-                        }
-                        ids.push_back((uint8_t)id);
-                        st.tagVals[id].push_back(value);
-                    } else if (segLen > 0 && p[segStart] != '\n') {
-                        /* Not TAG:TYPE:VALUE: the per-tag layout cannot represent it losslessly. */
+                }
+                if (id < 0) {
+                    id = (int)st.tagDict.size();
+                    st.tagDict.emplace_back(std::string(namePtr, nameLen),
+                                            std::string(typePtr, typeLen));
+                    st.tagVals.emplace_back();
+                } else {
+                    const std::string& knownType = st.tagDict[id].second;
+                    if (knownType.size() != typeLen ||
+                        memcmp(knownType.data(), typePtr, typeLen) != 0) {
+                        /* Same tag name with two types cannot share one column. */
                         return -1;
                     }
                 }
-                segStart = i + 1;
+                ids.push_back((uint8_t)id);
+                st.tagVals[id].emplace_back(reinterpret_cast<const char*>(colon2 + 1),
+                                            (size_t)(segEnd - (colon2 + 1)));
             }
+            segStart = i + 1;
         }
-        st.recIds.push_back(ids);
+        st.recIds.push_back(std::move(ids));
     }
     return 0;
+}
+
+int32_t SamCodecActuator::collectOptionTags(OptionParseState& st)
+{
+    return parseOptionTags(inBlockPtr->getBuffer(), inBlockPtr->getNpos(),
+                           (uint32_t)headEndLine, contentPos, st);
 }
 
 /* Whether the block has a tag segment starting with `seg` (e.g. "MD:Z:"). A cheap byte scan:
@@ -1597,65 +1625,17 @@ static bool samTagIsInteger(const std::string& type)
 
 /* CRAM-style OPTION serialization: one column per tag, each encoded on its own (integer tags try
    text/varint/delta-varint; string tags are line-oriented text; MD/NM are regenerated). */
-int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
 
-    /* Gate the per-tag layout on a usable reference and the two regenerable tags *before* the
-       per-record parse. That parse allocates a string per tag per record; a file with many tags
-       but no MD/NM (e.g. con_sorted.sam) would otherwise pay it and then fall back to the whole
-       column anyway. */
-    if (pRefeGene == nullptr || !referenceUsableForSeq()) {
-        return -1;
-    }
-    {
-        const uint8_t* data = inBlockPtr->getBuffer();
-        const size_t len = (size_t)inBlockPtr->getDataLen();
-        if (!blockHasTagSegment(data, len, "MD:Z:") ||
-            !blockHasTagSegment(data, len, "NM:i:")) {
-            return -1;
-        }
-    }
-
-    /* Parse OPTION line by line: see collectOptionTags. */
-    OptionParseState opt;
-    if (collectOptionTags(opt) != 0) {
-        return -1;
-    }
-    fieldSrcLen = opt.srcLen;
-
-    const uint32_t nTag = (uint32_t)opt.tagDict.size();
-
-    /* The block scan above is only a hint; confirm the parsed dictionary really carries MD:Z and
-       NM:i, since the layout's win comes from regenerating them. */
-    int mdId = -1, nmId = -1;
-    for (uint32_t t = 0; t < nTag; ++t) {
-        if (opt.tagDict[t].first == "MD" && opt.tagDict[t].second == "Z") mdId = (int)t;
-        if (opt.tagDict[t].first == "NM" &&
-            (opt.tagDict[t].second == "i" || opt.tagDict[t].second == "I")) nmId = (int)t;
-    }
-    if (mdId < 0 || nmId < 0) {
-        return -1;
-    }
-
-    Json::Value streams(Json::arrayValue);
-    uint32_t totalDst = 0;
-
-    Json::Value tags(Json::arrayValue);
-    for (uint32_t t = 0; t < nTag; ++t) {
-        Json::Value e(Json::arrayValue);
-        e.append(opt.tagDict[t].first);
-        e.append(opt.tagDict[t].second);
-        tags.append(e);
-    }
-
-    /* MD:Z and NM:i are recomputed from the reference + CIGAR + SEQ (as CRAM does), so only the
-       records whose stored value differs from the recomputed one have to carry it. Each derived
-       column is a byte per value (0 = derive, 1 = stored) followed by the exception values. */
-    std::vector<std::vector<uint8_t>> derivedFlags(nTag);
-    std::vector<std::string> derivedExcs(nTag);
-    std::vector<bool> derivedReady(nTag, false);
-    {
-        std::vector<size_t>& npos = inBlockPtr->getNpos();
-        uint8_t* buffer = inBlockPtr->getBuffer();
+/* Recompute MD/NM from the reference + CIGAR + SEQ (as CRAM does) and mark, per value,
+   whether the stored one equals the regenerated one.  Takes the block views explicitly so
+   the file-level layout trial can share it. */
+static void deriveOptionTags(uint8_t* buffer, const std::vector<size_t>& npos,
+                             uint32_t headEndLine, const std::vector<LineTabs>& contentPos,
+                             Reference* ref, const OptionParseState& opt, int mdId, int nmId,
+                             std::vector<std::vector<uint8_t>>& derivedFlags,
+                             std::vector<std::string>& derivedExcs,
+                             std::vector<bool>& derivedReady)
+{
         std::vector<uint8_t> refScratch;
         std::vector<CigarOp> ops;
         size_t mdCur = 0, nmCur = 0;
@@ -1705,7 +1685,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
                 if (chrStart >= 0) {
                     ops.clear();
                     parseCigarOps(ci.start, ci.lengthWithoutTab(), ops);
-                    derivedOk = deriveMdNm(pRefeGene, chrStart, posVal, (uint16_t)flagVal, ops,
+                    derivedOk = deriveMdNm(ref, chrStart, posVal, (uint16_t)flagVal, ops,
                                            sq.start, sq.lengthWithoutTab(), refScratch, derivedMd,
                                            derivedNm);
                 }
@@ -1729,9 +1709,277 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
                 }
             }
         }
-        derivedReady[mdId] = true;
-        derivedReady[nmId] = true;
+    derivedReady[mdId] = true;
+    derivedReady[nmId] = true;
+}
+
+/* Build one tag's layout candidates: text, the integer forms, and the regenerated form. */
+static void buildOptionCandidates(const std::vector<std::string>& vals, bool isInt,
+                                  bool derivedReady,
+                                  const std::vector<uint8_t>& derivedFlags,
+                                  const std::string& derivedExc,
+                                  std::vector<std::pair<const char*, std::vector<uint8_t>>>& out)
+{
+    out.clear();
+    std::vector<uint8_t> textCol;
+    for (size_t k = 0; k < vals.size(); ++k) {
+        textCol.insert(textCol.end(), vals[k].begin(), vals[k].end());
+        textCol.push_back('\n');
     }
+    out.emplace_back("text", std::move(textCol));
+    if (isInt) {
+        std::vector<uint8_t> rawCol, deltaCol;
+        rawCol.reserve(vals.size() * 2 + 16);
+        deltaCol.reserve(vals.size() * 2 + 16);
+        int64_t prev = 0;
+        for (size_t k = 0; k < vals.size(); ++k) {
+            const int64_t v = strtoll(vals[k].c_str(), nullptr, 10);
+            appendVarint64(rawCol, (uint64_t)v);
+            appendVarint64(deltaCol, zigzag64(v - prev));
+            prev = v;
+        }
+        out.emplace_back("varint", std::move(rawCol));
+        out.emplace_back("dvarint", std::move(deltaCol));
+    }
+    if (derivedReady) {
+        /* flags (one per value) followed by the exception values, line by line. */
+        std::vector<uint8_t> derivedCol;
+        derivedCol.reserve(derivedFlags.size() + derivedExc.size());
+        derivedCol.insert(derivedCol.end(), derivedFlags.begin(), derivedFlags.end());
+        derivedCol.insert(derivedCol.end(), derivedExc.begin(), derivedExc.end());
+        out.emplace_back("derived", std::move(derivedCol));
+    }
+}
+
+/* Compressed size of one layout, encoded exactly as a block would encode it.  Returns 0 when
+   the scratch buffer could not hold it (the tag is then left unplanned). */
+static uint32_t trialLayoutSize(uint8_t mode, const std::vector<uint8_t>& blob,
+                                uint8_t* scratch, uint32_t scratchLen)
+{
+    if (scratch == nullptr || scratchLen == 0) {
+        return 0;
+    }
+    coder_io io(scratch, (int32_t)scratchLen, nullptr, "OPTION layout trial");
+    std::shared_ptr<coder> c = CoderFactory::makeProfileEncoder(SAM_FIELD_COUNT, mode, &io,
+                                                                CoderType::BWT_CM, false, 0);
+    c->encode_line(blob.data(), (uint32_t)blob.size());
+    c->encode_flush();
+    return (io.err == coder_io::IO_OK) ? (uint32_t)io.data_len : 0;
+}
+
+/* File head line count and per-line tab positions for a block, the views parseOptionTags and
+   deriveOptionTags take.  Returns false when a line is not a SAM record. */
+static bool buildOptionLineViews(const uint8_t* buffer, const std::vector<size_t>& npos,
+                                 std::vector<LineTabs>& contentPos, uint32_t& headEndLine)
+{
+    contentPos.clear();
+    contentPos.reserve(npos.size());
+    headEndLine = 0;
+    bool header = true;
+    for (size_t lineIdx = 0; lineIdx < npos.size(); ++lineIdx) {
+        const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
+        const uint32_t lineEnd = (uint32_t)npos[lineIdx] - lineStart;
+        if (lineEnd == 0) {
+            return false;   /* empty line */
+        }
+        if (header && buffer[lineStart] == '@') {
+            ++headEndLine;
+            continue;
+        }
+        header = false;
+        LineTabs tabs;
+        for (uint32_t i = 0; i < lineEnd; ++i) {
+            const uint8_t c = buffer[lineStart + i];
+            if (c == '\t' || c == '\n') {
+                tabs.push_back(i);
+                if (tabs.size() == LineTabs::CAP) {
+                    break;
+                }
+            }
+        }
+        if (tabs.size() < 10) {
+            return false;   /* not a SAM record */
+        }
+        contentPos.push_back(tabs);
+    }
+    return !contentPos.empty();
+}
+
+/* Build the file-level OPTION layout plan: trial every tag's layouts once and record the
+   winner.  Runs once, on a reader-side thread. */
+int32_t buildSamOptionPlan(uint8_t* buffer, uint32_t dataLen, const std::vector<size_t>& npos,
+                           Reference* ref, uint8_t mode,
+                           std::unordered_map<std::string, std::string>& out)
+{
+    out.clear();
+    if (ref == nullptr || buffer == nullptr || dataLen == 0 || npos.empty()) {
+        return 0;
+    }
+    if (!blockHasTagSegment(buffer, (size_t)dataLen, "MD:Z:") ||
+        !blockHasTagSegment(buffer, (size_t)dataLen, "NM:i:")) {
+        return 0;
+    }
+
+    std::vector<LineTabs> contentPos;
+    uint32_t headEndLine = 0;
+    if (!buildOptionLineViews(buffer, npos, contentPos, headEndLine)) {
+        return 0;
+    }
+    OptionParseState opt;
+    if (parseOptionTags(buffer, npos, headEndLine, contentPos, opt) != 0) {
+        return 0;
+    }
+
+    const uint32_t nTag = (uint32_t)opt.tagDict.size();
+    int mdId = -1, nmId = -1;
+    for (uint32_t t = 0; t < nTag; ++t) {
+        if (opt.tagDict[t].first == "MD" && opt.tagDict[t].second == "Z") mdId = (int)t;
+        if (opt.tagDict[t].first == "NM" &&
+            (opt.tagDict[t].second == "i" || opt.tagDict[t].second == "I")) nmId = (int)t;
+    }
+    if (mdId < 0 || nmId < 0) {
+        return 0;
+    }
+
+    std::vector<std::vector<uint8_t>> derivedFlags(nTag);
+    std::vector<std::string> derivedExcs(nTag);
+    std::vector<bool> derivedReady(nTag, false);
+    deriveOptionTags(buffer, npos, headEndLine, contentPos, ref, opt, mdId, nmId,
+                     derivedFlags, derivedExcs, derivedReady);
+
+    /* Same gate as the block path: most MD/NM values must be regenerable, or the per-tag
+       layout is not used at all and there is nothing to plan. */
+    size_t total = 0, derived = 0;
+    for (uint32_t t = 0; t < nTag; ++t) {
+        if (!derivedReady[t]) {
+            continue;
+        }
+        total += derivedFlags[t].size();
+        for (uint8_t f : derivedFlags[t]) {
+            if (f == 0) {
+                ++derived;
+            }
+        }
+    }
+    if (total == 0 || derived * 2 < total) {
+        return 0;
+    }
+
+    /* Generous scratch: a layout whose encode does not fit leaves the tag unplanned. */
+    const size_t scratchLen = (size_t)dataLen * 2 + (1u << 20);
+    std::vector<uint8_t> scratch(scratchLen);
+    int32_t planned = 0;
+    for (uint32_t t = 0; t < nTag; ++t) {
+        std::vector<std::pair<const char*, std::vector<uint8_t>>> cands;
+        buildOptionCandidates(opt.tagVals[t], samTagIsInteger(opt.tagDict[t].second),
+                              derivedReady[t], derivedFlags[t], derivedExcs[t], cands);
+        std::vector<uint32_t> sizes(cands.size(), 0);
+        uint32_t best = UINT32_MAX;
+        bool failed = false;
+        for (size_t c = 0; c < cands.size(); ++c) {
+            sizes[c] = trialLayoutSize(mode, cands[c].second, scratch.data(),
+                                       (uint32_t)scratchLen);
+            if (sizes[c] == 0) {
+                failed = true;
+                break;      /* no plan for this tag */
+            }
+            if (sizes[c] < best) {
+                best = sizes[c];
+            }
+        }
+        if (failed) {
+            continue;
+        }
+        /* The winner plus any exact tie: a tie must still be decided per block. */
+        std::string entry;
+        for (size_t c = 0; c < cands.size(); ++c) {
+            if (sizes[c] == best) {
+                if (!entry.empty()) {
+                    entry.push_back(',');
+                }
+                entry += cands[c].first;
+            }
+        }
+        std::string key = opt.tagDict[t].first;
+        key.push_back('\x1f');
+        key += opt.tagDict[t].second;
+        out[std::move(key)] = std::move(entry);
+        ++planned;
+    }
+    return planned;
+}
+
+int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+
+    /* Gate the per-tag layout on a usable reference and the two regenerable tags *before* the
+       per-record parse. That parse allocates a string per tag per record; a file with many tags
+       but no MD/NM (e.g. con_sorted.sam) would otherwise pay it and then fall back to the whole
+       column anyway. */
+    if (pRefeGene == nullptr || !referenceUsableForSeq()) {
+        return -1;
+    }
+    {
+        const uint8_t* data = inBlockPtr->getBuffer();
+        const size_t len = (size_t)inBlockPtr->getDataLen();
+        if (!blockHasTagSegment(data, len, "MD:Z:") ||
+            !blockHasTagSegment(data, len, "NM:i:")) {
+            return -1;
+        }
+    }
+
+    /* Parse OPTION line by line: see collectOptionTags. */
+    OptionParseState opt;
+    if (collectOptionTags(opt) != 0) {
+        return -1;
+    }
+    fieldSrcLen = opt.srcLen;
+
+    const uint32_t nTag = (uint32_t)opt.tagDict.size();
+
+    /* The block scan above is only a hint; confirm the parsed dictionary really carries MD:Z and
+       NM:i, since the layout's win comes from regenerating them. */
+    int mdId = -1, nmId = -1;
+    for (uint32_t t = 0; t < nTag; ++t) {
+        if (opt.tagDict[t].first == "MD" && opt.tagDict[t].second == "Z") mdId = (int)t;
+        if (opt.tagDict[t].first == "NM" &&
+            (opt.tagDict[t].second == "i" || opt.tagDict[t].second == "I")) nmId = (int)t;
+    }
+    if (mdId < 0 || nmId < 0) {
+        return -1;
+    }
+
+    /* File-level layout plan (see buildSamOptionPlan): built before this block was dispatched,
+       so waiting here costs nothing in normal runs.  Without a plan every tag is trialled. */
+    std::unordered_map<std::string, std::string> layoutPlan;
+    if (pbgzEngine != nullptr) {
+        SamOptionPlan& plan = pbgzEngine->getSamOptionPlan();
+        std::unique_lock<std::mutex> lock(plan.mutex);
+        if (plan.started) {
+            plan.cv.wait(lock, [&plan] { return plan.ready; });
+            layoutPlan = plan.layout;
+        }
+    }
+
+    Json::Value streams(Json::arrayValue);
+    uint32_t totalDst = 0;
+
+    Json::Value tags(Json::arrayValue);
+    for (uint32_t t = 0; t < nTag; ++t) {
+        Json::Value e(Json::arrayValue);
+        e.append(opt.tagDict[t].first);
+        e.append(opt.tagDict[t].second);
+        tags.append(e);
+    }
+
+    /* MD:Z and NM:i are recomputed from the reference + CIGAR + SEQ (as CRAM does), so only the
+       records whose stored value differs from the recomputed one have to carry it. Each derived
+       column is a byte per value (0 = derive, 1 = stored) followed by the exception values. */
+    std::vector<std::vector<uint8_t>> derivedFlags(nTag);
+    std::vector<std::string> derivedExcs(nTag);
+    std::vector<bool> derivedReady(nTag, false);
+    deriveOptionTags(inBlockPtr->getBuffer(), inBlockPtr->getNpos(), (uint32_t)headEndLine,
+                     contentPos, pRefeGene, opt, mdId, nmId, derivedFlags, derivedExcs,
+                     derivedReady);
 
     /* If most MD/NM values could not be regenerated (an aligner whose MD/NM differ from calmd),
        the per-tag layout loses its advantage; fall back to the plain column now, before writing
@@ -1815,46 +2063,64 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         return ok;
     };
 
+    /* Each tag's layouts are compared by compressing them in full.  The coder emits a
+       whole BWT block only on flush, so a partial encode cannot give a smaller size and
+       any estimate here could change the chosen layout (and the archive size). */
     for (uint32_t t = 0; t < nTag; ++t) {
         const std::vector<std::string>& vals = opt.tagVals[t];
 
-        std::vector<uint8_t> textCol;
-        for (size_t k = 0; k < vals.size(); ++k) {
-            textCol.insert(textCol.end(), vals[k].begin(), vals[k].end());
-            textCol.push_back('\n');
-        }
-
-        const bool isInt = samTagIsInteger(opt.tagDict[t].second);
         std::vector<std::pair<const char*, std::vector<uint8_t>>> candidates;
-        candidates.emplace_back("text", std::move(textCol));
-        if (isInt) {
-            std::vector<uint8_t> rawCol, deltaCol;
-            rawCol.reserve(vals.size() * 2 + 16);
-            deltaCol.reserve(vals.size() * 2 + 16);
-            int64_t prev = 0;
-            for (size_t k = 0; k < vals.size(); ++k) {
-                const int64_t v = strtoll(vals[k].c_str(), nullptr, 10);
-                appendVarint64(rawCol, (uint64_t)v);
-                appendVarint64(deltaCol, zigzag64(v - prev));
-                prev = v;
-            }
-            candidates.emplace_back("varint", std::move(rawCol));
-            candidates.emplace_back("dvarint", std::move(deltaCol));
-        }
-        if (derivedReady[t]) {
-            /* flags (one per value) followed by the exception values, line by line. */
-            std::vector<uint8_t> derivedCol;
-            derivedCol.reserve(derivedFlags[t].size() + derivedExcs[t].size());
-            derivedCol.insert(derivedCol.end(), derivedFlags[t].begin(), derivedFlags[t].end());
-            derivedCol.insert(derivedCol.end(), derivedExcs[t].begin(), derivedExcs[t].end());
-            candidates.emplace_back("derived", std::move(derivedCol));
-        }
+        buildOptionCandidates(vals, samTagIsInteger(opt.tagDict[t].second), derivedReady[t],
+                              derivedFlags[t], derivedExcs[t], candidates);
 
         const char* bestEnc = "text";
         uint32_t bestDst = UINT32_MAX, bestSrc = 0;
         Json::Value bestCoder;
         std::vector<uint8_t> bestBytes;
+
+        /* Layouts the file-level plan still wants compared here: the winner plus any exact
+           tie.  A tag without a plan entry (or a block where none of the planned layouts can
+           be built) is trialled in full. */
+        std::vector<const char*> planned;
+        if (!layoutPlan.empty()) {
+            std::string key = opt.tagDict[t].first;
+            key.push_back('\x1f');
+            key += opt.tagDict[t].second;
+            auto it = layoutPlan.find(key);
+            if (it != layoutPlan.end()) {
+                size_t pos = 0;
+                while (pos <= it->second.size()) {
+                    const size_t comma = it->second.find(',', pos);
+                    std::string name = it->second.substr(
+                        pos, (comma == std::string::npos ? it->second.size() : comma) - pos);
+                    if (!name.empty()) {
+                        for (auto& cand : candidates) {
+                            if (name == cand.first) {
+                                planned.push_back(cand.first);
+                                break;
+                            }
+                        }
+                    }
+                    if (comma == std::string::npos) {
+                        break;
+                    }
+                    pos = comma + 1;
+                }
+            }
+        }
         for (auto& cand : candidates) {
+            if (!planned.empty()) {
+                bool trialIt = false;
+                for (const char* name : planned) {
+                    if (strcmp(name, cand.first) == 0) {
+                        trialIt = true;
+                        break;
+                    }
+                }
+                if (!trialIt) {
+                    continue;
+                }
+            }
             std::vector<uint8_t> bytes;
             Json::Value coder;
             uint32_t dst = 0;

@@ -263,7 +263,7 @@ public:
         return dataBlockChecksum;
     }
 
-    int32_t verifyCheckSum();
+    int32_t verifyCheckSum(bool verifyContainer = true);
 
 private:
     PbgzBlockType blockType;       // block type

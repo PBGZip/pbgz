@@ -25,6 +25,7 @@
 #include <cstring>
 #include <random>
 #include <chrono>
+#include <vector>
 
 // Include the header with the functions to test
 #include "actg.h"
@@ -707,5 +708,47 @@ TEST_F(ActgTest, EdgeCases) {
         
         delete[] largeInput;
         delete[] largeOutput;
+    }
+}
+
+/*
+ * Every SIMD path must produce exactly the same bytes as the scalar path:
+ * same input -> same packed squash, same diff count, same stretch output.
+ * On non-ARM builds this compares the scalar code with itself; on ARM it
+ * guards the NEON implementations (including the <16/<8 byte tails).
+ */
+TEST_F(ActgTest, SimdMatchesScalar) {
+    std::mt19937 rng(20261028u);
+    std::uniform_int_distribution<int> byte(0, 255);
+
+    for (int len = 0; len <= 600; ++len) {
+        SCOPED_TRACE(::testing::Message() << "len=" << len);
+
+        std::vector<uint8_t> a((size_t)len);
+        std::vector<uint8_t> b((size_t)len);
+        for (int i = 0; i < len; ++i) {
+            a[i] = (uint8_t)byte(rng);
+            b[i] = (uint8_t)byte(rng);
+        }
+
+        const size_t squashCap = (size_t)((len + 3) / 4) + 4;
+        std::vector<uint8_t> squashSimd(squashCap, 0xAA);
+        std::vector<uint8_t> squashScalar(squashCap, 0xAA);
+        const int64_t nSimd = actgSquash(a.data(), len, squashSimd.data());
+        const int64_t nScalar = actgSquashScalar(a.data(), len, squashScalar.data());
+        ASSERT_EQ(nSimd, nScalar);
+        ASSERT_EQ(0, memcmp(squashSimd.data(), squashScalar.data(), (size_t)nScalar));
+
+        ASSERT_EQ(actgSquashDiffCnt(a.data(), b.data(), (uint32_t)len),
+                  actgSquashDiffCntScalar(a.data(), b.data(), (uint32_t)len));
+
+        std::vector<uint8_t> stretchSimd((size_t)len * 4 + 8, 0xAA);
+        std::vector<uint8_t> stretchScalar(stretchSimd.size(), 0xAA);
+        const uint32_t outSimd = actgStretchMappingXor(
+            a.data(), b.data(), (uint32_t)len, stretchSimd.data());
+        const uint32_t outScalar = actgStretchMappingXorScalar(
+            a.data(), b.data(), (uint32_t)len, stretchScalar.data());
+        ASSERT_EQ(outSimd, outScalar);
+        ASSERT_EQ(0, memcmp(stretchSimd.data(), stretchScalar.data(), outScalar));
     }
 }

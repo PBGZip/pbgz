@@ -26,7 +26,6 @@
 #include "log/logger.h"
 #include "farmhash/src/farmhash.h"
 
-
 std::string PbgzFileHeader::getVersionStr() {
     // Convert version array [major, minor, patch] to "x.x.x".
     if (version[0] == '\0') {
@@ -47,16 +46,28 @@ int32_t PbgzDataBlock::setBlockData(uint8_t* data, uint32_t length) {
 }
 
 void PbgzDataBlock::calcChecksum() {
-    dataBlockChecksum = util::Hash64((char*)pBlockData, (size_t)blockDataLength);
+    /* Fingerprint64 is portable; files written on x86 and ARM agree. */
+    dataBlockChecksum = util::Fingerprint64((char*)pBlockData, (size_t)blockDataLength);
     Json::StreamWriterBuilder writer;
     std::string jsonStr = Json::writeString(writer, dataMetaInfo);
-    metaChecksum = util::Hash64(jsonStr);
+    metaChecksum = util::Fingerprint64(jsonStr);
 }
 
-int32_t PbgzDataBlock::verifyCheckSum() {
+int32_t PbgzDataBlock::verifyCheckSum(bool verifyContainer) {
+    /*
+     * Legacy files carry util::Hash64() container checksums, whose value
+     * depends on the CPU-specific FarmHash variant, so they cannot be checked
+     * across architectures.  The caller disables this check for such files;
+     * their content still goes through the MD5 checksum in the block meta.
+     */
+    if (!verifyContainer) {
+        return 0;
+    }
+
     if (blockDataLength > 0 && dataBlockChecksum != 0) {
-        if (dataBlockChecksum != util::Hash64((char*)pBlockData, (size_t)blockDataLength)) {
-            LOG_ERROR("Meta checksum verify failed.");
+        if (dataBlockChecksum !=
+            util::Fingerprint64((char*)pBlockData, (size_t)blockDataLength)) {
+            LOG_ERROR("Data checksum verify failed.");
             return -1;
         }
     }
@@ -64,8 +75,8 @@ int32_t PbgzDataBlock::verifyCheckSum() {
     if (metaChecksum != 0) {
         Json::StreamWriterBuilder writer;
         std::string jsonStr = Json::writeString(writer, dataMetaInfo);
-        if (metaChecksum != util::Hash64(jsonStr)) {
-            LOG_ERROR("Data checksum verify failed.");
+        if (metaChecksum != util::Fingerprint64(jsonStr)) {
+            LOG_ERROR("Meta checksum verify failed.");
             return -1;
         }
     }

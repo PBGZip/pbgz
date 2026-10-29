@@ -40,6 +40,14 @@ else()
     message(STATUS "Detected unknown architecture")
 endif()
 
+# ARM PGO mode: OFF, GENERATE (instrumented training build) or USE.
+# Only ARM Linux + GCC is supported; other platforms ignore it.
+set(PBGZ_PGO "OFF" CACHE STRING "ARM PGO mode: OFF, GENERATE or USE")
+set_property(CACHE PBGZ_PGO PROPERTY STRINGS OFF GENERATE USE)
+if(NOT PBGZ_ARCH STREQUAL "arm64" AND NOT PBGZ_PGO STREQUAL "OFF")
+    message(WARNING "PBGZ_PGO is only supported on ARM; ignoring it")
+endif()
+
 # Platform detection
 if(APPLE)
     set(PBGZ_MACOS TRUE)
@@ -65,6 +73,31 @@ set(PBGZ_COMMON_FLAGS "-fvisibility=hidden")
 if(PBGZ_ARCH STREQUAL "x86_64")
     set(PBGZ_ARCH_FLAGS "-mbmi2 -msse4.2 -mmovbe -mavx2")
     add_definitions(-D__BMI2__ -D__SSE4_2__)
+elseif(PBGZ_ARCH STREQUAL "arm64")
+    if(UNIX AND NOT APPLE)
+        # ARMv8-A CRC32 is optional in v8.0; the target servers implement it
+        # (FT-2000/4 reports crc32+pmull).  LTO is enabled for ARM only so the
+        # x86 build flags and code generation stay untouched.
+        # For a baseline ARMv8-A build without CRC, remove +crc.
+        set(PBGZ_ARCH_FLAGS "-march=armv8-a+crc -flto")
+        if(NOT PBGZ_PGO STREQUAL "OFF")
+            if(PBGZ_COMPILER STREQUAL "gcc")
+                if(PBGZ_PGO STREQUAL "GENERATE")
+                    string(APPEND PBGZ_ARCH_FLAGS " -fprofile-generate")
+                elseif(PBGZ_PGO STREQUAL "USE")
+                    # -fprofile-correction tolerates the racing counters of a
+                    # multi-threaded training run; -Wno-missing-profile keeps
+                    # uncovered third-party code quiet.
+                    string(APPEND PBGZ_ARCH_FLAGS
+                           " -fprofile-use -fprofile-correction -Wno-missing-profile")
+                else()
+                    message(WARNING "Unknown PBGZ_PGO=${PBGZ_PGO}; expected OFF, GENERATE or USE")
+                endif()
+            else()
+                message(WARNING "PBGZ_PGO is only implemented for GCC on ARM; ignoring it")
+            endif()
+        endif()
+    endif()
 endif()
 
 # Compiler-specific flags

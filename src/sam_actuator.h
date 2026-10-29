@@ -92,7 +92,6 @@ struct TlenInput {
 /* The OPTION column's parse result (see collectOptionTags). */
 struct OptionParseState {
     std::vector<std::pair<std::string, std::string>> tagDict;  /* tag name and type, first-seen order */
-    std::map<std::string, int> tagId;                          /* name -> slot in tagDict */
     std::vector<std::vector<uint8_t>> recIds;                  /* one line's tag slots, in order */
     std::vector<std::vector<std::string>> tagVals;             /* one column of values per tag */
     uint32_t srcLen = 0;

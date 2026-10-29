@@ -81,6 +81,9 @@ public:
 
     std::string finish();
 
+    /* Bytes fed so far (the length mixed into Fingerprint128). */
+    uint64_t size() const;
+
 private:
     ChecksumType type;
     struct Impl;

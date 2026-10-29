@@ -58,6 +58,9 @@ public:
     /* Computes the block MD5 on the reader thread (see PbgzEngine::readOneBlock). */
     virtual void preDispatchBlock(RoughIOBlock* blockPtr) override;
 
+    /* Build the file-level OPTION layout plan on its own thread (see buildSamOptionPlan). */
+    void startSamOptionPlan(RoughIOBlock* blockPtr);
+
     /* Archive-mode BAM: launch the SAM render (conversion) thread pool. */
     virtual void engineReaderReady(BlockReader* blockReader) override;
 
@@ -77,6 +80,10 @@ protected:
     uint32_t renderThreadNum = 0;
     std::unique_ptr<BlockingQueueType> renderInputPool;
     std::vector<std::thread> renderThreads;
+
+    /* File-level OPTION layout plan builder; joined before the engine goes away. */
+    std::thread optionPlanThread;
+    bool optionPlanStarted = false;
 
     /* Reader thread accumulates QUAL prior samples block by block until the target block
        count or the 45 MB cap is reached. */

@@ -170,7 +170,8 @@ private:
     static void calculateReferenceChecksum(const std::string& refGeneFile,
                                            ChecksumType type,
                                            std::string& refGeneHash,
-                                           int64_t& refGeneLen);
+                                           int64_t& refGeneLen,
+                                           int64_t forcedTotalLen = -1);
 
     /// @brief Join the background checksum thread (if any) and publish its result.
     void ensureFastaInfo();

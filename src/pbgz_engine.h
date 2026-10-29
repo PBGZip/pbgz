@@ -36,6 +36,7 @@
 #include "utils/timer.h"
 #include "reference.h"
 #include "aux_block_consumer.h"
+#include "sam_option_plan.h"
 
 struct PreprocessInfo;
 
@@ -203,6 +204,9 @@ public:
     /* File-level POS delta prior, parsed from file meta; empty if none. */
     virtual AuxPayloadPtr getPosPrior() { return AuxPayloadPtr(); }
 
+    /* File-level SAM OPTION layout plan (see buildSamOptionPlan). */
+    SamOptionPlan& getSamOptionPlan() { return samOptionPlan; }
+
 
     std::vector<AuxBlockConsumer*> auxConsumers;
 
@@ -231,4 +235,7 @@ public:
 
     /* Returns true the first time, false afterwards; used to release once. */
     bool firstCoderNotify(bool flag);
+
+    /* Written by the reader before the coder workers need it, read-only afterwards. */
+    SamOptionPlan samOptionPlan;
 };

@@ -24,6 +24,9 @@
 #include <gtest/gtest.h>
 #include "pbgz_file.h"
 #include <coder_json.h>
+#include "farmhash/src/farmhash.h"
+
+#include <vector>
 
 // Test cases for PbgzFileHeader
 TEST(PbgzFileHeader, PbgzFileHeaderInit) {
@@ -66,3 +69,37 @@ TEST(PbgzDataBlock, PbgzDataBlockSetData) {
     EXPECT_EQ(memcmp(dataBlock.getDataPtr(), testData, dataLength), 0);
 }
 
+
+/*
+ * Container checksums switched from util::Hash64() to the portable
+ * Fingerprint64 so files written on x86 and ARM can be verified on either
+ * platform.  Files written by older versions still carry util::Hash64() and
+ * must keep verifying on the platform that wrote them.
+ */
+TEST(PbgzDataBlock, PortableChecksumAndLegacyFile) {
+    std::vector<uint8_t> data(256);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = (uint8_t)(i * 29u + 7u);
+    }
+
+    PbgzDataBlock block;
+    ASSERT_EQ(block.setBlockData(data.data(), (uint32_t)data.size()), 0);
+    block.setMetaData("field", "value");
+    block.calcChecksum();
+    EXPECT_EQ(block.verifyCheckSum(true), 0);
+
+    Json::StreamWriterBuilder writer;
+    const std::string meta = Json::writeString(writer, block.getMetaData());
+
+    /* Legacy files stored util::Hash64(), which is CPU-specific and is no
+       longer accepted.  Such files skip the container check (their content
+       still carries MD5), so they can cross architectures. */
+    block.setDataCheckSum(util::Hash64((const char*)data.data(), data.size()));
+    block.setMetaCheckSum(util::Hash64(meta));
+    EXPECT_EQ(block.verifyCheckSum(false), 0);
+
+    /* A corrupted portable checksum must still fail. */
+    block.setDataCheckSum(util::Fingerprint64((const char*)data.data(), data.size()) ^ 1ULL);
+    block.setMetaCheckSum(util::Fingerprint64(meta));
+    EXPECT_NE(block.verifyCheckSum(true), 0);
+}

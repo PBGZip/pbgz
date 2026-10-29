@@ -81,7 +81,48 @@ void CompressEngine::initStatsBasedOnFileType(BlockType fileType) {
     statsInitialized = true;
 }
 
+void CompressEngine::startSamOptionPlan(RoughIOBlock* blockPtr)
+{
+    optionPlanStarted = true;
+    if (blockPtr == nullptr || blockPtr->getDataLen() == 0) {
+        return;
+    }
+    /* The block is queued for a worker right after this, so the plan reads a private copy. */
+    std::vector<uint8_t> buffer(blockPtr->getBuffer(),
+                                blockPtr->getBuffer() + blockPtr->getDataLen());
+    std::vector<size_t> npos = blockPtr->getNpos();
+
+    Reference* ref = getReference();
+    const uint8_t mode = parameter.mode;
+    SamOptionPlan& plan = getSamOptionPlan();
+    {
+        std::lock_guard<std::mutex> lock(plan.mutex);
+        plan.started = true;
+    }
+    try {
+        optionPlanThread = std::thread([&plan, buffer = std::move(buffer),
+                                        npos = std::move(npos), ref, mode]() mutable {
+            std::unordered_map<std::string, std::string> layout;
+            buildSamOptionPlan(buffer.data(), (uint32_t)buffer.size(), npos, ref, mode, layout);
+            {
+                std::lock_guard<std::mutex> lock(plan.mutex);
+                plan.layout = std::move(layout);
+                plan.ready = true;
+            }
+            plan.cv.notify_all();
+        });
+    } catch (...) {
+        /* No thread: leave the plan empty and release anyone waiting on it. */
+        std::lock_guard<std::mutex> lock(plan.mutex);
+        plan.ready = true;
+        plan.cv.notify_all();
+    }
+}
+
 CompressEngine::~CompressEngine() {
+    if (optionPlanThread.joinable()) {
+        optionPlanThread.join();
+    }
     while(!freeIndexBlockQueue->empty()) {
         RoughIOBlock* ptr = freeIndexBlockQueue->get();
         MemoryUtil::safeDeleteClass(ptr);
@@ -196,6 +237,19 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
         PBGZ_PROF_SCOPE(pbgzprof::READ_HEADER);
         SamUtil::prefetchHeaderChromosomes(blockPtr->getBuffer(), blockPtr->getDataLen(),
                                            blockPtr->getNpos());
+        /* First block with records: plan the per-tag OPTION layouts off the reader thread.
+           It starts before this block is queued, so every worker sees the plan coming. */
+        if (!optionPlanStarted) {
+            const uint8_t* buf = blockPtr->getBuffer();
+            const std::vector<size_t>& npos = blockPtr->getNpos();
+            for (size_t i = 0; i < npos.size(); ++i) {
+                const size_t begin = (i == 0) ? 0 : npos[i - 1] + 1;
+                if (begin < npos[i] && buf[begin] != '@') {
+                    startSamOptionPlan(blockPtr);
+                    break;
+                }
+            }
+        }
     }
     if (blockPtr->getBamColumns() != nullptr) {
         /* Structured BAM: hashing is deferred to the compressing worker. */
@@ -474,6 +528,17 @@ void CompressEngine::finalizePretrain() {
 void CompressEngine::readLoopPostProc() {
     if (pretraining) {
         finalizePretrain();
+    }
+    if (optionPlanThread.joinable()) {
+        optionPlanThread.join();
+    }
+    if (!optionPlanStarted) {
+        /* No SAM data block ever started the plan: release the workers with an empty one. */
+        SamOptionPlan& plan = getSamOptionPlan();
+        std::lock_guard<std::mutex> lock(plan.mutex);
+        plan.started = true;
+        plan.ready = true;
+        plan.cv.notify_all();
     }
     signalPriorSettled();
 }

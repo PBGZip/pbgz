@@ -239,6 +239,7 @@ public:
     size_t readIO(void* pBuffer, size_t readSize) override;
 
     size_t readLine(std::string& line) override;
+    size_t readLine(std::string& line, ChecksumStream* sink) override;
 
     void closeIO() override;
 
@@ -295,6 +296,7 @@ public:
     size_t readIO(void* pBuffer, size_t readSize) override;
 
     size_t readLine(std::string& line) override;
+    size_t readLine(std::string& line, ChecksumStream* sink) override;
 
     void closeIO() override;
 

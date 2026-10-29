@@ -32,7 +32,13 @@ cd $libname
   # -fPIC alone would *override* zlib's default CFLAGS, silently dropping its
   # -O3 and leaving deflate/crc at unoptimized speed (measured: 17.7 MB/s vs
   # 33.6 MB/s on the same 236MB BAM stream). Keep -O3.
-  CFLAGS="-O3 -fPIC" ./configure --prefix=$buildpath/zlib
+  # On Linux ARMv8, enable the CRC32 extension so zlib uses hardware CRC.
+  # x86 builds keep exactly the previous flags.
+  ZLIB_CFLAGS="-O3 -fPIC"
+  if [ "$(uname -s)" = "Linux" ] && { [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; }; then
+    ZLIB_CFLAGS="$ZLIB_CFLAGS -march=armv8-a+crc"
+  fi
+  CFLAGS="$ZLIB_CFLAGS" ./configure --prefix=$buildpath/zlib
   make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
   make install 
 else

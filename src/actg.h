@@ -26,14 +26,19 @@
 #include <stdint.h>
 #include <mutex>
 #include <bitset>
+#include <cstring>
 #include "utils/memory_util.h"
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 /* ACTG pair lookup table */
 static uint16_t *actgp = nullptr;
 static std::mutex actgpMutex;
 
 /*  ACTG -> 00011011 */
-static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *dst) {
+static inline int64_t actgSquashScalar(const uint8_t *base, int64_t baseLen, uint8_t *dst) {
     uint8_t *squash = dst;
     int64_t len4align = (baseLen >> 2) << 2;
     int64_t len4remain = baseLen - len4align;
@@ -48,6 +53,61 @@ static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *
         squash++;
     }
     return (squash - dst);
+}
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+
+/*
+ * 16 ASCII bases -> 4 packed bytes.  Each group of four is packed in reverse
+ * order like the scalar loop (the last base occupies the low bits); the four
+ * 2-bit fields are disjoint, so pairwise addition is equivalent to OR.
+ */
+static inline int64_t actgSquashNeon(const uint8_t *base, int64_t baseLen, uint8_t *dst) {
+    static const uint8_t kShifts[16] = {6, 4, 2, 0, 6, 4, 2, 0,
+                                        6, 4, 2, 0, 6, 4, 2, 0};
+    const uint8x16_t mask = vdupq_n_u8(0x06);
+    const int8x16_t shifts = vreinterpretq_s8_u8(vld1q_u8(kShifts));
+    uint8_t *out = dst;
+    int64_t n = 0;
+
+    for (; n + 16 <= baseLen; n += 16) {
+        uint8x16_t x = vandq_u8(vld1q_u8(base + n), mask);
+        x = vshrq_n_u8(x, 1);
+        x = vshlq_u8(x, shifts);
+        const uint8x16_t pairs = vpaddq_u8(x, x);
+        const uint8x16_t groups = vpaddq_u8(pairs, pairs);
+        const uint32_t packed =
+            vget_lane_u32(vreinterpret_u32_u8(vget_low_u8(groups)), 0);
+        memcpy(out, &packed, sizeof(packed));
+        out += 4;
+    }
+
+    /* Same grouping rules as the scalar implementation for the last <16 bytes. */
+    const int64_t rem = baseLen - n;
+    const int64_t len4 = (rem >> 2) << 2;
+    const uint8_t *p = base + n;
+    for (int64_t i = 0; i < len4; i += 4) {
+        *out++ = (uint8_t)(((p[i + 3] & 0x06) >> 1) | ((p[i + 2] & 0x06) << 1) |
+                           ((p[i + 1] & 0x06) << 3) | ((p[i] & 0x06) << 5));
+    }
+    if (len4 < rem) {
+        uint8_t v = 0;
+        for (int64_t i = len4; i < rem; ++i) {
+            v = (uint8_t)(v | (((p[i] & 0x06) >> 1) << (6 - ((i - len4) << 1))));
+        }
+        *out++ = v;
+    }
+    return (int64_t)(out - dst);
+}
+
+#endif /* __aarch64__ && __ARM_NEON */
+
+static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *dst) {
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    return actgSquashNeon(base, baseLen, dst);
+#else
+    return actgSquashScalar(base, baseLen, dst);
+#endif
 }
 
 /* Calculate complementary strand of bases */
@@ -111,7 +171,7 @@ static inline uint32_t getDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t
 }
 
 /* Count differing ACTG bases after squash. */
-static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len) {
+static inline uint32_t actgSquashDiffCntScalar(const uint8_t *s1, const uint8_t *s2, uint32_t len) {
     // Add safety checks
     if (s1 == nullptr || s2 == nullptr) {
         return 0;
@@ -152,6 +212,41 @@ static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, u
         cnt += std::bitset<8>{x8}.count();
     }
     return cnt;
+}
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+
+/* Same per-byte bit folding as the scalar loop, 16 bytes at a time. */
+static inline uint32_t actgSquashDiffCntNeon(const uint8_t *s1, const uint8_t *s2, uint32_t len) {
+    if (s1 == nullptr || s2 == nullptr || len == 0) {
+        return 0;
+    }
+
+    const uint8x16_t mask = vdupq_n_u8(0x55);
+    uint32_t cnt = 0;
+    uint32_t n = 0;
+    for (; n + 16 <= len; n += 16) {
+        const uint8x16_t x = veorq_u8(vld1q_u8(s1 + n), vld1q_u8(s2 + n));
+        const uint8x16_t folded =
+            vorrq_u8(vandq_u8(x, mask), vandq_u8(vshrq_n_u8(x, 1), mask));
+        cnt += vaddvq_u8(vcntq_u8(folded));
+    }
+    for (; n < len; ++n) {
+        uint8_t x = (uint8_t)(s1[n] ^ s2[n]);
+        x = (uint8_t)((x & 0x55) | ((x >> 1) & 0x55));
+        cnt += (uint32_t)__builtin_popcount((unsigned)x);
+    }
+    return cnt;
+}
+
+#endif /* __aarch64__ && __ARM_NEON */
+
+static inline uint32_t actgSquashDiffCnt(const uint8_t *s1, const uint8_t *s2, uint32_t len) {
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    return actgSquashDiffCntNeon(s1, s2, len);
+#else
+    return actgSquashDiffCntScalar(s1, s2, len);
+#endif
 }
 
 /* Map base to reference after squash; 2 bits at end of byte, 0 if same, else original base bits. */
@@ -213,7 +308,7 @@ static inline uint32_t actgStretchMapping(const uint8_t *squashBase, const uint8
 }
 
 /* Map base to reference after squash; 2 bits placed at end of byte. */
-static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst) {
+static inline uint32_t actgStretchMappingXorScalar(const uint8_t *squashBase, const uint8_t *squashRefe, uint32_t squashLen, uint8_t *dst) {
     uint32_t n, offset = 0, x32, next;
     uint64_t x64, x64_1, x64_2;
     uint8_t *p;
@@ -315,6 +410,53 @@ static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase, const ui
         break;
     }
     return offset;
+}
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+
+/*
+ * Expand eight squash bytes into 32 bytes: each 2-bit field becomes one byte,
+ * most-significant field first, matching the scalar STRETCH_XOR macros.
+ */
+static inline uint32_t actgStretchMappingXorNeon(const uint8_t *squashBase,
+                                                 const uint8_t *squashRefe,
+                                                 uint32_t squashLen, uint8_t *dst) {
+    const uint8x8_t mask = vdup_n_u8(0x03);
+    uint32_t n = 0;
+    uint32_t offset = 0;
+
+    for (; n + 8 <= squashLen; n += 8) {
+        const uint8x8_t x = veor_u8(vld1_u8(squashBase + n), vld1_u8(squashRefe + n));
+        uint8x8x4_t out;
+        out.val[0] = vand_u8(vshr_n_u8(x, 6), mask);
+        out.val[1] = vand_u8(vshr_n_u8(x, 4), mask);
+        out.val[2] = vand_u8(vshr_n_u8(x, 2), mask);
+        out.val[3] = vand_u8(x, mask);
+        vst4_u8(dst + offset, out);
+        offset += 32;
+    }
+
+    /* The scalar tail writes one 4-byte group per remaining squash byte. */
+    for (; n < squashLen; ++n) {
+        const uint32_t x = (uint32_t)(squashBase[n] ^ squashRefe[n]);
+        const uint32_t v = ((x & 0xC0) >> 6) | ((x & 0x30) << 4) |
+                           ((x & 0x0C) << 14) | ((x & 0x03) << 24);
+        memcpy(dst + offset, &v, sizeof(v));
+        offset += 4;
+    }
+    return offset;
+}
+
+#endif /* __aarch64__ && __ARM_NEON */
+
+static inline uint32_t actgStretchMappingXor(const uint8_t *squashBase,
+                                             const uint8_t *squashRefe,
+                                             uint32_t squashLen, uint8_t *dst) {
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    return actgStretchMappingXorNeon(squashBase, squashRefe, squashLen, dst);
+#else
+    return actgStretchMappingXorScalar(squashBase, squashRefe, squashLen, dst);
+#endif
 }
 
 /* Encode ACTG: 1 byte per base, only the last 2 bits are valid. */

@@ -117,7 +117,24 @@ static inline bool x86(const uint8_t *in, uint32_t n, uint8_t *out)
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
 
-static inline bool arm(const uint8_t *in, uint32_t n, uint8_t *out)
+/* Pack 16 already-validated 2-bit codes (one per byte) into 4 bytes. */
+static inline void armPack16(const uint8x16_t code, uint8_t *out)
+{
+    /* code is 16 bytes, each 0..3. Pack two codes into a 4-bit nibble, then
+       two nibbles into a byte, entirely in the 16/32-bit lanes. */
+    const uint16x8_t c16 = vreinterpretq_u16_u8(code); /* lo=code[2j], hi=code[2j+1] */
+    const uint16x8_t nib = vorrq_u16(vandq_u16(c16, vdupq_n_u16(0x0003)),
+                                     vandq_u16(vshrq_n_u16(c16, 6), vdupq_n_u16(0x000C)));
+    const uint32x4_t n32 = vreinterpretq_u32_u16(nib);
+    const uint32x4_t byt = vorrq_u32(vandq_u32(n32, vdupq_n_u32(0x0000000Fu)),
+                                     vandq_u32(vshrq_n_u32(n32, 12), vdupq_n_u32(0x000000F0u)));
+    const uint16x4_t t16 = vmovn_u32(byt);
+    const uint8x8_t t8 = vmovn_u16(vcombine_u16(t16, t16));
+    vst1_lane_u32(reinterpret_cast<uint32_t *>(out), vreinterpret_u32_u8(t8), 0);
+}
+
+/* Validate and pack one 16-base chunk; false means a non-ACGT byte was seen. */
+static inline bool armEncode16(const uint8_t *in, uint8_t *out)
 {
     const uint8x16_t vA = vdupq_n_u8('A');
     const uint8x16_t vC = vdupq_n_u8('C');
@@ -127,30 +144,38 @@ static inline bool arm(const uint8_t *in, uint32_t n, uint8_t *out)
     const uint8x16_t two = vdupq_n_u8(2);
     const uint8x16_t three = vdupq_n_u8(3);
 
+    const uint8x16_t x = vld1q_u8(in);
+    const uint8x16_t cA = vceqq_u8(x, vA);
+    const uint8x16_t cC = vceqq_u8(x, vC);
+    const uint8x16_t cG = vceqq_u8(x, vG);
+    const uint8x16_t cT = vceqq_u8(x, vT);
+    const uint8x16_t valid = vorrq_u8(vorrq_u8(cA, cC), vorrq_u8(cG, cT));
+    if (vminvq_u8(valid) != 0xFF) {
+        return false;
+    }
+    const uint8x16_t code = vorrq_u8(vandq_u8(cC, one),
+                                     vorrq_u8(vandq_u8(cG, two), vandq_u8(cT, three)));
+    armPack16(code, out);
+    return true;
+}
+
+static inline bool arm(const uint8_t *in, uint32_t n, uint8_t *out)
+{
     uint32_t i = 0, o = 0;
-    for (; i + 16 <= n; i += 16) {
-        const uint8x16_t x = vld1q_u8(in + i);
-        const uint8x16_t cA = vceqq_u8(x, vA);
-        const uint8x16_t cC = vceqq_u8(x, vC);
-        const uint8x16_t cG = vceqq_u8(x, vG);
-        const uint8x16_t cT = vceqq_u8(x, vT);
-        const uint8x16_t valid = vorrq_u8(vorrq_u8(cA, cC), vorrq_u8(cG, cT));
-        if (vminvq_u8(valid) != 0xFF) {
+
+    /* Two 16-base chunks per iteration: fewer branches and a paired output
+       pattern, while the scalar tail keeps the exact fallback semantics. */
+    for (; i + 32 <= n; i += 32) {
+        if (!armEncode16(in + i, out + o) ||
+            !armEncode16(in + i + 16, out + o + 4)) {
             return scalar(in + i, n - i, out + o);
         }
-        const uint8x16_t code = vorrq_u8(vandq_u8(cC, one),
-                                         vorrq_u8(vandq_u8(cG, two), vandq_u8(cT, three)));
-        /* code is 16 bytes, each 0..3. Pack two codes into a 4-bit nibble, then
-           two nibbles into a byte, entirely in the 16/32-bit lanes. */
-        const uint16x8_t c16 = vreinterpretq_u16_u8(code); /* lo=code[2j], hi=code[2j+1] */
-        const uint16x8_t nib = vorrq_u16(vandq_u16(c16, vdupq_n_u16(0x0003)),
-                                         vandq_u16(vshrq_n_u16(c16, 6), vdupq_n_u16(0x000C)));
-        const uint32x4_t n32 = vreinterpretq_u32_u16(nib);
-        const uint32x4_t byt = vorrq_u32(vandq_u32(n32, vdupq_n_u32(0x0000000Fu)),
-                                         vandq_u32(vshrq_n_u32(n32, 12), vdupq_n_u32(0x000000F0u)));
-        const uint16x4_t t16 = vmovn_u32(byt);
-        const uint8x8_t t8 = vmovn_u16(vcombine_u16(t16, t16));
-        vst1_lane_u32(reinterpret_cast<uint32_t *>(out + o), vreinterpret_u32_u8(t8), 0);
+        o += 8;
+    }
+    for (; i + 16 <= n; i += 16) {
+        if (!armEncode16(in + i, out + o)) {
+            return scalar(in + i, n - i, out + o);
+        }
         o += 4;
     }
     if (i < n) {

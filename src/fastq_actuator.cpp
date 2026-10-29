@@ -26,6 +26,10 @@
 #include <atomic>
 #include <memory>
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 #include "fastq_actuator.h"
 #include "compress_engine.h"
 #include "reference.h"
@@ -83,6 +87,20 @@ static bool seqHasNonAcgt(const uint8_t* p, uint32_t len, bool allowN)
             return true;
         }
     }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    const uint8x16_t acgt[4] = {vdupq_n_u8('A'), vdupq_n_u8('C'),
+                                vdupq_n_u8('G'), vdupq_n_u8('T')};
+    for (; i + 16 <= len; i += 16) {
+        const uint8x16_t x = vld1q_u8(p + i);
+        const uint8x16_t ac = vorrq_u8(vceqq_u8(x, acgt[0]), vceqq_u8(x, acgt[1]));
+        uint8x16_t gt = vorrq_u8(vceqq_u8(x, acgt[2]), vceqq_u8(x, acgt[3]));
+        if (allowN) {
+            gt = vorrq_u8(gt, vceqq_u8(x, vdupq_n_u8('N')));
+        }
+        if (vminvq_u8(vorrq_u8(ac, gt)) != 0xFF) {
+            return true;
+        }
+    }
 #endif
     for (; i < len; ++i) {
         const uint8_t ch = p[i];
@@ -93,7 +111,7 @@ static bool seqHasNonAcgt(const uint8_t* p, uint32_t len, bool allowN)
     return false;
 }
 
-// SIMD-optimized N character counting using SSE4.2
+// SIMD-optimized N character counting (SSE4.2 / NEON)
 uint32_t FastqCodecActuator::countN_SSE2(const uint8_t* data, size_t length) {
     uint32_t count = 0;
     size_t i = 0;
@@ -106,6 +124,14 @@ uint32_t FastqCodecActuator::countN_SSE2(const uint8_t* data, size_t length) {
         __m128i cmp_upper = _mm_cmpeq_epi8(chunk, target_upper);
         uint32_t mask = _mm_movemask_epi8(cmp_upper);
         count += __builtin_popcount(mask);
+    }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    const uint8x16_t target_upper = vdupq_n_u8('N');
+    const uint8x16_t one = vdupq_n_u8(1);
+
+    for (; i + 16 <= length; i += 16) {
+        const uint8x16_t cmp_upper = vceqq_u8(vld1q_u8(data + i), target_upper);
+        count += vaddvq_u8(vandq_u8(cmp_upper, one));
     }
 #endif
 
@@ -154,7 +180,7 @@ uint32_t FastqCodecActuator::countN_Optimized(const uint8_t* data, size_t length
         return countN_Unrolled(data, length);
     }
 
-#ifdef __SSE4_2__
+#if defined(__SSE4_2__) || (defined(__aarch64__) && defined(__ARM_NEON))
     return countN_SSE2(data, length);
 #else
     return countN_Unrolled(data, length);

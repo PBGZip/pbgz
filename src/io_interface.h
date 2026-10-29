@@ -27,6 +27,8 @@
 #include <stddef.h>
 #include <string>
 
+class ChecksumStream;
+
 enum class IOWhence {
     IO_WHENCE_SET = 0,
     IO_WHENCE_CUR = 1,
@@ -47,6 +49,13 @@ public:
     virtual ~IOReader() {};
 
     virtual size_t readLine(std::string& line) = 0;
+
+    /* Line readers that can expose the raw bytes (including delimiters) feed
+       them to the sink while parsing; used to hash a reference FASTA in the
+       same pass that builds its squash. */
+    virtual size_t readLine(std::string& line, ChecksumStream* /*sink*/) {
+        return readLine(line);
+    }
 
     virtual bool isEOF() { return eofFlag; }
 

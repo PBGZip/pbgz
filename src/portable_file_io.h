@@ -42,6 +42,7 @@ public:
     void closeIO() override;
     size_t readIO(void* pBuffer, size_t readSize) override;
     size_t readLine(std::string& line) override;
+    size_t readLine(std::string& line, ChecksumStream* sink) override;
 
     int32_t seekIO(uint64_t seekOffset,
                    IOWhence whence = IOWhence::IO_WHENCE_SET) override;

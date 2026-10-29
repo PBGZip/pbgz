@@ -190,18 +190,37 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
 }
 
 bool Reference::initSquashFromFasta() {
-    /* The FASTA is read twice - once for the file checksum and once for the squash - and the two
-       passes are independent, so the checksum runs on its own thread while this one builds the
-       squash. The result is published lazily by ensureFastaInfo(), so a caller that does not need
-       the checksum (e.g. the compression metadata, which carries it in the end-of-file meta) lets
-       it overlap the whole compression instead of blocking the load. */
-    checksumJob = std::make_shared<ChecksumJob>();
-    const std::string checksumInput = refGeneFile;
-    const ChecksumType checksumType = fastaChecksumType;
-    std::shared_ptr<ChecksumJob> job = checksumJob;
-    job->thread = std::thread([job, checksumInput, checksumType]() {
-        calculateReferenceChecksum(checksumInput, checksumType, job->value, job->len);
-    });
+    /* Hash the FASTA while the squash is built when the uncompressed length is
+       known in advance: Fingerprint128 mixes the length into its state, and a
+       plain file or a single-member gzip trailer provides it.  Unusual gzip
+       streams (multi-member, wrapped past 4 GiB) fall back to the old
+       background pass, which decompresses the file a second time. */
+    const bool isGz = PathUtil::isGzFile(refGeneFile);
+    int64_t totalLen = 0;
+    bool inlineChecksum = (fastaChecksumType == ChecksumType::MD5);
+    if (!inlineChecksum) {
+        if (isGz) {
+            totalLen = PathUtil::getGzUncompressedSize(refGeneFile);
+            inlineChecksum = totalLen > 0;
+        } else {
+            totalLen = PathUtil::getFileSize(refGeneFile);
+            inlineChecksum = totalLen >= 0;
+        }
+    }
+
+    std::unique_ptr<ChecksumStream> checksumStream;
+    if (inlineChecksum) {
+        checksumStream = std::make_unique<ChecksumStream>(fastaChecksumType,
+                                                          (uint64_t)totalLen);
+    } else {
+        checksumJob = std::make_shared<ChecksumJob>();
+        const std::string checksumInput = refGeneFile;
+        const ChecksumType checksumType = fastaChecksumType;
+        std::shared_ptr<ChecksumJob> job = checksumJob;
+        job->thread = std::thread([job, checksumInput, checksumType]() {
+            calculateReferenceChecksum(checksumInput, checksumType, job->value, job->len);
+        });
+    }
 
     std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
     if (reader == nullptr || reader->openIO() != 0) {
@@ -210,11 +229,12 @@ bool Reference::initSquashFromFasta() {
         return false;
     }
 
-    /* Build squash in memory: 4 bases per byte (2 bits each). The checksum pass's exact content
-       length is not available yet, so reserve from the on-disk size (an upper bound for a plain
-       FASTA; a gzip reference just reallocates a little). */
+    /* Build squash in memory: 4 bases per byte (2 bits each). */
     std::vector<uint8_t> squash;
-    squash.reserve((size_t)(PathUtil::getFileSize(refGeneFile) / 4 + 1024));
+    {
+        const int64_t expectLen = (totalLen > 0) ? totalLen : PathUtil::getFileSize(refGeneFile);
+        squash.reserve(expectLen > 0 ? (size_t)(expectLen / 4 + 1024) : 1024);
+    }
 
     uint8_t cacheActg[4];
     uint32_t cacheLen = 0;
@@ -224,7 +244,7 @@ bool Reference::initSquashFromFasta() {
     uint64_t baseCount = 0;
     refSequences.clear();
 
-    while (reader->readLine(line) > 0) {
+    while (reader->readLine(line, checksumStream.get()) > 0) {
         if (line.empty()) continue;
         if (line[0] == '>') {
             /* Record name: first whitespace-delimited token of the header. */
@@ -276,6 +296,21 @@ bool Reference::initSquashFromFasta() {
         squash.push_back(ch);
     }
 
+    if (checksumStream != nullptr) {
+        const uint64_t fed = checksumStream->size();
+        fastaChecksum = checksumStream->finish();
+        fastaLength = (int64_t)fed;
+        if (fastaChecksumType == ChecksumType::FarmHash128 &&
+            totalLen > 0 && fed != (uint64_t)totalLen) {
+            /* The length guessed from stat/ISIZE was wrong (or the file changed);
+               redo with the length that was actually read. */
+            LOG_ERROR("Reference %s length changed while hashing; re-reading.",
+                      refGeneFile.c_str());
+            calculateReferenceChecksum(refGeneFile, fastaChecksumType,
+                                       fastaChecksum, fastaLength, (int64_t)fed);
+        }
+    }
+
     /* Fill each record's length now that the next record's offset (or the end) is known. */
     for (size_t i = 0; i < refSequences.size(); ++i) {
         const uint64_t end = (i + 1 < refSequences.size()) ? refSequences[i + 1].offset : baseCount;
@@ -313,7 +348,8 @@ uint8_t* Reference::initSquashByStream(int64_t squashLength) {
 }
 
 void Reference::calculateReferenceChecksum(const std::string& refGeneFile, ChecksumType type,
-                                           std::string& refGeneHash, int64_t& refGeneLen) {
+                                           std::string& refGeneHash, int64_t& refGeneLen,
+                                           int64_t forcedTotalLen) {
     /* A 4 MB buffer keeps the per-read syscall overhead negligible against the checksum cost. */
     uint32_t bufferLen = 4u << 20, len;
     refGeneLen = 0;
@@ -323,15 +359,18 @@ void Reference::calculateReferenceChecksum(const std::string& refGeneFile, Check
     /* Fingerprint128 mixes in the input length, so it must be known before the
        first byte is hashed.  A plain file reports its size directly; for gzip,
        ISIZE covers single-member files below 4 GiB. */
-    int64_t totalLen = isGzFile ? PathUtil::getGzUncompressedSize(refGeneFile)
-                                : PathUtil::getFileSize(refGeneFile);
+    int64_t totalLen = forcedTotalLen;
+    if (totalLen < 0) {
+        totalLen = isGzFile ? PathUtil::getGzUncompressedSize(refGeneFile)
+                            : PathUtil::getFileSize(refGeneFile);
+    }
     if (!isGzFile && totalLen < 0) {
         LOG_ERROR("Failed to stat file: %s", refGeneFile.c_str());
         MemoryUtil::safeFree(buffer);
         return;
     }
-    const bool lengthFromTrailer = isGzFile && totalLen > 0;
-    if (isGzFile && totalLen <= 0) {
+    const bool lengthFromTrailer = (forcedTotalLen < 0) && isGzFile && totalLen > 0;
+    if (forcedTotalLen < 0 && isGzFile && totalLen <= 0) {
         /* ISIZE is missing or untrustworthy (multi-member, wrapped past 4 GiB):
            count the decompressed bytes once. */
         GzFileReader counter(refGeneFile, 1);

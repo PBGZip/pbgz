@@ -291,6 +291,7 @@ struct ChecksumStream::Impl {
     ChecksumType type;
     md5_ctx md5;
     Farm128State farm;
+    uint64_t bytesFed = 0;
     bool finished = false;
 };
 
@@ -305,11 +306,17 @@ void ChecksumStream::update(const uint8_t* data, size_t len)
     if (impl->finished || data == nullptr || len == 0) {
         return;
     }
+    impl->bytesFed += len;
     if (type == ChecksumType::MD5) {
         md5_update(&impl->md5, data, len);
     } else {
         impl->farm.update(data, len);
     }
+}
+
+uint64_t ChecksumStream::size() const
+{
+    return impl->bytesFed;
 }
 
 std::string ChecksumStream::finish()

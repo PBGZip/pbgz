@@ -386,7 +386,7 @@ public:
     coder_io* io;
     ContextModel cm;
     HuffTree tree;
-    RangeCoder rc;
+    FcRangeCoder rc;
 
     /*
      * Probability model for the strand. The strand is written into the stream
@@ -844,7 +844,7 @@ int32_t coder_fcv2::encode_flush()
 
 /* Reads the stream header, rewinding the range decoder first. Anything that
    does not fit this build's layout is refused as an unsupported version. */
-static bool readStreamHeader(RangeCoder& rc, const uint8_t* data, int& alpha, Fcv2Cfg& cfg)
+static bool readStreamHeader(FcRangeCoder& rc, const uint8_t* data, int& alpha, Fcv2Cfg& cfg)
 {
     rc.InitDecoder(data);
     if ((int)rc.DecodeByte() != (int)FCV2_STREAM_VERSION) {

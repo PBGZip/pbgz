@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "io_wrapper.h"
+#include "utils/checksum.h"
 #include "log/logger.h"
 #include "utils/memory_util.h"
 
@@ -625,7 +626,7 @@ size_t PipeReader::readLine(std::string& line) {
 
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
-        bufferSize = 8192;  // 8KB buffer
+        bufferSize = 65536;  // 64KB line buffer: fewer read calls
         lineBuffer = new char[bufferSize];
         bufferPos = 0;
         bytesRead = 0;
@@ -733,6 +734,10 @@ void GzFileReader::closeIO() {
 }
 
 size_t GzFileReader::readLine(std::string& line) {
+    return readLine(line, nullptr);
+}
+
+size_t GzFileReader::readLine(std::string& line, ChecksumStream* sink) {
     line.clear();
 
     if (fpGz == nullptr) {
@@ -741,7 +746,7 @@ size_t GzFileReader::readLine(std::string& line) {
 
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
-        bufferSize = 8192;  // 8KB buffer
+        bufferSize = 65536;  // 64KB line buffer: fewer read calls
         lineBuffer = new char[bufferSize];
         bufferPos = 0;
         bytesRead = 0;
@@ -753,6 +758,9 @@ size_t GzFileReader::readLine(std::string& line) {
         // If buffer data has been processed, read new data
         if (bufferPos >= static_cast<size_t>(bytesRead)) {
             bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
+            if (sink != nullptr && bytesRead > 0) {
+                sink->update(reinterpret_cast<const uint8_t*>(lineBuffer), (size_t)bytesRead);
+            }
             if (bytesRead <= 0) {
                 // EOF or error, return number of characters read
                 if (bytesRead == 0) {
@@ -923,11 +931,15 @@ void FastGzFileReader::closeIO() {
 }
 
 size_t FastGzFileReader::readLine(std::string& line) {
+    return readLine(line, nullptr);
+}
+
+size_t FastGzFileReader::readLine(std::string& line, ChecksumStream* sink) {
     line.clear();
 
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
-        bufferSize = 8192;  // 8KB buffer
+        bufferSize = 65536;  // 64KB line buffer: fewer read calls
         lineBuffer = new char[bufferSize];
         bufferPos = 0;
         bytesRead = 0;
@@ -939,6 +951,9 @@ size_t FastGzFileReader::readLine(std::string& line) {
         // If buffer data has been processed, read new data
         if (bufferPos >= bytesRead) {
             bytesRead = readIO(lineBuffer, bufferSize);
+            if (sink != nullptr && bytesRead > 0) {
+                sink->update(reinterpret_cast<const uint8_t*>(lineBuffer), bytesRead);
+            }
             if (bytesRead == 0) {
                 // EOF, return number of characters read
                 return totalRead;
@@ -1088,7 +1103,7 @@ size_t GzPipeReader::readLine(std::string& line) {
 
     // Initialize buffer (if not already allocated)
     if (lineBuffer == nullptr) {
-        bufferSize = 8192;  // 8KB buffer
+        bufferSize = 65536;  // 64KB line buffer: fewer read calls
         lineBuffer = new char[bufferSize];
         bufferPos = 0;
         bytesRead = 0;

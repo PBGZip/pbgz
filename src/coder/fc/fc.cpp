@@ -406,7 +406,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
     fprintf(stderr, "\n");
 #endif
 
-    RangeCoder coder;
+    FcRangeCoder coder;
 
     coder.InitEncoder(output, outputSize);
     coder.EncodeWord((unsigned int)inputSize);
@@ -789,7 +789,7 @@ int fc_encode_do (const unsigned char * input, unsigned char * output, unsigned 
 
 int fc_decode_do (const unsigned char * input, unsigned char * output, fcModel1 * model)
 {
-    RangeCoder coder;
+    FcRangeCoder coder;
 
     unsigned char ALIGNED(64) MTFTable[CHAR_SIZE];
 

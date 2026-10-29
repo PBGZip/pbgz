@@ -1755,7 +1755,11 @@ int64_t PbgzBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType __attribute
         return -1;
     }
 
-    if (0 != pbgzDataBlock.verifyCheckSum()) {
+    /* Pre-Fingerprint64 files stored CPU-specific container checksums; skip
+       them so MD5-carrying files can cross architectures. */
+    const bool verifyContainer =
+        pbgzFileReader->getBaseFileMeta().getMetaData().isMember(kChecksumMethodKey);
+    if (0 != pbgzDataBlock.verifyCheckSum(verifyContainer)) {
         LOG_ERROR("Verify pbgz block checksum failed, block id = %ld", pbgzDataBlock.getMetaData("blockid").asInt64());
         return -1;
     }
