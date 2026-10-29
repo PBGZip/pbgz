@@ -110,8 +110,9 @@ static inline int64_t actgSquash(const uint8_t *base, int64_t baseLen, uint8_t *
 #endif
 }
 
-/* Calculate complementary strand of bases */
-static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len) {
+/* Calculate the reverse complement of a base string (table-based reference implementation).
+   actgPairNeon below must reproduce it byte for byte, because callers hash/match the result. */
+static inline void actgPairScalar(uint8_t *dst, const uint8_t *src, const size_t len) {
     if (dst == nullptr || src == nullptr || len == 0) {
         return;
     }
@@ -159,6 +160,63 @@ static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len) 
             ps++;
         } while (ps <= e);
     }
+}
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+
+/* Complement of one masked base: 0 -> T, 2 -> G, 4 -> A, 6 -> C. */
+static inline uint8_t actgComplement(uint8_t base)
+{
+    static const char kComp[7] = {'T', 0, 'G', 0, 'A', 0, 'C'};
+    return (uint8_t)kComp[base & 0x06];
+}
+
+/*
+ * Vector version of actgPairScalar: same output bytes (reverse complement), without the
+ * 128 KiB uint16_t lookup table, so the hot loop does not thrash a 128 KiB L1d.
+ */
+static inline void actgPairNeon(uint8_t *dst, const uint8_t *src, const size_t len)
+{
+    static const uint8_t kLookup[16] = {'T', 0, 'G', 0, 'A', 0, 'C', 0,
+                                        0, 0, 0, 0, 0, 0, 0, 0};
+    const uint8x16_t table = vld1q_u8(kLookup);
+    const uint8x16_t mask = vdupq_n_u8(0x06);
+    const size_t bulk = (len >> 3) << 3;
+
+    size_t j = 0;
+    for (; j + 16 <= bulk; j += 16) {
+        const uint8x16_t x = vandq_u8(vld1q_u8(src + j), mask);
+        uint8x16_t c = vqtbl1q_u8(table, x);
+        c = vrev64q_u8(c);
+        c = vextq_u8(c, c, 8);
+        vst1q_u8(dst + len - j - 16, c);
+    }
+    if (j + 8 <= bulk) {
+        const uint8x8_t x = vand_u8(vld1_u8(src + j), vdup_n_u8(0x06));
+        uint8x8_t c = vtbl1_u8(vld1_u8(kLookup), x);
+        c = vrev64_u8(c);
+        vst1_u8(dst + len - j - 8, c);
+        j += 8;
+    }
+    /* Trailing <8 bytes: written byte-reversed into the front, like the scalar tail
+       (its pd starts at dst + len - bulk). */
+    const size_t tail = len - bulk;
+    for (size_t k = bulk; k < len; ++k) {
+        dst[tail - 1 - (k - bulk)] = actgComplement(src[k]);
+    }
+}
+
+#endif /* __aarch64__ && __ARM_NEON */
+
+/* Calculate complementary strand of bases */
+static inline void actgPair(uint8_t *dst, const uint8_t *src, const size_t len) {
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (dst != nullptr && src != nullptr && len != 0) {
+        actgPairNeon(dst, src, len);
+    }
+#else
+    actgPairScalar(dst, src, len);
+#endif
 }
 
 /* Count the number of different characters between two strings */

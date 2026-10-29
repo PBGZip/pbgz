@@ -405,9 +405,10 @@ bool deriveMdNm(Reference* reference, int64_t chrStart, uint64_t pos, uint16_t f
                     !fetchRef(rp, op.len, lead)) {
                     return false;
                 }
-                for (uint32_t i = 0; i < op.len; ++i) {
-                    const uint8_t rb = (uint8_t)std::toupper(refScratch[lead + i]);
-                    const uint8_t cb = (uint8_t)std::toupper(seq[readPos + i]);
+                /* One base, exactly as calmd compares it. */
+                const auto consumeBase = [&](uint32_t k) {
+                    const uint8_t rb = (uint8_t)std::toupper(refScratch[lead + k]);
+                    const uint8_t cb = (uint8_t)std::toupper(seq[readPos + k]);
                     const bool isMatch = (cb == '=') || (cb == rb && cb != 'N' && rb != 'N');
                     if (isMatch) {
                         ++matched;
@@ -417,6 +418,45 @@ bool deriveMdNm(Reference* reference, int64_t chrStart, uint64_t pos, uint16_t f
                         md.push_back((char)rb);
                         ++nm;
                     }
+                };
+                uint32_t i = 0;
+#if defined(__aarch64__) && defined(__ARM_NEON)
+                /* Most M blocks match end to end; compare 16 bases at a time and only run the
+                   per-base path for a block that has a mismatch.  The canonical form below
+                   (lower-case folded to upper, then the calmd rule) is exactly std::toupper
+                   followed by that rule. */
+                {
+                    const uint8x16_t va = vdupq_n_u8('a'), vz = vdupq_n_u8('z');
+                    const uint8x16_t vclear = vdupq_n_u8(0xDF);
+                    const uint8x16_t vN = vdupq_n_u8('N');
+                    const uint8x16_t vEqMark = vdupq_n_u8('=');
+                    while (i + 16 <= op.len) {
+                        const uint8x16_t cbRaw = vld1q_u8(seq + readPos + i);
+                        const uint8x16_t rbRaw = vld1q_u8(refScratch.data() + lead + i);
+                        const uint8x16_t cb = vbslq_u8(
+                            vandq_u8(vcgeq_u8(cbRaw, va), vcleq_u8(cbRaw, vz)),
+                            vandq_u8(cbRaw, vclear), cbRaw);
+                        const uint8x16_t rb = vbslq_u8(
+                            vandq_u8(vcgeq_u8(rbRaw, va), vcleq_u8(rbRaw, vz)),
+                            vandq_u8(rbRaw, vclear), rbRaw);
+                        const uint8x16_t isN = vorrq_u8(vceqq_u8(cb, vN), vceqq_u8(rb, vN));
+                        const uint8x16_t isMatch = vorrq_u8(
+                            vandq_u8(vceqq_u8(cb, rb), vmvnq_u8(isN)),
+                            vceqq_u8(cb, vEqMark));
+                        if (vminvq_u8(isMatch) == 0xFF) {
+                            matched += 16;
+                            i += 16;
+                            continue;
+                        }
+                        for (uint32_t k = 0; k < 16; ++k) {
+                            consumeBase(i + k);
+                        }
+                        i += 16;
+                    }
+                }
+#endif
+                for (; i < op.len; ++i) {
+                    consumeBase(i);
                 }
                 readPos += op.len;
                 rp += op.len;

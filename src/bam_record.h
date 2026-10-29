@@ -28,6 +28,7 @@
 
 #pragma once
 
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,72 @@
 #include "log/logger.h"
 
 namespace bamrec {
+
+/* Skip the whitespace strtol/strtoll skip, then parse [s, s+n). */
+inline const char* samSkipSpace(const char* s, const char* end) {
+    while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\v' ||
+                       *s == '\f' || *s == '\r')) {
+        ++s;
+    }
+    return s;
+}
+
+inline uint64_t samParseU64(const char* s, const char* end) {
+    s = samSkipSpace(s, end);
+    uint64_t v = 0;
+    bool any = false;
+    for (; s < end; ++s) {
+        const unsigned d = (unsigned)((uint8_t)*s - (uint8_t)'0');
+        if (d > 9) {
+            break;
+        }
+        v = v * 10 + d;
+        any = true;
+    }
+    return any ? v : 0;
+}
+
+inline int64_t samParseI64(const char* s, const char* end) {
+    s = samSkipSpace(s, end);
+    bool neg = false;
+    if (s < end && (*s == '+' || *s == '-')) {
+        neg = (*s == '-');
+        ++s;
+    }
+    const uint64_t v = samParseU64(s, end);
+    return neg ? (int64_t)(0 - v) : (int64_t)v;
+}
+
+/* std::stoll(value) semantics for a field view: false on empty input or overflow. */
+inline bool samParseI64Strict(const char* s, const char* end, long long& out) {
+    s = samSkipSpace(s, end);
+    bool neg = false;
+    if (s < end && (*s == '+' || *s == '-')) {
+        neg = (*s == '-');
+        ++s;
+    }
+    unsigned long long v = 0;
+    bool any = false;
+    for (; s < end; ++s) {
+        const unsigned d = (unsigned)((uint8_t)*s - (uint8_t)'0');
+        if (d > 9) {
+            break;
+        }
+        const unsigned long long limit = neg ? (unsigned long long)INT64_MAX + 1ull
+                                             : (unsigned long long)INT64_MAX;
+        if (v > (limit - d) / 10) {
+            return false;
+        }
+        v = v * 10 + d;
+        any = true;
+    }
+    if (!any) {
+        return false;
+    }
+    out = neg ? (long long)(0ull - v) : (long long)v;
+    return true;
+}
+
 
 /* ---- Little-endian byte stream output ---- */
 inline void putU8(std::vector<uint8_t>& out, uint8_t v) {
@@ -190,9 +257,7 @@ inline int appendSamAuxToBam(const char* opt, size_t n, std::vector<uint8_t>& ou
     }
     case 'i': {
         long long v = 0;
-        try {
-            v = std::stoll(std::string(value, vlen));
-        } catch (...) {
+        if (!samParseI64Strict(value, value + vlen, v)) {
             return -1;
         }
         /* Narrowest width holding the value: non-negative -> unsigned letter
@@ -369,11 +434,11 @@ inline int buildBamRecordFromSamLine(const uint8_t* line, size_t len,
         return 0;   // QNAME must not be empty; skip the invalid record
     }
 
-    const uint16_t flag = (uint16_t)strtoul(fields[1], nullptr, 10);
-    const uint8_t mapq = (uint8_t)strtoul(fields[4], nullptr, 10);
-    const int64_t pos1 = strtoll(fields[3], nullptr, 10);      // 1-based
-    const int64_t pnext1 = strtoll(fields[7], nullptr, 10);    // 1-based
-    const int32_t btlen = (int32_t)strtol(fields[8], nullptr, 10);
+    const uint16_t flag = (uint16_t)samParseU64(fields[1], fields[1] + flens[1]);
+    const uint8_t mapq = (uint8_t)samParseU64(fields[4], fields[4] + flens[4]);
+    const int64_t pos1 = samParseI64(fields[3], fields[3] + flens[3]);     // 1-based
+    const int64_t pnext1 = samParseI64(fields[7], fields[7] + flens[7]);   // 1-based
+    const int32_t btlen = (int32_t)samParseI64(fields[8], fields[8] + flens[8]);
 
     /* refID: RNAME '*' / empty -> -1, otherwise look up the reference sequence list */
     int32_t refId = -1;

@@ -180,6 +180,24 @@ unsigned char * fctransform (const unsigned char * RESTRICT input, unsigned char
 
 INLINE ptrdiff_t transform_ (const unsigned char * RESTRICT input, ptrdiff_t i, unsigned long long currentChar)
 {
+    /* 16 bytes per iteration (SSE2 parity), then the existing 8-byte SWAR tail.  A hit is
+       located by scanning the 16-byte window from the top; that happens once per run, so
+       long runs of the same byte are the case that matters. */
+    const unsigned char c = (unsigned char)currentChar;
+    const uint8x16_t v16 = vdupq_n_u8(c);
+    while (i >= 16)
+    {
+        i -= 16;
+        const uint8x16_t x = vld1q_u8(input + i);
+        if (vminvq_u8(vceqq_u8(x, v16)) != 0xFF)
+        {
+            for (int k = 15; k >= 0; --k)
+            {
+                if (input[i + k] != c) { return i + k; }
+            }
+        }
+    }
+
     unsigned long long v = currentChar; v |= (v << 8); v |= (v << 16); v |= (v << 32);
 
     while (i >= 8)

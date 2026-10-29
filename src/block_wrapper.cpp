@@ -568,13 +568,33 @@ namespace {
     const char BAM_BASE_MAP[16] = {'=', 'A', 'C', 'M', 'G', 'R', 'S', 'V',
                                    'T', 'W', 'Y', 'H', 'K', 'D', 'B', 'N'};
 
+    /* Decimal append without the temporary std::string std::to_string builds. */
+    static inline void appendUInt(std::string& out, uint64_t v) {
+        char buf[20];
+        char* p = buf + sizeof(buf);
+        do {
+            *--p = (char)('0' + (v % 10));
+            v /= 10;
+        } while (v != 0);
+        out.append(p, (size_t)(buf + sizeof(buf) - p));
+    }
+
+    static inline void appendInt(std::string& out, int64_t v) {
+        if (v < 0) {
+            out.push_back('-');
+            appendUInt(out, (uint64_t)(-(v + 1)) + 1);
+        } else {
+            appendUInt(out, (uint64_t)v);
+        }
+    }
+
     void buildBamCigar(const uint8_t* data, uint16_t nCigarOp, std::string& out) {
         for (uint16_t i = 0; i < nCigarOp; ++i) {
             uint32_t op;
             memcpy(&op, data + i * 4, 4);
             const uint32_t len = op >> 4;      /* Upper 28 bits are the length */
             const unsigned code = op & 0xF;    /* Lower 4 bits are the opcode */
-            out += std::to_string(len);
+            appendUInt(out, len);
             out += (code < 11) ? BAM_CIGAR_OPS[code] : 'M';
         }
     }
@@ -622,38 +642,38 @@ namespace {
                 p += 1;
                 break;
             case 'c':
-                line += std::to_string((int)(int8_t)*p);
+                appendInt(line, (int)(int8_t)*p);
                 p += 1;
                 break;
             case 'C':
-                line += std::to_string((int)*p);
+                appendUInt(line, (unsigned)*p);
                 p += 1;
                 break;
             case 's': {
                 int16_t v;
                 memcpy(&v, p, 2);
-                line += std::to_string(v);
+                appendInt(line, v);
                 p += 2;
                 break;
             }
             case 'S': {
                 uint16_t v;
                 memcpy(&v, p, 2);
-                line += std::to_string(v);
+                appendUInt(line, v);
                 p += 2;
                 break;
             }
             case 'i': {
                 int32_t v;
                 memcpy(&v, p, 4);
-                line += std::to_string(v);
+                appendInt(line, v);
                 p += 4;
                 break;
             }
             case 'I': {
                 uint32_t v;
                 memcpy(&v, p, 4);
-                line += std::to_string(v);
+                appendUInt(line, v);
                 p += 4;
                 break;
             }
@@ -685,12 +705,12 @@ namespace {
                 for (int32_t i = 0; i < count && p + 1 <= end; ++i) {
                     line += ',';
                     switch (sub) {
-                    case 'c': line += std::to_string((int)(int8_t)*p); p += 1; break;
-                    case 'C': line += std::to_string((int)*p); p += 1; break;
-                    case 's': { int16_t v; memcpy(&v, p, 2); line += std::to_string(v); p += 2; } break;
-                    case 'S': { uint16_t v; memcpy(&v, p, 2); line += std::to_string(v); p += 2; } break;
-                    case 'i': { int32_t v; memcpy(&v, p, 4); line += std::to_string(v); p += 4; } break;
-                    case 'I': { uint32_t v; memcpy(&v, p, 4); line += std::to_string(v); p += 4; } break;
+                    case 'c': appendInt(line, (int)(int8_t)*p); p += 1; break;
+                    case 'C': appendUInt(line, (unsigned)*p); p += 1; break;
+                    case 's': { int16_t v; memcpy(&v, p, 2); appendInt(line, v); p += 2; } break;
+                    case 'S': { uint16_t v; memcpy(&v, p, 2); appendUInt(line, v); p += 2; } break;
+                    case 'i': { int32_t v; memcpy(&v, p, 4); appendInt(line, v); p += 4; } break;
+                    case 'I': { uint32_t v; memcpy(&v, p, 4); appendUInt(line, v); p += 4; } break;
                     case 'f': { float v; memcpy(&v, p, 4); char bf[64]; snprintf(bf, sizeof(bf), "%g", (double)v); line += bf; p += 4; } break;
                     default: return; break;
                     }
@@ -985,14 +1005,14 @@ int32_t bamRecordToSamLine(const uint8_t* data, int32_t size,
     }
 
     line = qname;
-    line += "\t"; line += std::to_string(flag);
+    line += "\t"; appendUInt(line, flag);
     line += "\t"; line += rname;
-    line += "\t"; line += std::to_string((pos >= 0) ? (pos + 1) : 0);
-    line += "\t"; line += std::to_string(mapq);
+    line += "\t"; appendUInt(line, (pos >= 0) ? (uint64_t)(pos + 1) : 0);
+    line += "\t"; appendUInt(line, mapq);
     line += "\t"; line += cigar;
     line += "\t"; line += rnext;
-    line += "\t"; line += std::to_string((nextPos >= 0) ? (nextPos + 1) : 0);
-    line += "\t"; line += std::to_string(tlen);
+    line += "\t"; appendUInt(line, (nextPos >= 0) ? (uint64_t)(nextPos + 1) : 0);
+    line += "\t"; appendInt(line, tlen);
     line += "\t"; line += seq;
     line += "\t"; line += qual;
 

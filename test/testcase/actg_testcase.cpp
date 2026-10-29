@@ -234,6 +234,34 @@ TEST_F(ActgTest, ActgPair) {
     }
 }
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+// The NEON actgPair must reproduce the table-based reference byte for byte, including the
+// <16-byte tail and non-ACTG bytes (N, lower case), because callers hash the result.
+TEST_F(ActgTest, ActgPairSimdMatchesScalar) {
+    std::mt19937 rng(0x5eed);
+    static const char kBases[8] = {'A', 'C', 'T', 'G', 'N', 'a', 'c', 't'};
+    for (size_t len = 0; len <= 512; ++len) {
+        std::vector<uint8_t> in(len), scalar(len), neon(len);
+        for (size_t i = 0; i < len; ++i) {
+            in[i] = (uint8_t)kBases[rng() % 8];
+        }
+        actgPairScalar(scalar.data(), in.data(), len);
+        actgPairNeon(neon.data(), in.data(), len);
+        ASSERT_EQ(scalar, neon) << "length " << len;
+    }
+    // Boundary patterns for the bulk/tail split.
+    for (size_t len : {7u, 8u, 15u, 16u, 17u, 23u, 24u, 31u, 32u, 33u}) {
+        std::vector<uint8_t> in(len, 'A'), scalar(len, 0), neon(len, 0);
+        for (size_t i = 0; i < len; ++i) {
+            in[i] = (uint8_t)"ACGT"[i % 4];
+        }
+        actgPairScalar(scalar.data(), in.data(), len);
+        actgPairNeon(neon.data(), in.data(), len);
+        ASSERT_EQ(scalar, neon) << "pattern length " << len;
+    }
+}
+#endif
+
 // Test getDiffCnt function
 TEST_F(ActgTest, GetDiffCnt) {
     // Test case 1: Identical strings
