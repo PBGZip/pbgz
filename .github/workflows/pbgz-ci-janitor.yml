@@ -1,0 +1,54 @@
+name: pbgz-ci-janitor
+
+# 兜底清理：调用英国管理服务器上的 watcher.sh + monitor.sh
+#   watcher.sh：处理漏收的结果包 + 删对应编译机
+#   monitor.sh：删除超时/停机未删的编译机、心跳超时告警
+# 平时这两个由管理机本地 systemd timer（每 3 分钟）跑，这里每天兜底一次，
+# 万一 timer 没装上或挂了也不至于一直计费。
+#
+# cron 是 UTC：22:20 UTC = 次日 06:20 北京时间。
+# 原为每 2 小时一次，2026-10-28 改为每天一次（timer 已稳定，高频兜底只是白跑）。
+on:
+  schedule:
+    - cron: "20 22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ALIYUN_REGION: eu-west-1          # 同 pbgz-ci.yml：region 写死，不占 Variable
+
+jobs:
+  janitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 安装阿里云 CLI
+        run: |
+          curl -fsSL https://aliyuncli.alicdn.com/install.sh | bash
+
+      - name: 配置阿里云凭证
+        run: |
+          aliyun configure set --profile default \
+            --region "$ALIYUN_REGION" \
+            --access-key-id "${{ secrets.ALIYUN_ACCESS_KEY_ID }}" \
+            --access-key-secret "${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}"
+
+      - name: 触发管理机扫描清理
+        env:
+          MID: ${{ secrets.ALIYUN_MANAGER_ECS_INSTANCE_ID }}
+        run: |
+          if [ -z "$MID" ]; then
+            echo "::error::Secret ALIYUN_MANAGER_ECS_INSTANCE_ID 未设置（注意是 Secrets，不是 Variables）"
+            exit 1
+          fi
+          aliyun ecs RunCommand \
+            --RegionId "$ALIYUN_REGION" \
+            --Name "pbgz-ci-monitor" \
+            --Type "RunShellScript" \
+            --Timeout 300 \
+            --InstanceId.1 "$MID" \
+            --CommandContent "bash /root/pbgz-ci/watcher.sh; bash /root/pbgz-ci/monitor.sh" \
+            | jq -r '.InvokeId'
+          echo "已触发 watcher.sh + monitor.sh"

@@ -1,0 +1,218 @@
+name: pbgz-ci
+
+# ============================================================================
+# GitHub 只做「按钮 + 展示板」，活全部在阿里云干：
+#   触发 → 英国区管理机编排 → 临时开编译机 → 跑完 scp 回管理机 → 删机
+#   报告 → 管理机 git push 到 ci-reports 分支 → Pages 在线看 + Commit Status 打点
+#   （报告不走 runner：runner 的 job 6h 就死，full 跑 25h 的结论推不回来）
+#
+#   smoke / standard：同步等结论
+#     Step A  RunCommand → bash call_start_pbgz_ci.sh <level> <ref>   （拿 JOB_ID）
+#     Step B  RunCommand → bash wait_result.sh <JOB_ID>  --Timeout 2400/18000
+#             wait_result 在管理机前台阻塞到 job 终态，退出码即结论：
+#             0=pass / 0+::warning::=warn（不变红，D6）/ 1=fail / 3=超时
+#
+#   full：异步（GitHub-hosted runner 单 job 上限 6h，物理上等不了 10-25h）
+#     只跑 Step A，summary 里明写「绿勾只代表触发成功，不代表结论」，报告仍会由
+#     管理机推上去（runs/<run_id>.html），Pages 首页照样能看到这一轮。
+#
+# 触发方式：只手动 workflow_dispatch（不做 push / 定时），避免被动烧机器。
+# 配置：Secrets 存 ALIYUN_ACCESS_KEY_ID / ALIYUN_ACCESS_KEY_SECRET /
+#       ALIYUN_MANAGER_ECS_INSTANCE_ID；region 不敏感，直接写死 eu-west-1。
+# ============================================================================
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "测试级别（full = 历史表 ≤50GB 全跑 288 样本）"
+        type: choice
+        options: [smoke, standard, full]
+        default: standard
+      ref:
+        description: "被测分支/tag/commit（留空 = 仓库默认分支）"
+        default: ""
+      keep_compile_node:
+        description: "跑完保留编译机（排查用，会产生计费，记得手动删）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# 防连点：同一时刻只允许一个 CI 在跑。管理机侧 call_start 也有并发保护，这是第二道。
+# cancel-in-progress=false —— 绝不取消正在跑的一轮（full 已经烧了几十块机时）。
+concurrency:
+  group: pbgz-ci-trigger
+  cancel-in-progress: false
+
+env:
+  ALIYUN_REGION: eu-west-1          # 英国区，不敏感 → 不占 Variable
+  PAGES_BASE: https://pbgzip.github.io/pbgz
+
+jobs:
+  trigger:
+    name: 触发英国管理服务器编排
+    runs-on: ubuntu-latest
+    timeout-minutes: 330            # standard 最坏 5h + 30min 余量；smoke/full 提前结束
+    steps:
+      - name: 校验输入
+        env:
+          REF: ${{ github.event.inputs.ref }}
+        run: |
+          set -euo pipefail
+          # REF 会被拼进管理机上的 shell 命令，必须白名单，否则是命令注入面。
+          if [ -n "$REF" ]; then
+            if ! printf '%s' "$REF" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+              echo "::error::ref 只允许字母数字与 . _ / - ，收到：$REF"
+              exit 1
+            fi
+            case "$REF" in
+              *..*|/*|*/) echo "::error::ref 不能包含 .. 或首尾斜杠：$REF"; exit 1 ;;
+            esac
+          fi
+          echo "输入校验通过：level=${{ github.event.inputs.level }} ref=${REF:-(默认分支)} keep_compile_node=${{ github.event.inputs.keep_compile_node }}"
+
+      - name: 安装阿里云 CLI
+        run: |
+          curl -fsSL https://aliyuncli.alicdn.com/install.sh | bash
+
+      - name: 配置阿里云凭证
+        run: |
+          aliyun configure set --profile default \
+            --region "$ALIYUN_REGION" \
+            --access-key-id "${{ secrets.ALIYUN_ACCESS_KEY_ID }}" \
+            --access-key-secret "${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}"
+
+      - name: 检查必要配置
+        env:
+          MID: ${{ secrets.ALIYUN_MANAGER_ECS_INSTANCE_ID }}
+          AK: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+        run: |
+          missing=""
+          [ -n "$MID" ] || missing="$missing ALIYUN_MANAGER_ECS_INSTANCE_ID"
+          [ -n "$AK" ]  || missing="$missing ALIYUN_ACCESS_KEY_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::仓库 Secret 缺：$missing。到 Settings → Secrets and variables → Actions → Secrets 补齐（不是 Variables）。"
+            exit 1
+          fi
+
+      # ---- Step A：触发编排，拿 JOB_ID（call_start 内部 nohup start_pbgz_ci 后立即 echo JOB_ID 退出） ----
+      - name: 触发编排脚本
+        id: start
+        env:
+          LEVEL: ${{ github.event.inputs.level }}
+          REF: ${{ github.event.inputs.ref }}
+          KCN: ${{ github.event.inputs.keep_compile_node }}
+          MID: ${{ secrets.ALIYUN_MANAGER_ECS_INSTANCE_ID }}
+        run: |
+          set -uo pipefail
+          keep=0; [ "$KCN" = "true" ] && keep=1
+          echo "level=$LEVEL ref=$REF keep_compile_node=$keep"
+          cmd="KEEP_COMPILE_NODE=${keep} bash /root/pbgz-ci/call_start_pbgz_ci.sh ${LEVEL} '${REF}'"
+          invoke_id=$(aliyun ecs RunCommand \
+            --RegionId "$ALIYUN_REGION" \
+            --Name "trigger-pbgz-ci" \
+            --Type "RunShellScript" \
+            --Timeout 300 \
+            --InstanceId.1 "$MID" \
+            --CommandContent "$cmd" \
+            | jq -r '.InvokeId')
+          echo "invoke_id=$invoke_id"
+          # call_start 跑完会 echo "JOB_ID=..."，从 Output 里抠出来
+          job_id=""
+          for i in $(seq 1 30); do
+            r=$(aliyun ecs DescribeInvocationResults \
+              --RegionId "$ALIYUN_REGION" \
+              --InvokeId "$invoke_id" \
+              --ContentEncoding PlainText)
+            st=$(echo "$r" | jq -r '.Invocation.InvocationResults.InvocationResult[0].InvokeRecordStatus // ""')
+            echo "call_start 状态: $st"
+            if [ "$st" = "Finished" ] || [ "$st" = "Success" ]; then
+              out=$(echo "$r" | jq -r '.Invocation.InvocationResults.InvocationResult[0].Output // ""')
+              job_id=$(echo "$out" | sed -n 's/^JOB_ID=//p' | tail -1)
+              break
+            fi
+            sleep 10
+          done
+          if [ -z "$job_id" ]; then
+            echo "::error::没拿到 JOB_ID（call_start 可能没跑起来，或本轮被并发保护跳过，看管理机 /root/pbgz-ci/logs/call_start.log）"
+            exit 3
+          fi
+          echo "job_id=$job_id" >> "$GITHUB_OUTPUT"
+          echo "已触发，JOB_ID=$job_id"
+
+      # ---- Step B：同步等结论（smoke/standard）。wait_result 在管理机前台阻塞，退出码即结论 ----
+      - name: 等结论（同步）
+        if: ${{ github.event.inputs.level != 'full' }}
+        env:
+          JOB_ID: ${{ steps.start.outputs.job_id }}
+          LEVEL: ${{ github.event.inputs.level }}
+        run: |
+          set -uo pipefail
+          case "$LEVEL" in
+            smoke)    wt=2400 ;;     # 40 分钟
+            standard) wt=18000 ;;    # 5 小时
+            *)        wt=18000 ;;
+          esac
+          invoke_id=$(aliyun ecs RunCommand \
+            --RegionId "$ALIYUN_REGION" \
+            --Name "wait-pbgz-ci" \
+            --Type "RunShellScript" \
+            --Timeout "$wt" \
+            --InstanceId.1 "${{ secrets.ALIYUN_MANAGER_ECS_INSTANCE_ID }}" \
+            --CommandContent "bash /root/pbgz-ci/wait_result.sh ${JOB_ID}" \
+            | jq -r '.InvokeId')
+          echo "wait invoke_id=$invoke_id（--Timeout ${wt}s）"
+          # 轮询到 Finished；wait_result 内部已阻塞，这里主要是取 ExitCode + Output
+          ec=1
+          out=""
+          for i in $(seq 1 1200); do
+            r=$(aliyun ecs DescribeInvocationResults \
+              --RegionId "$ALIYUN_REGION" \
+              --InvokeId "$invoke_id" \
+              --ContentEncoding PlainText)
+            st=$(echo "$r" | jq -r '.Invocation.InvocationResults.InvocationResult[0].InvokeRecordStatus // ""')
+            if [ "$st" = "Finished" ] || [ "$st" = "Success" ] || [ "$st" = "Failed" ] || [ "$st" = "PartialFailed" ] || [ "$st" = "Stopped" ]; then
+              ec=$(echo "$r" | jq -r '.Invocation.InvocationResults.InvocationResult[0].ExitCode // 1')
+              out=$(echo "$r" | jq -r '.Invocation.InvocationResults.InvocationResult[0].Output // ""')
+              dropped=$(echo "$r" | jq -r '.Invocation.InvocationResults.InvocationResult[0].Dropped // 0')
+              echo "$out" >> "$GITHUB_STEP_SUMMARY"
+              [ "$dropped" != "0" ] && echo "::warning::Output 被截断 ${dropped} 字节，完整结论见管理机 summary.md"
+              break
+            fi
+            sleep 30
+          done
+          # 报告链接：wait_result 那行里带 report=<url>（推失败就没有这项）
+          url=$(printf '%s\n' "$out" | sed -n 's/.*report=\(http[^ ]*\).*/\1/p' | tail -1)
+          {
+            echo ""
+            echo "---"
+            if [ -n "$url" ]; then
+              echo "📄 **本轮报告**：$url"
+            else
+              echo "📄 **报告**：未推到 GitHub（push 失败时正常），到管理机看 \`summary.md\`"
+            fi
+            echo "📚 **全部历史**：$PAGES_BASE/"
+            echo "🔗 **分支内容**：https://github.com/${{ github.repository }}/tree/ci-reports"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "退出码 = $ec"
+          exit "$ec"
+
+      # ---- full 异步：不等，明写「绿勾≠通过」 ----
+      - name: full 异步提示
+        if: ${{ github.event.inputs.level == 'full' }}
+        env:
+          JOB_ID: ${{ steps.start.outputs.job_id }}
+        run: |
+          {
+            echo "## ⏳ full 已触发"
+            echo "job_id=${JOB_ID}，预计 10-25 小时"
+            echo ""
+            echo "⚠ **本 job 的绿勾只代表触发成功，不代表结论**（GitHub-hosted runner 单 job 上限 6h，物理上等不了 full）"
+            echo ""
+            echo "跑完后管理机会自己把报告推到 ci-reports 分支，届时直接看："
+            echo "- 在线报告：$PAGES_BASE/"
+            echo "- 被测 commit 上的 Commit Status：https://github.com/${{ github.repository }}/commits"
+            echo ""
+            echo "完整报告文件：$PAGES_BASE/runs/${JOB_ID}.html（实际情况以索引页为准）"
+          } >> "$GITHUB_STEP_SUMMARY"
