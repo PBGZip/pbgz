@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pbgz CI 测试报告 20261029-174119-v2.2.0</title>
+<style>
+:root{--bg:#f7f8fa;--card:#fff;--line:#e5e7eb;--txt:#1f2937;--mute:#6b7280;
+--blue:#2563eb;--green:#059669;--red:#dc2626;--amber:#d97706;--violet:#7c3aed}
+*{box-sizing:border-box}
+body{margin:0;padding:32px;background:var(--bg);color:var(--txt);
+font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+.wrap{max-width:1180px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:16px;margin:28px 0 12px;padding-left:10px;border-left:3px solid var(--blue)}
+.sub{color:var(--mute);font-size:13px;margin-bottom:20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card .k{color:var(--mute);font-size:12px}
+.card .v{font-size:22px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+.card .v.good{color:var(--green)} .card .v.bad{color:var(--red)}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
+border-radius:10px;overflow:hidden;font-size:12.5px}
+th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{background:#f2f4f7;font-weight:600;text-align:right;position:sticky;top:0}
+td:first-child,th:first-child,td.l,th.l{text-align:left}
+tbody tr:hover{background:#fafbfc}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;font-weight:600}
+.b-pass{background:#e7f7ef;color:var(--green)} .b-fail{background:#fdeaea;color:var(--red)}
+.b-warn{background:#fef4e6;color:var(--amber)} .b-info{background:#eef2ff;color:var(--violet)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.muted{color:var(--mute)}
+.env{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:6px 24px;font-size:12.5px}
+.env b{color:var(--mute);font-weight:500}
+pre{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:11.5px;
+max-height:260px;white-space:pre-wrap}
+.chart{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.legend{font-size:12px;color:var(--mute);margin-bottom:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 12px}
+.sim-banner{background:#fef4e6;border:1px solid #f59e0b;color:#92400e;border-radius:10px;
+padding:10px 14px;margin:14px 0 0;font-weight:600;font-size:13px}
+.exit-bad{color:var(--red);font-weight:700}
+</style></head><body><div class="wrap">
+<h1>pbgz CI 测试报告</h1>
+<div class="sub">级别 <b>smoke</b> · run 20261029-174119-v2.2.0 ·
+生成于 2026-10-29 17:42:08 ·
+单样本上限 <b>50 GB</b> ·
+cram 基线取自历史表，未重跑</div>
+<div style='margin:12px 0;padding:12px 16px;border-radius:8px;background:#e8f7ee;color:#0a7d33;font-weight:700;font-size:15px'>结论：通过　·　样本 3 个，PASS 3　FAIL 0　WARN 0</div>
+
+<div class="cards"><div class='card'><div class='k'>样本数</div><div class='v '>3</div></div><div class='card'><div class='k'>通过 / 失败</div><div class='v good'>3 / 0</div></div><div class='card'><div class='k'>平均压缩率</div><div class='v '>2.79%</div></div><div class='card'><div class='k'>优于 cram</div><div class='v good'>3/3</div></div><div class='card'><div class='k'>平均压缩速度(sam)</div><div class='v '>9.5 MB/s</div></div></div>
+<h2>环境与参数</h2>
+<div class="env"><div><b>run</b> 20261029-174119-v2.2.0</div><div><b>级别</b> smoke</div><div><b>pbgz commit</b> 1be374abab7862812f46675d30b64ffc05408075</div><div><b>pbgz 版本</b> pbgz: 2.2.0</div><div><b>二进制指纹</b> ff1260d052064e49</div><div><b>阿里云服务器型号</b> ecs.c9i.4xlarge</div><div><b>CPU</b> Intel® Xeon® 6982P-C</div><div><b>内存</b> 30.2 GB</div><div><b>线程数</b> 16</div><div><b>内核</b> Linux-6.8.0-139-generic-x86_64-with-glibc2.39</div><div><b>压缩参数</b> -n</div><div><b>压缩示例</b> <code>pbgz compress ERR14949932.bam -r AAHY01.fasta.gz -n</code></div><div><b>解压示例</b> <code>pbgz decompress ERR14949932.bam.pbgz -r AAHY01.fasta.gz -o out.bam</code></div></div>
+<h2>明细</h2>
+<table><thead><tr><th class='l'>bam_file</th><th class='l'>平台</th><th class='l'>读长</th><th class='l'>物种</th><th class=''>bam(MB)</th><th class=''>pbgz(MB)</th><th class=''>pbgz率</th><th class=''>cram率</th><th class=''>差值 pp</th><th class='l'>优于</th><th class=''>压缩 s</th><th class=''>解压 s</th><th class=''>压缩 MB/s</th><th class=''>解压 MB/s</th><th class=''>RSS MB</th><th class=''>CPU%</th><th class=''>退出码</th><th class='l'>状态</th></tr></thead><tbody><tr><td class='l mono' title='ERR11169730.bam'>ERR11169730.bam</td><td class='l'>MiniSeq</td><td class='l'>PE100</td><td class='l'>Mus musculus</td><td>1.5</td><td>0.5</td><td>2.87%</td><td>7.18%</td><td>4.31</td><td class='l'>pbgz</td><td>2.7</td><td>2.6</td><td>6.1</td><td>6.4</td><td>568</td><td>129</td><td class='mono'>0/0</td><td class='l'><span class='badge b-pass'>PASS</span></td></tr><tr><td class='l mono' title='ERR11169733.bam'>ERR11169733.bam</td><td class='l'>MiniSeq</td><td class='l'>PE100</td><td class='l'>Mus musculus</td><td>2.4</td><td>0.8</td><td>2.79%</td><td>6.53%</td><td>3.74</td><td class='l'>pbgz</td><td>2.8</td><td>2.6</td><td>10.3</td><td>10.9</td><td>654</td><td>152</td><td class='mono'>0/0</td><td class='l'><span class='badge b-pass'>PASS</span></td></tr><tr><td class='l mono' title='ERR11169742.bam'>ERR11169742.bam</td><td class='l'>MiniSeq</td><td class='l'>PE100</td><td class='l'>Mus musculus</td><td>2.8</td><td>0.9</td><td>2.70%</td><td>6.55%</td><td>3.84</td><td class='l'>pbgz</td><td>2.8</td><td>2.6</td><td>12.0</td><td>12.7</td><td>716</td><td>163</td><td class='mono'>0/0</td><td class='l'><span class='badge b-pass'>PASS</span></td></tr></tbody></table>
+<h2>对比图</h2>
+<div style='display:flex;gap:14px;flex-wrap:wrap'><div class='chart'><div class='legend' style='margin-bottom:4px'>压缩率：pbgz vs cram（更优占比）</div><svg viewBox='0 0 500 175' width='500' style='display:block'><g transform='rotate(-90 85 85)'><circle cx='85' cy='85' r='58' fill='none' stroke='#94a3b8' stroke-width='26'/><circle cx='85' cy='85' r='58' fill='none' stroke='#2563eb' stroke-width='26' pathLength='100' stroke-dasharray='100.0000 0.0000'/></g><text x='85' y='79' text-anchor='middle' font-size='14' font-weight='600' fill='#1f2937'>共 3 个</text><text x='85' y='99' text-anchor='middle' font-size='11' fill='#6b7280'>对比数据</text><rect x='200' y='53' width='10' height='10' rx='2' fill='#2563eb'/><text x='216' y='62' font-size='12' fill='#374151'>pbgz 压缩更优：3 个（100.0%）</text><rect x='200' y='79' width='10' height='10' rx='2' fill='#94a3b8'/><text x='216' y='88' font-size='12' fill='#374151'>cram 更优：0 个（0.0%）</text></svg></div><div class='chart'><div class='legend' style='margin-bottom:4px'>压缩速度：pbgz vs cram（更快占比）</div><svg viewBox='0 0 500 175' width='500' style='display:block'><g transform='rotate(-90 85 85)'><circle cx='85' cy='85' r='58' fill='none' stroke='#94a3b8' stroke-width='26'/><circle cx='85' cy='85' r='58' fill='none' stroke='#2563eb' stroke-width='26' pathLength='100' stroke-dasharray='50.0000 50.0000'/></g><text x='85' y='79' text-anchor='middle' font-size='14' font-weight='600' fill='#1f2937'>共 - 个</text><text x='85' y='99' text-anchor='middle' font-size='11' fill='#6b7280'>对比数据</text><rect x='200' y='53' width='10' height='10' rx='2' fill='#2563eb'/><text x='216' y='62' font-size='12' fill='#374151'>pbgz 更快：50%</text><rect x='200' y='79' width='10' height='10' rx='2' fill='#94a3b8'/><text x='216' y='88' font-size='12' fill='#374151'>cram 更快：50%</text></svg><div class='legend' style='margin-top:6px'>示意：暂无 cram 速度基准（历史表只记录了 cram 体积与压缩率），按 1:1 占位，取得真实数据后替换</div></div></div>
+
+
+<h2>说明</h2>
+<div class="env" style="display:block">
+<div>压缩率 = 输出大小 / 原始 sam 大小（含 <code>-n</code> 打包的参考序列开销），越低越好。</div>
+<div>差值 pp = cram 压缩率 − pbgz 压缩率（百分点）；正值表示 pbgz 更优。</div>
+<div>WARN = 软告警，不影响 PASS/FAIL：当前仅在 pbgz 压缩率输给 cram 基线时触发（悬停徽章看原因）。</div>
+<div>压缩速度（MB/s）= sam 大小（取自历史表 <code>sam_size</code> 列）/ 压缩墙钟时间；线程数固定，跨 run 可比。</div>
+<div>解压 MB/s、RSS MB、CPU% 有采集数据时显示，无值以 '-' 占位。</div>
+<div>压缩速度饼图为 1:1 示意：历史表只有 cram 的体积与压缩率、没有耗时，待后续真跑 cram 取得速度基准后替换为真实占比。</div>
+<div>退出码 = 压缩退出码 / 解压退出码；任一非 0 即失败（红色标出），错误日志见下方「失败样本」区（贴日志尾部 30 行）。</div>
+<div>未覆盖样本 = 单样本体积超过 <code>limits.max_sample_size_gb</code>（当前 50 GB）的样本，按数据盘规格主动跳过，不计入通过率；要纳入请调大该值并同步放大数据盘。</div>
+<div>数据生命周期 = 每个样本跑完立刻删掉它的 bam 与输出（.pbgz / 还原 bam），ref 保留到整轮结束，所以磁盘峰值只装单样本。</div>
+<div>解压只校验退出码与输出非空，未做内容一致性比对（可在 ci_config.yaml 打开）。</div>
+</div>
+</div></body></html>
