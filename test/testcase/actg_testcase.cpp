@@ -260,7 +260,31 @@ TEST_F(ActgTest, ActgPairSimdMatchesScalar) {
         ASSERT_EQ(scalar, neon) << "pattern length " << len;
     }
 }
+
 #endif
+
+// actgSquashDiffCnt's NEON path must return exactly the scalar count, including
+// across the 4096-iteration accumulator flush.
+TEST_F(ActgTest, ActgSquashDiffCntSimdMatchesScalar) {
+    std::mt19937 rng(0xc0ffee);
+    std::vector<size_t> lengths;
+    for (size_t len = 0; len <= 512; ++len) {
+        lengths.push_back(len);
+    }
+    for (size_t len : {4095u, 4096u, 4097u, 65535u, 65536u, 65537u, 70000u, 131072u}) {
+        lengths.push_back(len);
+    }
+    for (size_t len : lengths) {
+        std::vector<uint8_t> a(len), b(len);
+        for (size_t i = 0; i < len; ++i) {
+            a[i] = (uint8_t)(rng() & 0xff);
+            b[i] = (uint8_t)((rng() & 1) ? a[i] : (rng() & 0xff));
+        }
+        ASSERT_EQ(actgSquashDiffCntScalar(a.data(), b.data(), (uint32_t)len),
+                  actgSquashDiffCnt(a.data(), b.data(), (uint32_t)len))
+            << "length " << len;
+    }
+}
 
 // Test getDiffCnt function
 TEST_F(ActgTest, GetDiffCnt) {

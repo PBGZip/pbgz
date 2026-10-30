@@ -75,7 +75,8 @@ uint16_t bamStatObjectId(uint32_t fieldIdx)
 
 void recordBamFieldStats(PbgzEngine* engine, uint32_t fieldIdx, uint32_t srcLen, uint32_t dstLen)
 {
-    if (engine == nullptr) {
+    /* Statistics are only collected for -s; without it this must cost nothing. */
+    if (engine == nullptr || !engine->getParameter().showStat) {
         return;
     }
     auto compressEngine = dynamic_cast<CompressEngine*>(engine);

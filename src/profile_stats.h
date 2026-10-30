@@ -156,6 +156,11 @@ inline std::chrono::steady_clock::time_point nowOrZero()
 
 inline void add(int cat, uint64_t us)
 {
+    /* Compiled out entirely without -DPBGZ_PROFILE, like addSince()/Scope: call sites may
+       pass a constant (e.g. MAP_ATTEMPTS) without paying for the counters. */
+    if (!enabled()) {
+        return;
+    }
     if (cat < 0 || cat >= CAT_MAX) {
         return;
     }

@@ -267,3 +267,29 @@ TEST_F(FastQActuatorTest, testPreAnalysis) {
     EXPECT_EQ(actuator.qualityFreqTable[2].first, ',' - '!');
 }
 
+
+// countN_Optimized must return exactly the number of 'N' bytes, including across
+// the 4096-iteration accumulator flush and the 16-byte tail.
+TEST(FastqCountNTest, MatchesNaiveCount) {
+    std::vector<size_t> lengths;
+    for (size_t len = 0; len <= 300; ++len) {
+        lengths.push_back(len);
+    }
+    for (size_t len : {4095u, 4096u, 4097u, 65535u, 65536u, 65537u, 70000u, 131072u}) {
+        lengths.push_back(len);
+    }
+    uint32_t state = 12345u;
+    for (size_t len : lengths) {
+        std::vector<uint8_t> data(len, 'A');
+        uint32_t expected = 0;
+        for (size_t i = 0; i < len; ++i) {
+            state = state * 1103515245u + 12345u;
+            if ((state >> 16 & 0xfu) == 0u) {
+                data[i] = 'N';
+                ++expected;
+            }
+        }
+        EXPECT_EQ(expected, FastqCodecActuator::countN_Optimized(data.data(), len))
+            << "length " << len;
+    }
+}

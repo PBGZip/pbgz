@@ -68,7 +68,8 @@ namespace {
     }
 
     void recordFieldStats(PbgzEngine* engine, uint32_t fieldIdx, uint32_t fieldSrcLen, uint32_t fieldDstLen) {
-        if (!engine) return;
+        /* Statistics are only collected for -s; without it this must cost nothing. */
+        if (!engine || !engine->getParameter().showStat) return;
 
         auto compressEngine = dynamic_cast<CompressEngine*>(engine);
         if (!compressEngine || !compressEngine->getStats()) return;

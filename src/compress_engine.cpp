@@ -59,6 +59,11 @@ void CompressEngine::initStatsBasedOnFileType(BlockType fileType) {
     if (statsInitialized) {
         return;
     }
+    /* Statistics are only requested with -s: don't even allocate the counters otherwise. */
+    if (!parameter.showStat) {
+        statsInitialized = true;
+        return;
+    }
 
     if (BlockUtil::isSAMBlock(fileType) || BlockUtil::isBAMBlock(fileType)) {
         stats = std::make_unique<SamStat>();

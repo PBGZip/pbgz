@@ -40,12 +40,29 @@ else()
     message(STATUS "Detected unknown architecture")
 endif()
 
-# ARM PGO mode: OFF, GENERATE (instrumented training build) or USE.
-# Only ARM Linux + GCC is supported; other platforms ignore it.
-set(PBGZ_PGO "OFF" CACHE STRING "ARM PGO mode: OFF, GENERATE or USE")
+# PGO mode: OFF, GENERATE (instrumented training build) or USE.
+# Implemented and verified for ARM64 Linux + GCC only. The x86_64 build keeps its
+# own flags untouched, so asking for PGO there is an error rather than a silent
+# downgrade to an unprofiled binary.
+set(PBGZ_PGO "OFF" CACHE STRING "ARM64 Linux + GCC PGO mode: OFF, GENERATE or USE")
 set_property(CACHE PBGZ_PGO PROPERTY STRINGS OFF GENERATE USE)
-if(NOT PBGZ_ARCH STREQUAL "arm64" AND NOT PBGZ_PGO STREQUAL "OFF")
-    message(WARNING "PBGZ_PGO is only supported on ARM; ignoring it")
+if(NOT PBGZ_PGO STREQUAL "OFF")
+    if(NOT PBGZ_PGO STREQUAL "GENERATE" AND NOT PBGZ_PGO STREQUAL "USE")
+        message(FATAL_ERROR "PBGZ_PGO must be OFF, GENERATE or USE (got '${PBGZ_PGO}')")
+    endif()
+    if(NOT PBGZ_ARCH STREQUAL "arm64")
+        message(FATAL_ERROR
+            "PBGZ_PGO=${PBGZ_PGO} is only supported on ARM64 (detected ${PBGZ_ARCH}). "
+            "Configure with -DPBGZ_PGO=OFF.")
+    endif()
+    if(APPLE)
+        message(FATAL_ERROR "PBGZ_PGO is only supported on ARM64 Linux, not macOS.")
+    endif()
+    if(NOT PBGZ_COMPILER STREQUAL "gcc")
+        message(FATAL_ERROR
+            "PBGZ_PGO requires GCC (detected ${PBGZ_COMPILER}). "
+            "Configure with -DPBGZ_PGO=OFF.")
+    endif()
 endif()
 
 # Platform detection
@@ -79,23 +96,15 @@ elseif(PBGZ_ARCH STREQUAL "arm64")
         # (FT-2000/4 reports crc32+pmull).  LTO is enabled for ARM only so the
         # x86 build flags and code generation stay untouched.
         # For a baseline ARMv8-A build without CRC, remove +crc.
-        set(PBGZ_ARCH_FLAGS "-march=armv8-a+crc -flto")
-        if(NOT PBGZ_PGO STREQUAL "OFF")
-            if(PBGZ_COMPILER STREQUAL "gcc")
-                if(PBGZ_PGO STREQUAL "GENERATE")
-                    string(APPEND PBGZ_ARCH_FLAGS " -fprofile-generate")
-                elseif(PBGZ_PGO STREQUAL "USE")
-                    # -fprofile-correction tolerates the racing counters of a
-                    # multi-threaded training run; -Wno-missing-profile keeps
-                    # uncovered third-party code quiet.
-                    string(APPEND PBGZ_ARCH_FLAGS
-                           " -fprofile-use -fprofile-correction -Wno-missing-profile")
-                else()
-                    message(WARNING "Unknown PBGZ_PGO=${PBGZ_PGO}; expected OFF, GENERATE or USE")
-                endif()
-            else()
-                message(WARNING "PBGZ_PGO is only implemented for GCC on ARM; ignoring it")
-            endif()
+        set(PBGZ_ARCH_FLAGS "-march=armv8-a+crc -mtune=cortex-a72 -flto")
+        if(PBGZ_PGO STREQUAL "GENERATE")
+            string(APPEND PBGZ_ARCH_FLAGS " -fprofile-generate")
+        elseif(PBGZ_PGO STREQUAL "USE")
+            # -fprofile-correction tolerates the racing counters of a
+            # multi-threaded training run; -Wno-missing-profile keeps
+            # uncovered third-party code quiet.
+            string(APPEND PBGZ_ARCH_FLAGS
+                   " -fprofile-use -fprofile-correction -Wno-missing-profile")
         endif()
     endif()
 endif()

@@ -22,6 +22,8 @@
  */
 
 #include <getopt.h>
+#include <cerrno>
+#include <cstdlib>
 #include <filesystem>
 
 #include "log/logger.h"
@@ -36,6 +38,35 @@
 #include "index_engine.h"
 #include "sort_engine.h"
 
+
+/*
+ * Parse an option argument as a decimal integer in [lo, hi].
+ *
+ * strtol/atoi alone are not enough here: atoi("5x") silently yields 5, and the level
+ * fields of PbgzParameter are uint8_t, so e.g. "-l 265" would wrap to 9 and pass a
+ * range check applied after the cast. Requiring the whole string to be a number and
+ * checking the range on the long value rejects both.
+ */
+static bool parseBoundedInt(const char* optName, const char* arg, int lo, int hi, int& out)
+{
+    if (arg == nullptr || *arg == '\0') {
+        fprintf(stderr, "Error: %s requires an integer in %d..%d.\n", optName, lo, hi);
+        return false;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    const long value = strtol(arg, &end, 10);
+    if (errno == ERANGE || end == arg || end == nullptr || *end != '\0' ||
+        value < (long)lo || value > (long)hi) {
+        fprintf(stderr, "Error: invalid value '%s' for %s: expected an integer in %d..%d.\n",
+                arg, optName, lo, hi);
+        return false;
+    }
+
+    out = static_cast<int>(value);
+    return true;
+}
 
 typedef struct
 {
@@ -57,7 +88,7 @@ static PbgzArg pbgzArgs =
     {'r', "reference", required_argument, "<FASTA> specify reference gene file (it's not Mandatory). use for compress/decompress"},
     {'N', "ni", required_argument, "<NI> use an index built by 'pbgz makeref' instead of re-reading the FASTA. -r is still required and decides which reference is used"},
     {'n', "refunpack", no_argument, "unpack reference to pbgz file, so reference gene is needed when decompress"},
-    {'t', "threads", required_argument, "<number> specify number of threads, default is CPUS. use for compress/decompress"},
+    {'t', "threads", required_argument, "<1-1024> specify number of threads, default is CPUS. use for compress/decompress"},
     {'l', "level", required_argument, "<1-9> specify compress level, default is 5, 1 is fast, 9 is best"},
     {'e', "remove", no_argument, "if compress succeed, will remove origin file, else this option is invalid. use for compress"},
     {'h', "help",  no_argument, "show help"},
@@ -219,12 +250,14 @@ public:
         }
 
         if (parameter.compressLevel < 1 || parameter.compressLevel > 9) {
-            fprintf(stderr, "Compress level is invalid.\n");
+            fprintf(stderr, "Compress level %u is invalid, expected 1..9.\n",
+                    (unsigned)parameter.compressLevel);
             return -1;
         }
 
         if (parameter.logLevel < 1 || parameter.logLevel > 6) {
-            fprintf(stderr, "Log level is invalid.\n");
+            fprintf(stderr, "Log level %u is invalid, expected 1..6.\n",
+                    (unsigned)parameter.logLevel);
             return -1;
         }
 
@@ -860,11 +893,19 @@ int main(int argc, char** argv) {
             break;
         }
         case 't': {
-            parameter.threadNum = atoi(optarg);
+            int threads = 0;
+            if (!parseBoundedInt("-t/--threads", optarg, 1, 1024, threads)) {
+                return 1;
+            }
+            parameter.threadNum = static_cast<uint32_t>(threads);
             break;
         }
         case 'l': {
-            parameter.compressLevel = atoi(optarg);
+            int level = 0;
+            if (!parseBoundedInt("-l/--level", optarg, 1, 9, level)) {
+                return 1;
+            }
+            parameter.compressLevel = static_cast<uint8_t>(level);
             break;
         }
         case 'e': {
@@ -872,7 +913,11 @@ int main(int argc, char** argv) {
             break;
         }
         case 'g': {
-            parameter.logLevel = atoi(optarg);
+            int level = 0;
+            if (!parseBoundedInt("-g/--loglevel", optarg, 1, 6, level)) {
+                return 1;
+            }
+            parameter.logLevel = static_cast<uint8_t>(level);
             break;
         }
         case 'G': {
