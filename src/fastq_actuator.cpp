@@ -985,6 +985,28 @@ int32_t FastqCodecActuator::compressBaseWithRef() {
                 }
             }
         }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+        // Process 16 bytes at a time with NEON, matching the SSE4.2 branch byte for byte.
+        const uint8x16_t target = vdupq_n_u8('N');
+        for (; simdIdx + 16 <= segmentLength; simdIdx += 16) {
+            const uint8x16_t cmp = vceqq_u8(vld1q_u8(segmentStart + simdIdx), target);
+            if (vminvq_u8(cmp) == 0xFF) {
+                // No N in this chunk: cheap 16-byte copy, then skip the byte loop.
+                memcpy(pBuff, segmentStart + simdIdx, 16);
+                pBuff += 16;
+            } else {
+                // At least one N: same per-byte handling as the scalar/x86 path below.
+                for (int j = 0; j < 16; j++) {
+                    if (segmentStart[simdIdx + j] == 'N') {
+                        *(baseNPosBuffer + nOffset) = currPos + simdIdx + j;
+                        nOffset++;
+                    } else {
+                        *pBuff = segmentStart[simdIdx + j];
+                        pBuff++;
+                    }
+                }
+            }
+        }
 #endif
 
         // Process remaining bytes with scalar code

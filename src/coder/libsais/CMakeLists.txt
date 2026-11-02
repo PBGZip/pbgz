@@ -1,4 +1,4 @@
-# Shared vendored upstream libsais 2.8.7 (Apache-2.0).
+# Shared vendored upstream libsais 2.12.1 (Apache-2.0 WITH LLVM-exception).
 # See NOTICE.md and the file header in libsais.h for license details.
 #
 # This is the project's single libsais copy. It is shared by the FC coder

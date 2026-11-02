@@ -38,9 +38,7 @@
 #include "utils/path_util.h"
 #include "pbgz_manager.h"
 #include "actg.h"
-#ifdef __SSE4_2__
 #include "hardware.h"
-#endif
 
 Reference::Reference(const std::string& fastaName, uint32_t threadNum, ChecksumType checksumType)
     : fastaChecksumType(checksumType) {
@@ -387,10 +385,7 @@ void Reference::calculateReferenceChecksum(const std::string& refGeneFile, Check
         }
     }
 
-    bool useFastGzReader = false;
-#ifdef __SSE4_2__
-    useFastGzReader = isGzFile && Hardware::isSupportSimd();
-#endif
+    bool useFastGzReader = useIsalGzReader() && isGzFile;
 
     auto runPass = [&](int64_t declaredLen, int64_t& bytesRead) -> std::string {
         ChecksumStream stream(type, (uint64_t)declaredLen);
@@ -480,11 +475,8 @@ bool Reference::writeNiFileHeader(DefaultFileWriter& niWriter, int64_t& offset) 
 std::unique_ptr<IOReader> Reference::createIOReader(const std::string& fileName) {
     bool isGz = PathUtil::isGzFile(fileName);
     if (isGz) {
-        // Choose gzip reader based on SIMD support
-        bool useFastGzReader = false;
-#ifdef __SSE4_2__
-        useFastGzReader = Hardware::isSupportSimd();
-#endif
+        // Choose gzip reader based on ISA-L availability (x86 CPUID / AArch64 NEON)
+        bool useFastGzReader = useIsalGzReader();
         if (useFastGzReader) {
             // Intel ISA-L accelerated reader
             // FastGzFileReader requires a non-const string reference

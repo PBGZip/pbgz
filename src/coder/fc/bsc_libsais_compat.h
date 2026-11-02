@@ -5,8 +5,9 @@ bsc_libsais_compat.h - bsc-style Burrows-Wheeler entry points for the FC coder.
 The FC coder calls the bsc-style entry points transform_do() / untransform_do()
 / untransform(). These were historically provided by the vendored, bsc-merged
 libsais.c (a stripped libsais 2.0 fork). PBGZ now vendors upstream libsais
-2.8.7 (Apache-2.0) verbatim in libsais.c/.h and implements the three entry
-points here, on top of the public libsais API, with byte-identical output.
+2.12.1 (Apache-2.0 WITH LLVM-exception) verbatim in libsais.c/.h and
+implements the three entry points here, on top of the public libsais API, with
+byte-identical output.
 
 SPDX-License-Identifier: MIT
 

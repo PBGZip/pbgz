@@ -147,6 +147,17 @@ private:
     }
 };
 
+/*
+ * Whether the ISA-L accelerated gzip reader (FastGzFileReader) is usable.
+ * On x86 it needs the SSE4.2/AVX2 feature set probed above; on AArch64 the
+ * bundled ISA-L is built with NEON inflate kernels (igzip_inflate_*_arm64,
+ * igzip_decode_huffman_code_block_aarch64, ...) so it is always usable there.
+ */
+static inline bool useIsalGzReader()
+{
+    return Hardware::isSupportSimd();
+}
+
 #else
 /* ARM / other architectures: no x86 SIMD */
 class Hardware
@@ -158,4 +169,18 @@ public:
         return false;
     }
 };
+
+/*
+ * AArch64 builds link an ISA-L static archive that carries NEON/AArch64
+ * deflate+inflate kernels, so the accelerated gzip reader is always usable.
+ * (x86_64 decides at runtime via CPUID in the branch above.)
+ */
+static inline bool useIsalGzReader()
+{
+#if defined(__aarch64__)
+    return true;
+#else
+    return false;
+#endif
+}
 #endif

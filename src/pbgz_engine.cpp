@@ -141,11 +141,7 @@ int32_t PbgzEngine::init() {
                 ioReader = MemoryUtil::safeNewClass<DefaultFileReader>(parameter.inputFile);
                 LOG_INFO("Create DefaultFileReader (BAM).");
             } else {
-                bool isSupportSimd = false;
-#ifdef __SSE4_2__
-                isSupportSimd = Hardware().isSupportSimd();
-#endif
-                if (isSupportSimd) {
+                if (useIsalGzReader()) {
                     ioReader = MemoryUtil::safeNewClass<FastGzFileReader>(parameter.inputFile);
                     LOG_INFO("Create FastGzFileReader.");
                 } else {
