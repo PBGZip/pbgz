@@ -41,6 +41,38 @@ See also the bsc and libbsc web site:
 
 #if defined (FC_UNALIGN) && defined (__x86_64__)
 
+/* Extend a byte match from `len` while input[len]==reference[len].
+   The 16-byte NEON fast path is only used where the original 8-byte SWAR loop
+   would inspect both chunks; the 8-byte tail keeps the exact boundary
+   semantics, so the resulting match length (and thus the bitstream) is
+   unchanged. */
+static inline long long fc_extend_match(const unsigned char * RESTRICT input,
+                                        const unsigned char * RESTRICT reference,
+                                        long long len,
+                                        const unsigned char * RESTRICT inputMinLenEnd)
+{
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(__AARCH64EB__)
+    while (input + len + 16 <= inputMinLenEnd) {
+        const uint8x16_t vm = veorq_u8(vld1q_u8(input + len), vld1q_u8(reference + len));
+        if (vmaxvq_u8(vm) != 0) {
+            const uint64x2_t m64 = vreinterpretq_u64_u8(vm);
+            const uint64_t lo = vgetq_lane_u64(m64, 0);
+            if (lo != 0) return len + (long long)(__builtin_ctzll(lo) >> 3);
+            return len + 8 + (long long)(__builtin_ctzll(vgetq_lane_u64(m64, 1)) >> 3);
+        }
+        len += 16;
+    }
+#endif
+    for (; input + len < inputMinLenEnd; len += sizeof(unsigned long long)) {
+        unsigned long long m;
+        if ((m = (*(unsigned long long *)(input + len)) ^ *(unsigned long long *)(reference + len)) != 0) {
+            len += fc_bit_scan_forward64(m) / 8;
+            break;
+        }
+    }
+    return len;
+}
+
 template<class T> int fc_pp_2(const unsigned char * RESTRICT input, const unsigned char * inputEnd, unsigned char * RESTRICT output, unsigned char * outputEnd, int * RESTRICT lookup, int mask)
 {
     const unsigned char *   inputStart      = input;
@@ -92,14 +124,7 @@ FC_PP_GOOD_MATCH_FOUND1:
 
                 long long len = sizeof(T);
 
-                for (; input + len < inputMinLenEnd; len += sizeof(unsigned long long))
-                {
-                    unsigned long long m;
-                    if ((m = (*(unsigned long long *)(input + len)) ^ *(unsigned long long *)(reference + len)) != 0) 
-                    {
-                        len += fc_bit_scan_forward64(m) / 8; break;
-                    }
-                }
+                len = fc_extend_match(input, reference, len, inputMinLenEnd);
 
                 input += len; len -= sizeof(T);
 
@@ -186,14 +211,7 @@ FC_PP_GOOD_MATCH_FOUND1:
 
                 long long len = sizeof(T) + sizeof(T);
 
-                for (; input + len < inputMinLenEnd; len += sizeof(unsigned long long))
-                {
-                    unsigned long long m;
-                    if ((m = (*(unsigned long long *)(input + len)) ^ *(unsigned long long *)(reference + len)) != 0) 
-                    {
-                        len += fc_bit_scan_forward64(m) / 8; break;
-                    }
-                }
+                len = fc_extend_match(input, reference, len, inputMinLenEnd);
 
                 input += len; len -= sizeof(T) + sizeof(T);
 
@@ -280,14 +298,7 @@ FC_PP_GOOD_MATCH_FOUND1:
 
                 long long len = minLen;
 
-                for (; input + len < inputMinLenEnd; len += sizeof(unsigned long long))
-                {
-                    unsigned long long m;
-                    if ((m = (*(unsigned long long *)(input + len)) ^ *(unsigned long long *)(reference + len)) != 0) 
-                    {
-                        len += fc_bit_scan_forward64(m) / 8; break;
-                    }
-                }
+                len = fc_extend_match(input, reference, len, inputMinLenEnd);
 
                 input += len; len -= minLen;
 
@@ -378,14 +389,7 @@ FC_PP_GOOD_MATCH_FOUND1:
 
                 long long len = sizeof(T);
 
-                for (; input + len < inputMinLenEnd; len += sizeof(unsigned long long))
-                {
-                    unsigned long long m;
-                    if ((m = (*(unsigned long long *)(input + len)) ^ *(unsigned long long *)(reference + len)) != 0) 
-                    {
-                        len += fc_bit_scan_forward64(m) / 8; break;
-                    }
-                }
+                len = fc_extend_match(input, reference, len, inputMinLenEnd);
 
                 if (len < minLen) { heuristic = input + len; goto FC_PP_MATCH_NOT_FOUND; }
 
@@ -463,6 +467,26 @@ static int fc_pp_encode_generic(const unsigned char * RESTRICT input, const unsi
                     }
 
                     int len = 4;
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(__AARCH64EB__)
+                    /* 16-byte fast path. It stops at the same 4-byte-aligned
+                       offset the scalar loop would (len stays a multiple of 4
+                       so the len<minLen gate and the 2+1 refinement below are
+                       unchanged). */
+                    while (input + len + 16 <= inputMinLenEnd)
+                    {
+                        const uint8x16_t vm = veorq_u8(vld1q_u8(input + len), vld1q_u8(reference + len));
+                        if (vmaxvq_u8(vm) != 0)
+                        {
+                            const uint64x2_t m64 = vreinterpretq_u64_u8(vm);
+                            const uint64_t lo = vgetq_lane_u64(m64, 0);
+                            const int diff = (lo != 0) ? (int)(__builtin_ctzll(lo) >> 3)
+                                                       : 8 + (int)(__builtin_ctzll(vgetq_lane_u64(m64, 1)) >> 3);
+                            len += diff & ~3;
+                            break;
+                        }
+                        len += 16;
+                    }
+#endif
                     for (; input + len < inputMinLenEnd; len += sizeof(unsigned int))
                     {
                         if (*(unsigned int *)(input + len) != *(unsigned int *)(reference + len)) break;
