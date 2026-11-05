@@ -95,8 +95,49 @@ elseif(PBGZ_ARCH STREQUAL "arm64")
         # ARMv8-A CRC32 is optional in v8.0; the target servers implement it
         # (FT-2000/4 reports crc32+pmull).  LTO is enabled for ARM only so the
         # x86 build flags and code generation stay untouched.
-        # For a baseline ARMv8-A build without CRC, remove +crc.
-        set(PBGZ_ARCH_FLAGS "-march=armv8-a+crc -mtune=cortex-a72 -flto")
+        #
+        # Adaptive ISA selection (build time): probe the build host's HWCAP and
+        # pick the highest -march that *this* machine can run.  Because the
+        # third-party/static release tree is built on each deployment host, the
+        # resulting binary is tuned for that host:
+        #   * DotProd + FP16 present -> armv8.2-a+dotprod+fp16
+        #   * DotProd present        -> armv8.2-a+dotprod
+        #   * otherwise              -> armv8-a+crc   (portable ARMv8.0 baseline)
+        # A v8.2-selected binary will SIGILL on a CPU lacking these extensions;
+        # pass -DPBGZ_ARM_MARCH=armv8-a+crc to force a portable baseline build.
+        # Cross-compiling cannot run the probe, so it also falls back to baseline.
+        set(PBGZ_ARM_MARCH "" CACHE STRING
+            "Override ARM64 -march (e.g. armv8-a+crc for a portable baseline build)")
+        if(PBGZ_ARM_MARCH)
+            set(_pbgz_march "${PBGZ_ARM_MARCH}")
+            message(STATUS "ARM64: -march overridden to '${_pbgz_march}'")
+        elseif(CMAKE_CROSSCOMPILING)
+            set(_pbgz_march "armv8-a+crc")
+            message(STATUS "ARM64: cross-compiling; using portable baseline '${_pbgz_march}'")
+        else()
+            include(CheckCSourceRuns)
+            set(CMAKE_REQUIRED_QUIET TRUE)
+            # HWCAP_ASIMDDP = 1 << 20 (DotProd), HWCAP_ASIMDHP = 1 << 10 (FP16).
+            check_c_source_runs("
+                #include <sys/auxv.h>
+                int main(void) { unsigned long h = getauxval(AT_HWCAP);
+                                 return ((h >> 20) & 1UL) ? 0 : 1; }"
+                PBGZ_CPU_HAS_DOTPROD)
+            check_c_source_runs("
+                #include <sys/auxv.h>
+                int main(void) { unsigned long h = getauxval(AT_HWCAP);
+                                 return ((h >> 10) & 1UL) ? 0 : 1; }"
+                PBGZ_CPU_HAS_FP16)
+            if(PBGZ_CPU_HAS_DOTPROD AND PBGZ_CPU_HAS_FP16)
+                set(_pbgz_march "armv8.2-a+dotprod+fp16+nolse")
+            elseif(PBGZ_CPU_HAS_DOTPROD)
+                set(_pbgz_march "armv8.2-a+dotprod+nolse")
+            else()
+                set(_pbgz_march "armv8-a+crc")
+            endif()
+            message(STATUS "ARM64 host: dotprod=${PBGZ_CPU_HAS_DOTPROD} fp16=${PBGZ_CPU_HAS_FP16} -> -march=${_pbgz_march}")
+        endif()
+        set(PBGZ_ARCH_FLAGS "-march=${_pbgz_march} -mtune=cortex-a72 -flto")
         if(PBGZ_PGO STREQUAL "GENERATE")
             string(APPEND PBGZ_ARCH_FLAGS " -fprofile-generate")
         elseif(PBGZ_PGO STREQUAL "USE")

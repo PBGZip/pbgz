@@ -24,7 +24,7 @@ This project is licensed under the MIT License. For detailed license terms, plea
 
 This project uses the following open-source third-party components, and we hereby express our gratitude 🙏:
 
-#### 1. 🧬 HTSlib (Version 1.22)
+#### 1. 🧬 HTSlib (Version 1.25)
 - **📜 License**: BSD 3-Clause License
 - **🎯 Purpose**: Handling HTS (High-Throughput Sequencing) data formats
 - **🔗 Source**: https://github.com/samtools/htslib
@@ -47,17 +47,17 @@ This project uses the following open-source third-party components, and we hereb
   - The vendored upstream sources are used unmodified. The bsc-style entry points required by the FC coder (`transform_do` / `untransform_do` / `untransform`) are provided by our own MIT-licensed wrapper `src/coder/fc/bsc_libsais_compat.cpp`.
   - The BWT-CM coder calls upstream `libsais_bwt()` directly; its previously separate vendored copy (`src/coder/bcm_libsais.cpp`) was removed in favour of this single shared copy, so no source file needed to be symbol-renamed.
 
-#### 4. 🗜️ ZLIB (Version 1.3.1)
+#### 4. 🗜️ ZLIB (Version 1.3.2)
 - **📜 License**: zlib License
 - **🎯 Purpose**: Data compression library
 - **🔗 Source**: https://zlib.net/
 
-#### 5. 📦 BZIP2
+#### 5. 📦 BZIP2 (Version 1.0.8)
 - **📜 License**: BSD-style License
 - **🎯 Purpose**: Compression algorithm support
 - **🔗 Source**: https://sourceware.org/bzip2/
 
-#### 6. ⚡ LIBDEFLATE (Version 1.7)
+#### 6. ⚡ LIBDEFLATE (Version 1.26)
 - **📜 License**: MIT License
 - **🎯 Purpose**: High-performance DEFLATE compression/decompression
 - **🔗 Source**: https://github.com/ebiggers/libdeflate
@@ -67,7 +67,7 @@ This project uses the following open-source third-party components, and we hereb
 - **🎯 Purpose**: Zstandard compression algorithm support
 - **🔗 Source**: https://github.com/facebook/zstd
 
-#### 8. 📝 JSONCPP (Version 1.9.6)
+#### 8. 📝 JSONCPP (Version 1.9.8)
 - **📜 License**: MIT License
 - **🎯 Purpose**: JSON parsing and generation
 - **🔗 Source**: https://github.com/open-source-parsers/jsoncpp
@@ -153,14 +153,14 @@ SOFTWARE.
 
 | Dependency | Version | License | Purpose | Status |
 |------------|---------|---------|---------|--------|
-| HTSlib | 1.22 | BSD 3-Clause | HTS data formats | ✅ Integrated |
+| HTSlib | 1.25 | BSD 3-Clause | HTS data formats | ✅ Integrated |
 | FarmHash | Latest | MIT | Hash functions | ✅ Used |
 | libsais | 2.12.1 | Apache 2.0 + LLVM-exception | Suffix array + BWT | ✅ Integrated |
-| ZLIB | 1.3.1 | zlib | Compression | ✅ Supported |
-| BZIP2 | Latest | BSD | Compression | ✅ Supported |
-| LIBDEFLATE | 1.7 | MIT | DEFLATE | ✅ Supported |
+| ZLIB | 1.3.2 | zlib | Compression | ✅ Supported |
+| BZIP2 | 1.0.8 | BSD | Compression | ✅ Supported |
+| LIBDEFLATE | 1.26 | MIT | DEFLATE | ✅ Supported |
 | ZSTD | 1.5.7 | BSD + GPLv2 | Zstandard | ✅ Supported |
-| JSONCPP | 1.9.6 | MIT | JSON parsing | ✅ Used |
+| JSONCPP | 1.9.8 | MIT | JSON parsing | ✅ Used |
 | Google Test | Latest | BSD 3-Clause | Testing | ✅ Dev-only |
 | SPINLOCK | Multiple | Various | Concurrency | ✅ Integrated |
 

@@ -51,6 +51,21 @@ set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp )
 # Define main executable
 add_executable(pbgz ${MAIN_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPEN_SOURCES})
 
+# ARMv8.2 DotProd base packing: only coder_factory.cpp (the TU that uses
+# packBases) is compiled with the DotProd extension, so the inline UDOT path in
+# base_pack.h is used there. The rest of the program keeps the detected -march
+# (incl. +nolse), so LSE atomics stay disabled everywhere else.
+if(PBGZ_ARCH STREQUAL "arm64" AND PBGZ_CPU_HAS_DOTPROD)
+    if(PBGZ_CPU_HAS_FP16)
+        set(_pbgz_dot_march "armv8.2-a+dotprod+fp16")
+    else()
+        set(_pbgz_dot_march "armv8.2-a+dotprod")
+    endif()
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/coder_factory.cpp PROPERTIES
+        COMPILE_FLAGS "-march=${_pbgz_dot_march}"
+        COMPILE_DEFINITIONS "PBGZ_BASEPACK_INLINE_DOT=1")
+endif()
+
 target_link_libraries(pbgz PRIVATE
     pbgz_coder
     ${THIRDPARTY_DIR}/release/jsoncpp/lib/libjsoncpp.a

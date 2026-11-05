@@ -21,22 +21,33 @@ if [ ! -d "$buildpath" ]; then
 fi
 echo "----[build path: $buildpath]----"
 
-libname=libdeflate-1.7
+libname=libdeflate-1.26
 root=`pwd`/$libname
 rm -rf $libname || true # Ignore errors from rm command
 tar -xvf $libname.tar.gz
 cd $libname
 
 # start to build
-export INSTALL_PATH=$buildpath/libdeflate
+# libdeflate >= 1.19 only ships a CMake build (the top-level Makefile was dropped),
+# so the old `make && make install` flow no longer applies. Configure CMake to build
+# only the static lib and install into the same layout the rest of the project expects
+# (release/libdeflate/{include/libdeflate.h,lib/libdeflate.a}).
  if [ $buildtype == "release" ] ; then
-    make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
-    make install 
+  mkdir -p build
+  cd build
+  cmake -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=$buildpath/libdeflate \
+        -DCMAKE_C_FLAGS=-fPIC \
+        -DLIBDEFLATE_BUILD_SHARED_LIB=OFF \
+        -DLIBDEFLATE_BUILD_TESTS=OFF \
+        -DLIBDEFLATE_BUILD_GZIP=OFF \
+        ..
+  make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
+  make install
+  cd ..
 else
     echo "----[error type: build type $buildtype not defined]----"
     exit 1 # Added explicit error code
 fi
-unset INSTALL_PATH
 
 rm -rf $root || true # Ignore errors from rm command
-

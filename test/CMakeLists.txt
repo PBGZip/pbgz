@@ -35,6 +35,18 @@ set(TEST_MAIN ${CMAKE_CURRENT_SOURCE_DIR}/pbgz_test_main.cpp)
 # Generate test executable
 add_executable(pbgz_test ${TEST_MAIN} ${TEST_SOURCES} ${PBGZ_SOURCES} ${PBGZ_OPEN_SOURCES})
 
+# Keep the test's coder_factory.cpp on the same DotProd path as the pbgz binary.
+if(PBGZ_ARCH STREQUAL "arm64" AND PBGZ_CPU_HAS_DOTPROD)
+    if(PBGZ_CPU_HAS_FP16)
+        set(_pbgz_dot_march "armv8.2-a+dotprod+fp16")
+    else()
+        set(_pbgz_dot_march "armv8.2-a+dotprod")
+    endif()
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/src/coder_factory.cpp PROPERTIES
+        COMPILE_FLAGS "-march=${_pbgz_dot_march}"
+        COMPILE_DEFINITIONS "PBGZ_BASEPACK_INLINE_DOT=1")
+endif()
+
 # The model snapshot test does not depend on an external dataset; it is kept as a small
 # standalone command-line program so that prior binary compatibility, error fallback, and codec
 # state synchronization can be verified before integration into the main compression path.

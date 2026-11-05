@@ -29,7 +29,7 @@
 #ifndef _BGZF_PARALLEL_H_
 #define _BGZF_PARALLEL_H_
 
-#include <zlib.h>
+#include <libdeflate.h>
 
 #include <algorithm>
 #include <atomic>
@@ -371,9 +371,12 @@ private:
     {
         pthread_setname_np(pthread_self(),
                            std::string("bgzfinflate_").append(std::to_string(idx)).c_str());
-        z_stream zs;
-        memset(&zs, 0, sizeof(zs));
-        if (inflateInit2(&zs, 32 + MAX_WBITS) != Z_OK)
+        /* A libdeflate decompressor is one-shot per call but reusable across
+           calls, and this worker only ever sees complete, independent gzip
+           members, so allocate exactly one decompressor per worker thread
+           (documented thread-safety contract). */
+        struct libdeflate_decompressor* d = libdeflate_alloc_decompressor();
+        if (d == nullptr)
             return;
         for (;;) {
             uint64_t seq;
@@ -386,35 +389,27 @@ private:
                 jobQ_.pop_front();
             }
             BgzfMember& m = ring_[seq % kRingSize];
-            /* Each job is an independent gzip member; reset the stream so the
-               same z_stream can serve member after member (without the reset,
-               only the first member would inflate). */
-            inflateReset(&zs);
-            zs.next_in = m.comp.data();
-            zs.avail_in = (uInt)m.comp.size();
-            zs.next_out = m.out;
-            zs.avail_out = (uInt)kMaxInflated;
-            int rc = inflate(&zs, Z_FINISH);
-            if (rc != Z_STREAM_END) {
-                /* truncated/corrupt: deliver what we have and end the stream */
-                std::lock_guard<std::mutex> lk(mtx_);
-                m.outLen = (uint32_t)(kMaxInflated - zs.avail_out);
-                m.ready = true;
-                ++inflateDone_;
-                cvRead_.notify_all();
-                cvWork_.notify_all(); /* wake the creator's end-of-stream wait */
-                continue;
-            }
-            m.outLen = (uint32_t)(kMaxInflated - zs.avail_out);
+            /* Each job is a complete BGZF gzip member (header + deflate payload
+               + crc32/isize trailer), so it inflates in one shot into the full
+               64 KiB member buffer. The gzip trailer is validated (CRC + ISIZE)
+               exactly like the previous zlib path. */
+            size_t actualOut = 0;
+            const enum libdeflate_result rc = libdeflate_gzip_decompress(
+                d, m.comp.data(), m.comp.size(), m.out, (size_t)kMaxInflated, &actualOut);
+            const bool ok = (rc == LIBDEFLATE_SUCCESS);
             {
                 std::lock_guard<std::mutex> lk(mtx_);
+                /* On failure libdeflate leaves the output undefined (no partial
+                   bytes), so deliver an empty member: the reader skips it and
+                   the stream keeps draining to EOF, like the old corrupt path. */
+                m.outLen = ok ? (uint32_t)actualOut : 0;
                 m.ready = true;
                 ++inflateDone_;
                 cvRead_.notify_all();
                 cvWork_.notify_all(); /* wake the creator's end-of-stream wait */
             }
         }
-        inflateEnd(&zs);
+        libdeflate_free_decompressor(d);
     }
 
 private:

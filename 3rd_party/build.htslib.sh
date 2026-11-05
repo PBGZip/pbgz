@@ -24,7 +24,7 @@ if [ ! -d "$buildpath" ]; then
 fi
 echo "----[build path: $buildpath]----"
 
-libname=htslib-1.22
+libname=htslib-1.25
 rm -rf $libname || true # Ignore errors from rm command
 tar -xvf $libname.tar.bz2
 cd $libname
@@ -34,6 +34,8 @@ export LD_LIBRARY_PATH=$buildpath/tools/lib:$LD_LIBRARY_PATH
 
 export LIBRARY_PATH=$buildpath/libdeflate/lib:$buildpath/bzip2/lib
 export C_INCLUDE_PATH=$buildpath/libdeflate/include:$buildpath/bzip2/include
+# htslib's configure locates libdeflate through pkg-config when available.
+export PKG_CONFIG_PATH=$buildpath/libdeflate/lib/pkgconfig:$PKG_CONFIG_PATH
 
 # start to build
  if [ $buildtype == "release" ] ; then

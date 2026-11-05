@@ -120,6 +120,19 @@ static inline bool x86(const uint8_t *in, uint32_t n, uint8_t *out)
 /* Pack 16 already-validated 2-bit codes (one per byte) into 4 bytes. */
 static inline void armPack16(const uint8x16_t code, uint8_t *out)
 {
+#if defined(PBGZ_BASEPACK_INLINE_DOT) && defined(__ARM_FEATURE_DOTPROD)
+    /* ARMv8.2 DotProd path (inlined only in TUs compiled with +dotprod):
+       one UDOT packs all 16 codes. With per-lane weights {1,4,16,64}, lane k
+       = c[4k]*1 + c[4k+1]*4 + c[4k+2]*16 + c[4k+3]*64, which is exactly the
+       little-endian packed byte (codes are 0..3, so no carries). */
+    static const uint8_t kPackWeights[16] = {1, 4, 16, 64, 1, 4, 16, 64,
+                                             1, 4, 16, 64, 1, 4, 16, 64};
+    const uint8x16_t w = vld1q_u8(kPackWeights);
+    const uint32x4_t byt = vdotq_u32(vdupq_n_u32(0), code, w);
+    const uint16x4_t t16 = vmovn_u32(byt);
+    const uint8x8_t t8 = vmovn_u16(vcombine_u16(t16, t16));
+    vst1_lane_u32(reinterpret_cast<uint32_t *>(out), vreinterpret_u32_u8(t8), 0);
+#else
     /* code is 16 bytes, each 0..3. Pack two codes into a 4-bit nibble, then
        two nibbles into a byte, entirely in the 16/32-bit lanes. */
     const uint16x8_t c16 = vreinterpretq_u16_u8(code); /* lo=code[2j], hi=code[2j+1] */
@@ -131,6 +144,7 @@ static inline void armPack16(const uint8x16_t code, uint8_t *out)
     const uint16x4_t t16 = vmovn_u32(byt);
     const uint8x8_t t8 = vmovn_u16(vcombine_u16(t16, t16));
     vst1_lane_u32(reinterpret_cast<uint32_t *>(out), vreinterpret_u32_u8(t8), 0);
+#endif
 }
 
 /* Validate and pack one 16-base chunk; false means a non-ACGT byte was seen. */
