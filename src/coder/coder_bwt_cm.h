@@ -476,6 +476,7 @@ private:
         _counter<6>* const plane2 = &counter2[f][0][0];
 
         int32_t ctx = 1;
+        size_t idx17 = 17; /* ctx * 17, maintained incrementally: ctx'=2*ctx+bit */
         for (int32_t i = 128; i > 0; i >>= 1) /* Get all bits of current byte c, starting from high bit */
         {
             const int32_t p0 = counter0[ctx].get();
@@ -485,7 +486,7 @@ private:
 
             /* Get probability of auxiliary symbols through linear interpolation */
             const int32_t j = p >> 12; /* SSE index: highest 4 bits of mixed probability */
-            _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
+            _counter<6>* const row2 = plane2 + idx17;
             uint32_t x12;
             memcpy(&x12, (const void*)(row2 + j), sizeof(uint32_t));
             const int32_t x1 = (int32_t)(uint16_t)x12;
@@ -502,6 +503,7 @@ private:
             row2[j + 1].update(bit);
 
             ctx += ctx + bit; /* ctx left shift by one bit (+1 when the bit was 1) */
+            idx17 += idx17 + (bit ? (size_t)17 : (size_t)0);
         }
 
         c2 = c1;        /* c2 = previous byte */
@@ -523,6 +525,7 @@ private:
         _counter<6>* const plane2 = &counter2[f][0][0];
 
         int32_t ctx = 1;
+        size_t idx17 = 17; /* ctx * 17, maintained incrementally */
         while (ctx < 256)
         {
             const int32_t p0 = counter0[ctx].get();
@@ -532,7 +535,7 @@ private:
 
             /* Get probability of auxiliary symbols through linear interpolation */
             const int32_t j = p >> 12;
-            _counter<6>* const row2 = plane2 + (size_t)ctx * 17;
+            _counter<6>* const row2 = plane2 + idx17;
             uint32_t x12;
             memcpy(&x12, (const void*)(row2 + j), sizeof(uint32_t));
             const int32_t x1 = (int32_t)(uint16_t)x12;
@@ -547,6 +550,7 @@ private:
             row2[j + 1].update(bit);
 
             ctx += ctx + bit; /* ctx left shift by one bit (+1 when the bit was 1) */
+            idx17 += idx17 + (bit ? (size_t)17 : (size_t)0);
         }
 
         c2 = c1;

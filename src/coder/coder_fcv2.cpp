@@ -155,6 +155,10 @@ const Counter COUNTER_INIT = 2048;   /* probability 0.5, count 0 */
 /* Lookup tables converting between log-odds and probability, 12-bit fixed
    point with a scale factor of 256. */
 short  g_stretch[4096];
+/* g_stretch indexed directly by the packed 16-bit Counter (low 12 bits are the
+   probability), so the hot predict loop needs one load instead of two
+   dependent loads (counter -> prob mask -> stretch). */
+short  g_stretchCounter[65536];
 uint16_t g_squash[4096];
 
 /* Adaptive step-size table: large step when the update count is small, shrinking
@@ -181,6 +185,9 @@ void initTables()
         if (v >  2047) v =  2047;
         g_stretch[p] = (short)v;
     }
+    for (int c = 0; c < 65536; c++) {
+        g_stretchCounter[c] = g_stretch[c & 0x0FFF];
+    }
     for (int n = 0; n < 16; n++) {
         int s = 1 + n / 3;
         g_adaptShift[n] = (uint8_t)(s > 6 ? 6 : s);
@@ -203,13 +210,14 @@ inline int squash(int x)
 
 inline void counterUpdate(Counter& c, int isZero)
 {
-    int target = isZero ? 4095 : 0;
-    int p = counterProb(c);
-    int n = counterCount(c);
+    /* Branchless form: isZero is 0/1, the clamp and the saturating count
+       increment become conditional moves (identical results). */
+    const int target = isZero * 4095;
+    int p = c & 0x0FFF;
+    int n = c >> 12;
     p += ((target - p) * 2) >> g_adaptShift[n];
-    if (p < 1)    p = 1;
-    if (p > 4095) p = 4095;
-    if (n < 15)   n++;
+    p = p < 1 ? 1 : (p > 4095 ? 4095 : p);
+    n += (n < 15);
     c = (Counter)(p | (n << 12));
 }
 
@@ -432,12 +440,23 @@ public:
                        Counter** slot, int* stretched, int*& wp)
     {
         wp = cm.weightAt(wBucket, node);
-        long dot = 0;
-        for (int i = 0; i < FCV2_MODEL_COUNT; i++) {
-            slot[i] = cm.counterAt(i, base[i], node);
-            stretched[i] = g_stretch[counterProb(*slot[i])];
-            dot += (long)wp[i] * stretched[i];
-        }
+        /* FCV2_MODEL_COUNT is 5; the loop is fully unrolled so the five
+           independent counter gathers can overlap and the multiply-adds stay
+           branch-free. */
+        slot[0] = cm.counterAt(0, base[0], node);
+        slot[1] = cm.counterAt(1, base[1], node);
+        slot[2] = cm.counterAt(2, base[2], node);
+        slot[3] = cm.counterAt(3, base[3], node);
+        slot[4] = cm.counterAt(4, base[4], node);
+        const int s0 = g_stretchCounter[*slot[0]];
+        const int s1 = g_stretchCounter[*slot[1]];
+        const int s2 = g_stretchCounter[*slot[2]];
+        const int s3 = g_stretchCounter[*slot[3]];
+        const int s4 = g_stretchCounter[*slot[4]];
+        stretched[0] = s0; stretched[1] = s1; stretched[2] = s2;
+        stretched[3] = s3; stretched[4] = s4;
+        const long dot = (long)wp[0] * s0 + (long)wp[1] * s1 + (long)wp[2] * s2 +
+                         (long)wp[3] * s3 + (long)wp[4] * s4;
         /* squash() already clamps to [1, 4095]. */
         return squash((int)(dot >> 16));
     }
@@ -446,11 +465,17 @@ public:
        model's counter. */
     inline void update(Counter** slot, const int* stretched, int* wp, int p, int isZero)
     {
-        int err = (isZero ? 4095 : 0) - p;
-        for (int i = 0; i < FCV2_MODEL_COUNT; i++) {
-            wp[i] += (err * stretched[i]) >> WEIGHT_LR_SHIFT;
-            counterUpdate(*slot[i], isZero);
-        }
+        const int err = (isZero ? 4095 : 0) - p;
+        wp[0] += (err * stretched[0]) >> WEIGHT_LR_SHIFT;
+        wp[1] += (err * stretched[1]) >> WEIGHT_LR_SHIFT;
+        wp[2] += (err * stretched[2]) >> WEIGHT_LR_SHIFT;
+        wp[3] += (err * stretched[3]) >> WEIGHT_LR_SHIFT;
+        wp[4] += (err * stretched[4]) >> WEIGHT_LR_SHIFT;
+        counterUpdate(*slot[0], isZero);
+        counterUpdate(*slot[1], isZero);
+        counterUpdate(*slot[2], isZero);
+        counterUpdate(*slot[3], isZero);
+        counterUpdate(*slot[4], isZero);
     }
 
     /* Converts an in-record position to a sequencing-cycle index (flipped on the
