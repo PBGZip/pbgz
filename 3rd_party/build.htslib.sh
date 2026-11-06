@@ -47,7 +47,12 @@ export PKG_CONFIG_PATH=$buildpath/libdeflate/lib/pkgconfig:$PKG_CONFIG_PATH
         build_flag="--build=$build_triplet"
     fi
     autoreconf -i
-    ./configure $build_flag CFLAGS=-fPIC --prefix=$buildpath/hts --disable-lzma --with-libdeflate --enable-bz2 --disable-libcurl --disable-s3 --disable-ref-cache
+    # NOTE: passing CFLAGS on the configure line *replaces* htslib's default
+    # "-g -Wall -O2 -fvisibility=hidden" (AC_PROG_CC only fills CFLAGS when it is
+    # unset), so the optimization level must be spelled out here or the whole
+    # library - BGZF, htscodecs rANS, BAM parsing - is built at -O0.
+    # PBGZ_ARM_MARCH (from prepare-build-env.sh) matches the pbgz binary's -march.
+    ./configure $build_flag CFLAGS="-O3 ${PBGZ_ARM_MARCH} -fPIC -fvisibility=hidden" --prefix=$buildpath/hts --disable-lzma --with-libdeflate --enable-bz2 --disable-libcurl --disable-s3 --disable-ref-cache
     make -j $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) # Using nproc instead of cat /proc/cpuinfo for better portability
     make install 
 else

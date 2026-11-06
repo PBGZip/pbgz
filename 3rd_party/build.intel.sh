@@ -178,11 +178,11 @@ EOF
     if [[ $ARCH == "arm64" ]]; then
         echo "----[info: isa-l for MACOSX arm64]----"
         # for MAC OSX arm64 version
-        ./configure $other_configure_flags --target=darwin --prefix=$INSTALL_PATH CPPFLAGS="-fPIC -fdeclspec" CFLAGS="-fPIC -fdeclspec" 
+        ./configure $other_configure_flags --target=darwin --prefix=$INSTALL_PATH CPPFLAGS="-fPIC -fdeclspec" CFLAGS="-O3 ${PBGZ_ARM_MARCH} -fPIC -fdeclspec" 
     else
         echo "----[info: isa-l for MACOSX intel]----"
         # for MAC OSX intel version
-        ./configure $other_configure_flags --target=darwin  --prefix=$INSTALL_PATH CPPFLAGS="-fPIC" CFLAGS="-fPIC" 
+        ./configure $other_configure_flags --target=darwin  --prefix=$INSTALL_PATH CPPFLAGS="-fPIC" CFLAGS="-O3 ${PBGZ_ARM_MARCH} -fPIC" 
     fi
 else
     # ---- aarch64 non-SVE build workaround -------------------------------------
@@ -335,7 +335,7 @@ EOF
     fi
 
     ./autogen.sh
-    ./configure $other_configure_flags --prefix=$INSTALL_PATH CPPFLAGS="-fPIC" CFLAGS="-fPIC"
+    ./configure $other_configure_flags --prefix=$INSTALL_PATH CPPFLAGS="-fPIC" CFLAGS="-O3 ${PBGZ_ARM_MARCH} -fPIC"
 fi
 
 make clean
