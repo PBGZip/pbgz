@@ -754,7 +754,7 @@ size_t GzFileReader::readLine(std::string& line, ChecksumStream* sink) {
 
     size_t totalRead = 0;
 
-    while (true) {
+    for (;;) {
         // If buffer data has been processed, read new data
         if (bufferPos >= static_cast<size_t>(bytesRead)) {
             bytesRead = bgzf_read(fpGz, lineBuffer, bufferSize);
@@ -771,27 +771,29 @@ size_t GzFileReader::readLine(std::string& line, ChecksumStream* sink) {
             bufferPos = 0;
         }
 
-        // Process characters in buffer
-        while (bufferPos < static_cast<size_t>(bytesRead)) {
-            char c = lineBuffer[bufferPos++];
-            totalRead++;
-
-            // If newline encountered, stop reading
-            if (c == '\n') {
-                return totalRead;
+        /* Copy the whole line in one shot instead of one char at a time; '\r' is
+           dropped exactly as before, so the resulting string is unchanged. */
+        const char* start = lineBuffer + bufferPos;
+        const size_t avail = static_cast<size_t>(bytesRead) - bufferPos;
+        const char* nl = static_cast<const char*>(memchr(start, '\n', avail));
+        const size_t span = (nl != nullptr) ? static_cast<size_t>(nl - start) : avail;
+        if (memchr(start, '\r', span) == nullptr) {
+            line.append(start, span);
+        } else {
+            for (size_t i = 0; i < span; i++) {
+                if (start[i] != '\r') {
+                    line += start[i];
+                }
             }
-
-            // If carriage return encountered, skip it (Windows-style line breaks)
-            if (c == '\r') {
-                continue;
-            }
-
-            // Add character to line
-            line += c;
+        }
+        bufferPos += span;
+        totalRead += span;
+        if (nl != nullptr) {
+            bufferPos++;
+            totalRead++;   /* the newline itself is counted, as before */
+            return totalRead;
         }
     }
-
-    return totalRead;
 }
 
 int GzFileWriter::openIO() {
@@ -947,7 +949,7 @@ size_t FastGzFileReader::readLine(std::string& line, ChecksumStream* sink) {
 
     size_t totalRead = 0;
 
-    while (true) {
+    for (;;) {
         // If buffer data has been processed, read new data
         if (bufferPos >= bytesRead) {
             bytesRead = readIO(lineBuffer, bufferSize);
@@ -961,27 +963,29 @@ size_t FastGzFileReader::readLine(std::string& line, ChecksumStream* sink) {
             bufferPos = 0;
         }
 
-        // Process characters in buffer
-        while (bufferPos < bytesRead) {
-            char c = lineBuffer[bufferPos++];
-            totalRead++;
-
-            // If newline encountered, stop reading
-            if (c == '\n') {
-                return totalRead;
+        /* Copy the whole line in one shot instead of one char at a time; '\r' is
+           dropped exactly as before, so the resulting string is unchanged. */
+        const char* start = lineBuffer + bufferPos;
+        const size_t avail = bytesRead - bufferPos;
+        const char* nl = static_cast<const char*>(memchr(start, '\n', avail));
+        const size_t span = (nl != nullptr) ? static_cast<size_t>(nl - start) : avail;
+        if (memchr(start, '\r', span) == nullptr) {
+            line.append(start, span);
+        } else {
+            for (size_t i = 0; i < span; i++) {
+                if (start[i] != '\r') {
+                    line += start[i];
+                }
             }
-
-            // If carriage return encountered, skip it (Windows-style line breaks)
-            if (c == '\r') {
-                continue;
-            }
-
-            // Add character to line
-            line += c;
+        }
+        bufferPos += span;
+        totalRead += span;
+        if (nl != nullptr) {
+            bufferPos++;
+            totalRead++;   /* the newline itself is counted, as before */
+            return totalRead;
         }
     }
-
-    return totalRead;
 }
 
 bool FastGzFileReader::readMoreDataAndReset(uint8_t* isalIn, uint32_t isalInLen, uint8_t* isalOut, uint32_t isalOutLen, bool isMultipleHeaders) {
