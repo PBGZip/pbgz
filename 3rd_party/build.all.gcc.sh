@@ -4,7 +4,7 @@ set -e # Exit immediately if a command exits with a non-zero status.
 
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-pushd "$ROOT_DIR" || exit 1
+pushd "$ROOT_DIR" > /dev/null || exit 1
 source "$ROOT_DIR/prepare-build-env.sh"
 
 # All third-party libraries are considered stable and robust code, 
@@ -33,4 +33,4 @@ rm -rf ../3rd_party/$buildtype
 
 
 
-popd || exit 1
+popd > /dev/null || exit 1
