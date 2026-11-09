@@ -23,6 +23,9 @@
 
 #include <algorithm>   /* std::sort */
 #include <atomic>
+#include <cstdio>      /* rename/remove */
+#include <sys/stat.h>  /* stat/chmod */
+#include <unistd.h>    /* getpid */
 #include <utility>
 
 #include "spinlock/spinlock-pthread.h"
@@ -86,6 +89,21 @@ Reference::~Reference() {
     MemoryUtil::safeDeleteClass(guardBar);
 }
 
+/* Index identity name: the reference basename with a trailing gzip suffix
+   removed.  The index stores the decompressed squash, so an index built from
+   ref.fa must serve -r ref.fa.gz too (and the other way round). */
+static std::string niReferenceIdentity(const std::string& path) {
+    std::string name = PathUtil::getFileName(path);
+    if (name.size() > 3 && name.compare(name.size() - 3, 3, ".gz") == 0) {
+        name.resize(name.size() - 3);
+    } else if (name.size() > 4 && name.compare(name.size() - 4, 4, ".bgz") == 0) {
+        name.resize(name.size() - 4);
+    } else if (name.size() > 5 && name.compare(name.size() - 5, 5, ".gzip") == 0) {
+        name.resize(name.size() - 5);
+    }
+    return name;
+}
+
 /* Read the whole index, verify its checksum, and detach from disk. */
 bool Reference::loadFromNiFile(const std::string& niFile) {
     const int64_t magicLen = (int64_t)PBGZ_FILE_MAGIC.length();
@@ -144,10 +162,12 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
         return reject(std::string("carries unreadable metadata: ") + e.what());
     }
 
-    /* The index must have been built from the reference selected by -r. */
+    /* The index must have been built from the reference selected by -r.  The
+       squash is built from the decompressed bases, so the .gz/plain spellings of
+       the same reference are interchangeable. */
     const std::string wantName = PathUtil::getFileName(refGeneFile);
     const std::string haveName = niMeta["refe_name"].asString();
-    if (haveName != wantName) {
+    if (niReferenceIdentity(haveName) != niReferenceIdentity(wantName)) {
         return reject("was built from '" + haveName + "', not from '" + wantName + "'");
     }
 
@@ -180,6 +200,43 @@ bool Reference::loadFromNiFile(const std::string& niFile) {
     fastaChecksum = niMeta.isMember(fastaHashKey) ? niMeta[fastaHashKey].asString()
                                                   : std::string();
     fastaLength = niMeta["refe_len"].asInt64();
+    /* Restore the contig list written by makeref, so the reference/@SQ check in
+       referenceLinesUpWithHeader() behaves exactly as for a FASTA-backed load.
+       Indexes written by older pbgz have no such field: read the list from the
+       reference FASTA and write it back into the index (see below). */
+    refSequences.clear();
+    if (niMeta.isMember("refe_seqs") && niMeta["refe_seqs"].isArray()) {
+        const Json::Value& seqs = niMeta["refe_seqs"];
+        refSequences.reserve(seqs.size());
+        for (Json::ArrayIndex i = 0; i < seqs.size(); ++i) {
+            const Json::Value& e = seqs[i];
+            if (!e.isArray() || e.size() != 3) {
+                continue;
+            }
+            refSequences.emplace_back(e[0].asString(), e[1].asUInt64(), e[2].asUInt64());
+        }
+    } else {
+        /* Index written by an older pbgz: it carries no contig list, so read the
+           names/offsets/lengths from the reference FASTA (-r) instead.  Only the
+           headers and line lengths are parsed; the squash still comes from the
+           index.  Then write the list back into the index so later runs do not
+           touch the FASTA at all.  If the FASTA cannot be read, fall back to the
+           historical behaviour (unverifiable -> accepted) with a warning. */
+        if (loadSequenceSpansFromFasta()) {
+            if (rewriteNiFileWithContigNames(niFile, niChecksumType, expectHash)) {
+                fprintf(stderr, "Updated index %s with the contig list read from %s.\n",
+                        niFile.c_str(), refGeneFile.c_str());
+            } else {
+                fprintf(stderr, "note: index %s carries no contig names and could not be "
+                                "rewritten; the list was read from %s for this run only.\n",
+                        niFile.c_str(), refGeneFile.c_str());
+            }
+        } else {
+            fprintf(stderr, "warning: index %s carries no contig names and %s could not be read; "
+                            "the reference/@SQ check is skipped for this run.\n",
+                    niFile.c_str(), refGeneFile.c_str());
+        }
+    }
     loadedFromNi = true;
 
     fprintf(stderr, "Using index %s for reference %s (verified in memory).\n",
@@ -323,6 +380,83 @@ bool Reference::initSquashFromFasta() {
     }
     memcpy(refGeneSquash, squash.data(), refGeneSquashlen);
     return true;
+}
+
+/* Rewrite an index that predates the contig list.  The squash and its checksum
+   are unchanged; only the metadata is regenerated (now including refe_seqs), so
+   the FASTA is never scanned again for this index.  Written to a temp file and
+   renamed, so an interrupted upgrade leaves the original intact. */
+bool Reference::rewriteNiFileWithContigNames(const std::string& niFile,
+                                             ChecksumType niChecksumType,
+                                             const std::string& niDataHash) {
+    const std::string tmpFile = niFile + ".tmp." + std::to_string((long long)getpid());
+
+    struct stat st;
+    const bool haveMode = (::stat(niFile.c_str(), &st) == 0);
+
+    DefaultFileWriter writer(tmpFile);
+    if (writer.openIO() != 0) {
+        return false;
+    }
+
+    int64_t offset = 0;
+    if (!writeNiFileHeader(writer, offset)) {
+        writer.closeIO();
+        ::remove(tmpFile.c_str());
+        return false;
+    }
+    writer.writeIO(refGeneSquash, refGeneSquashlen);
+    writer.writeIOAt((size_t)offset, (uint8_t*)(&refGeneSquashlen), sizeof(refGeneSquashlen));
+    if (!writeNiFileMetadata(writer, niChecksumType, niDataHash,
+                             fastaChecksumType, fastaChecksum, fastaLength)) {
+        writer.closeIO();
+        ::remove(tmpFile.c_str());
+        return false;
+    }
+    writer.closeIO();
+    if (writer.getWriteError() != 0) {
+        ::remove(tmpFile.c_str());
+        return false;
+    }
+    if (haveMode) {
+        ::chmod(tmpFile.c_str(), st.st_mode & 07777);
+    }
+    if (::rename(tmpFile.c_str(), niFile.c_str()) != 0) {
+        ::remove(tmpFile.c_str());
+        return false;
+    }
+    return true;
+}
+
+/* Fill names/offsets/lengths from the FASTA without building the squash or the
+   checksum.  Used when an NI index written by an older pbgz carries no contig
+   list: the check in referenceLinesUpWithHeader() must still see the real list. */
+bool Reference::loadSequenceSpansFromFasta() {
+    std::unique_ptr<IOReader> reader = createIOReader(refGeneFile);
+    if (reader == nullptr || reader->openIO() != 0) {
+        return false;
+    }
+
+    std::vector<SequenceSpan> spans;
+    std::string line;
+    uint64_t baseCount = 0;
+    while (reader->readLine(line) > 0) {
+        if (line.empty()) continue;
+        if (line[0] == '>') {
+            const size_t nameEnd = line.find_first_of(" \t", 1);
+            spans.emplace_back(line.substr(1, nameEnd - 1), baseCount);
+            continue;
+        }
+        baseCount += line.length();
+    }
+    reader->closeIO();
+
+    for (size_t i = 0; i < spans.size(); ++i) {
+        const uint64_t end = (i + 1 < spans.size()) ? spans[i + 1].offset : baseCount;
+        spans[i].length = end - spans[i].offset;
+    }
+    refSequences.swap(spans);
+    return !refSequences.empty();
 }
 
 /* Join the background checksum pass (once) and publish its result into the members. */
@@ -554,6 +688,21 @@ bool Reference::writeNiFileMetadata(DefaultFileWriter& niWriter, ChecksumType ni
     } else {
         meta["refe_orgfile_md5"] = refeHash;
     }
+    /* Contig names/offsets/lengths, so an NI-backed load can run the same
+       reference-vs-@SQ consistency check as a FASTA-backed load.  Without them
+       the check is skipped (an unverifiable reference is accepted) and a
+       reference whose names do not match the alignment header is silently used
+       for SEQ, which costs a lot of compression on such files. */
+    Json::Value seqs(Json::arrayValue);
+    for (const SequenceSpan& s : refSequences) {
+        Json::Value e(Json::arrayValue);
+        e.append(s.name);
+        e.append(Json::Value::UInt64(s.offset));
+        e.append(Json::Value::UInt64(s.length));
+        seqs.append(e);
+    }
+    meta["refe_seqs"] = seqs;
+
     fastaLength = refGeneLen;
     fastaChecksum = refeHash;
     fastaChecksumType = refeChecksumType;

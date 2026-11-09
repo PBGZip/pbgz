@@ -120,6 +120,9 @@ public:
     /// @brief Build the squash buffer in memory from the FASTA file.
     bool initSquashFromFasta();
 
+    /// @brief Fill refSequences (names/offsets/lengths) from the FASTA alone.
+    bool loadSequenceSpansFromFasta();
+
     /// @brief Allocate the compressed-data buffer of the given length.
     uint8_t* initSquashByStream(int64_t squashLength);
 
@@ -185,6 +188,10 @@ private:
     bool writeNiFileMetadata(DefaultFileWriter& niWriter, ChecksumType niChecksumType,
                              const std::string& niDataHash, ChecksumType refeChecksumType,
                              const std::string& refeHash, int64_t refGeneLen);
+
+    /// @brief Rewrite an old NI file so it carries the contig list.
+    bool rewriteNiFileWithContigNames(const std::string& niFile, ChecksumType niChecksumType,
+                                      const std::string& niDataHash);
 
 private:
     // Progress bar
