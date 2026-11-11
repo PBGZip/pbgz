@@ -52,9 +52,12 @@ std::shared_ptr<coder> createFc(coder_io* io)        { return std::make_shared<c
 std::shared_ptr<coder> createAffix(coder_io* io)     { return std::make_shared<coder_affix_match>(io); }
 std::shared_ptr<coder> createArith(coder_io* io)     { return std::make_shared<coder_arith>(io); }
 std::shared_ptr<coder> createArithK(coder_io* io)    {
-    /* htscodecs rANS order-1 on the A/C/G/T bases packed four per byte. */
+    /* htscodecs rANS order-1.  Legacy streams pack four bases per byte; callers that
+       measured unpacked to be smaller (short unmapped reads) request it per stream. */
+    const bool noPack = (io != nullptr && io->meta.isMember("aknopack") &&
+                         io->meta["aknopack"].asInt() != 0);
     return std::make_shared<coder_arith_k>(io, /*order=*/1, /*mapBases=*/true,
-                                           /*useRans=*/true, /*ransPack=*/true);
+                                           /*useRans=*/true, /*ransPack=*/!noPack);
 }
 std::shared_ptr<coder> createRans(coder_io* io)      { return std::make_shared<coder_rans>(io); }
 std::shared_ptr<coder> createQcm(coder_io* io)       { return std::make_shared<coder_qcm>(io); }

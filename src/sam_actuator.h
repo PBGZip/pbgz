@@ -585,6 +585,18 @@ private:
        consulted, so every record stores its own bases (the "streams" layout still applies). */
     bool seqNoReference = false;
 
+    /* Set per block by compressBaseWithRef: every SEQ payload byte is ASCII ACGT,
+       so the order-1 rANS path can be used (see writeSeqMatchStreams). */
+    bool seqPayloadAllAcgt = true;
+    /* Set per block by compressBaseWithRef: some record was coded against the reference
+       (or a consensus), so the no-reference fast path must not take over. */
+    bool seqAnyUsedReference = false;
+    /* Set per block by compressBaseWithRef: at least one record was mapped (FLAG&4 == 0). */
+    bool seqAnyMappedRecord = false;
+    /* Set per block by writeSeqMatchStreams when the unpacked order-1 fast path was used;
+       only then are the raw-base exception streams written. */
+    bool seqUsedFastCoder = false;
+
     /* A decoded SEQ exception stream for the current block: its character and its positions. */
     struct SeqExcStream {
         uint8_t byte;
@@ -620,6 +632,8 @@ private:
     std::vector<uint32_t> idNumericLens;
     std::vector<uint32_t> idNumericPos;
     std::vector<uint64_t> idNumericAcc;
+    /* Zero-pad width per stream (see "padw" in the QNAME stream meta); 0 = as-is. */
+    std::vector<uint32_t> idNumericPad;
     /* State for value-domain QNAME sub-streams ("mode":"intd"): a range decoder walks one value per line. */
     std::vector<RangeCoder> idIntCoders;
     std::vector<id_int::Model> idIntModes;

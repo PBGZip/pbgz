@@ -129,7 +129,13 @@ int32_t analyzeQnameLine(const uint8_t* pBuffer, uint32_t bufferLen,
 struct IdSplitSegments {
     std::vector<std::string> texts;
     std::vector<std::string> payloads;
-    bool allNumeric = true;    /* every payload is a plain decimal integer, no leading zero */
+    bool allNumeric = true;    /* every payload is a plain decimal integer */
+    bool zeroPadded = false;   /* some payload has a leading zero */
+    uint32_t minWidth = 0;
+    uint32_t maxWidth = 0;
+    /* Width to restore leading zeros with, when the payloads are uniformly padded; 0 when the
+       decimal form round-trips as-is. */
+    uint32_t padWidth = 0;
     uint32_t srcLength = 0;    /* bytes this segment occupies in the source lines */
 };
 
@@ -325,6 +331,7 @@ struct IdValueLayout {
     uint32_t values = 0;
     uint32_t uniBase = 0;
     uint32_t uniTotal = 0;
+    uint32_t padWidth = 0;     /* zero-pad the decoded value back to this width */
 };
 
 /* What the scan of an all-digit segment produced: values, deltas, varints and test facts. */
@@ -567,6 +574,7 @@ static void settleIdOrdinalLayouts(coder_io* io, const uint8_t* varints, uint32_
         layout.wrote = true;
         layout.numeric = true;
         layout.srcLength = varintLength;
+        layout.dstLength = numeric.length;
     }
 }
 
@@ -625,11 +633,43 @@ static void settleIdValueLayouts(coder_io* io, const std::vector<std::string>& t
     }
 }
 
+/* Cheap probe before the full BWT+CM ordinal trial: encode the first PROBE values'
+   varints and compare bytes/value with the current value/text winner.  This keeps the
+   expensive trial off segments where it cannot win (e.g. random tile coordinates). */
+static bool ordinalProbeLooksBetter(const IdValueScan& scan, uint32_t curLen,
+                                    int32_t capacity, coder_err_sink* sink)
+{
+    const uint32_t n = (uint32_t)scan.deltas.size();
+    if (n == 0 || curLen == 0) {
+        return true;                       /* no winner yet: always try */
+    }
+    const uint32_t probe = (n < 4096u) ? n : 4096u;
+    std::vector<uint8_t> pv((size_t)probe * 10 + 16);
+    uint32_t pos = 0;
+    for (uint32_t k = 0; k < probe; ++k) {
+        pos += writeVarint(pv.data() + pos, (uint32_t)id_int::zigzag32(scan.deltas[k]));
+    }
+    int32_t cap = (int32_t)(pos * 2 + 4096);
+    if (cap > capacity) {
+        cap = capacity;
+    }
+    std::vector<uint8_t> out((size_t)cap);
+    coder_io io(out.data(), cap, sink, "QNAME probe");
+    std::shared_ptr<coder_bwt_cm> coder = std::make_shared<coder_bwt_cm>(&io);
+    coder->encode_line(pv.data(), pos);
+    coder->encode_flush();
+    if (io.err != coder_io::IO_OK || io.data_len <= 0) {
+        return false;
+    }
+    /* Strictly better by 2% at the probe scale, or don't pay for the full trial. */
+    return (uint64_t)io.data_len * n * 100ull < (uint64_t)curLen * probe * 98ull;
+}
+
 static IdValueLayout buildIdValueLayouts(const std::vector<std::string>& texts,
                                          const std::vector<std::string>& payloads,
                                          bool allNumeric, bool constMode, coder_io* io,
                                          RoughIOBlock* outBlock, int64_t segBlockStart,
-                                         coder_err_sink* sink)
+                                         coder_err_sink* sink, uint32_t padWidth)
 {
     IdValueLayout layout;
     /* An all-digit segment travels as correlated varints, modelled values, or decimal text. */
@@ -644,12 +684,40 @@ static IdValueLayout buildIdValueLayouts(const std::vector<std::string>& texts,
     }
 
     const IdValueScan scan = scanIdValues(payloads, varBuf, cap);
-    if (scan.ok && scan.correlated && scan.varintLength > 0) {
-        settleIdOrdinalLayouts(io, varBuf, scan.varintLength, scan, layout);
-    } else if (scan.modelFits()) {
+    /* Value/text candidates first. */
+    if (scan.modelFits()) {
         settleIdValueLayouts(io, texts, scan, outBlock, segBlockStart, sink, layout);
     }
+    /* Ordinal candidates (zigzag-delta varints through BWT+CM, or the delta counter) are
+       built whenever the values parse, then compared against the value/text winner above.
+       This used to require 10% exact +1 steps, which rejects sparse ordinals such as
+       Illumina x/y coordinates (large gaps between reads); those fell back to text. */
+    const uint32_t curLenForProbe = layout.wrote ? layout.dstLength
+                                 : (layout.textWroteOut ? (uint32_t)io->data_len : 0);
+    if (scan.ok && scan.varintLength > 0 &&
+        ordinalProbeLooksBetter(scan, curLenForProbe, io->data_capacity, sink)) {
+        const int32_t ordCap = (scan.varintLength * 2 + 4096 < (uint32_t)io->data_capacity)
+                                   ? (int32_t)(scan.varintLength * 2 + 4096)
+                                   : io->data_capacity;
+        std::vector<uint8_t> ordBuf((size_t)ordCap);
+        coder_io ordIo(ordBuf.data(), ordCap, sink, "QNAME ordinal");
+        IdValueLayout ord;
+        settleIdOrdinalLayouts(&ordIo, varBuf, scan.varintLength, scan, ord);
+        const uint32_t curLen = layout.wrote ? layout.dstLength
+                                             : (layout.textWroteOut ? (uint32_t)io->data_len : 0);
+        if (ord.wrote && (curLen == 0 || ord.dstLength < curLen)) {
+            memcpy(io->data, ordIo.data, ord.dstLength);
+            io->data_len = ord.dstLength;
+            io->meta = ordIo.meta;
+            layout = ord;
+            layout.textWroteOut = false;
+            /* The value/text path may have advanced the block by the text length; the
+               segment starts at segBlockStart, and settleIdSplitLayout adds from there. */
+            outBlock->setDataLen(segBlockStart);
+        }
+    }
     MemoryUtil::safeFree(varBuf);
+    layout.padWidth = padWidth;
     return layout;
 }
 
@@ -692,7 +760,7 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
                                               const uint8_t* buffer,
                                               const std::vector<std::vector<int32_t>>& splitPos,
                                               const std::vector<uint8_t>& splitSymbols,
-                                              int64_t headEndLine)
+                                              int64_t headEndLine, bool digitSplit = false)
 {
     IdSplitSegments seg;
     const uint32_t lineNum = (uint32_t)npos.size();
@@ -707,33 +775,67 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
         }
 
         const uint32_t contentId = lineIdx - (uint32_t)headEndLine;
+        /* In digit-split mode stream 0 is the synthetic cut before the trailing digits; the
+           real symbols start at stream 1. */
+        auto cutPos = [&](uint32_t streamIdx) -> uint32_t {
+            if (digitSplit && streamIdx == 0) {
+                const uint32_t tabPos = (uint32_t)splitPos[contentId][0];
+                uint32_t b = tabPos;
+                while (b > 0 && line[b - 1] >= (uint8_t)'0' && line[b - 1] <= (uint8_t)'9') {
+                    --b;
+                }
+                return (b > 0) ? (b - 1) : 0;
+            }
+            return (uint32_t)splitPos[contentId][digitSplit ? streamIdx - 1 : streamIdx];
+        };
         const uint8_t* segmentStart = nullptr;
         uint32_t segmentLength = 0;
         if (splitIdx == 0) {
             segmentStart = line;
-            segmentLength = (uint32_t)splitPos[contentId][0] + 1;
+            segmentLength = cutPos(0) + 1;
         } else {
-            const uint32_t prevPos = (uint32_t)splitPos[contentId][splitIdx - 1];
-            const uint32_t currPos = (uint32_t)splitPos[contentId][splitIdx];
+            const uint32_t prevPos = cutPos(splitIdx - 1);
+            const uint32_t currPos = cutPos(splitIdx);
             segmentStart = line + prevPos + 1;
             segmentLength = currPos - prevPos;
         }
 
         /* Keep the full segment for the text path and the bare payload for the numeric one. */
-        const bool hasSep = (segmentLength > 0 && segmentStart[segmentLength - 1] == splitSymbols[splitIdx]);
+        /* The stream keeps its symbol (the mark for stream 0); only the cut positions are
+           shifted by one in digit-split mode. */
+        const uint8_t cutSym = splitSymbols[splitIdx];
+        const bool hasSep = (segmentLength > 0 && segmentStart[segmentLength - 1] == cutSym);
         const uint32_t payloadLen = hasSep ? segmentLength - 1 : segmentLength;
         std::string payload((char*)segmentStart, payloadLen);
         if (!payload.empty()) {
             if (payload.find_first_not_of("0123456789") != std::string::npos) {
                 seg.allNumeric = false;
-            } else if (payload.size() > 1 && payload[0] == '0') {
-                /* A leading zero cannot round-trip through the varint stream; force the textual path. */
-                seg.allNumeric = false;
+            } else {
+                const uint32_t width = (uint32_t)payload.size();
+                if (seg.minWidth == 0 || width < seg.minWidth) {
+                    seg.minWidth = width;
+                }
+                if (width > seg.maxWidth) {
+                    seg.maxWidth = width;
+                }
+                if (width > 1 && payload[0] == '0') {
+                    seg.zeroPadded = true;
+                }
             }
         }
         seg.texts.push_back(std::string((char*)segmentStart, segmentLength));
         seg.payloads.push_back(payload);
         seg.srcLength += segmentLength;
+    }
+    /* A leading zero is reversible only when every payload is the same width: the value is
+       stored numerically and zero-padded back to padWidth on decode. Otherwise the textual
+       path stands, as before. */
+    if (seg.allNumeric && seg.zeroPadded) {
+        if (seg.minWidth == seg.maxWidth) {
+            seg.padWidth = seg.maxWidth;
+        } else {
+            seg.allNumeric = false;
+        }
     }
     return seg;
 }
@@ -843,6 +945,9 @@ static Json::Value buildIdSplitMeta(const IdSplitWinner& winner, uint32_t splitI
         break;
     case IdSplitWinner::Numeric:
         meta["mode"] = "numeric";
+        if (value.padWidth > 0) {
+            meta["padw"] = (Json::Value::UInt)value.padWidth;
+        }
         break;
     case IdSplitWinner::Const:
         meta["mode"] = "const";
@@ -856,18 +961,27 @@ static Json::Value buildIdSplitMeta(const IdSplitWinner& winner, uint32_t splitI
         meta["intk"] = (Json::Value::UInt)value.lowBits;
         meta["numv"] = (Json::Value::UInt)value.values;
         meta["coder"]["magic"] = "int_field";
+        if (value.padWidth > 0) {
+            meta["padw"] = (Json::Value::UInt)value.padWidth;
+        }
         break;
     case IdSplitWinner::IntUniform:
         meta["mode"] = "intu";
         meta["intb"] = (Json::Value::UInt)value.uniBase;
         meta["intn"] = (Json::Value::UInt)value.uniTotal;
         meta["coder"]["magic"] = "int_field";
+        if (value.padWidth > 0) {
+            meta["padw"] = (Json::Value::UInt)value.padWidth;
+        }
         break;
     case IdSplitWinner::IntModel:
         meta["mode"] = "intd";
         meta["intw"] = (Json::Value::UInt)value.width;
         meta["intk"] = (Json::Value::UInt)value.lowBits;
         meta["coder"]["magic"] = "int_field";
+        if (value.padWidth > 0) {
+            meta["padw"] = (Json::Value::UInt)value.padWidth;
+        }
         break;
     case IdSplitWinner::Text:
     default:
@@ -876,6 +990,57 @@ static Json::Value buildIdSplitMeta(const IdSplitWinner& winner, uint32_t splitI
     return meta;
 }
 
+
+/* A block whose QNAMEs are a constant prefix followed by a fixed-width digit run (BGI/MGI
+   style, e.g. E150029393L1C001R00100001875). Cutting there lets the counter travel in a
+   numeric layout instead of the affix coder's text.  This is a plain scan of the sampled
+   lines: it costs no extra trial encode and adds no trial round. */
+static bool qnameDigitSplitFits(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
+                                uint32_t trialLines)
+{
+    if (analysis.symbols.size() != 1 || analysis.symbols[0] != (uint8_t)'\t') {
+        return false;   /* delimiter-ful names already tokenise */
+    }
+    const std::vector<size_t>& npos = *in.npos;
+    const uint32_t lineNum = (uint32_t)npos.size();
+    const uint8_t* buffer = in.buffer;
+    std::string prefix;
+    uint32_t digits = 0;
+    uint32_t seen = 0;
+    for (uint32_t lineIdx = (uint32_t)in.headEndLine; lineIdx < lineNum; ++lineIdx) {
+        if (trialLines != 0 && seen >= trialLines) {
+            break;
+        }
+        const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
+        const uint32_t lineEnd = (uint32_t)npos[lineIdx];
+        if (lineStart >= lineEnd || buffer[lineStart] == (uint8_t)'@') {
+            continue;
+        }
+        const uint8_t* tab = (const uint8_t*)memchr(buffer + lineStart, '\t', lineEnd - lineStart);
+        if (tab == nullptr) {
+            return false;
+        }
+        const uint32_t qnameEnd = (uint32_t)(tab - buffer);
+        uint32_t b = qnameEnd;
+        while (b > lineStart && buffer[b - 1] >= (uint8_t)'0' && buffer[b - 1] <= (uint8_t)'9') {
+            --b;
+        }
+        const uint32_t run = qnameEnd - b;
+        if (run < 4 || b == lineStart) {
+            return false;   /* too short to be a counter, or no prefix at all */
+        }
+        if (seen == 0) {
+            prefix.assign((const char*)buffer + lineStart, (size_t)(b - lineStart));
+            digits = run;
+        } else if (digits != run ||
+                   prefix.compare(0, prefix.size(), (const char*)buffer + lineStart,
+                                  (size_t)(b - lineStart)) != 0) {
+            return false;   /* mixed shapes: keep the whole-name layout */
+        }
+        ++seen;
+    }
+    return seen > 0 && !prefix.empty();
+}
 
 int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
                          RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
@@ -886,24 +1051,38 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
     uint32_t totalSrcLength = 0;
     uint32_t totalDstLength = 0;
 
-    // Process each split symbol
-    for (uint32_t i = 0; i < analysis.symbols.size(); ++i) {
+    /* Delimiter-less names with a counter tail get one extra cut before the digits; the
+       stream list then carries kQnameDigitSplit ahead of the real split symbols. */
+    const bool digitSplit = qnameDigitSplitFits(in, analysis, trialLines);
+    std::vector<uint8_t> streamSymbols;
+    if (digitSplit) {
+        streamSymbols.push_back(kQnameDigitSplit);
+    }
+    streamSymbols.insert(streamSymbols.end(), analysis.symbols.begin(), analysis.symbols.end());
+
+    // Process each split stream
+    for (uint32_t i = 0; i < streamSymbols.size(); ++i) {
         std::shared_ptr<coder_io> idIo = makeColumnIo(outBlock, "QNAME sub-stream", sink);
         const int64_t segBlockStart = (int64_t)outBlock->getDataLen();
 
         const IdSplitSegments seg = collectIdSplitSegments(i, trialLines, *in.npos,
                                                            in.buffer, analysis.positions,
-                                                           analysis.symbols, in.headEndLine);
+                                                           streamSymbols, in.headEndLine, digitSplit);
         std::string constText;
         const bool constMode = isConstantIdSplit(seg, constText);
 
-        /* The dict and hex layouts are built in their own buffers; the smallest wins. */
+        /* The dict and hex layouts are built in their own buffers; the smallest wins.  The
+           digit-split stream carries no separator, so it uses the layouts that store no
+           per-line separator byte: const/dict/text only. */
+        const bool noSepStream = digitSplit && i == 0;
         const IdDictLayout dict = constMode ? IdDictLayout{} : buildIdDictLayout(seg.texts);
-        const IdHexLayout hex = constMode ? IdHexLayout{} : buildIdHexLayout(seg.payloads);
+        const IdHexLayout hex =
+            (constMode || noSepStream) ? IdHexLayout{} : buildIdHexLayout(seg.payloads);
         /* Value layouts write into the segment's stream and settle the data length themselves. */
-        const IdValueLayout value = buildIdValueLayouts(seg.texts, seg.payloads, seg.allNumeric,
-                                                        constMode, idIo.get(), outBlock,
-                                                        segBlockStart, sink);
+        const IdValueLayout value = buildIdValueLayouts(seg.texts, seg.payloads,
+                                                        seg.allNumeric && !noSepStream, constMode,
+                                                        idIo.get(), outBlock, segBlockStart, sink,
+                                                        seg.padWidth);
 
         const IdSplitWinner winner = settleIdSplitLayout(seg, constMode, constText, value, dict, hex,
                                                          idIo.get(), outBlock, segBlockStart);
@@ -920,7 +1099,7 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
     // Set field metadata
     fieldMeta["totalsrclen"] = totalSrcLength;
     fieldMeta["totaldstlen"] = totalDstLength;
-    fieldMeta["splitsym"] = std::string((char*)analysis.symbols.data(), analysis.symbols.size());
+    fieldMeta["splitsym"] = std::string((char*)streamSymbols.data(), streamSymbols.size());
     fieldMeta["streams"] = streamMeta;
     fieldMeta["field"] = 0;
 

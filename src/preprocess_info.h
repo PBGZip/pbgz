@@ -219,6 +219,10 @@ struct PreprocessInfo {
        (see CodecSelector::selectQnameLayout); -1 keeps the affix layout. */
     std::atomic<int32_t> qnameUseAffix;
 
+    /* Whether the short-read, reference-free SEQ fast path (unpacked order-1 rANS) is
+       within 3% of coder_fc on this file: 1 = yes, 0 = no, -1 = not probed yet. */
+    std::atomic<int32_t> seqFastEligible;
+
     /* Whether this file is worth training and publishing a QUAL prior for; training is
        deferred until the pre-training blocks are consumed (see
        CompressEngine::finalizePretrain). */
@@ -227,6 +231,7 @@ struct PreprocessInfo {
     /* Initializers follow the declaration order of the members. */
     PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
                        qualPriorTrainingBytes(0), seqMatchCoder(-1), nposForm(-1), qnameUseAffix(-1),
+                       seqFastEligible(-1),
                        qualPriorRequested(false) {}
 
     void reset(BlockType type)
@@ -243,6 +248,7 @@ struct PreprocessInfo {
         seqMatchCoder.store(-1, std::memory_order_relaxed);
         nposForm.store(-1, std::memory_order_relaxed);
         qnameUseAffix.store(-1, std::memory_order_relaxed);
+        seqFastEligible.store(-1, std::memory_order_relaxed);
     }
 
     bool isDone() const

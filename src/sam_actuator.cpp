@@ -21,8 +21,11 @@
  * SOFTWARE.
  */
 
+#include <chrono>
+#include <cstring>
 #include <memory>
 #include <sstream>
+#include <thread>
 #include "sam_actuator.h"
 #include "profile_stats.h"
 #include "sam_field_layout.h"
@@ -310,100 +313,154 @@ int32_t SamCodecActuator::parseHeaderLine(const std::string& line)
 int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, uint32_t idx,
                                        std::pair<uint8_t, uint32_t>* qualityFrequnce)
 {
-    /* The line's tab positions (see LineTabs). */
+    /* Field-at-a-time scan: find each tab with memchr and hand the field to its own handler.
+       The old byte-at-a-time loop compared every byte against '\t'/ '\n' and then against the
+       field index, which cost several ns per byte; the per-byte work that is genuinely needed
+       (N count in SEQ, the QUAL histogram) now runs in tight loops over just that field. */
     LineTabs linePos;
     uint32_t baseLen = 0;
     bool lineCigarMatchFlag = false;
     uint32_t baseFieldLen = 0;
-    /* Walk the line through a raw pointer and hoisted length; this runs once per line of every block. */
-    const char* const src = (const char*)line;
-    const uint32_t srcLen = lineLen;
-    for (uint32_t i = 0; i < srcLen; ++i) {
-        if (src[i] == '\t' || src[i] == '\n') {
-            // First tab before is ID column, need to split and analyze ID column
-            if (linePos.empty()) {
-                if (contentPos.empty()) {
-                    // Pass ID column content (from line start to first tab position)
-                    preAnalysisIdFirstLine((uint8_t*)src, i + 1);
-                } else {
-                    // Pass ID column content (from line start to first tab position)
-                    preAnalysisIdLine((uint8_t*)src, i + 1);
-                }
-            } else if (linePos.size() == 2) {  // RNAME is the 3th field
-                uint32_t chrLen = i - (uint32_t)linePos[1] - 1;
-                const char* chrBegin = src + (size_t)linePos[1] + 1;
-                const bool isStar = (chrLen == 1 && *chrBegin == '*');
-                const bool isEq = (chrLen == 1 && *chrBegin == '=');
-                if (!isStar && !isEq) {
-                    /* Mapped read: build the (rare) name only to look it up. */
-                    std::string chrName(chrBegin, chrLen);
-                    if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
-                        return -1;
+    uint32_t flagValue = 0;
+    bool flagParsed = false;
+
+    const uint8_t* p = line;
+    const uint8_t* const lineEnd = line + lineLen;
+
+    for (uint32_t field = 0; field < LineTabs::CAP; ++field) {
+        bool atEol = false;
+        const uint8_t* q = (const uint8_t*)memchr(p, '\t', (size_t)(lineEnd - p));
+        if (q == nullptr) {
+            /* No further tab: the last field ends at the newline, which the previous scan
+               recorded like a tab (a record without optional tags takes this path). */
+            q = (const uint8_t*)memchr(p, '\n', (size_t)(lineEnd - p));
+            if (q == nullptr) {
+                /* The line carries no terminator either (the block's line view excludes it).
+                   Still do the field's own per-byte work, exactly as the byte-wise scan did,
+                   but record no position for it. */
+                if (field == 9) {
+                    baseLen = (uint32_t)(lineEnd - p);
+                    if (baseLen > maxBaseLength) {
+                        maxBaseLength = baseLen;
+                    }
+                } else if (field == 10) {
+                    for (const uint8_t* s = p; s < lineEnd; ++s) {
+                        qualityFrequnce[*s].second++;
                     }
                 }
-            } else if (linePos.size() == 5) {  // CIGAR is the 6th field
-                uint32_t cigarLen = i - (uint32_t)linePos[4] - 1;
-                if (cigarLen > 1) {
-                    lineCigarMatchFlag = true;
-                    uint8_t* cigarBegin  = (uint8_t*)src + (size_t)linePos[4] + 1;
-                    baseFieldLen = cigarSeqConsumed(cigarBegin, cigarLen);
-                } else {
-                    lineCigarMatchFlag = false;
-                }
-            } else if (linePos.size() == 9) {   // Base is the 10th field
-                baseLen = i - (uint32_t)linePos[8] - 1;
-                if (baseLen > maxBaseLength) {
-                    maxBaseLength = baseLen;
-                }
-                if (!lineCigarMatchFlag) {
-                    if (baseLen < minBaseLength) {
-                        minBaseLength =  baseLen;
-                    }
-                } else {
-                    if (baseFieldLen != baseLen) {
-                        return -1;
-                    }
-                }
-            } else if (linePos.size() == 10) {  // Quality value is the 11th field
-                uint32_t qualityLen = i - (uint32_t)linePos[9] - 1;
-                if (baseLen != qualityLen) {
-                    /* A QUAL of a single '*' denotes missing quality; its length need not equal the SEQ length */
-                    const bool missingQual = (qualityLen == 1 &&
-                                              src[(size_t)linePos[9] + 1] == '*');
-                    if (!missingQual) {
-                        LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
-                        return -1;
-                    }
-                }
-            }
-            linePos.push_back(i);
-            // Optional fields compressed as whole block
-            if (linePos.size() == 11) {
                 break;
             }
-        } else {
-            if (linePos.size() == 9) {
-                char ch = src[i];
-                if (ch == 'N' || ch == 'n') {
-                    baseNCount++;
-                }
-            } else if (linePos.size() == 10) {
-                /* Index by uint8_t: quality bytes are histogrammed in a 256-entry
-                   table and char signedness differs between targets. */
-                const uint8_t ch = line[i];
-                qualityFrequnce[ch].second++;
+            atEol = true;
+        }
+
+        switch (field) {
+        case 0:   /* QNAME: the split analysis wants the field including its tab. */
+            if (contentPos.empty()) {
+                preAnalysisIdFirstLine((uint8_t*)p, (uint32_t)(q - p) + 1);
+            } else {
+                preAnalysisIdLine((uint8_t*)p, (uint32_t)(q - p) + 1);
             }
+            break;
+        case 1: {   /* FLAG: kept so the CIGAR check can skip unmapped records. */
+            uint32_t v = 0;
+            const uint8_t* s = p;
+            for (; s < q; ++s) {
+                if (*s < (uint8_t)'0' || *s > (uint8_t)'9') {
+                    break;
+                }
+                v = v * 10 + (uint32_t)(*s - (uint8_t)'0');
+            }
+            flagValue = (s == q) ? v : 0;
+            flagParsed = (s == q);
+            break;
+        }
+        case 2: {   /* RNAME */
+            const uint32_t chrLen = (uint32_t)(q - p);
+            const bool isStar = (chrLen == 1 && *p == (uint8_t)'*');
+            const bool isEq = (chrLen == 1 && *p == (uint8_t)'=');
+            if (!isStar && !isEq) {
+                /* Mapped read: build the (rare) name only to look it up. */
+                std::string chrName((const char*)p, chrLen);
+                if (SamInfo::getInstance().getChrNameIndex(chrName) == 65535) {
+                    return -1;
+                }
+            }
+            break;
+        }
+        case 5: {   /* CIGAR */
+            const uint32_t cigarLen = (uint32_t)(q - p);
+            if (cigarLen > 1) {
+                lineCigarMatchFlag = true;
+                if (flagParsed && (flagValue & 0x4) != 0) {
+                    /* Unmapped: no reference can be addressed, so the reference span is never
+                       used. Leave the length check to the SEQ field (span == read length). */
+                    baseFieldLen = 0;
+                } else {
+                    baseFieldLen = cigarSeqConsumed(p, cigarLen);
+                }
+            } else {
+                lineCigarMatchFlag = false;
+            }
+            break;
+        }
+        case 9: {   /* SEQ */
+            baseLen = (uint32_t)(q - p);
+            if (baseLen > maxBaseLength) {
+                maxBaseLength = baseLen;
+            }
+            if (!lineCigarMatchFlag) {
+                if (baseLen < minBaseLength) {
+                    minBaseLength = baseLen;
+                }
+            } else if (baseFieldLen == 0) {
+                baseFieldLen = baseLen;   /* CIGAR span not computed (unmapped fast path). */
+            } else if (baseFieldLen != baseLen) {
+                return -1;
+            }
+            /* N count: one vectorised pass per case, still byte-exact. */
+            for (const uint8_t* s = p; (s = (const uint8_t*)memchr(s, 'N', (size_t)(q - s))) != nullptr; ++s) {
+                ++baseNCount;
+            }
+            for (const uint8_t* s = p; (s = (const uint8_t*)memchr(s, 'n', (size_t)(q - s))) != nullptr; ++s) {
+                ++baseNCount;
+            }
+            break;
+        }
+        case 10: {  /* QUAL */
+            const uint32_t qualityLen = (uint32_t)(q - p);
+            if (baseLen != qualityLen) {
+                /* A QUAL of a single '*' denotes missing quality; its length need not equal the SEQ length */
+                const bool missingQual = (qualityLen == 1 && *p == (uint8_t)'*');
+                if (!missingQual) {
+                    LOG_ERROR("Not a valid sam data, baselen = %u, qualityLen = %u ", baseLen, qualityLen);
+                    return -1;
+                }
+            }
+            for (const uint8_t* s = p; s < q; ++s) {
+                qualityFrequnce[*s].second++;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+
+        linePos.push_back((int64_t)(q - line));
+        p = q + 1;
+        if (atEol || field == LineTabs::CAP - 1) {
+            break;   /* the OPTION column runs to the line end */
         }
     }
+
     // Each line must have at least 10 tabs, less than 10 means not a SAM file
     if (linePos.size() < 10) {
-        LOG_ERROR("Sam field line invalid, size = %d", linePos.size());
+        LOG_ERROR("Sam field line invalid, size = %d", (int)linePos.size());
         return -1;
     }
     if (linePos.size() > maxFieldSize) {
         maxFieldSize = linePos.size();
     }
-    lineFiledCount.push_back(std::make_pair(idx, linePos.size()));
+    lineFiledCount.push_back(std::make_pair(idx, (uint16_t)linePos.size()));
     contentPos.push_back(linePos);
     return 0;
 }
@@ -1234,6 +1291,7 @@ void SamCodecActuator::clearIdNumericState() {
     idNumericLens.clear();
     idNumericPos.clear();
     idNumericAcc.clear();
+    idNumericPad.clear();
     idIntCoders.clear();
     idIntModes.clear();
     idIntActive.clear();
@@ -2787,6 +2845,51 @@ int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::
 }
 
 /* Write the SEQ match stream: "m" (run lengths under RLE, else whole) and, under RLE, "mval" (surviving values). */
+/* One-time per-file probe: is the unpacked order-1 rANS payload within 3% of coder_fc?
+   If yes, the fast SEQ path is taken (2.5x faster on short unmapped reads); if not (e.g.
+   highly duplicated reads, where coder_fc's LZP/BWT wins big), coder_fc is kept.
+   Only a prefix is probed: the verdict is about which coder suits the read mix, and a few
+   MB already separates "LZP/BWT wins by 3x" from "rANS is level", while a whole-block probe
+   would cost seconds on files that end up keeping coder_fc. */
+static const uint32_t kSeqFastProbeBytes = 4u << 20;   /* 4 MiB */
+
+static int32_t trialSeqFastOrder1(const uint8_t* buf, uint32_t len)
+{
+    if (len > kSeqFastProbeBytes) {
+        len = kSeqFastProbeBytes;
+    }
+    const int32_t cap = (int32_t)((uint64_t)len * 2 + 65536);
+    std::vector<uint8_t> outF((size_t)cap);
+    std::vector<uint8_t> outA((size_t)cap);
+    coder_err_sink sinkF;
+    coder_err_sink sinkA;
+
+    coder_io ioF(outF.data(), cap, &sinkF, "SEQ fast trial");
+    std::shared_ptr<coder> cF = CoderFactory::makeEncoder(CoderType::FC, &ioF);
+    cF->encode_line(buf, len);
+    cF->encode_flush();
+
+    /* The fast coder sees the sanitized payload (non-ACGT -> 'A' + exception stream);
+       coder_fc sees the raw payload, exactly as it would be coded. */
+    std::vector<uint8_t> clean(buf, buf + len);
+    for (uint32_t i = 0; i < len; ++i) {
+        const uint8_t ch = clean[i];
+        if (!(ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T')) {
+            clean[i] = (uint8_t)'A';
+        }
+    }
+    coder_io ioA(outA.data(), cap, &sinkA, "SEQ fast trial");
+    ioA.meta["aknopack"] = 1;
+    std::shared_ptr<coder> cA = CoderFactory::makeEncoder(CoderType::ARITH_K, &ioA);
+    cA->encode_line(clean.data(), len);
+    cA->encode_flush();
+
+    if (!sinkF.ok() || !sinkA.ok() || ioF.data_len <= 0 || ioA.data_len <= 0) {
+        return 0;
+    }
+    return ((uint64_t)ioA.data_len * 100ull <= (uint64_t)ioF.data_len * 103ull) ? 1 : 0;
+}
+
 int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uint8_t* matchBuffer,
                                                uint32_t matchLen, uint32_t srcLen, coder_io* matchIo,
                                                Json::Value& metaSubs, Json::Value& metaStreams,
@@ -2801,8 +2904,65 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
            At the extreme-ratio level (-l9) coder_arith_k is never taken: the pre-selection's verdict (coder_fc/coder_bwt_cm) is used as it stands. */
         const bool fastMode = (compressMode() == PBGZ_MODE_FAST);
         CoderType payType = seqMatchCoderFor();
-        if (!fastMode && !rle.useRle && baseNCount == 0 && engineCompressLevel() < 9) {
-            payType = CoderType::ARITH_K;
+        /* The unpacked order-1 fast path is for the scenario it was measured on: short,
+           reference-free blocks (all-unmapped reads), including sporadic Ns.  Everything
+           else keeps the previous behaviour (packed order-1 when baseNCount == 0, else
+           the pre-selection verdict). */
+        const bool shortReads = (maxBaseLength > 0 && maxBaseLength <= 512);
+        const bool fastCandidate = shortReads && seqPayloadAllAcgt && !seqAnyMappedRecord &&
+                                   !seqAnyUsedReference && seqSelfRef == nullptr;
+        if (!fastMode && !rle.useRle && engineCompressLevel() < 9) {
+            bool useFast = false;
+            if (fastCandidate) {
+                PreprocessInfo* preInfo = preprocessInfoMut();
+                int32_t verdict = (preInfo != nullptr)
+                                      ? preInfo->seqFastEligible.load(std::memory_order_relaxed)
+                                      : -1;
+                if (verdict < 0) {
+                    if (preInfo != nullptr) {
+                        /* One thread probes (-2 = in progress).  The others wait for it rather
+                           than coding their block the legacy way: the probe is a 4 MiB encode,
+                           and letting block placement depend on thread timing would make the
+                           archive bytes vary from run to run. */
+                        int32_t expected = -1;
+                        if (preInfo->seqFastEligible.compare_exchange_strong(
+                                expected, -2, std::memory_order_relaxed)) {
+                            verdict = trialSeqFastOrder1(payBuf, payLen);
+                            preInfo->seqFastEligible.store(verdict, std::memory_order_relaxed);
+                        } else {
+                            const auto deadline =
+                                std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                            while ((verdict = preInfo->seqFastEligible.load(
+                                        std::memory_order_relaxed)) == -2 &&
+                                   std::chrono::steady_clock::now() < deadline) {
+                                std::this_thread::yield();
+                            }
+                            if (verdict < 0) {
+                                verdict = 0;   /* probe never finished: keep the legacy path */
+                            }
+                        }
+                    } else {
+                        verdict = trialSeqFastOrder1(payBuf, payLen);
+                    }
+                }
+                useFast = (verdict == 1);
+            }
+            if (useFast) {
+                /* Sanitize the raw-base payload in place; the exception streams carry the
+                   original characters.  (RLE is off on this path, so payBuf == matchBuffer.) */
+                uint8_t* mb = const_cast<uint8_t*>(payBuf);
+                for (uint32_t i = 0; i < payLen; ++i) {
+                    const uint8_t ch = mb[i];
+                    if (!(ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T')) {
+                        mb[i] = (uint8_t)'A';
+                    }
+                }
+                payType = CoderType::ARITH_K;
+                matchIo->meta["aknopack"] = 1;
+                seqUsedFastCoder = true;
+            } else if (baseNCount == 0) {
+                payType = CoderType::ARITH_K;
+            }
         }
         /* A pinned or sampled verdict can still name a segment too short for coder_fc (FC_MIN_LEN bytes or less). */
         if (!fastMode && payType == CoderType::FC &&
@@ -3061,6 +3221,12 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
        (seqSelfRef), or none at all (compressBaseWithoutRef) - with none every record stores its own
        bases, and the "streams" layout still applies unchanged. */
     Reference* fileRef = seqNoReference ? nullptr : pRefeGene;
+    /* Every payload byte this block emits is ASCII ACGT (raw-base records are sanitized
+       and their non-ACGT characters travel in the exception streams). */
+    seqPayloadAllAcgt = true;
+    seqAnyUsedReference = false;
+    seqAnyMappedRecord = false;
+    seqUsedFastCoder = false;
 
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint32_t lineNum = npos.size();
@@ -3069,6 +3235,12 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     /* SEQ characters the 2-bit path cannot carry, one accumulator per character (see SeqExceptionClass); positions are delta-coded. */
     std::vector<SeqExceptionClass> excClasses(256);
     std::vector<uint8_t> excPresent;
+    /* 'N' positions split by payload kind: under the raw layout the payload already holds the
+       byte, so its positions are only needed when the fast coder sanitizes the payload. */
+    std::vector<uint32_t> nPosRaw;
+    std::vector<uint32_t> nPosNonRaw;
+    nPosRaw.reserve((size_t)baseNCount + 16);
+    nPosNonRaw.reserve((size_t)baseNCount + 16);
     excClasses[(uint8_t)'N'].keepForms = true;
     excClasses[(uint8_t)'N'].abs.reserve((size_t)baseNCount + 16);
     excClasses[(uint8_t)'N'].varint.reserve((size_t)baseNCount + 16);
@@ -3158,6 +3330,16 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
                                         fileRef, baseMappedBuffer.get(), ref2bitBuf.get());
         const uint32_t outLen = payload.length;
         const bool rawBases = payload.rawBases;
+        if (outLen > 0 && !rawBases) {
+            /* 2-bit codes (reference XOR / actgEncode fallback), not ASCII bases. */
+            seqPayloadAllAcgt = false;
+        }
+        if (payload.usedReference) {
+            seqAnyUsedReference = true;
+        }
+        if (!(flag & 0x04)) {
+            seqAnyMappedRecord = true;
+        }
         /* A consensus is not a file reference and carries no match statistics to update. */
         if (payload.usedReference && seqSelfRef == nullptr && fileRef != nullptr) {
             fileRef->updateMatchedGene((uint64_t)payload.refPos,
@@ -3166,9 +3348,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         /* Characters the payload cannot carry are recorded, one list per character (see SeqExceptionClass). */
         for (uint32_t n = 0; n < seqLength; n++) {
             const uint8_t ch = seqStart[n];
-            const bool carried = (ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T') ||
-                                 (rawBases && ch == 'N');
-            if (!carried) {
+            if (ch == (uint8_t)'N') {
+                /* A raw payload carries 'N' as-is; a 2-bit payload does not. */
+                (rawBases ? nPosRaw : nPosNonRaw).push_back(totalBaseLength + n);
+            } else if (!(ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T')) {
                 addSeqException(excClasses, excPresent, ch, totalBaseLength + n);
             }
         }
@@ -3205,6 +3388,26 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     totalSrcLen += srcLen;
     }
 
+
+    /* 'N' from a raw payload is carried by the payload itself (as before); only when the fast
+       coder sanitized it does the position have to travel in the exception stream. */
+    if (seqUsedFastCoder) {
+        size_t a = 0;
+        size_t b = 0;
+        while (a < nPosRaw.size() || b < nPosNonRaw.size()) {
+            uint32_t pos;
+            if (b >= nPosNonRaw.size() || (a < nPosRaw.size() && nPosRaw[a] <= nPosNonRaw[b])) {
+                pos = nPosRaw[a++];
+            } else {
+                pos = nPosNonRaw[b++];
+            }
+            addSeqException(excClasses, excPresent, (uint8_t)'N', pos);
+        }
+    } else {
+        for (size_t i = 0; i < nPosNonRaw.size(); ++i) {
+            addSeqException(excClasses, excPresent, (uint8_t)'N', nPosNonRaw[i]);
+        }
+    }
 
     /* SEQ exception sub-streams: one per character present, in ascending character order (see writeSeqExceptionStreams). */
     if (writeSeqExceptionStreams(excClasses, excPresent, metaStreams, totalSrcLen, totalDstLen) != 0) {
@@ -4178,6 +4381,9 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
         idNumericLens.push_back(nlen);
         idNumericPos.push_back(0);
         idNumericAcc.push_back(0);
+        /* Zero-padded decimal segments store their width, so the leading zeros come back. */
+        idNumericPad.push_back(idStreamMeta[i].isMember("padw")
+                                   ? idStreamMeta[i]["padw"].asUInt() : 0);
         idIntCoders.push_back(intRc);
         idIntModes.push_back(intModel);
         idIntActive.push_back(intActive);
@@ -6093,8 +6299,11 @@ int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& s
 
         const uint8_t sep = (splitIdx < idAnalysis.symbols.size())
                             ? (uint8_t)idAnalysis.symbols[splitIdx] : (uint8_t)'\t';
+        const uint32_t padw = (splitIdx < idNumericPad.size()) ? idNumericPad[splitIdx] : 0;
         char tmp[24];
-        int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)nacc);
+        int n = (padw > 0 && padw < sizeof(tmp))
+                    ? snprintf(tmp, sizeof(tmp), "%0*llu", (int)padw, (unsigned long long)nacc)
+                    : snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)nacc);
         if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
             LOG_ERROR("Reconstruct id numeric segment(%u) overflow", splitIdx);
             return -1;
@@ -6181,8 +6390,11 @@ int32_t SamCodecActuator::reconstructIdSegment(uint32_t splitIdx, Json::Value& s
         const uint8_t sep = (splitIdx < idAnalysis.symbols.size())
                             ? (uint8_t)idAnalysis.symbols[splitIdx] : (uint8_t)'\t';
         const uint64_t v = idIntModes[splitIdx].decode(idIntCoders[splitIdx]);
+        const uint32_t padw = (splitIdx < idNumericPad.size()) ? idNumericPad[splitIdx] : 0;
         char tmp[24];
-        int n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)v);
+        int n = (padw > 0 && padw < sizeof(tmp))
+                    ? snprintf(tmp, sizeof(tmp), "%0*llu", (int)padw, (unsigned long long)v)
+                    : snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)v);
         if (n <= 0 || outputBlock->getRemain() < (uint32_t)n + 1) {
             LOG_ERROR("Reconstruct id value-domain segment(%u) overflow", splitIdx);
             return -1;

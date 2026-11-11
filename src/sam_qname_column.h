@@ -84,6 +84,11 @@ struct QnameColumnInput {
 /* Encode the whole column with the affix-segmentation layout: one sub-stream per separator.
    `trialLines` stops after that many content lines (0 means the whole block). Returns the
    encoded size, negative on failure. */
+/* Synthetic split "symbol" for the cut before a QNAME's trailing digit run. SAM QNAME is
+   printable ASCII, so 0x01 never occurs in it; the segment this introduces has no trailing
+   separator (the decoder appends nothing for it). */
+constexpr uint8_t kQnameDigitSplit = 0x01;
+
 int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
                          RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
                          Json::Value& fieldMeta, uint32_t& fieldSrcLen);

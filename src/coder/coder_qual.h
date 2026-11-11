@@ -57,6 +57,12 @@ public:
 
         Q_MASK = (q_ctx_len > 0) ? ((1 << (Q_LOG * q_ctx_len)) - 1) : 0;
         S_CTX = pow(AMAX, s_ctx_len);
+        /* Precomputed base-context step: (s * AMAX + base) % S_CTX.  S_CTX is a
+           runtime value, so the modulo would otherwise be a real division in the
+           per-quality-symbol hot loop.  s_ctx_len is 1 or 3 here (S_CTX 5 or 125). */
+        for (int v = 0; v < S_CTX * AMAX && v < (int)(sizeof(s_ctx_next)/sizeof(s_ctx_next[0])); ++v) {
+            s_ctx_next[v] = (uint32_t)(v % S_CTX);
+        }
 
         if (is_gen2) {
             SSE_CTX = 1 << 4;
@@ -100,7 +106,7 @@ public:
         q = Q_QUANT_GEN2[q];
 
         q_prev_ctx = ((q_prev_ctx << Q_LOG) + q) & Q_MASK;
-        s_prev_ctx = ((s_prev_ctx * AMAX) + L[s]) % S_CTX;
+        s_prev_ctx = s_ctx_next[s_prev_ctx * AMAX + L[s]];
         return (((s_prev_ctx << (q_ctx_len * Q_LOG)) + q_prev_ctx ) << 4) | (sse_ctx);
     }
 
@@ -110,7 +116,7 @@ public:
         q = (q + ROUND_UP(QUANT_Q)) >> QUANT_Q;
 
         q_prev_ctx = ((q_prev_ctx << Q_LOG) + q) & Q_MASK;
-        s_prev_ctx = ((s_prev_ctx * AMAX) + L[s]) % S_CTX;
+        s_prev_ctx = s_ctx_next[s_prev_ctx * AMAX + L[s]];
         return (s_prev_ctx << (q_ctx_len * Q_LOG)) + q_prev_ctx;
     }
 
@@ -138,9 +144,13 @@ public:
             uint8_t q = (qual[i] - '!');
             model_qual->encodeSymbol(&rc, q, ctx);
 
-            /* SSE context: running average of the qualities so far. */
+            /* SSE context: running average of the qualities so far.  A read is far
+               below 16M bases, so the sum fits in 32 bits; keep the 64-bit path only
+               for the (unreachable in practice) overflow case. */
             tot_qual += qual[i];
-            sse_ctx_cur = tot_qual / (i + 1);
+            sse_ctx_cur = (tot_qual <= 0xFFFFFFFFull)
+                              ? (uint32_t)tot_qual / (i + 1)
+                              : (uint32_t)(tot_qual / (uint64_t)(i + 1));
 
             if (next_s < len)
                 ctx = get_context_gen2(seq[next_s], q, s_prev_ctx, q_prev_ctx, sse_ctx_cur);
@@ -205,7 +215,9 @@ public:
 
             /* SSE context: running average of the qualities so far. */
             tot_qual += q + '!';
-            sse_ctx_cur = tot_qual / (i + 1);
+            sse_ctx_cur = (tot_qual <= 0xFFFFFFFFull)
+                              ? (uint32_t)tot_qual / (i + 1)
+                              : (uint32_t)(tot_qual / (uint64_t)(i + 1));
 
             if (next_s < len)
                 ctx = get_context_gen2(seq[next_s], q, s_prev_ctx, q_prev_ctx, sse_ctx_cur);
@@ -289,6 +301,9 @@ private:
 
      /* sequence table lookups ACGTN->0..4 */
     int32_t L[256];
+
+    /* (base context * AMAX + base) % S_CTX, for s_ctx_len <= 3 (S_CTX <= 125). */
+    uint32_t s_ctx_next[125 * AMAX];
 
     /*  generate Q_QUANT_GEN2 */
     // uint8_t Q_QUANT[128] = {0};
