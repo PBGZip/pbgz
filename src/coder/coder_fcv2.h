@@ -97,9 +97,9 @@ const int FCV2_PRESET_COUNT = 3;
 
 /* The three measured presets: ultra, ultra-80 and fine. */
 const Fcv2Preset FCV2_PRESETS[FCV2_PRESET_COUNT] = {
-    { "ultra",    0, {   96,  4, 0, false } },
-    { "ultra-80", 0, {   80,  4, 0, false } },
-    { "fine",     3, {   96, 24, 0, false } },
+    { "ultra",    0, { 96,  4, 0, false } },
+    { "ultra-80", 0, { 80,  4, 0, false } },
+    { "fine",     3, { 96, 24, 0, false } },
 };
 
 /* The name of a configuration, or nullptr when it is not one of the presets. */

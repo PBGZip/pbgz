@@ -314,8 +314,9 @@ static int levelVolumeTier(uint8_t compressLevel)
     return 1;
 }
 
-/* fcv2 candidate tiers for the given compression level, filtered by block-volume tier. */
-std::vector<Fcv2Cfg> candidateFcv2Cfgs(uint8_t compressLevel)
+/* Shipped preset tiers for a compression level (non-target files keep these so
+   their archives stay byte-identical). */
+std::vector<Fcv2Cfg> shippedFcv2Cfgs(uint8_t compressLevel)
 {
     std::vector<Fcv2Cfg> cfgs;
     const int volumeTier = levelVolumeTier(compressLevel);
@@ -324,6 +325,166 @@ std::vector<Fcv2Cfg> candidateFcv2Cfgs(uint8_t compressLevel)
             continue;
         }
         cfgs.push_back(FCV2_PRESETS[i].cfg);
+    }
+    return cfgs;
+}
+
+/* Distribution and conditional-structure features of the QUAL sample.  These are
+   the statistics the fcv2 context tiers actually respond to; the marginal
+   histogram alone is not sufficient (two files can share a histogram and still
+   need different contexts). */
+struct QualFeatures {
+    uint64_t bytes = 0;
+    uint32_t maxLen = 0;
+    int      alphabet = 0;
+    double   topShare = 0.0;
+    double   cycStd = 0.0;    /* std of the mean quality over 20 relative-position bins */
+    double   lagDrop = 0.0;   /* H(Q) - H(Q_i | Q_{i-1}) in bits */
+};
+
+QualFeatures computeQualFeatures(const std::vector<QualSampleRecord>& records,
+                                 const std::vector<uint32_t>& freqByByte)
+{
+    QualFeatures f;
+    uint64_t total = 0;
+    uint32_t maxFreq = 0;
+    for (uint32_t b = 0; b < freqByByte.size() && b < 256; ++b) {
+        const uint32_t c = freqByByte[b];
+        if (c == 0) {
+            continue;
+        }
+        ++f.alphabet;
+        total += c;
+        if (c > maxFreq) {
+            maxFreq = c;
+        }
+    }
+    if (total == 0) {
+        return f;
+    }
+    f.bytes = total;
+    f.topShare = (double)maxFreq / (double)total;
+
+    const int NB = 20;
+    double binSum[NB] = {0};
+    uint64_t binCnt[NB] = {0};
+    std::vector<uint32_t> joint(128 * 128, 0);
+    std::vector<uint32_t> marg(128, 0);
+    for (const QualSampleRecord& r : records) {
+        const size_t len = r.qual.size();
+        if (len > f.maxLen) {
+            f.maxLen = (uint32_t)len;
+        }
+        for (size_t i = 0; i < len; ++i) {
+            const int v = (int)(uint8_t)r.qual[i] - 33;
+            const int bin = (int)((i * (size_t)NB) / len);
+            if (v >= 0 && v < 128) {
+                binSum[bin] += (double)v;
+                ++binCnt[bin];
+            }
+            if (i > 0) {
+                const int pv = (int)(uint8_t)r.qual[i - 1] - 33;
+                if (pv >= 0 && pv < 128 && v >= 0 && v < 128) {
+                    ++joint[(size_t)pv * 128 + v];
+                    ++marg[pv];
+                }
+            }
+        }
+    }
+    int used = 0;
+    double avg = 0.0;
+    for (int b = 0; b < NB; ++b) {
+        if (binCnt[b]) {
+            avg += binSum[b] / (double)binCnt[b];
+            ++used;
+        }
+    }
+    if (used > 0) {
+        avg /= (double)used;
+        double var = 0.0;
+        for (int b = 0; b < NB; ++b) {
+            if (binCnt[b]) {
+                const double m = binSum[b] / (double)binCnt[b];
+                var += (m - avg) * (m - avg);
+            }
+        }
+        f.cycStd = sqrt(var / (double)used);
+    }
+
+    uint64_t pairs = 0;
+    for (uint32_t pv = 0; pv < 128; ++pv) {
+        pairs += marg[pv];
+    }
+    if (pairs > 0) {
+        double hPrev = 0.0;
+        for (uint32_t pv = 0; pv < 128; ++pv) {
+            if (marg[pv]) {
+                const double p = (double)marg[pv] / (double)pairs;
+                hPrev -= p * log2(p);
+            }
+        }
+        double hCond = 0.0;
+        for (uint32_t pv = 0; pv < 128; ++pv) {
+            if (!marg[pv]) {
+                continue;
+            }
+            const double pm = (double)marg[pv];
+            for (uint32_t v = 0; v < 128; ++v) {
+                const uint32_t c = joint[(size_t)pv * 128 + v];
+                if (c) {
+                    hCond -= ((double)c / (double)pairs) * log2((double)c / pm);
+                }
+            }
+        }
+        f.lagDrop = hPrev - hCond;
+    }
+    return f;
+}
+
+/* Measured feature -> tier mapping (12 benchmark files, see the fcv2 study):
+     cycleMax  <- read length (hard lower bound), alphabet/peakedness, and cycle
+                  structure: flat + high diversity wants 32; peaked or long reads
+                  want 128; otherwise follow the read length.
+     prevShift <- lag-1 predictability: a strongly predictable previous value (or a
+                  tiny alphabet) wants the exact value (0), otherwise 1.
+   cycleBucket is the axis with the most exceptions (e19 wants 24 despite a flat
+   profile), so it is measured by the trial: {4, 8, 24}. */
+Fcv2Cfg predictFcv2Cfg(const QualFeatures& f, int cycleBucket)
+{
+    int cm;
+    if (f.cycStd < 1.0 && f.topShare < 0.55) {
+        cm = 32;                    /* high-diversity, flat cycle profile (150 bp BGI/Illumina) */
+    } else if (f.topShare > 0.60 && f.cycStd < 0.5) {
+        cm = 128;                   /* peaked, flat profile (old GAII) */
+    } else if (f.maxLen <= 64) {
+        cm = 48;                    /* short reads: cm just under the read length */
+    } else if (f.alphabet <= 8) {
+        cm = 128;                   /* few quality levels: per-cycle contexts are cheap */
+    } else if (f.maxLen <= 96) {
+        cm = 80;
+    } else if (f.maxLen <= 128) {
+        cm = 96;
+    } else {
+        cm = 128;
+    }
+    Fcv2Cfg cfg;
+    cfg.cycleMax = cm;
+    cfg.cycleBucket = cycleBucket;
+    cfg.prevShift = (f.alphabet <= 8 || f.lagDrop >= 0.35) ? 0 : 1;
+    cfg.useDedup = false;
+    cfg.counterMode = 0;
+    return cfg;
+}
+
+/* Target-scenario candidates: one predicted (cm, ps) with the three buckets that
+   win on real data.  Same trial count as the shipped presets. */
+std::vector<Fcv2Cfg> featureFcv2Cfgs(const QualFeatures& f)
+{
+    static const int kBuckets[] = {4, 8, 24};
+    std::vector<Fcv2Cfg> cfgs;
+    cfgs.reserve(3);
+    for (int cb : kBuckets) {
+        cfgs.push_back(predictFcv2Cfg(f, cb));
     }
     return cfgs;
 }
@@ -530,9 +691,34 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
     const bool tryBwtCm = contains(activeCandidates, CoderType::BWT_CM);
     const bool tryQcm   = contains(activeCandidates, CoderType::QCM);
 
-    /* fcv2 tiers are built only when fcv2 is in play. */
-    const std::vector<Fcv2Cfg> cfgs =
-        tryFcv2 ? candidateFcv2Cfgs(compressLevel) : std::vector<Fcv2Cfg>();
+    /* fcv2 tiers are built only when fcv2 is in play.  Target files are
+       predicted from their QUAL features; every other file keeps the shipped
+       presets so its archive stays byte-identical. */
+    std::vector<Fcv2Cfg> cfgs;
+    if (tryFcv2) {
+        if (targetScenario) {
+            /* Feature candidates plus the shipped presets.  The presets are the
+               anchor that makes the choice no worse than the previous behaviour
+               even when the ~1 MB probe mis-ranks the bucket values; the trial
+               picks the smallest of all six, and the extra tasks run in
+               parallel with the existing round. */
+            cfgs = featureFcv2Cfgs(computeQualFeatures(records, freqByByte));
+            for (const Fcv2Cfg& preset : shippedFcv2Cfgs(compressLevel)) {
+                bool dup = false;
+                for (const Fcv2Cfg& c : cfgs) {
+                    if (c == preset) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    cfgs.push_back(preset);
+                }
+            }
+        } else {
+            cfgs = shippedFcv2Cfgs(compressLevel);
+        }
+    }
 
     /* Multi-round convergence: double the sample each round, finalizing once the leader opens
        enough of a gap, and never below MIN_SETTLE_PROBE where the coders have not converged. */
