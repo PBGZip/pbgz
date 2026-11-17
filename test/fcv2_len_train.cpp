@@ -133,6 +133,10 @@ void loadRecords(const std::string& path, uint64_t maxLines, std::vector<Rec>& r
  */
 void buildRankFreq(const std::vector<Rec>& recs, std::vector<uint32_t>& freq)
 {
+    /* Mirrors the product: sam_actuator sorts the QUAL histogram by count and
+       stores (symbol, 1) pairs, and CoderFactory::makeQualEncoder turns rank i
+       into weight (N - i).  The Huffman tree is therefore built from ranks, not
+       raw counts. */
     std::vector<uint64_t> count(256, 0);
     for (const Rec& r : recs) {
         for (char c : r.qual) {
@@ -155,6 +159,22 @@ void buildRankFreq(const std::vector<Rec>& recs, std::vector<uint32_t>& freq)
     freq.assign(256, 0);
     for (size_t i = 0; i < present.size(); ++i) {
         freq[present[i].second] = (uint32_t)(present.size() - i);
+    }
+}
+
+void buildCountFreq(const std::vector<Rec>& recs, std::vector<uint32_t>& freq)
+{
+    /* Raw counts, which is what QualSelector's trial uses.  Kept as an option so
+       the trial path and the encode path can be compared. */
+    std::vector<uint64_t> count(256, 0);
+    for (const Rec& r : recs) {
+        for (char c : r.qual) {
+            count[(uint8_t)c]++;
+        }
+    }
+    freq.assign(256, 0);
+    for (uint32_t b = 0; b < 256; ++b) {
+        freq[b] = (uint32_t)(count[b] > 0xFFFFFFFFu ? 0xFFFFFFFFu : count[b]);
     }
 }
 
@@ -320,8 +340,8 @@ bool encodePpmd(const std::vector<Rec>& recs, uint32_t& dstLen, bool verify)
 std::string nameOf(const Fcv2Cfg& c)
 {
     char buf[128];
-    snprintf(buf, sizeof(buf), "cm%3d cb%2d ps%d dedup%d",
-             c.cycleMax, c.cycleBucket, c.prevShift, (int)c.useDedup);
+    snprintf(buf, sizeof(buf), "cm%3d cb%2d ps%d dedup%d mode%d",
+             c.cycleMax, c.cycleBucket, c.prevShift, (int)c.useDedup, c.counterMode);
     return buf;
 }
 
@@ -360,9 +380,10 @@ Score evaluate(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq, 
    presets (cycleMax 80/96, cycleBucket 4/8/16/24, prevShift 0/1/2) widened one step past both
    ends, so the search can leave the hand-picked set but stays inside what the coder's tables are
    sized for. The mixing-model count is fixed at FCV2_MODEL_COUNT and is not searched. */
-const int kCycleMaxValues[]     = {32, 48, 64, 80, 96, 128, 160, 256};
-const int kCycleBucketValues[]  = {2, 3, 4, 6, 8, 12, 16, 24, 32};
+const int kCycleMaxValues[]     = {32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128};
+const int kCycleBucketValues[]  = {2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32};
 const int kPrevShiftValues[]    = {0, 1, 2, 3};
+const int kCounterModeValues[]  = {0, 1};
 
 bool stepCoordinate(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq, Fcv2Cfg& cfg,
                     double timeUsWeight, double& bestValue, const char* what,
@@ -421,6 +442,9 @@ bool descend(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq, Fc
     moved |= stepCoordinate(recs, freq, cfg, timeUsWeight, bestValue, "prevShift",
                             kPrevShiftValues, sizeof(kPrevShiftValues) / sizeof(int),
                             &Fcv2Cfg::prevShift, quiet);
+    moved |= stepCoordinate(recs, freq, cfg, timeUsWeight, bestValue, "counterMode",
+                            kCounterModeValues, sizeof(kCounterModeValues) / sizeof(int),
+                            &Fcv2Cfg::counterMode, quiet);
     moved |= stepBool(recs, freq, cfg, timeUsWeight, bestValue, "useDedup", &Fcv2Cfg::useDedup,
                       quiet);
     return moved;
@@ -451,7 +475,9 @@ int main(int argc, char** argv)
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <reads.sam> [--max-lines N] [--buckets a,b,...] "
-                "[--bytes-per-bucket N] [--iters K] [--time-us-weight W] [--quiet]\n",
+                "[--records-per-bucket N] [--bytes-per-bucket N] [--iters K] [--starts N] "
+                "[--start cm,cb,ps] [--fixed cm,cb,ps] [--count-freq] [--skip-refs] "
+                "[--time-us-weight W] [--quiet] [--no-search]\n",
                 argv[0]);
         return 2;
     }
@@ -465,6 +491,12 @@ int main(int argc, char** argv)
     double timeUsWeight = 0.0;
     bool quiet = false;
     bool noSearch = false;
+    bool skipRefs = false;
+    bool haveStart = false;
+    bool haveFixed = false;
+    bool countFreq = false;
+    Fcv2Cfg startCfg;
+    Fcv2Cfg fixedCfg;
     std::vector<uint32_t> edges = {0, 100, 300, 500, 1000, 3000, 10000};
 
     for (int i = 2; i < argc; ++i) {
@@ -492,6 +524,31 @@ int main(int argc, char** argv)
             quiet = true;
         } else if (a == "--no-search") {
             noSearch = true;
+        } else if (a == "--skip-refs") {
+            skipRefs = true;
+        } else if (a == "--count-freq") {
+            countFreq = true;
+        } else if (a == "--start" || a == "--fixed") {
+            const std::string v = next();
+            int cm = 96, cb = 16, ps = 1, dd = 0, md = 0;
+            const int nf = sscanf(v.c_str(), "%d,%d,%d,%d,%d", &cm, &cb, &ps, &dd, &md);
+            if (nf < 3) {
+                fprintf(stderr, "%s expects cm,cb,ps[,dedup[,mode]]\n", a.c_str());
+                return 2;
+            }
+            Fcv2Cfg c;
+            c.cycleMax = cm;
+            c.cycleBucket = cb;
+            c.prevShift = ps;
+            c.useDedup = (dd != 0);
+            c.counterMode = md;
+            if (a == "--start") {
+                startCfg = c;
+                haveStart = true;
+            } else {
+                fixedCfg = c;
+                haveFixed = true;
+            }
         } else if (a == "--buckets") {
             edges.clear();
             const std::string v = next();
@@ -559,7 +616,11 @@ int main(int argc, char** argv)
         /* One bucket stands in for one block, so the ranked alphabet is built from this bucket's
            own sample, the way the product builds it from the block it is about to encode. */
         std::vector<uint32_t> freq;
-        buildRankFreq(sample, freq);
+        if (countFreq) {
+            buildCountFreq(sample, freq);
+        } else {
+            buildRankFreq(sample, freq);
+        }
 
         fprintf(stderr, "\n[bucket %zu: %u..%s) reads=%llu sample=%llu bytes mean=%u]\n", b,
                 r.loBytes, r.hiBytes ? std::to_string(r.hiBytes).c_str() : "inf",
@@ -574,16 +635,31 @@ int main(int argc, char** argv)
                 r.baseUsec = s.usec;
             }
             uint32_t bwtLen = 0;
-            if (encodeBwtCm(sample, bwtLen)) {
+            if (!skipRefs && encodeBwtCm(sample, bwtLen)) {
                 r.bwtBytes = bwtLen;
             }
             uint32_t ppmdLen = 0;
-            r.ppmdOk = encodePpmd(sample, ppmdLen, true);
+            if (!skipRefs) {
+                r.ppmdOk = encodePpmd(sample, ppmdLen, true);
+            }
             if (r.ppmdOk) {
                 r.ppmdBytes = ppmdLen;
-            } else {
+            } else if (!skipRefs) {
                 fprintf(stderr, "  coder_ppmd encode or round trip failed on this bucket\n");
             }
+        }
+
+        if (haveFixed) {
+            /* Knob-sweep mode: evaluate one fixed configuration, no descent. */
+            const Score s = evaluate(sample, freq, fixedCfg, timeUsWeight);
+            if (!s.ok) {
+                continue;
+            }
+            r.cfg = fixedCfg;
+            r.bytes = s.bytes;
+            r.usec = s.usec;
+            r.roundTripOk = verifyRoundTrip(sample, freq, r.cfg);
+            continue;
         }
 
         if (noSearch) {
@@ -611,8 +687,12 @@ int main(int argc, char** argv)
         double bestValue = 1e30;
         bool haveBest = false;
         std::vector<Fcv2Cfg> starts;
-        for (int p = 0; p < FCV2_PRESET_COUNT; ++p) {
-            starts.push_back(FCV2_PRESETS[p].cfg);
+        if (haveStart) {
+            starts.push_back(startCfg);
+        } else {
+            for (int p = 0; p < FCV2_PRESET_COUNT; ++p) {
+                starts.push_back(FCV2_PRESETS[p].cfg);
+            }
         }
         const size_t nStarts = (startsLimit > 0 && (size_t)startsLimit < starts.size())
                                ? (size_t)startsLimit : starts.size();
@@ -686,6 +766,10 @@ int main(int argc, char** argv)
                (unsigned long long)r.reads, (unsigned long long)r.qualBytes,
                (unsigned long long)r.sampleQualBytes, r.meanLen, defStr, bwtStr, ppmdStr, outStr,
                r.roundTripOk ? "ok" : "FAIL", nameOf(r.cfg).c_str());
+        printf("RESULT bucket=%zu bytes=%u base=%u usec=%llu cm=%d cb=%d ps=%d rt=%d\n",
+               b, r.bytes, r.baseBytes, (unsigned long long)r.usec,
+               r.cfg.cycleMax, r.cfg.cycleBucket, r.cfg.prevShift,
+               r.roundTripOk ? 1 : 0);
     }
 
     printf("\nTrained table (paste into the per-length rule):\n");

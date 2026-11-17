@@ -52,6 +52,11 @@ const int FCV2_TREE_CAP = 64;
  */
 const uint8_t FCV2_STREAM_VERSION = 3;
 
+/* Stream version used when the non-default counter-adaptation schedule is
+   selected.  Version 3 stays byte-identical for the shipped schedule; version 4
+   appends the mode byte. */
+const uint8_t FCV2_STREAM_VERSION_TUNED = 4;
+
 /*
  * Parameter tiers of the fcv2 context model; chosen per data by QualSelector
  * and read back from the stream header.
@@ -64,11 +69,14 @@ struct Fcv2Cfg {
     int  cycleBucket = 16;
     int  prevShift   = 1;
     bool useDedup    = false;
+    /* Counter-adaptation schedule: 0 = shipped, 1 = faster steady state. */
+    int  counterMode = 0;
 
     bool operator==(const Fcv2Cfg& o) const
     {
         return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
-               prevShift == o.prevShift && useDedup == o.useDedup;
+               prevShift == o.prevShift && useDedup == o.useDedup &&
+               counterMode == o.counterMode;
     }
     bool operator!=(const Fcv2Cfg& o) const { return !(*this == o); }
 };
@@ -100,7 +108,8 @@ inline const char* fcv2PresetName(const Fcv2Cfg& cfg)
     for (int i = 0; i < FCV2_PRESET_COUNT; ++i) {
         const Fcv2Cfg& p = FCV2_PRESETS[i].cfg;
         if (cfg.cycleMax == p.cycleMax && cfg.cycleBucket == p.cycleBucket &&
-            cfg.prevShift == p.prevShift && cfg.useDedup == p.useDedup) {
+            cfg.prevShift == p.prevShift && cfg.useDedup == p.useDedup &&
+            cfg.counterMode == p.counterMode) {
             return FCV2_PRESETS[i].name;
         }
     }

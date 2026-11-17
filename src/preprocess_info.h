@@ -86,11 +86,13 @@ struct QualFcv2Params {
     int  cycleBucket = 16;
     int  prevShift   = 1;
     bool useDedup    = false;
+    int  counterMode = 0;
 
     bool operator==(const QualFcv2Params& o) const
     {
         return cycleMax == o.cycleMax && cycleBucket == o.cycleBucket &&
-               prevShift == o.prevShift && useDedup == o.useDedup;
+               prevShift == o.prevShift && useDedup == o.useDedup &&
+               counterMode == o.counterMode;
     }
     bool operator!=(const QualFcv2Params& o) const { return !(*this == o); }
 };

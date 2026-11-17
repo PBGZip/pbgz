@@ -96,6 +96,7 @@ std::shared_ptr<qual_record_encoder> CoderFactory::makeQualEncoder(CoderType pic
             cfg.cycleBucket = args.fcv2Params->cycleBucket;
             cfg.prevShift = args.fcv2Params->prevShift;
             cfg.useDedup = args.fcv2Params->useDedup;
+            cfg.counterMode = args.fcv2Params->counterMode;
         }
         /* Turn the carried frequency rank into a monotonically decreasing weight. */
         std::vector<uint32_t> freqByByte(256, 0);

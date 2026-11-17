@@ -44,15 +44,22 @@ extern const uint32_t QUAL_LONG_READ_LEN;
 class QualSelector {
 public:
     /* Trial-compress the candidates on the sampled records and return the smallest. freqByByte
-       counts quality-value occurrences by raw byte value. Returns SKIPPED for a too-small sample
-       and FAILED when no candidate runs; both leave the caller's default encoder in place. */
+       counts quality-value occurrences by raw byte value. priorTree selects the fcv2 Huffman
+       tree the real encoder will use: the QUAL prior is trained from raw counts, so when a prior
+       will be written the trial must use counts; without a prior the encoder uses rank weights.
+       Returns SKIPPED for a too-small sample and FAILED when no candidate runs; both leave the
+       caller's default encoder in place. */
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
                                       const std::vector<uint32_t>& freqByByte,
-                                      uint8_t compressLevel = 5);
+                                      uint8_t compressLevel = 5,
+                                      bool priorTree = false,
+                                      bool targetScenario = false);
 
     /* Same, with the candidate set given by the caller (how the FASTQ QUAL column is evaluated). */
     static FieldCodecSelection select(const std::vector<QualSampleRecord>& records,
                                       const std::vector<uint32_t>& freqByByte,
                                       uint8_t compressLevel,
-                                      const std::vector<CoderType>& candidates);
+                                      const std::vector<CoderType>& candidates,
+                                      bool priorTree = false,
+                                      bool targetScenario = false);
 };

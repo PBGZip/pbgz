@@ -153,9 +153,19 @@ bool trialQual(const std::vector<QualSampleRecord>& records, size_t recordCount,
     return outLen > 0 && outLen < buf.size();
 }
 
-/* Trial-compress with fcv2; each record is fed with its length and strand. */
+/* Trial-compress with fcv2; each record is fed with its length and strand.
+ *
+ * The Huffman tree must be the one the real encoder will use, and that depends
+ * on the QUAL prior:
+ *   - with a prior, CoderFactory loads the prior model, whose alphabet and tree
+ *     were trained from raw counts (CodecSelector::trainQualPriorModel), and the
+ *     stream header carries that tree;
+ *   - without a prior, the encoder builds the tree from the rank-weighted table
+ *     (sam_actuator sorts by count, CoderFactory assigns weight N-i).
+ * Trialling the wrong tree measures a different bit decomposition (around 1% on
+ * 150 bp BGI data) and can pick the wrong tier or the wrong coder. */
 bool trialFcv2(const std::vector<QualSampleRecord>& records, size_t recordCount,
-               const std::vector<uint32_t>& freqByByte, const Fcv2Cfg& cfg,
+               const std::vector<uint32_t>& freqByByte, const Fcv2Cfg& cfg, bool priorTree,
                uint32_t& outLen, uint32_t& usec)
 {
     size_t total = 0;
@@ -166,11 +176,41 @@ bool trialFcv2(const std::vector<QualSampleRecord>& records, size_t recordCount,
         return false;
     }
 
+    std::vector<uint32_t> treeFreq;
+    if (priorTree) {
+        treeFreq = freqByByte;
+    } else {
+        /* Same ordering rule as the encoder: descending count, symbol ascending
+           on ties so the trial stays deterministic. */
+        std::vector<std::pair<uint32_t, uint8_t>> present;
+        present.reserve(256);
+        for (uint32_t b = 0; b < freqByByte.size() && b < 256; b++) {
+            if (freqByByte[b] > 0) {
+                present.push_back(std::make_pair(freqByByte[b], (uint8_t)b));
+            }
+        }
+        if (present.empty()) {
+            return false;
+        }
+        std::sort(present.begin(), present.end(),
+                  [](const std::pair<uint32_t, uint8_t>& a, const std::pair<uint32_t, uint8_t>& b) {
+                      if (a.first != b.first) {
+                          return a.first > b.first;
+                      }
+                      return a.second < b.second;
+                  });
+        treeFreq.assign(256, 0);
+        const size_t n = present.size();
+        for (size_t i = 0; i < n; i++) {
+            treeFreq[present[i].second] = (uint32_t)(n - i);
+        }
+    }
+
     std::vector<uint8_t> buf(trialCapacity(total), 0);
     const auto t0 = std::chrono::steady_clock::now();
     {
         coder_io io(buf.data(), (int32_t)buf.size());
-        coder_fcv2 coder(&io, freqByByte, cfg);
+        coder_fcv2 coder(&io, treeFreq, cfg);
         for (size_t i = 0; i < recordCount; i++) {
             const QualSampleRecord& r = records[i];
             if (r.qual.empty()) {
@@ -261,6 +301,7 @@ QualFcv2Params toQualParams(const Fcv2Cfg& cfg)
     p.cycleBucket = cfg.cycleBucket;
     p.prevShift = cfg.prevShift;
     p.useDedup = cfg.useDedup;
+    p.counterMode = cfg.counterMode;
     return p;
 }
 
@@ -431,19 +472,23 @@ QualRoundResult assembleRound(const RoundSlots& s, const std::vector<Fcv2Cfg>& c
 
 FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& records,
                                          const std::vector<uint32_t>& freqByByte,
-                                         uint8_t compressLevel)
+                                         uint8_t compressLevel,
+                                         bool priorTree,
+                                         bool targetScenario)
 {
     std::vector<CoderType> candidates = samFieldCandidates(SAM_QUAL, PBGZ_MODE_ARCHIVE);
     const std::vector<CoderType> extra =
         samFieldExtremeCandidates(SAM_QUAL, PBGZ_MODE_ARCHIVE, compressLevel);
     candidates.insert(candidates.end(), extra.begin(), extra.end());
-    return select(records, freqByByte, compressLevel, candidates);
+    return select(records, freqByByte, compressLevel, candidates, priorTree, targetScenario);
 }
 
 FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& records,
                                          const std::vector<uint32_t>& freqByByte,
                                          uint8_t compressLevel,
-                                         const std::vector<CoderType>& candidates)
+                                         const std::vector<CoderType>& candidates,
+                                         bool priorTree,
+                                         bool targetScenario)
 {
     FieldCodecSelection sel;
 
@@ -544,11 +589,11 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
             });
         }
         for (size_t c = 0; c < cfgs.size(); c++) {
-            tasks.push_back([&records, &freqByByte, &slot, &cfgs, c, count]() {
+            tasks.push_back([&records, &freqByByte, &slot, &cfgs, c, count, priorTree]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_QUAL_FCV2_BASE + (int)c);
                 uint32_t len = 0;
                 uint32_t us = 0;
-                if (trialFcv2(records, count, freqByByte, cfgs[c], len, us)) {
+                if (trialFcv2(records, count, freqByByte, cfgs[c], priorTree, len, us)) {
                     slot.fcv2Ok[c] = true;
                     slot.fcv2Len[c] = len;
                     slot.fcv2Us[c] = us;
@@ -665,6 +710,41 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
                 (probe <= (1u << 20)) ? SETTLE_MARGIN : laterSettleMargin;
             if ((double)(runnerUp - r.bestLen) / (double)runnerUp >= settleMargin) {
                 break;
+            }
+        }
+    }
+
+    /* One extra fcv2 trial with the faster counter-adaptation schedule, on the
+       tier that won the ladder.  The schedule's benefit is a cold-start effect:
+       it is strong on the ~1 MB probe but shrinks with the production block and
+       can invert (measured on 280 bp data: probe -0.6%, 28 MB block +0.05%).
+       Adopt it only when all of these hold:
+         - the file is the target scenario (all sampled reads unmapped, short
+           reads), so a non-target archive can never change,
+         - the production block is close to the probe size (<= 16 MB QUAL),
+         - the probe gain is at least 1%, so a cold-start-only win is rejected
+           (the benchmark's other unmapped files are 50-280 bp; without this
+           guard e115/e170 regress at their real block sizes).
+       Otherwise the tier is kept exactly as before, and the stream stays v3. */
+    if (tryFcv2 && finalSet && final.fcv2Ok && targetScenario) {
+        const uint64_t readsPerBlock = (compressLevel >= 8) ? 100000ull
+                                       : (compressLevel >= 6 ? 25000ull : 10000ull);
+        const uint64_t blockQualBytes = readsPerBlock * meanLen;
+        if (blockQualBytes <= (16ull << 20)) {
+            Fcv2Cfg fastCfg = final.fcv2Cfg;
+            fastCfg.counterMode = 1;
+            const size_t fastCount = recordsForBudget(records, settleProbe);
+            uint32_t fastLen = 0;
+            uint32_t fastUs = 0;
+            if (trialFcv2(records, fastCount, freqByByte, fastCfg, priorTree, fastLen, fastUs) &&
+                (uint64_t)fastLen * 100ull < (uint64_t)final.fcv2Len * 99ull) {
+                final.fcv2Len = fastLen;
+                final.fcv2Us = fastUs;
+                final.fcv2Cfg = fastCfg;
+                if (fastLen < final.bestLen) {
+                    final.bestLen = fastLen;
+                    final.bestCoder = CoderType::FCV2;
+                }
             }
         }
     }

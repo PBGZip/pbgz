@@ -719,6 +719,7 @@ std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& ac
         cfg.cycleBucket = params.cycleBucket;
         cfg.prevShift = params.prevShift;
         cfg.useDedup = params.useDedup;
+        cfg.counterMode = params.counterMode;
         coder_fcv2 coder(&io, acc.freqByByte, cfg);
         for (const QualSampleRecord& r : acc.records) {
             coder.encode_record((const uint8_t*)r.qual.data(),
@@ -738,6 +739,65 @@ std::vector<uint8_t> CodecSelector::trainQualPriorModel(const QualPriorAccum& ac
         /* Optimization only; any failure falls back to the prior-less path. */
         return {};
     }
+}
+
+/* True when the sampled records look like the reference-free target scenario:
+ * every read unmapped (FLAG 0x4) and no read longer than 512 bases.  This is the
+ * same condition SamCodecActuator uses to enable the SEQ fast path; it gates the
+ * fcv2 counter-mode trial so only the target scenario may change bytes. */
+static bool samSampleTargetLike(RoughIOBlock* block, uint32_t sampleBudget)
+{
+    SafeLineReader reader(block);
+    const uint8_t* line = nullptr;
+    uint32_t lineLen = 0;
+    uint64_t records = 0;
+    uint64_t unmapped = 0;
+    uint32_t maxSeq = 0;
+    while (reader.nextLine(line, lineLen)) {
+        if (reader.scannedBytes() >= sampleBudget) {
+            break;
+        }
+        if (lineLen == 0 || line[0] == '@') {
+            continue;
+        }
+        long flag = -1;
+        uint32_t seqLen = 0;
+        uint32_t field = 0;
+        uint32_t start = 0;
+        for (uint32_t i = 0; i <= lineLen && field <= 9; ++i) {
+            if (i != lineLen && line[i] != '\t') {
+                continue;
+            }
+            if (field == 1) {
+                flag = 0;
+                for (uint32_t k = start; k < i; ++k) {
+                    if (line[k] < '0' || line[k] > '9') {
+                        flag = -1;
+                        break;
+                    }
+                    flag = flag * 10 + (line[k] - '0');
+                }
+            } else if (field == 9) {
+                seqLen = i - start;
+                if (seqLen == 1 && line[start] == '*') {
+                    seqLen = 0;
+                }
+            }
+            ++field;
+            start = i + 1;
+        }
+        if (flag < 0 || seqLen == 0) {
+            continue;
+        }
+        ++records;
+        if ((flag & 4) != 0) {
+            ++unmapped;
+        }
+        if (seqLen > maxSeq) {
+            maxSeq = seqLen;
+        }
+    }
+    return records > 0 && unmapped == records && maxSeq > 0 && maxSeq <= 512;
 }
 
 uint32_t CodecSelector::extractSamFieldSamples(RoughIOBlock* block,
@@ -1403,6 +1463,13 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
     std::vector<std::vector<LineSample>> fieldLines;
     info.scannedBytes = extractSamFieldSamples(block, fieldBufs, fieldLines, trialSampleTarget(), mode);
 
+    /* Decided before the trials: when the QUAL prior is written it also defines the
+       fcv2 Huffman tree, so the QUAL trial must use the same tree as the encoder. */
+    const bool qualPriorExpected = qualPriorPaysOff(fieldBufs[SAM_QUAL].size(),
+                                                    info.scannedBytes, inputTotalBytes);
+    /* Target scenario: short reads, every sampled read unmapped. */
+    const bool samTargetLike = samSampleTargetLike(block, trialSampleTarget());
+
     info.fields.resize(SAM_FIELD_COUNT_SELECT);
     uint64_t totalSample = 0;
 
@@ -1410,7 +1477,6 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
        file-level consequences (QUAL/POS prior) serially. */
     std::vector<std::function<void()>> trials;
     std::vector<uint64_t> posCounts;
-    uint64_t qualSampleBytes = 0;
     uint64_t posSampleBytes = 0;
     bool qualSelectedFcv2 = false;
 
@@ -1485,14 +1551,13 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
             const uint32_t qualBudget = (uint32_t)block->getDataLen();
             const uint64_t bufSize = buf.size();
             trials.push_back([block, qualBudget, compressLevel, mode, &info, &qualSelectedFcv2,
-                              &qualSampleBytes, bufSize]() {
+                              bufSize, qualPriorExpected, samTargetLike]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + SAM_QUAL);
                 /* Fast mode uses coder_rans for QUAL; the dedicated QUAL trial only
                    chooses among archive-profile coders (qual/fcv2/qcm). */
                 if (mode == PBGZ_MODE_FAST) {
                     info.fields[SAM_QUAL] =
                         fixedSelection(CoderType::RANS, (uint32_t)bufSize);
-                    qualSampleBytes = bufSize;
                     qualSelectedFcv2 = false;
                     return;
                 }
@@ -1504,9 +1569,9 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
                 }
                 {
                     PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_QUAL_SELECT);
-                    info.fields[SAM_QUAL] = QualSelector::select(qualRecs, qualFreq, compressLevel);
+                    info.fields[SAM_QUAL] = QualSelector::select(qualRecs, qualFreq, compressLevel,
+                                                                 qualPriorExpected, samTargetLike);
                 }
-                qualSampleBytes = bufSize;
                 qualSelectedFcv2 = (info.fields[SAM_QUAL].status == FieldStatus::SELECTED &&
                                     info.fields[SAM_QUAL].selectedCoder == CoderType::FCV2);
             });
@@ -1567,7 +1632,7 @@ int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes,
     runTrialsInParallel(trials);
 
     /* Record the prior request only; training is deferred to CompressEngine. */
-    if (qualSelectedFcv2 && qualPriorPaysOff(qualSampleBytes, info.scannedBytes, inputTotalBytes)) {
+    if (qualSelectedFcv2 && qualPriorExpected) {
         info.setQualPriorRequested(true);
     }
 
@@ -1610,10 +1675,13 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, uint64_t inputTotalByte
     info.scannedBytes = extractFastqFieldSamples(block, fieldBufs, fieldLines, qualRecords,
                                                  qualFreq, trialSampleTarget(), QUAL_PRIOR_TRAIN_MAX);
 
+    /* Same pre-trial prior decision as the SAM side: the prior defines the fcv2 tree. */
+    const bool qualPriorExpected = qualPriorPaysOff(fieldBufs[FQ_QUAL].size(),
+                                                    info.scannedBytes, inputTotalBytes);
+
     info.fields.resize(FQ_FIELD_COUNT);
     uint64_t totalSample = 0;
     bool qualSelectedFcv2 = false;
-    uint64_t qualSampleBytes = 0;
 
     std::vector<std::function<void()>> trials;
 
@@ -1642,11 +1710,10 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, uint64_t inputTotalByte
                 continue;
             }
             trials.push_back([&qualRecords, &qualFreq, compressLevel, &info, &qualSelectedFcv2,
-                              &qualSampleBytes, bufSize, qualCandidates]() {
+                              qualCandidates, qualPriorExpected]() {
                 PBGZ_PROF_SCOPE(pbgzprof::READ_TRIAL_BASE + FQ_QUAL);
                 info.fields[FQ_QUAL] = QualSelector::select(qualRecords, qualFreq, compressLevel,
-                                                            qualCandidates);
-                qualSampleBytes = bufSize;
+                                                            qualCandidates, qualPriorExpected, false);
                 qualSelectedFcv2 = (info.fields[FQ_QUAL].status == FieldStatus::SELECTED &&
                                     info.fields[FQ_QUAL].selectedCoder == CoderType::FCV2);
             });
@@ -1678,7 +1745,7 @@ int32_t CodecSelector::analyzeFastq(RoughIOBlock* block, uint64_t inputTotalByte
     runTrialsInParallel(trials);
 
     /* Same QUAL prior trade-off as the SAM side. */
-    if (qualSelectedFcv2 && qualPriorPaysOff(qualSampleBytes, info.scannedBytes, inputTotalBytes)) {
+    if (qualSelectedFcv2 && qualPriorExpected) {
         info.setQualPriorRequested(true);
     }
 

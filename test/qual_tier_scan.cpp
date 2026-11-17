@@ -124,11 +124,29 @@ bool encodeFcv2(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq,
 {
     if (recs.empty())
         return false;
+    /* Build the same rank-weighted alphabet the production encoder uses:
+       sam_actuator sorts the QUAL histogram by count, CoderFactory turns rank i
+       into weight (N - i).  Raw counts would give a different Huffman tree. */
+    std::vector<std::pair<uint32_t, uint8_t>> present;
+    for (uint32_t b = 0; b < freq.size() && b < 256; b++) {
+        if (freq[b] > 0) present.push_back(std::make_pair(freq[b], (uint8_t)b));
+    }
+    if (present.empty())
+        return false;
+    std::sort(present.begin(), present.end(),
+              [](const std::pair<uint32_t, uint8_t>& a, const std::pair<uint32_t, uint8_t>& b) {
+                  if (a.first != b.first) return a.first > b.first;
+                  return a.second < b.second;
+              });
+    std::vector<uint32_t> rankFreq(256, 0);
+    for (size_t i = 0; i < present.size(); i++)
+        rankFreq[present[i].second] = (uint32_t)(present.size() - i);
+
     uint64_t qualBytes = qualBytesOf(recs);
     std::vector<uint8_t> comp((size_t)qualBytes * 2 + (1u << 20), 0);
     {
         coder_io io(comp.data(), (int32_t)comp.size());
-        coder_fcv2 coder(&io, freq, cfg);
+        coder_fcv2 coder(&io, rankFreq, cfg);
         for (const Rec& r : recs) {
             coder.encode_record((const uint8_t*)r.qual.data(), (uint32_t)r.qual.size(), r.rev,
                                 (const uint8_t*)r.seq.data(), (uint32_t)r.seq.size());
@@ -142,7 +160,7 @@ bool encodeFcv2(const std::vector<Rec>& recs, const std::vector<uint32_t>& freq,
        built from the defaults must still reproduce the input. */
     {
         coder_io io(comp.data(), dstLen);
-        coder_fcv2 dec(&io, freq, Fcv2Cfg());
+        coder_fcv2 dec(&io, rankFreq, Fcv2Cfg());
         if (dec.begin_decode() < 0)
             return false;
         for (const Rec& r : recs) {

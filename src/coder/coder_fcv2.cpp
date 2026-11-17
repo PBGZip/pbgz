@@ -52,9 +52,11 @@ const int CFG_CYCLE_MAX_MIN = 32;
 const int CFG_CYCLE_MAX_MAX = 128;
 const int CFG_CYCLE_BUCKET_MAX = 32;
 const int CFG_PREV_SHIFT_MAX = 3;
+const int CFG_COUNTER_MODE_MAX = 1;
 
 static_assert(CFG_CYCLE_MAX_MAX <= 255 && CFG_CYCLE_BUCKET_MAX <= 255 &&
-              CFG_PREV_SHIFT_MAX <= 255 && FCV2_MODEL_COUNT <= 255 &&
+              CFG_PREV_SHIFT_MAX <= 255 && CFG_COUNTER_MODE_MAX <= 255 &&
+              FCV2_MODEL_COUNT <= 255 &&
               TREE_CAP <= 255,
               "the tier fields and the alphabet size are written into the stream header "
               "one byte each, so a maximum above 255 would be truncated on write and "
@@ -70,6 +72,8 @@ Fcv2Cfg normalizeCfg(Fcv2Cfg cfg)
     if (cfg.cycleBucket > CFG_CYCLE_BUCKET_MAX) cfg.cycleBucket = CFG_CYCLE_BUCKET_MAX;
     if (cfg.prevShift < 0) cfg.prevShift = 0;
     if (cfg.prevShift > CFG_PREV_SHIFT_MAX) cfg.prevShift = CFG_PREV_SHIFT_MAX;
+    if (cfg.counterMode < 0) cfg.counterMode = 0;
+    if (cfg.counterMode > CFG_COUNTER_MODE_MAX) cfg.counterMode = CFG_COUNTER_MODE_MAX;
     return cfg;
 }
 
@@ -84,7 +88,8 @@ uint8_t g_baseSym[256];
 /* Model snapshot header: lets a snapshot be validated against the current array
    layout before it is read. */
 const uint8_t MODEL_MAGIC[] = { 'f', 'c', 'v', '2', 'p', 'r', 'i', 'o', 'r' };
-const uint16_t MODEL_FORMAT_VERSION = 9;  /* v9: m5/m6 removed, model count fixed at FCV2_MODEL_COUNT */
+const uint16_t MODEL_FORMAT_VERSION = 9;      /* shipped layout, no counterMode field */
+const uint16_t MODEL_FORMAT_VERSION_MODE = 10; /* v10: counterMode carried in the blob */
 
 inline void appendU16(std::vector<uint8_t>& out, uint16_t value)
 {
@@ -164,6 +169,8 @@ uint16_t g_squash[4096];
 /* Adaptive step-size table: large step when the update count is small, shrinking
    as it grows. */
 uint8_t g_adaptShift[16];
+/* Faster steady-state schedule (counterMode 1): 2+n/4, i.e. step 1/4 -> 1/32. */
+uint8_t g_fastAdaptShift[16];
 
 bool g_tablesReady = false;
 
@@ -191,6 +198,8 @@ void initTables()
     for (int n = 0; n < 16; n++) {
         int s = 1 + n / 3;
         g_adaptShift[n] = (uint8_t)(s > 6 ? 6 : s);
+        int f = 2 + n / 4;
+        g_fastAdaptShift[n] = (uint8_t)(f > 7 ? 7 : f);
     }
     for (int i = 0; i < 256; i++) g_baseSym[i] = BASE_STATES - 1;
     g_baseSym[(int)'A'] = g_baseSym[(int)'a'] = 0;
@@ -208,14 +217,14 @@ inline int squash(int x)
     return g_squash[x + 2048];
 }
 
-inline void counterUpdate(Counter& c, int isZero)
+inline void counterUpdate(Counter& c, int isZero, const uint8_t* shiftTab)
 {
     /* Branchless form: isZero is 0/1, the clamp and the saturating count
        increment become conditional moves (identical results). */
     const int target = isZero * 4095;
     int p = c & 0x0FFF;
     int n = c >> 12;
-    p += ((target - p) * 2) >> g_adaptShift[n];
+    p += ((target - p) * 2) >> shiftTab[n];
     p = p < 1 ? 1 : (p > 4095 ? 4095 : p);
     n += (n < 15);
     c = (Counter)(p | (n << 12));
@@ -327,6 +336,8 @@ struct ContextModel {
     ContextModel(ContextModel&&) = default;
     ContextModel& operator=(ContextModel&&) = default;
     std::vector<int> weight; /* mixing weights, organized by position bin x tree node x model */
+    /* Counter-adaptation schedule chosen by cfg.counterMode. */
+    const uint8_t* adaptShift = g_adaptShift;
     /* cycle index -> position bin, precomputed by init(); see there. */
     std::vector<int> cycBucketTab;
 
@@ -337,6 +348,7 @@ struct ContextModel {
         cycleMax = cfg.cycleMax;
         cycleBucket = cfg.cycleBucket;
         prevShift = cfg.prevShift;
+        adaptShift = (cfg.counterMode == 1) ? g_fastAdaptShift : g_adaptShift;
         /* Quantizing the previous quality value by >>prevShift keeps the order-2
            context from being too sparse. */
         prevQStates = (alpha >> prevShift) + 2;
@@ -471,11 +483,11 @@ public:
         wp[2] += (err * stretched[2]) >> WEIGHT_LR_SHIFT;
         wp[3] += (err * stretched[3]) >> WEIGHT_LR_SHIFT;
         wp[4] += (err * stretched[4]) >> WEIGHT_LR_SHIFT;
-        counterUpdate(*slot[0], isZero);
-        counterUpdate(*slot[1], isZero);
-        counterUpdate(*slot[2], isZero);
-        counterUpdate(*slot[3], isZero);
-        counterUpdate(*slot[4], isZero);
+        counterUpdate(*slot[0], isZero, cm.adaptShift);
+        counterUpdate(*slot[1], isZero, cm.adaptShift);
+        counterUpdate(*slot[2], isZero, cm.adaptShift);
+        counterUpdate(*slot[3], isZero, cm.adaptShift);
+        counterUpdate(*slot[4], isZero, cm.adaptShift);
     }
 
     /* Converts an in-record position to a sequencing-cycle index (flipped on the
@@ -496,10 +508,16 @@ public:
         try {
             snapshot.reserve(modelBlobSize(alphaSize, cfg));
             snapshot.insert(snapshot.end(), MODEL_MAGIC, MODEL_MAGIC + sizeof(MODEL_MAGIC));
-            appendU16(snapshot, MODEL_FORMAT_VERSION);
+            /* Version 9 keeps the shipped blob byte-for-byte; the mode field is
+               only present in version 10, so mode-0 archives do not change. */
+            const bool modeBlob = (cfg.counterMode != 0);
+            appendU16(snapshot, modeBlob ? MODEL_FORMAT_VERSION_MODE : MODEL_FORMAT_VERSION);
             appendU16(snapshot, (uint16_t)cfg.cycleMax);
             appendU16(snapshot, (uint16_t)cfg.cycleBucket);
             appendU16(snapshot, (uint16_t)cfg.prevShift);
+            if (modeBlob) {
+                appendU16(snapshot, (uint16_t)cfg.counterMode);
+            }
             appendU16(snapshot, (uint16_t)(cfg.useDedup ? 1 : 0));
             appendU16(snapshot, (uint16_t)TREE_CAP);
             appendU16(snapshot, (uint16_t)alphaSize);
@@ -535,27 +553,34 @@ public:
         }
 
         uint16_t version = 0, cycleMax = 0, cycleBucket = 0;
-        uint16_t prevShift = 0, useDedup = 0, treeCap = 0, storedAlpha = 0;
+        uint16_t prevShift = 0, counterMode = 0, useDedup = 0, treeCap = 0, storedAlpha = 0;
         uint32_t m0Length = 0, m1Length = 0, m2Length = 0, m3Length = 0, m4Length = 0;
         uint32_t weightLength = 0;
         if (!reader.readU16(version) || !reader.readU16(cycleMax) ||
-            !reader.readU16(cycleBucket) || !reader.readU16(prevShift) ||
-            !reader.readU16(useDedup) || !reader.readU16(treeCap) ||
+            !reader.readU16(cycleBucket) || !reader.readU16(prevShift)) {
+            return false;
+        }
+        if (version == MODEL_FORMAT_VERSION_MODE && !reader.readU16(counterMode)) {
+            return false;
+        }
+        if (!reader.readU16(useDedup) || !reader.readU16(treeCap) ||
             !reader.readU16(storedAlpha) ||
             !reader.readU32(m0Length) || !reader.readU32(m1Length) ||
             !reader.readU32(m2Length) || !reader.readU32(m3Length) ||
             !reader.readU32(m4Length) || !reader.readU32(weightLength)) {
             return false;
         }
-        if (version != MODEL_FORMAT_VERSION || treeCap != TREE_CAP ||
-            storedAlpha == 0 || storedAlpha > TREE_CAP) {
+        if ((version != MODEL_FORMAT_VERSION && version != MODEL_FORMAT_VERSION_MODE) ||
+            treeCap != TREE_CAP || storedAlpha == 0 || storedAlpha > TREE_CAP) {
             return false;
         }
-        if (useDedup > 1 || prevShift > CFG_PREV_SHIFT_MAX) {
+        if (useDedup > 1 || prevShift > CFG_PREV_SHIFT_MAX ||
+            counterMode > CFG_COUNTER_MODE_MAX) {
             return false;
         }
 
-        Fcv2Cfg storedCfg = { (int)cycleMax, (int)cycleBucket, (int)prevShift, useDedup == 1 };
+        Fcv2Cfg storedCfg = { (int)cycleMax, (int)cycleBucket, (int)prevShift, useDedup == 1,
+                              (int)counterMode };
         storedCfg = normalizeCfg(storedCfg);
         /* Adopt the prior's own tiers as the effective tiers; a later tier
            mismatch with the stream header is rejected in begin_decode. */
@@ -660,8 +685,9 @@ private:
             prevStates * cfg.cycleMax * TREE_CAP +
             prevQStates * prevQStates * cfg.cycleBucket * 2 * TREE_CAP +
             (size_t)BASE_STATES * cfg.cycleMax * TREE_CAP;
-        /* header: magic + 7 x u16 + 6 x u32 */
-        return sizeof(MODEL_MAGIC) + 7 * 2 + 6 * 4 + (size_t)alpha +
+        /* header: magic + 7 x u16 (+ 1 when the mode field is present) + 6 x u32 */
+        const size_t modeField = (cfg.counterMode != 0) ? 2 : 0;
+        return sizeof(MODEL_MAGIC) + 7 * 2 + modeField + 6 * 4 + (size_t)alpha +
             (size_t)alpha * 2 + 2 + 2 + counters * 2 +
             (size_t)cfg.cycleBucket * TREE_CAP * FCV2_MODEL_COUNT * 4;
     }
@@ -753,14 +779,20 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
     }
     if (!d->encodeStarted) {
         d->rc.InitEncoder(d->io->data, d->io->data_capacity);
-        /* Format version first, then the parameters. */
-        d->rc.EncodeByte(FCV2_STREAM_VERSION);
+        /* Format version first, then the parameters.  Version 3 stays exactly
+           as before for the shipped counter schedule; version 4 appends the
+           mode byte. */
+        const bool tuned = (d->cfg.counterMode != 0);
+        d->rc.EncodeByte(tuned ? FCV2_STREAM_VERSION_TUNED : FCV2_STREAM_VERSION);
         d->rc.EncodeByte((unsigned)d->alphaSize);
         /* Context parameter tiers, so the decoder can align its context indices. */
         d->rc.EncodeByte((unsigned)d->cfg.cycleMax);
         d->rc.EncodeByte((unsigned)d->cfg.cycleBucket);
         d->rc.EncodeByte((unsigned)d->cfg.prevShift);
         d->rc.EncodeByte((unsigned)(d->cfg.useDedup ? 1 : 0));
+        if (tuned) {
+            d->rc.EncodeByte((unsigned)d->cfg.counterMode);
+        }
         /* Alphabet plus quantized frequencies, so the decoder rebuilds the same tree. */
         for (int s = 0; s < d->alphaSize; s++) {
             d->rc.EncodeByte((unsigned)d->byteOf[s]);
@@ -782,7 +814,7 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         } else {
             d->rc.EncodeBit0<12>(p0);
         }
-        counterUpdate(d->revCounter, !rv);
+        counterUpdate(d->revCounter, !rv, d->cm.adaptShift);
     }
 
     /* Adjacent duplicate read dedup: 1 bit when identical, else the whole string. */
@@ -797,7 +829,7 @@ void coder_fcv2::encode_record(const uint8_t* qual, uint32_t len, bool rev,
         } else {
             d->rc.EncodeBit0<12>(p0);
         }
-        counterUpdate(d->dupCounter, !isDup);
+        counterUpdate(d->dupCounter, !isDup, d->cm.adaptShift);
         if (isDup) {
             d->prevQualLen = len;
             if (d->prevQual.size() < (size_t)len) {
@@ -872,7 +904,8 @@ int32_t coder_fcv2::encode_flush()
 static bool readStreamHeader(FcRangeCoder& rc, const uint8_t* data, int& alpha, Fcv2Cfg& cfg)
 {
     rc.InitDecoder(data);
-    if ((int)rc.DecodeByte() != (int)FCV2_STREAM_VERSION) {
+    const int version = (int)rc.DecodeByte();
+    if (version != (int)FCV2_STREAM_VERSION && version != (int)FCV2_STREAM_VERSION_TUNED) {
         return false;
     }
     alpha = (int)rc.DecodeByte();
@@ -883,6 +916,14 @@ static bool readStreamHeader(FcRangeCoder& rc, const uint8_t* data, int& alpha, 
     cfg.cycleBucket = (int)rc.DecodeByte();
     cfg.prevShift = (int)rc.DecodeByte();
     const int useDedup = (int)rc.DecodeByte();
+    if (version == (int)FCV2_STREAM_VERSION_TUNED) {
+        cfg.counterMode = (int)rc.DecodeByte();
+        if (cfg.counterMode <= 0 || cfg.counterMode > CFG_COUNTER_MODE_MAX) {
+            return false;
+        }
+    } else {
+        cfg.counterMode = 0;
+    }
     if (cfg.prevShift > CFG_PREV_SHIFT_MAX || cfg.cycleBucket > CFG_CYCLE_BUCKET_MAX ||
         useDedup > 1) {
         return false;   /* a parameter lies outside its legal range */
@@ -960,7 +1001,7 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
     if (p0 < 1)    p0 = 1;
     if (p0 > 4095) p0 = 4095;
     int rv = d->rc.DecodeBit<12>(p0);
-    counterUpdate(d->revCounter, !rv);
+    counterUpdate(d->revCounter, !rv, d->cm.adaptShift);
     bool rev = (rv != 0);
 
     /* Adjacent duplicate read dedup: when dup=1, copy the quality string
@@ -970,7 +1011,7 @@ int32_t coder_fcv2::decode_record(uint8_t* dst, uint32_t len,
         if (pDup < 1)    pDup = 1;
         if (pDup > 4095) pDup = 4095;
         int isDup = d->rc.DecodeBit<12>(pDup);
-        counterUpdate(d->dupCounter, !isDup);
+        counterUpdate(d->dupCounter, !isDup, d->cm.adaptShift);
         if (isDup) {
             if (d->prevQualLen < len) {
                 /* Corrupt stream: previous string too short; fill with '!' to stay in bounds. */
