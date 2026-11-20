@@ -322,7 +322,7 @@ TEST_F(SamActuatorTest, testPreAnalysisIdInvalid) {
     int32_t result = actuator.preAnalysis();
     std::remove("idinvlid_pre_analysis.sam");
     EXPECT_EQ(result, 0);
-    EXPECT_EQ(actuator.idAnalysis.posLength, UINT32_MAX);
+    EXPECT_TRUE(actuator.idAnalysis.unavailable);
 }
 
 TEST_F(SamActuatorTest, testCompressQuality) {
@@ -2390,4 +2390,20 @@ TEST_F(SamActuatorTest, testMeasureIndelRefSeqStream) {
     out.close();
 
     std::remove("ratio_ref.fa");
+}
+
+/* A later QNAME line with fewer separators than the first makes the split layout unusable:
+   the analysis must say so and keep its per-line position vectors uniformly sized (the
+   segment walk indexes them by separator). */
+TEST_F(SamActuatorTest, testQnameSplitUnavailableForVariableShapes) {
+    IdSplitAnalysis analysis;
+    const std::string first = "Other_RNA_exon|Abcc1|10|11261142///MN01080:7:1";
+    const std::string second = "Genome///MN01080:7:2";
+    ASSERT_EQ(analyzeQnameFirstLine((const uint8_t*)first.data(), (uint32_t)first.size(),
+                                    analysis), 0);
+    ASSERT_EQ(analyzeQnameLine((const uint8_t*)second.data(), (uint32_t)second.size(),
+                               analysis), 0);
+    EXPECT_TRUE(analysis.unavailable);
+    ASSERT_EQ(analysis.positions.size(), 2u);
+    EXPECT_EQ(analysis.positions[1].size(), analysis.symbols.size());
 }

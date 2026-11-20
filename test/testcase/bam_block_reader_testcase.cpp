@@ -23,6 +23,8 @@
 
 #include <cstring>
 #include <fstream>
+#include <iterator>
+#include <vector>
 #include <gtest/gtest.h>
 #include <htslib/bgzf.h>
 
@@ -291,4 +293,97 @@ TEST(BamBlockReaderTest, GzBamInflate) {
     delete reader;
     delete io;
     std::remove("ut_bam.bam.gz");
+}
+
+namespace {
+
+std::string readWholeFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+/* Offsets of the complete BGZF members in a buffer (stop at the first partial/corrupt one). */
+std::vector<size_t> bgzfMemberOffsets(const std::string& data) {
+    std::vector<size_t> offsets;
+    size_t off = 0;
+    while (off + 18 <= data.size()) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(data.data() + off);
+        if (p[0] != 0x1f || p[1] != 0x8b || p[2] != 0x08 || !(p[3] & 0x04)) {
+            break;
+        }
+        const size_t total = (size_t)p[16] | ((size_t)p[17] << 8);
+        if (total == 0 || off + total + 1 > data.size()) {
+            break;
+        }
+        offsets.push_back(off);
+        off += total + 1;
+    }
+    return offsets;
+}
+
+/* Drain the reader; a corrupt stream must end in -1 and flag the read error, never in a
+   clean 0 (which the engine would treat as a successful, if short, archive). */
+void expectCorruptReadFails(const char* path) {
+    IOReader* io = new FileReader(path);
+    ASSERT_EQ(io->openIO(), 0);
+    BlockReader* reader = BlockFactory::createBlockReader(io, 5);
+    ASSERT_NE(reader, nullptr);
+    EXPECT_NE(dynamic_cast<BamGzBlockReader*>(reader), nullptr);
+
+    RoughIOBlock block(kBlockSize);
+    int64_t rc = 0;
+    for (int i = 0; i < 1000; ++i) {
+        block.reset();
+        rc = reader->readBlock(&block, TYPE_UNKNOW);
+        if (rc <= 0) {
+            break;
+        }
+    }
+    EXPECT_LT(rc, 0);
+    EXPECT_TRUE(reader->hasReadError());
+
+    delete reader;
+    delete io;
+}
+
+}  // namespace
+
+/* A BGZF member whose deflate payload is damaged must abort the read with an error, not
+   silently drop the block and report EOF (that used to compress corrupt BAMs as success). */
+TEST(BamBlockReaderTest, CorruptBgzfPayloadFailsRead) {
+    const std::string path = "ut_bam_bad_payload.bam.gz";
+    writeBgzfFile(path, buildBam(30000, kBamHeader));
+
+    std::string data = readWholeFile(path);
+    const std::vector<size_t> offsets = bgzfMemberOffsets(data);
+    ASSERT_GT(offsets.size(), 10u);
+
+    const size_t off = offsets[offsets.size() / 2];
+    for (size_t i = off + 40; i < off + 80; ++i) {
+        data[i] = static_cast<char>(0xFF);
+    }
+    writeFile(path, data);
+
+    expectCorruptReadFails(path.c_str());
+    std::remove(path.c_str());
+}
+
+/* A member that no longer starts with a BGZF header (cut/overwritten bytes) is corruption
+   too; the reader must report it instead of returning the bytes read so far as a clean EOF. */
+TEST(BamBlockReaderTest, CorruptBgzfHeaderFailsRead) {
+    const std::string path = "ut_bam_bad_header.bam.gz";
+    writeBgzfFile(path, buildBam(30000, kBamHeader));
+
+    std::string data = readWholeFile(path);
+    const std::vector<size_t> offsets = bgzfMemberOffsets(data);
+    ASSERT_GT(offsets.size(), 10u);
+
+    const size_t off = offsets[offsets.size() / 2];
+    data[off + 0] = '\0';
+    data[off + 1] = '\0';
+    data[off + 2] = '\0';
+    writeFile(path, data);
+
+    expectCorruptReadFails(path.c_str());
+    std::remove(path.c_str());
 }

@@ -116,7 +116,14 @@ int32_t analyzeQnameLine(const uint8_t* pBuffer, uint32_t bufferLen,
         }
 
         if (pos >= bufferLen) {
-            analysis.posLength = UINT32_MAX; // Mark as unavailable
+            analysis.unavailable = true;
+            /* Keep one position per separator: callers index this vector by symbol, and a
+               shorter one is what used to run past its end. The layout is rejected by the
+               `unavailable` flag, so the padding value only has to be in range. */
+            const int32_t pad = (bufferLen > 0) ? (int32_t)(bufferLen - 1) : 0;
+            while (currentLinePos.size() < analysis.symbols.size()) {
+                currentLinePos.push_back(pad);
+            }
             break;
         }
     }
@@ -775,18 +782,27 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
         }
 
         const uint32_t contentId = lineIdx - (uint32_t)headEndLine;
+        if (contentId >= splitPos.size()) {
+            break;   /* the analysis and the block disagree; no split segment for this line */
+        }
+        const std::vector<int32_t>& posLine = splitPos[contentId];
         /* In digit-split mode stream 0 is the synthetic cut before the trailing digits; the
            real symbols start at stream 1. */
         auto cutPos = [&](uint32_t streamIdx) -> uint32_t {
+            if (posLine.empty()) {
+                return 0;
+            }
             if (digitSplit && streamIdx == 0) {
-                const uint32_t tabPos = (uint32_t)splitPos[contentId][0];
+                const uint32_t tabPos = (uint32_t)posLine[0];
                 uint32_t b = tabPos;
                 while (b > 0 && line[b - 1] >= (uint8_t)'0' && line[b - 1] <= (uint8_t)'9') {
                     --b;
                 }
                 return (b > 0) ? (b - 1) : 0;
             }
-            return (uint32_t)splitPos[contentId][digitSplit ? streamIdx - 1 : streamIdx];
+            const uint32_t idx = digitSplit ? (streamIdx - 1) : streamIdx;
+            return (idx < posLine.size()) ? (uint32_t)posLine[idx]
+                                          : (uint32_t)posLine.back();
         };
         const uint8_t* segmentStart = nullptr;
         uint32_t segmentLength = 0;

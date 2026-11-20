@@ -415,7 +415,12 @@ int32_t SamCodecActuator::scanDataLine(const uint8_t* line, uint32_t lineLen, ui
             } else if (baseFieldLen == 0) {
                 baseFieldLen = baseLen;   /* CIGAR span not computed (unmapped fast path). */
             } else if (baseFieldLen != baseLen) {
-                return -1;
+                /* SEQ '*' means "unavailable" and may still accompany a real CIGAR (PacBio
+                   secondary alignments do this); its field length carries no read length. */
+                const bool missingSeq = (baseLen == 1 && *p == (uint8_t)'*');
+                if (!missingSeq) {
+                    return -1;
+                }
             }
             /* N count: one vectorised pass per case, still byte-exact. */
             for (const uint8_t* s = p; (s = (const uint8_t*)memchr(s, 'N', (size_t)(q - s))) != nullptr; ++s) {
@@ -541,10 +546,10 @@ int32_t SamCodecActuator::preAnalysis() {
     }
 
     // Compression strategy judgment logic - refer to FastqActuator implementation
-    if (idAnalysis.posLength != UINT32_MAX) {
+    if (!idAnalysis.unavailable && idAnalysis.posLength != UINT32_MAX) {
         for (uint32_t idx = 0; idx < idAnalysis.symbols.size(); ++idx) {
             if (idAnalysis.minLen[idx] == 0) {
-                idAnalysis.posLength = UINT32_MAX;
+                idAnalysis.unavailable = true;
                 break;
             }
         }
@@ -712,7 +717,7 @@ int32_t SamCodecActuator::compressSamHeader() {
 int32_t SamCodecActuator::encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& fieldMeta)
 {
     // ID field: compress based on analysis result
-    if (idAnalysis.posLength == UINT32_MAX) {
+    if (idAnalysis.unavailable || idAnalysis.posLength == UINT32_MAX) {
         LOG_DEBUG("Id will compress in all.");
         return compressIdFieldInAll(fieldSrcLen, fieldMeta);
     }
@@ -2802,7 +2807,9 @@ static bool appendSeqMatch(uint8_t* matchBuffer, uint32_t& matchLen, uint32_t ca
 int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::Value& metaStreams,
                                                   uint32_t& totalSrcLen, uint32_t& totalDstLen)
 {
-    if (minBaseLength != maxBaseLength) {
+    /* Records with SEQ '*' need their own length even when minBaseLength == maxBaseLength
+       (their CIGAR implies a span that the SEQ field does not carry). */
+    if (minBaseLength != maxBaseLength || seqStarNeedsLength) {
         std::shared_ptr<coder_io> lenIo = makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ length");
         /* The reads whose length is not implied by their CIGAR, as (ordinal, length) forward-delta varints. */
         std::vector<uint8_t> lenBuf;
@@ -3221,6 +3228,7 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
        (seqSelfRef), or none at all (compressBaseWithoutRef) - with none every record stores its own
        bases, and the "streams" layout still applies unchanged. */
     Reference* fileRef = seqNoReference ? nullptr : pRefeGene;
+    seqStarNeedsLength = false;
     /* Every payload byte this block emits is ASCII ACGT (raw-base records are sanitized
        and their non-ACGT characters travel in the exception streams). */
     seqPayloadAllAcgt = true;
@@ -3302,6 +3310,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
 
         if (baseLengthBuffer && baseLengthBuffer[contentIdx] != seqLength) {
             LOG_WARNING("Warnning: sequece length(%u) not match cigar(%u)", seqLength, baseLengthBuffer[contentIdx]);
+            /* Only a missing SEQ ('*') gets here; the decoder cannot derive its length from
+               the CIGAR, so it travels in the baselen stream like an unmapped read. */
+            unmapedReadLength.push_back(std::make_pair(contentIdx, seqLength));
+            seqStarNeedsLength = true;
             baseLengthBuffer[contentIdx] = seqLength;
         }
 
@@ -3552,7 +3564,9 @@ int32_t SamCodecActuator::writeSeqExceptionStreams(std::vector<SeqExceptionClass
 
 /* Encode the QUAL column record by record through the chosen coder; missing-quality records are expanded to seqLen '*' first. */
 uint32_t SamCodecActuator::encodeQualRecords(qual_record_encoder* encoder, uint32_t lineNum,
-                                                   uint32_t fieldIdx, bool needStrand)
+                                                   uint32_t fieldIdx, bool needStrand,
+                                                   std::vector<uint8_t>& missingFlags,
+                                                   bool& needFlagStream)
 {
     std::vector<size_t>& npos = inBlockPtr->getNpos();
     uint8_t* buffer = inBlockPtr->getBuffer();
@@ -3590,11 +3604,30 @@ uint32_t SamCodecActuator::encodeQualRecords(qual_record_encoder* encoder, uint3
             seqLen = contentPos[contentIdx][fieldIdx - 1] - contentPos[contentIdx][fieldIdx - 2] - 1;
         }
 
-        /* Missing quality (single '*') is expanded to seqLen '*' so the record length matches the decoder's fetch. */
+        /* Missing quality (single '*') is expanded to seqLen '*' so the record length matches the
+           decoder's fetch. The flag stream records which records were really missing: a QUAL of
+           two or more '*' is a valid column of Phred 9 and must not be folded back to '*'. */
         if (qualLength == 1 && qualStart[0] == '*' && seqLen > 0) {
+            if (contentIdx < missingFlags.size()) {
+                missingFlags[contentIdx] = 1;
+            }
+            needFlagStream = true;
             qualMissingBuf.assign(seqLen, '*');
             qualStart = qualMissingBuf.data();
             qualLength = seqLen;
+        } else if (qualLength > 1 && qualStart[0] == '*') {
+            /* A real all-'*' column of Phred 9 (not the missing marker) also needs the flags
+               stream: without it the decoder cannot tell it from an expanded missing value. */
+            bool allStar = true;
+            for (uint32_t i = 1; i < qualLength; ++i) {
+                if (qualStart[i] != '*') {
+                    allStar = false;
+                    break;
+                }
+            }
+            if (allStar) {
+                needFlagStream = true;
+            }
         }
 
         /* Strand direction from FLAG bit 0x10, parsed by hand (not NUL-terminated, hot path). */
@@ -3732,7 +3765,11 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     Json::Value streamMeta;
 
     // Encode quality data (see encodeQualRecords); the encoder is committed below.
-    const uint32_t streamSrcLen = encodeQualRecords(qualEncoder.get(), lineNum, fieldIdx, needStrand);
+    std::vector<uint8_t> qualMissing((lineNum > headEndLine) ? (size_t)(lineNum - headEndLine) : 0, 0);
+    bool needQualFlagStream = false;
+    const uint32_t streamSrcLen =
+        encodeQualRecords(qualEncoder.get(), lineNum, fieldIdx, needStrand, qualMissing,
+                          needQualFlagStream);
 
     qualEncoder->flush();
     pbgzprof::addSince(pbgzprof::QUAL_CODEC, qualT2);
@@ -3759,6 +3796,38 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     /* The quality frequency table travels as an auxiliary stream: see writeQualFreqStream. */
     if (writeQualFreqStream(subMeta, streamMeta, totalSrcLength, totalDstLength) != 0) {
         return -1;
+    }
+
+    /* Which records had a truly missing QUAL (a lone '*'). Only blocks that need the marker
+       (missing QUAL, or a real all-'*' column) carry the stream, so the rest keep their bytes. */
+    if (needQualFlagStream) {
+        std::vector<uint8_t> missBits((qualMissing.size() + 7) / 8, 0);
+        for (size_t i = 0; i < qualMissing.size(); ++i) {
+            if (qualMissing[i] != 0) {
+                missBits[i >> 3] |= (uint8_t)(1u << (i & 7));
+            }
+        }
+        std::shared_ptr<coder_io> missIo =
+            makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "QUAL missing");
+        std::shared_ptr<coder> missCoder =
+            CoderFactory::makeProfileEncoder(SAM_QUAL, compressMode(), missIo.get(),
+                                             CoderType::BWT_CM, false, engineCompressLevel());
+        missCoder->encode_line(missBits.data(), (uint32_t)missBits.size());
+        missCoder->encode_flush();
+        if (missIo->err != coder_io::IO_OK) {
+            LOG_ERROR("Encode QUAL missing stream overflow: output buffer too small");
+            return -1;
+        }
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + missIo->data_len);
+        Json::Value missMeta;
+        missMeta["srclen"] = (Json::Value::UInt)missBits.size();
+        missMeta["dstlen"] = missIo->data_len;
+        missMeta["coder"] = missIo->meta;
+        missMeta["sname"] = "qmiss";
+        missMeta["count"] = (Json::Value::UInt)qualMissing.size();
+        streamMeta.append(missMeta);
+        totalSrcLength += (uint32_t)missBits.size();
+        totalDstLength += missIo->data_len;
     }
 
     // Set field metadata
@@ -3976,7 +4045,16 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
         for (uint32_t fieldIdx = 0; fieldIdx < fieldCount; ++fieldIdx) {
             int32_t decoderLen = 0;
             if (fieldIdx == 0) {    /// ID
-                decoderLen = decompressIdField(fieldIdx, streams[fieldIdx], outputBlock);
+                if (lineNo < decodedQnames.size() && !decodedQnames[lineNo].empty()) {
+                    const std::string& qn = decodedQnames[lineNo];
+                    memcpy(outputBlock->getCurrent(), qn.data(), qn.size());
+                    outputBlock->setDataLen(outputBlock->getDataLen() + qn.size());
+                    *(outputBlock->getCurrent()) = '\t';
+                    outputBlock->setDataLen(outputBlock->getDataLen() + 1);
+                    decoderLen = (int32_t)qn.size() + 1;
+                } else {
+                    decoderLen = decompressIdField(fieldIdx, streams[fieldIdx], outputBlock);
+                }
             } else if (fieldIdx == 1) {  /// FLAG
                 if (streams[1]["mode"].asString() == "string") {
                     decoderLen = decompressRegularField(fieldIdx, lineNo, '\t', outputBlock);
@@ -4037,7 +4115,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
                 decoderLen = decompressBase(fieldIdx, streams[fieldIdx], pBaseOut, lineNo, totalBaseLen, outputBlock);
                 actualBaseLen = decoderLen;
             } else if (fieldIdx == 10 ) {  /// QUAL
-                decoderLen = decompressQuality(basePtr, actualBaseLen, outputBlock);
+                decoderLen = decompressQuality(lineNo, basePtr, actualBaseLen, outputBlock);
                 // No optional fields scenario, replace appended \t with \n
                 if (fieldIdx + 1 == fieldCount) {
                     uint8_t* pEnd = outputBlock->getCurrent();
@@ -4462,7 +4540,11 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
             return -1;
         }
 
-        if (minBaseLength != maxBaseLength) {
+        /* Present whenever the SEQ column needed per-record lengths, not only when the
+           min/max lengths differ: a SEQ '*' record carries its own length even when every
+           record in the block has the same CIGAR span. */
+        if (id + 1 < (uint32_t)baseMetaStreams.size() &&
+            baseMetaStreams[id + 1]["sname"].asString() == "baselen") {
             id++;
             if (predecodeSeqBaseLengthStream(baseMetaStreams, id) != 0) {
                 return -1;
@@ -4519,6 +4601,8 @@ int32_t SamCodecActuator::initDecoder(RoughIOBlock* outputBlock) {
     uint32_t lineNumber = meta["sam"]["lines"].asUInt();
     LOG_DEBUG("Line number = %d", lineNumber);
     baseLengthBuffer = MemoryUtil::safeAlloc<uint32_t>(lineNumber);
+    unmapedReadLength.clear();
+    unmapedReadCursor = 0;
 
     for (uint32_t idx = 0; idx < streamMeta.size(); ++idx) {
         if (idx == 0) {
@@ -5469,8 +5553,9 @@ int32_t SamCodecActuator::predecodeSeqExceptionStreams(const Json::Value& baseMe
 int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
 {
     const Json::Value& qualStreamMeta = qualMeta["streams"];
-    if (qualStreamMeta.size() != 2) {
-        LOG_ERROR("quality streams check failded, size = %d", qualStreamMeta.size());
+    const size_t qualStreamCount = qualStreamMeta.size();
+    if (qualStreamCount != 2 && qualStreamCount != 3) {
+        LOG_ERROR("quality streams check failded, size = %d", (int)qualStreamCount);
         return -1;
     }
     const uint32_t qualDstLength = qualStreamMeta[0]["dstlen"].asUInt();
@@ -5520,7 +5605,37 @@ int32_t SamCodecActuator::initQualFieldDecoders(const Json::Value& qualMeta)
                   qualStreamMeta[0]["coder"]["magic"].asString().c_str());
         return -1;
     }
-    readOffset += (qualDstLength + freqDstLength);
+
+    /* Optional "qmiss" bitset: which records really had a missing QUAL. Without it (older
+       archives) the all-'*' heuristic is the only signal available. */
+    qualMissingPresent = false;
+    qualMissingBits.clear();
+    uint32_t missDstLength = 0;
+    if (qualStreamCount == 3) {
+        const Json::Value& missMeta = qualStreamMeta[2];
+        if (missMeta["sname"].asString() != "qmiss") {
+            LOG_ERROR("quality stream 3 is not qmiss: %s", missMeta["sname"].asString().c_str());
+            return -1;
+        }
+        missDstLength = missMeta["dstlen"].asUInt();
+        const uint32_t missSrcLength = missMeta["srclen"].asUInt();
+        coder_io missIo(inBlockPtr->getBuffer() + readOffset + qualDstLength + freqDstLength,
+                        missDstLength, &ioErrSink, "QUAL missing");
+        FieldDecoderArgs missArgs;
+        if (missMeta["coder"].isMember("level")) {
+            missArgs.level = missMeta["coder"]["level"].asInt();
+        }
+        std::shared_ptr<coder> missCoder =
+            CoderFactory::makeFieldDecoder(missMeta["coder"]["magic"].asString(), &missIo, missArgs);
+        qualMissingBits.assign(missSrcLength, 0);
+        if (missCoder == nullptr ||
+            missCoder->decode_line(qualMissingBits.data(), missSrcLength, UINT8_MAX, false) < 0) {
+            LOG_ERROR("Decode QUAL missing flags failed");
+            return -1;
+        }
+        qualMissingPresent = true;
+    }
+    readOffset += (qualDstLength + freqDstLength + missDstLength);
     return 0;
 }
 
@@ -5641,80 +5756,6 @@ int32_t SamCodecActuator::initTlenFieldDecoders(const Json::Value& tlenMeta, uin
         return -1;
     }
     readOffset += dstLen;
-    return 0;
-}
-
-/* The QNAME column's own decoders, rebuilt from the recorded offsets so the main loop's are not consumed. */
-int32_t SamCodecActuator::predecodeIdStreams(IdPredecodeState& state)
-{
-    Json::Value& streams = meta["sam"]["streams"];
-    uint8_t* buffer = inBlockPtr->getBuffer();
-
-    state.streams.reserve(idStreamOffsets.size());
-    state.decoders.reserve(idStreamOffsets.size());
-    for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
-        std::shared_ptr<coder_io> io = makeCoderIo(buffer + idStreamOffsets[si], idStreamDstLens[si], "QNAME predecode");
-        state.streams.push_back(io);
-        int32_t lvl = -1;
-        if (streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
-            streams[0]["streams"][si]["coder"].isMember("level")) {
-            lvl = streams[0]["streams"][si]["coder"]["level"].asInt();
-        }
-        FieldDecoderArgs idPreArgs;
-        if (lvl >= 0) {
-            idPreArgs.level = lvl;
-        }
-        state.decoders.push_back(
-            CoderFactory::makeFieldDecoder(idStreamCoders[si], io.get(), idPreArgs));
-    }
-
-    state.numericBufs.assign(idStreamOffsets.size(), nullptr);
-    state.numericLens.assign(idStreamOffsets.size(), 0);
-    state.numericPos.assign(idStreamOffsets.size(), 0);
-    state.numericAcc.assign(idStreamOffsets.size(), 0);
-    for (uint32_t si = 0; si < idStreamOffsets.size(); ++si) {
-        if (si >= state.decoders.size()) {
-            continue;
-        }
-        if (!(streams[0].isMember("streams") && streams[0]["streams"].isValidIndex(si) &&
-              streams[0]["streams"][si].isMember("mode"))) {
-            continue;
-        }
-        const std::string preMode = streams[0]["streams"][si]["mode"].asString();
-        const uint32_t srclen = streams[0]["streams"][si]["srclen"].asUInt();
-        if (preMode == "cnt") {
-            uint8_t* cb = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
-            if (cb == nullptr) {
-                return -1;
-            }
-            const int32_t cl = expandCounterSubStream(buffer + idStreamOffsets[si],
-                                                      idStreamDstLens[si],
-                                                      streams[0]["streams"][si], cb, srclen + 8);
-            if (cl < 0) {
-                MemoryUtil::safeFree(cb);
-                LOG_ERROR("Predecode id counter sub-stream(%u) failed", si);
-                return -1;
-            }
-            state.numericBufs[si] = cb;
-            state.numericLens[si] = (uint32_t)cl;
-            continue;
-        }
-        if (!state.decoders[si] || preMode != "numeric") {
-            continue;
-        }
-        uint8_t* b = MemoryUtil::safeAlloc<uint8_t>(srclen + 8);
-        if (b == nullptr) {
-            return -1;
-        }
-        int32_t dl = state.decoders[si]->decode_line(b, srclen, UINT8_MAX, false);
-        if (dl < 0) {
-            MemoryUtil::safeFree(b);
-            LOG_ERROR("Predecode id numeric sub-stream(%u) failed: %d", si, dl);
-            return -1;
-        }
-        state.numericBufs[si] = b;
-        state.numericLens[si] = (uint32_t)dl;
-    }
     return 0;
 }
 
@@ -5971,91 +6012,53 @@ int32_t SamCodecActuator::rebuildQnameColumn()
 {
     decodedQnames.clear();
     decodedQnames.resize(samLine);
-    if (idStreamOffsets.empty()) {
+    if (samLine == 0 || idStreamOffsets.empty() || !meta.isMember("sam")) {
         return 0;
     }
-
-    IdPredecodeState preState;
-    if (predecodeIdStreams(preState) != 0) {
-        return -1;
+    Json::Value& streams = meta["sam"]["streams"];
+    if (!streams.isArray() || !streams.isValidIndex(0)) {
+        return 0;
     }
-    /* The rebuild loop below speaks in terms of the state's vectors, as it always has. */
-    auto& preIdDec = preState.decoders;
-    auto& numBufs = preState.numericBufs;
-    auto& numLens = preState.numericLens;
-    auto& numPos = preState.numericPos;
-    auto& numAcc = preState.numericAcc;
-
-    char qnameBuf[512];
-    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
-        std::string qname;
-        if (idUsesQnameCoder && !preIdDec.empty()) {
-            // Single-stream coder_qname: one QNAME per line (with trailing '\t').
-            bool hold = CoderFactory::decoderHoldsCallerBuffer(idStreamCoders[0]);
-            int32_t len = preIdDec[0]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), UINT8_MAX, hold);
-            if (len > 0) {
-                int32_t strip = (qnameBuf[len - 1] == '\t') ? 1 : 0;
-                qname.assign(qnameBuf, (size_t)len - strip);
-            }
-        } else {
-            // Reconstruct QNAME from split sub-streams, appending each decoded segment (mirrors decompressIdField).
-            for (uint32_t si = 0; si < preIdDec.size(); ++si) {
-                if (!preIdDec[si] && numBufs[si] == nullptr) continue;
-                if (numBufs[si] != nullptr) {
-                    /* Numeric sub-stream: one varint per line, no separator byte. */
-                    if (numPos[si] >= numLens[si]) {
-                        break;
-                    }
-                    uint32_t zz = 0;
-                    if (!readVarint(numBufs[si], numLens[si], numPos[si], zz)) {
-                        LOG_ERROR("Corrupt id numeric sub-stream(%u) in predecode", si);
-                        return -1;
-                    }
-                    const uint32_t delta = zz >> 1;
-                    numAcc[si] = ((zz & 1u) == 0) ? (numAcc[si] + delta) : (numAcc[si] - delta);
-                    char ntmp[24];
-                    int nn = snprintf(ntmp, sizeof(ntmp), "%llu",
-                                      (unsigned long long)numAcc[si]);
-                    if (nn > 0) {
-                        qname.append(ntmp, (size_t)nn);
-                    }
-                    continue;
-                }
-                if (!idConstTexts.empty() && !idConstTexts[si].empty()) {
-                    /* Constant segment: the same text every line, stored once in the block. */
-                    qname.append(idConstTexts[si]);
-                    continue;
-                }
-                if (!idIntActive.empty() && idIntActive[si]) {
-                    /* Value-domain segment: one value per line, no separator. */
-                    char ntmp[24];
-                    const uint64_t v = idIntModes[si].decode(idIntCoders[si]);
-                    const int nn = snprintf(ntmp, sizeof(ntmp), "%llu", (unsigned long long)v);
-                    if (nn > 0) {
-                        qname.append(ntmp, (size_t)nn);
-                    }
-                    continue;
-                }
-                if (!preIdDec[si]) {
-                    /* Every coder-backed layout is handled above; an unknown mode must not be dereferenced. */
-                    LOG_ERROR("Predecode id sub-stream(%u) has no decoder", si);
-                    return -1;
-                }
-                uint8_t sep = (si < idAnalysis.symbols.size()) ? idAnalysis.symbols[si] : UINT8_MAX;
-                // coder_affix_match keeps cross-line context only when need2hold is set;
-                // without it the next line would corrupt the prefix reference.
-                bool hold = CoderFactory::decoderHoldsCallerBuffer(idStreamCoders[si]);
-                int32_t len = preIdDec[si]->decode_line((uint8_t*)qnameBuf, sizeof(qnameBuf), sep, hold);
-                if (len > 0) {
-                    int32_t strip = (qnameBuf[len - 1] == '\t') ? 1 : 0;
-                    qname.append(qnameBuf, (size_t)len - strip);
-                }
-            }
+    /* Decode the column with the same per-line function the main loop uses, so every split
+       layout (numeric/cnt, dictionary, fixed alphabet, value domain) contributes its
+       separators exactly as it will in the output. The records are appended to one stable
+       buffer: the affix coder keeps the previous line as context, so the buffer must not be
+       reset or reallocated between lines. A QNAME is at most 254 bytes by the SAM spec, and
+       the whole column cannot exceed the block's text length; take the tighter bound. */
+    uint64_t capacity = (uint64_t)samLine * 256 + 65536;
+    if (meta["sam"].isMember("textlen")) {
+        const uint64_t textLen = meta["sam"]["textlen"].asUInt64() + 65536;
+        if (textLen < capacity) {
+            capacity = textLen;
         }
-        decodedQnames[lineNo] = qname;
     }
-    for (uint32_t si = 0; si < numBufs.size(); ++si) {
-        MemoryUtil::safeFree(numBufs[si]);
+    if (capacity < 65536) {
+        capacity = 65536;
+    }
+    RoughIOBlock scratch((size_t)((capacity + 1) / 2));
+    std::vector<uint32_t> offsets((size_t)samLine + 1, 0);
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        if (scratch.getRemain() < 1024) {
+            LOG_ERROR("Pre-decode QNAME buffer exhausted at line %u", lineNo);
+            return -1;
+        }
+        offsets[lineNo] = (uint32_t)scratch.getDataLen();
+        const int32_t rc = decompressIdField(0, streams[0], &scratch);
+        if (rc < 0) {
+            LOG_ERROR("Pre-decode QNAME line %u failed", lineNo);
+            return -1;
+        }
+    }
+    offsets[samLine] = (uint32_t)scratch.getDataLen();
+
+    const uint8_t* p = scratch.getBuffer();
+    for (uint32_t lineNo = 0; lineNo < samLine; ++lineNo) {
+        uint32_t begin = offsets[lineNo];
+        uint32_t end = offsets[lineNo + 1];
+        if (end > begin && p[end - 1] == '\t') {
+            --end;   /* the field separator is re-appended by the main loop */
+        }
+        decodedQnames[lineNo].assign((const char*)p + begin, end - begin);
     }
     return 0;
 }
@@ -6588,17 +6591,19 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             }
         }
     } else {
-        actualBaseLen =  baseLengthBuffer[lineNo];
+        /* Records whose length the CIGAR does not imply (no CIGAR, or SEQ '*') carry it in
+           the baselen stream. Its entries are ascending by data-line ordinal: advance the
+           cursor and let an entry override the CIGAR-derived length. */
+        while (unmapedReadCursor < unmapedReadLength.size() &&
+               unmapedReadLength[unmapedReadCursor].first < lineNo) {
+            ++unmapedReadCursor;
+        }
+        const bool hasOwnLength = unmapedReadCursor < unmapedReadLength.size() &&
+                                  unmapedReadLength[unmapedReadCursor].first == lineNo;
+        actualBaseLen = hasOwnLength ? unmapedReadLength[unmapedReadCursor].second
+                                     : baseLengthBuffer[lineNo];
         if (actualBaseLen == 0) {
-            for (auto pairIter = unmapedReadLength.begin(); pairIter < unmapedReadLength.end(); ++pairIter) {
-                if (pairIter->first == lineNo) {
-                    actualBaseLen = pairIter->second;
-                    break;
-                }
-            }
-            if (actualBaseLen == 0) {
-                actualBaseLen = maxBaseLength;
-            }
+            actualBaseLen = maxBaseLength;
         }
         Json::Value& baseStream = fieldMeta["streams"];
         /* A payload byte above 2-bit range is one of the record's own characters (record does not use the reference). */
@@ -6744,7 +6749,8 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
     return actualBaseLen;
 }
 
-int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
+int32_t SamCodecActuator::decompressQuality(uint32_t lineNo, uint8_t* basePtr,
+                                            uint32_t actualBaseLen, RoughIOBlock* outputBlock) {
     uint8_t* dst = outputBlock->getCurrent();
     /* One call, whichever coder wrote the column: the record goes to dst, with the record's decoded SEQ as context. */
     if (qualDecoder->decode_record(dst, actualBaseLen, basePtr, actualBaseLen) < 0) {
@@ -6752,12 +6758,20 @@ int32_t SamCodecActuator::decompressQuality(uint8_t* basePtr, uint32_t actualBas
         return -1;
     }
 
-    /* Missing quality (single '*') was expanded to seqLen '*' on compression; fold it back here. */
-    bool missing = true;
-    for (uint32_t i = 0; i < actualBaseLen; ++i) {
-        if (dst[i] != '*') {
-            missing = false;
-            break;
+    /* A lone '*' is the missing-QUAL marker; the block's qmiss bitset says which records were
+       written that way. Without it (older archives) an all-'*' run is the only signal. */
+    bool missing;
+    if (qualMissingPresent) {
+        const size_t byte = (size_t)lineNo >> 3;
+        missing = (byte < qualMissingBits.size()) &&
+                  ((qualMissingBits[byte] >> (lineNo & 7)) & 1u) != 0;
+    } else {
+        missing = true;
+        for (uint32_t i = 0; i < actualBaseLen; ++i) {
+            if (dst[i] != '*') {
+                missing = false;
+                break;
+            }
         }
     }
     if (missing) {

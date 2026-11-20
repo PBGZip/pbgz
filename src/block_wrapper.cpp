@@ -42,6 +42,20 @@
 #include <arm_neon.h>
 #endif
 
+namespace {
+
+/* samtools-style diagnostics for a stream error detected below the block layer. */
+void reportInputStreamError(const char* detail, const char* stage)
+{
+    const std::string& file = PbgzManager::getInstance().getCurrentInputFile();
+    const char* name = file.empty() ? "input" : file.c_str();
+    fprintf(stderr, "[E::%s] Read operation failed: %s\n", stage, detail);
+    fprintf(stderr, "Error: %s appears to be corrupt or truncated; no output written.\n", name);
+    LOG_ERROR("Corrupt or truncated input %s: %s", name, detail);
+}
+
+}  // namespace
+
 BlockType BlockReader::analyzeBlock(RoughIOBlock* /*blockPtr*/, BlockType /*fileType*/) {
     return BINARY;
 }
@@ -72,6 +86,10 @@ int64_t BlockReader::readBlock(RoughIOBlock* blockPtr, BlockType fileType) {
 
     while (totalLen < target) {
         size_t readLen = ioReader->readIO(buffer + totalLen, target - totalLen);
+        if (readLen == (size_t)-1) {
+            reportInputStreamError("gzip or file read failed", "bgzf_read");
+            return -1;
+        }
         if (readLen == 0) { 
             break; // EOF
         }
@@ -377,6 +395,10 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
             buffer = blockPtr->getBuffer();
         }
         const size_t readLen = ioReader->readIO(buffer, chunkSize);
+        if (readLen == (size_t)-1) {
+            reportInputStreamError("gzip or file read failed", "bgzf_read");
+            return -1;
+        }
         if (readLen == 0) {
             return 0;   // EOF
         }
@@ -436,6 +458,10 @@ int64_t SamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
             buffer = blockPtr->getBuffer();
         }
         const size_t readLen = ioReader->readIO(buffer + totalLen, chunkSize);
+        if (readLen == (size_t)-1) {
+            reportInputStreamError("gzip or file read failed", "bgzf_read");
+            return -1;
+        }
         if (readLen == 0) {
             eofReached = true;
             break; // EOF
@@ -756,6 +782,33 @@ size_t BamBlockReader::readBamBytes(void* dst, size_t n) {
     return got;
 }
 
+void BamGzBlockReader::reportReadError(size_t want, size_t got, const std::string& detail) {
+    readFailed = true;
+    if (readErrReported) {
+        return;
+    }
+    readErrReported = true;
+
+    const std::string& file = PbgzManager::getInstance().getCurrentInputFile();
+    const char* name = file.empty() ? "input" : file.c_str();
+
+    if (parMode) {
+        if (bgzfPar.inflateFailed()) {
+            /* samtools prints the same libdeflate/zlib result code on this line. */
+            fprintf(stderr, "[E::bgzf_uncompress] Inflate operation failed: %d\n",
+                    bgzfPar.errorCode());
+        }
+        fprintf(stderr,
+                "[E::bgzf_read] Read block operation failed: %s (BGZF offset %llu, %zu of %zu bytes)\n",
+                detail.c_str(), (unsigned long long)bgzfPar.errorOffset(), got, want);
+    } else {
+        fprintf(stderr, "[E::bgzf_read] Read block operation failed: %s (%zu of %zu bytes)\n",
+                detail.c_str(), got, want);
+    }
+    fprintf(stderr, "Error: %s is corrupt or truncated; no output written.\n", name);
+    LOG_ERROR("Corrupt or truncated input %s: %s", name, detail.c_str());
+}
+
 size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
     PBGZ_PROF_SCOPE(pbgzprof::READ_INFLATE);
     if (!parStarted) {
@@ -783,7 +836,11 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
     }
 
     if (parMode) {
-        return bgzfPar.read(dst, n);
+        const size_t got = bgzfPar.read(dst, n);
+        if (got == 0 && bgzfPar.failed()) {
+            reportReadError(n, got, bgzfPar.errorText());
+        }
+        return got;
     }
 
     /* Serial fallback for plain gzip; the compressed input first comes from the probe bytes above. */
@@ -821,20 +878,27 @@ size_t BamGzBlockReader::readBamBytes(void* dst, size_t n) {
             continue;
         }
         if (rc != Z_OK && rc != Z_BUF_ERROR) {
+            serialErr = "zlib inflate failed (rc=" + std::to_string(rc) + ")";
             break;   /* Corrupted data */
         }
         if (inflateState.avail_in == 0) {
             if (gzInEof) {
+                /* The stream ended without its final block: truncated input, not a clean EOF. */
+                serialErr = "unexpected end of gzip stream";
                 break;
             }
             const size_t inRead = readRawBam(gzInBuf, sizeof(gzInBuf));
             if (inRead == 0) {
                 gzInEof = true;
+                serialErr = "unexpected end of gzip stream";
                 break;
             }
             inflateState.next_in = gzInBuf;
             inflateState.avail_in = (uInt)inRead;
         }
+    }
+    if (!serialErr.empty()) {
+        reportReadError(n, got, serialErr);
     }
     return got;
 }
@@ -1236,6 +1300,8 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         }
         recBuf.resize((size_t)blockSize);
         if (readBamBytes(recBuf.data(), recBuf.size()) != recBuf.size()) {
+            /* A record that stops before its declared length is truncated input, not EOF. */
+            recordTruncated = true;
             break;
         }
         /* l_seq (SEQ length) is the fixed field of the 32-byte BAM core at offset 16. */
@@ -1322,6 +1388,15 @@ int64_t BamBlockReader::readBlock(RoughIOBlock* blockPtr, BlockType /*fileType*/
         blockBases += (uint64_t)(seqLen > 0 ? (uint32_t)seqLen : 0);
         ++reads;
         lastBlockHasData = true;
+    }
+
+    if (hasReadError() || recordTruncated) {
+        /* A corrupt/truncated BGZF member must not be mistaken for a clean end of file. */
+        if (recordTruncated && !hasReadError()) {
+            reportInputStreamError("truncated BAM record", "bgzf_read");
+        }
+        LOG_ERROR("BAM input is corrupt or truncated; aborting this block.");
+        return -1;
     }
 
     if (outLen == 0) {
@@ -2249,11 +2324,19 @@ int32_t SamToBamConverter::convert(RoughIOBlock* blockPtr)
     const bool isAlignment =
         BlockUtil::isSAMBlock(type) || BlockUtil::isBAMBlock(type);
     if (!isAlignment) {
-        /* Non-alignment input (-b on FASTQ/binary): let BamWriter pass it through. */
+        /* A SAM/BAM archive can hold data blocks that fell back to the generic binary
+           coder; their payload is still SAM text. Once the first block has produced the
+           BAM header, keep converting those here: BamWriter would otherwise parse them
+           against an empty @SQ table and drop every RNAME/POS. Before the header, a
+           non-alignment first block means non-SAM input (-b on FASTQ/binary), which
+           must pass through unchanged. */
         if (!headerWritten) {
             passThrough = true;
+            return 0;
         }
-        return 0;
+        if (passThrough) {
+            return 0;
+        }
     }
     if (passThrough) {
         return 0;

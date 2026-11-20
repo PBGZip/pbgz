@@ -97,6 +97,12 @@ public:
      */
     virtual bool blockHasData(const RoughIOBlock* /*blockPtr*/) const { return true; }
 
+    /*
+     * True once a read failed because the input stream was corrupt or truncated.
+     * Readers that can detect this return -1 from readBlock instead of reporting EOF.
+     */
+    virtual bool hasReadError() const { return false; }
+
 protected:
     /* Per-block read target in bytes: prefer the -l target, otherwise the block's own blockSize */
     size_t readTargetBytes(const RoughIOBlock* blockPtr) const {
@@ -233,6 +239,7 @@ protected:
     size_t blockMaxBases;              /* Base-count cap per data block (= readsPerBlock*500, CRAM rule) */
     bool splitHeader;                  /* Whether the header forms its own block */
     bool lastBlockHasData;
+    bool recordTruncated = false;      /* a record body ended before its declared length */
 
     /*
      * A read whose SAM line would push the block past the budget is parked here for the next block.
@@ -278,6 +285,8 @@ public:
      */
     void setParThreads(int n) { parThreads = (n >= 1) ? n : 4; }
 
+    bool hasReadError() const override { return readFailed; }
+
 protected:
     virtual size_t readBamBytes(void* dst, size_t n) override;
 
@@ -291,10 +300,16 @@ private:
     size_t gzInLen;
     bool gzInEof;
 
+    /* Print the samtools-style diagnostics once, then latch the failure. */
+    void reportReadError(size_t want, size_t got, const std::string& detail);
+
     BgzfParallelDecoder bgzfPar;
     bool parStarted;                   /* probe done */
     bool parMode;                      /* running the parallel decoder */
     int parThreads;
+    bool readFailed = false;           /* corrupt/truncated input was detected */
+    bool readErrReported = false;
+    std::string serialErr;             /* serial zlib fallback failure detail */
     std::vector<uint8_t> probeBuf;     /* stream head read once for the probe */
 };
 

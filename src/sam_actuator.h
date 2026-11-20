@@ -41,16 +41,6 @@
 /* The QNAME column's layouts and analysis, shared with the codec pre-selection. */
 #include "sam_qname_column.h"
 
-/* The QNAME column's pre-decode state (see preDecodeForTLEN). */
-struct IdPredecodeState {
-    std::vector<std::shared_ptr<coder_io>> streams;
-    std::vector<std::shared_ptr<coder>> decoders;
-    std::vector<uint8_t*> numericBufs;
-    std::vector<uint32_t> numericLens;
-    std::vector<uint32_t> numericPos;
-    std::vector<uint64_t> numericAcc;
-};
-
 /* One TLEN-reconstruction column (POS/CIGAR/PNEXT) and its decoder (see TlenColumnPredecoder). */
 struct TlenColumnPredecoder {
     std::shared_ptr<coder_io> stream;
@@ -251,7 +241,8 @@ public:
        matchBlockDecode, else decoded per line. Returns bytes, or -1. */
     int32_t readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_t len, uint32_t lineNo);
 
-    int32_t decompressQuality(uint8_t* basePtr, uint32_t actualBaseLen, RoughIOBlock* outputBlock);
+    int32_t decompressQuality(uint32_t lineNo, uint8_t* basePtr, uint32_t actualBaseLen,
+                              RoughIOBlock* outputBlock);
 
     int32_t decompressTLen(uint32_t fieldIdx, uint32_t lineNo, uint8_t splitFlag, RoughIOBlock* outputBlock, const Json::Value& fieldMeta);
 
@@ -293,6 +284,14 @@ public:
 
     int64_t getSamLineNumber() {
         return samLine;
+    }
+
+    /* True when this block holds a SEQ '*' record that a real CIGAR does not describe.
+       The coder thread uses it to compare against the generic binary coder (see
+       CompressEngine::actuatorProc): the column layout wins on some long-read files and
+       loses on others, and a block must never grow because SEQ '*' is accepted. */
+    bool usedMissingSeq() const {
+        return seqStarNeedsLength;
     }
 
     void initMetaInfo();
@@ -493,8 +492,6 @@ private:
     /* The TLEN column: one exception stream, else an ordinary column. */
     int32_t initTlenFieldDecoders(const Json::Value& tlenMeta, uint32_t fieldIdx);
     int32_t decodeTlenExceptionStream(const Json::Value& stream, const Json::Value& tlenMeta);
-    /* The QNAME column's own decoders, rebuilt so the main loop's idDecoders are not consumed. */
-    int32_t predecodeIdStreams(IdPredecodeState& state);
     /* FLAG (decides whether PNEXT holds a delta) and RNAME (POS-delta chromosome switches). */
     int32_t predecodeFlagColumn();
     int32_t predecodeRnameColumn();
@@ -517,7 +514,8 @@ private:
                                 uint32_t& totalSrcLength, uint32_t& totalDstLength);
 
     uint32_t encodeQualRecords(qual_record_encoder* encoder, uint32_t lineNum, uint32_t fieldIdx,
-                               bool needStrand);
+                               bool needStrand, std::vector<uint8_t>& missingFlags,
+                               bool& needFlagStream);
     int32_t compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     int32_t buildSamIndex();
@@ -575,6 +573,11 @@ private:
     /* Previous line's POS for delta decoding (used by the main-loop fallback path; preDecodeForTLEN uses a local variable). */
     int64_t posDeltaPrev = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unmapedReadLength;
+    /* Decoder cursor into unmapedReadLength: entries are ascending by data-line ordinal. */
+    uint32_t unmapedReadCursor = 0;
+    /* A SEQ '*' record reached the encoder: its length cannot be derived from the CIGAR, so
+       the baselen stream has to be written even when minBaseLength == maxBaseLength. */
+    bool seqStarNeedsLength = false;
 
     /* Per-line CIGAR op list, parsed once and reused by the SEQ reference rebuild and TLEN. */
     std::vector<std::vector<CigarOp>> cigarOpList;
@@ -615,6 +618,10 @@ private:
 
     // Quality compression related members
     std::vector<std::pair<uint16_t, uint16_t>> qualFreqTable;
+    /* Per-record missing-QUAL bits (1 = the field was a lone '*'). Blocks that need them carry a
+       "qmiss" sub-stream; without it the decoder keeps the legacy all-'*' heuristic. */
+    std::vector<uint8_t> qualMissingBits;
+    bool qualMissingPresent = false;
 
     uint32_t readOffset;
 

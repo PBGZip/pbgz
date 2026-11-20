@@ -4,7 +4,8 @@
  * Cuts BGZF gzip members out of the raw stream by their BC/BSIZE field and inflates
  * them in parallel (a creator thread plus N inflate workers), serving inflated bytes
  * to the reader in member order. Falls back to serial inflate for plain gzip. A
- * corrupt member makes read() return 0 after logging.
+ * corrupt member latches failed() and stops read(); the BAM reader turns that into
+ * a hard error so a truncated input is never archived as a successful run.
  * Copyright (C) 2025 PBGZip
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -56,6 +57,19 @@ public:
     BgzfParallelDecoder()
         : started_(false), stopped_(false), serialMode_(false) {}
 
+    /* True once a member header or its deflate payload was found corrupt/truncated. */
+    bool failed() const { return failed_.load(); }
+    bool inflateFailed() const { return inflateFailed_.load(); }
+    int errorCode() const { return errorCode_.load(); }
+    uint64_t errorOffset() const { return errorOffset_.load(); }
+
+    /* Human-readable reason for the failure; empty when failed() is false. */
+    std::string errorText() const
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return errText_;
+    }
+
     ~BgzfParallelDecoder() { stop(); }
 
     BgzfParallelDecoder(const BgzfParallelDecoder&) = delete;
@@ -75,6 +89,13 @@ public:
         consumed_ = 0;
         noMore_ = false;
         stopped_ = false;
+        failed_ = false;
+        inflateFailed_ = false;
+        errorCode_ = 0;
+        errorOffset_ = 0;
+        errText_.clear();
+        collectErr_.clear();
+        rawPos_ = 0;
 
         if (threads < 1) threads = 1;
         if (threads > 8) threads = 8;
@@ -103,7 +124,7 @@ public:
         return true;
     }
 
-    /* Pull n inflated bytes; 0 means end of stream / failure. */
+    /* Pull n inflated bytes; 0 means end of stream or (when failed()) corrupt input. */
     size_t read(void* dst, size_t n)
     {
         if (!started_ || stopped_)
@@ -112,6 +133,10 @@ public:
         size_t got = 0;
         std::unique_lock<std::mutex> lk(mtx_);
         while (got < n) {
+            if (failed_.load()) {
+                /* Stop handing out bytes from a stream whose block failed to inflate. */
+                break;
+            }
             BgzfMember& m = ring_[consumed_ % kRingSize];
             if (m.ready) {
                 /* Copy what remains of this member. */
@@ -175,9 +200,35 @@ private:
         uint8_t out[kMaxInflated];  /* inflated payload */
         uint32_t outLen;
         uint32_t outOff;            /* reader offset inside out */
+        uint64_t rawOff;            /* byte offset of this member in the input */
         bool ready;
-        BgzfMember() : outLen(0), outOff(0), ready(false) {}
+        BgzfMember() : outLen(0), outOff(0), rawOff(0), ready(false) {}
     };
+
+    /*
+     * Latch the first corruption seen by the creator or an inflate worker. The reader
+     * stops serving bytes and the BAM block reader turns this into a hard failure, so
+     * a truncated archive can never be reported as a successful compression.
+     */
+    void noteError(bool inflate, int code, uint64_t offset, std::string text)
+    {
+        {
+            /* Publish the message before failed_ becomes visible, so a reader that wakes on
+               the flag never observes an empty diagnostic. */
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (failed_.load()) {
+                return;
+            }
+            errText_ = std::move(text);
+            inflateFailed_.store(inflate);
+            errorCode_.store(code);
+            errorOffset_.store(offset);
+            failed_.store(true);
+        }
+        cvRead_.notify_all();
+        cvWork_.notify_all();
+        cvCreator_.notify_all();
+    }
 
     /* ---- raw byte source (creator thread only) ---- */
     size_t readRaw(void* dst, size_t n)
@@ -197,6 +248,7 @@ private:
                 break;
             got += r;
         }
+        rawPos_ += got;
         return got;
     }
 
@@ -229,10 +281,14 @@ private:
         size_t h = readRaw(hdr, 12);
         if (h == 0)
             return 0; /* EOF */
-        if (h < 12)
+        if (h < 12) {
+            collectErr_ = "unexpected end of file in BGZF member header";
             return UINT64_MAX; /* truncated header */
-        if (hdr[0] != 0x1f || hdr[1] != 0x8b || hdr[2] != 0x08)
+        }
+        if (hdr[0] != 0x1f || hdr[1] != 0x8b || hdr[2] != 0x08) {
+            collectErr_ = "invalid gzip/BGZF member header";
             return UINT64_MAX;
+        }
         const uint8_t flg = hdr[3];
         size_t skip = 10;
         size_t xlen = 0;
@@ -251,8 +307,10 @@ private:
             size_t have = 12;
             while (have < skip) {
                 const size_t r = readRaw(varHead.data() + have, skip - have);
-                if (r == 0)
+                if (r == 0) {
+                    collectErr_ = "unexpected end of file in BGZF member header";
                     return UINT64_MAX;
+                }
                 have += r;
             }
             /* memberSize comes from the BC extra subfield, when present */
@@ -268,28 +326,34 @@ private:
             memberSize = 0;
         }
 
+        auto shortHeader = [this]() {
+            collectErr_ = "unexpected end of file in BGZF member header";
+            return UINT64_MAX;
+        };
         if (flg & 0x08) { /* FNAME: NUL-terminated */
             uint8_t c;
             do {
                 if (readRaw(&c, 1) == 0)
-                    return UINT64_MAX;
+                    return shortHeader();
             } while (c != 0);
         }
         if (flg & 0x10) { /* FCOMMENT */
             uint8_t c;
             do {
                 if (readRaw(&c, 1) == 0)
-                    return UINT64_MAX;
+                    return shortHeader();
             } while (c != 0);
         }
         if (flg & 0x02) { /* FHCRC: 2 bytes */
             uint8_t two[2];
             if (readRaw(two, 2) != 2)
-                return UINT64_MAX;
+                return shortHeader();
         }
 
-        if (!foundBc)
+        if (!foundBc) {
+            collectErr_ = "gzip member is not BGZF (missing BC extra field)";
             return UINT64_MAX; /* cannot split; caller falls back */
+        }
 
         out.resize((size_t)memberSize);
         if (memberSize <= skip) {
@@ -305,8 +369,10 @@ private:
         size_t have = skip;
         while (have < memberSize) {
             const size_t r = readRaw(out.data() + have, (size_t)(memberSize - have));
-            if (r == 0)
+            if (r == 0) {
+                collectErr_ = "unexpected end of file inside a BGZF member";
                 return UINT64_MAX;
+            }
             have += r;
         }
         return memberSize;
@@ -330,8 +396,18 @@ private:
                     return;
             }
             const uint64_t seq = produced_;
+            const uint64_t memberOff = rawPos_;
             const uint64_t sz = collectMember(memberBuf);
             if (sz == UINT64_MAX) {
+                /* Let the members already handed to the workers finish first: when a broken
+                   block is what threw the cutter off, the inflate failure is the useful
+                   diagnostic, not the bogus header it happened to land on. */
+                {
+                    std::unique_lock<std::mutex> lk(mtx_);
+                    cvWork_.wait(lk, [this] { return stopped_ || inflateDone_ == produced_; });
+                }
+                noteError(false, 0, memberOff,
+                          collectErr_ + " at offset " + std::to_string(memberOff));
                 std::lock_guard<std::mutex> lk(mtx_);
                 noMore_ = true;
                 cvRead_.notify_all();
@@ -346,6 +422,7 @@ private:
                 m.comp.swap(memberBuf);
                 memberBuf.clear();
                 m.outOff = 0;
+                m.rawOff = memberOff;
                 ++produced_;
             }
             {
@@ -397,11 +474,16 @@ private:
             const enum libdeflate_result rc = libdeflate_gzip_decompress(
                 d, m.comp.data(), m.comp.size(), m.out, (size_t)kMaxInflated, &actualOut);
             const bool ok = (rc == LIBDEFLATE_SUCCESS);
+            if (!ok) {
+                /* A member that will not inflate is a corrupt input, not EOF: latch it so
+                   the reader aborts instead of silently dropping the block. */
+                noteError(true, (int)rc, m.rawOff,
+                          std::string("BGZF member at offset ") + std::to_string(m.rawOff) +
+                          " failed to inflate (rc=" + std::to_string((int)rc) + ")");
+            }
             {
                 std::lock_guard<std::mutex> lk(mtx_);
-                /* On failure libdeflate leaves the output undefined (no partial
-                   bytes), so deliver an empty member: the reader skips it and
-                   the stream keeps draining to EOF, like the old corrupt path. */
+                /* On failure libdeflate leaves the output undefined (no partial bytes). */
                 m.outLen = ok ? (uint32_t)actualOut : 0;
                 m.ready = true;
                 ++inflateDone_;
@@ -426,7 +508,16 @@ private:
     std::atomic<bool> stopped_{false};
     bool serialMode_;
 
-    std::mutex mtx_;
+    /* First corruption seen; the reader consults these before returning more bytes. */
+    std::atomic<bool> failed_{false};
+    std::atomic<bool> inflateFailed_{false};
+    std::atomic<int> errorCode_{0};
+    std::atomic<uint64_t> errorOffset_{0};
+    std::string errText_;          /* guarded by mtx_ */
+    std::string collectErr_;       /* creator thread only */
+    uint64_t rawPos_ = 0;          /* creator thread only: bytes consumed from the source */
+
+    mutable std::mutex mtx_;
     std::condition_variable cvRead_;    /* reader waits for its member/EOF */
     std::condition_variable cvWork_;    /* inflaters wait for jobs */
     std::condition_variable cvCreator_; /* creator waits for a free slot */

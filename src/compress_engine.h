@@ -113,6 +113,11 @@ protected:
 
     virtual Actuator* actuatorPreProc(Actuator* actuator, RoughIOBlock* inBlockPtr, RoughIOBlock* outBlockPtr) override;
 
+    /* After a SEQ '*' SAM block is encoded, keep whichever of the column layout and the
+       generic binary coder is smaller (see SamCodecActuator::usedMissingSeq). */
+    virtual int32_t actuatorProc(Actuator* actuator, RoughIOBlock* inBlockPtr,
+                                 RoughIOBlock* outBlockPtr) override;
+
 
     /* Build the QUAL_PRIOR auxiliary block and record its header offset. The writer
        thread performs the actual write via emitSyncAuxBlock. */

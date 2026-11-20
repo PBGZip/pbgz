@@ -656,3 +656,24 @@ TEST_F(CodecSelectorTest, ExplicitCandidateListDrivesSelection)
     EXPECT_EQ(sel.bestCompLen, 0u);   /* not measured: one-entry list */
     EXPECT_EQ(sel.trialCount, 0u);    /* no trial record either */
 }
+
+/* Variable separator shapes make the QNAME split unavailable; the selector must return the
+   whole-column verdict instead of walking a short per-line position vector. */
+TEST_F(CodecSelectorTest, QnameLayoutHandlesVariableSeparatorShapes)
+{
+    RoughIOBlock block(1 << 20);
+    buildQnameBlock(&block, 1000, [](uint32_t i) {
+        std::string q;
+        if (i % 2 == 0) {
+            q = "Other_RNA_exon_exon_ENSRNOG00000032748|Abcc1|10|11261142|11261318///"
+                "MN01080:7:000H37TCT:1:21103:19852:";
+        } else {
+            q = "Genome///MN01080:7:000H37TCT:1:11102:17240:";
+        }
+        return q + std::to_string(i);
+    });
+
+    PreprocessInfo info;
+    ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
+    info.markDone();
+}

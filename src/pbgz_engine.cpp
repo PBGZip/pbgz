@@ -131,6 +131,9 @@ int32_t PbgzEngine::init() {
         freeOutputPool->push(outPtr);
     }
 
+    PbgzManager::getInstance().setCurrentInputFile(
+        (parameter.inputFile == STDIN) ? std::string("<stdin>") : parameter.inputFile);
+
     if (parameter.inputFile == STDIN) {
         ioReader = MemoryUtil::safeNewClass<PipeReader>();
         LOG_INFO("Create PipeReader.");

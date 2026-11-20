@@ -30,6 +30,7 @@
 
 #define private public
 #include "coder/coder.h"
+#include "coder_json.h"
 #include "sam_actuator.h"
 #include <io_wrapper.h>
 #include <block_wrapper.h>
@@ -815,6 +816,308 @@ TEST_F(SamDecompressTest, TestReferenceRoundtripPreservesTheText) {
     SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
     ASSERT_EQ(compressor.preAnalysis(), 0);
     ASSERT_EQ(compressor.compress(), 0);
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::ifstream in(file, std::ios::binary);
+    std::string expected;
+    {
+        char buf[4096];
+        while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+            expected.append(buf, (size_t)in.gcount());
+        }
+    }
+    const std::string got((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen());
+    EXPECT_EQ(got.size(), expected.size());
+    EXPECT_EQ(got, expected);
+    std::remove(file.c_str());
+}
+
+/*
+ * SEQ '*' means "unavailable" and may still carry a real CIGAR (PacBio secondary alignments).
+ * Its field length is 1, so the CIGAR cannot tell the decoder how many bases to expect; the
+ * record's length has to travel in the baselen stream. A following record must stay aligned.
+ */
+TEST_F(SamDecompressTest, TestMissingSeqWithCigarRoundtrip) {
+    const std::string file = "test_missing_seq_cigar.sam";
+    {
+        std::ofstream out(file);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:coordinate\n";
+        out << "@SQ\tSN:chr1\tLN:340\n";
+        out << "m1\t0\tchr1\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII\n";
+        out << "star1\t256\tchr1\t21\t0\t10M5I2D8M\t*\t0\t0\t*\t*\n";
+        out << "m2\t0\tchr1\t41\t60\t12M\t*\t0\t0\tACGTACGTACGT\tIIIIIIIIIIII\n";
+        out << "star2\t256\tchr1\t61\t0\t3S20M\t*\t0\t0\t*\t*\n";
+        out << "m3\t16\tchr1\t81\t60\t9M\t*\t0\t0\tTTTTAAAAC\tIIIIIIIII\n";
+    }
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::ifstream in(file, std::ios::binary);
+    std::string expected;
+    {
+        char buf[4096];
+        while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+            expected.append(buf, (size_t)in.gcount());
+        }
+    }
+    const std::string got((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen());
+    EXPECT_EQ(got.size(), expected.size());
+    EXPECT_EQ(got, expected);
+    std::remove(file.c_str());
+}
+
+/*
+ * A QUAL column of two or more '*' is real Phred-9 data, not the single '*' missing marker.
+ * The "qmiss" flag stream lets the decoder keep the run instead of folding it to one '*'.
+ */
+TEST_F(SamDecompressTest, TestAllStarQualityRoundtrip) {
+    const std::string file = "test_all_star_quality.sam";
+    {
+        std::ofstream out(file);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:coordinate\n";
+        out << "@SQ\tSN:chr1\tLN:340\n";
+        out << "m1\t0\tchr1\t1\t60\t4M\t*\t0\t0\tACGT\tIIII\n";
+        out << "star1\t0\tchr1\t5\t60\t2M\t*\t0\t0\tAC\t**\n";
+        out << "star2\t4\t*\t0\t0\t*\t*\t0\t0\tACG\t***\n";
+        out << "m2\t0\tchr1\t9\t60\t4M\t*\t0\t0\tACGT\t****\n";
+        out << "miss\t0\tchr1\t13\t60\t3M\t*\t0\t0\tACG\t*\n";
+        out << "m3\t16\tchr1\t17\t60\t4M\t*\t0\t0\tACGT\tIIII\n";
+    }
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::ifstream in(file, std::ios::binary);
+    std::string expected;
+    {
+        char buf[4096];
+        while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+            expected.append(buf, (size_t)in.gcount());
+        }
+    }
+    const std::string got((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen());
+    EXPECT_EQ(got.size(), expected.size());
+    EXPECT_EQ(got, expected);
+    std::remove(file.c_str());
+}
+
+/*
+ * QNAME layouts other than plain text (dictionary, fixed alphabet, numeric/counter) are what
+ * the old, separate PNEXT pre-decoder could not reproduce: it dropped their separators and
+ * skipped several layouts, so mate pairing by QNAME failed and PNEXT became 0 (TLEN -POS).
+ * This block mixes all of them, checks that those layouts are really exercised, and then
+ * compares the decoded text byte for byte (PNEXT/TLEN come from the rebuild and exceptions).
+ */
+TEST_F(SamDecompressTest, TestQnameLayoutsPnextRebuildRoundtrip) {
+    const std::string file = "test_qname_pnext.sam";
+    const std::string seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+    const std::string qual(36, 'I');
+    {
+        std::ofstream out(file);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:coordinate\n";
+        out << "@SQ\tSN:chr1\tLN:2000000\n";
+        static const char* inst[3] = {"INST0", "INST1", "INST2"};
+        static const char alnum[] = "ABCD";
+        for (int i = 0; i < 400; ++i) {
+            std::string hex;
+            uint32_t rnd = (uint32_t)i * 2654435761u + 12345u;
+            for (int j = 0; j < 4; ++j) {
+                rnd = rnd * 1664525u + 1013904223u;
+                hex.push_back(alnum[(rnd >> 16) & 3u]);
+            }
+            char num[16];
+            snprintf(num, sizeof(num), "%06d", i * 7);
+            const std::string qname = std::string(inst[i % 3]) + ":" + hex + ":" + num +
+                                      ":read" + std::to_string(i);
+            const int p1 = 101 + i * 100;
+            const int p2 = p1 + 50;
+            out << qname << "\t99\tchr1\t" << p1 << "\t60\t36M\t=\t" << p2
+                << "\t86\t" << seq << "\t" << qual << "\n";
+            out << qname << "\t147\tchr1\t" << p2 << "\t60\t36M\t=\t" << p1
+                << "\t-86\t" << seq << "\t" << qual << "\n";
+        }
+        /* No mate in the block: PNEXT has to travel in the exception stream. */
+        out << "INST3:EXC:999999:orphan\t99\tchr1\t500001\t60\t36M\t=\t600001\t100036\t"
+            << seq << "\t" << qual << "\n";
+        /* Mate unmapped: PNEXT is 0 and no exception is written. */
+        out << "INST3:EXC:999998:nomate\t4\t*\t0\t0\t*\t*\t0\t0\t"
+            << seq << "\t" << qual << "\n";
+        /* Non-reciprocal pair: both records have to come from the exception stream. */
+        out << "INST3:EXC:999997:nonrecip\t99\tchr1\t700001\t60\t36M\t=\t700999\t1000\t"
+            << seq << "\t" << qual << "\n";
+        out << "INST3:EXC:999997:nonrecip\t147\tchr1\t700999\t60\t36M\t=\t700500\t1000\t"
+            << seq << "\t" << qual << "\n";
+    }
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    /* The crafted names must really reach the dictionary, fixed-alphabet and value layouts;
+       those are the paths the deleted pre-decoder used to skip or mangle. */
+    bool sawDict = false;
+    bool sawValue = false;
+    Json::Value compressedMeta;
+    coder_json metaJson;
+    metaJson.decoder(pOutBlock->getMetaBuffer(), (int32_t)pOutBlock->getMetaLen(), compressedMeta);
+    const Json::Value& qstreams = compressedMeta["sam"]["streams"][0]["streams"];
+    std::string modes;
+    for (Json::ArrayIndex i = 0; i < qstreams.size(); ++i) {
+        const std::string mode = qstreams[i].isMember("mode")
+                                     ? qstreams[i]["mode"].asString() : std::string();
+        modes += (i ? "," : "") + (mode.empty() ? std::string("text") : mode);
+        sawDict = sawDict || mode == "dict";
+        sawValue = sawValue || mode == "numeric" || mode == "cnt" || mode == "intd" ||
+                   mode == "intu";
+    }
+    /* Dictionary and value-domain layouts are the ones the old pre-decoder mangled for
+       ctvt (missing separators); the same unified decode also covers the fixed-alphabet
+       layout, which this encoder profile rarely selects over the text coder. */
+    EXPECT_TRUE(sawDict) << "modes=" << modes;
+    EXPECT_TRUE(sawValue) << "modes=" << modes;
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::ifstream in(file, std::ios::binary);
+    std::string expected;
+    {
+        char buf[4096];
+        while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+            expected.append(buf, (size_t)in.gcount());
+        }
+    }
+    const std::string got((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen());
+    EXPECT_EQ(got.size(), expected.size());
+    EXPECT_EQ(got, expected);
+    std::remove(file.c_str());
+}
+
+/*
+ * The qmiss stream is written only when a block needs it (a real all-'*' column or a truly
+ * missing QUAL). Blocks without either keep the two-stream QUAL layout, so their bytes and
+ * their compatibility with older decoders are unchanged.
+ */
+TEST_F(SamDecompressTest, TestQualityMissingStreamOnlyWhenNeeded) {
+    auto qualStreamCount = [&](const std::string& name, const std::string& qual) -> size_t {
+        {
+            std::ofstream out(name);
+            EXPECT_TRUE(out.is_open());
+            out << "@HD\tVN:1.6\n";
+            out << "@SQ\tSN:chr1\tLN:1000\n";
+            out << "r1\t0\tchr1\t1\t60\t4M\t*\t0\t0\tACGT\t" << qual << "\n";
+        }
+        loadSamData(name);
+        Reference ref = createTestReference();
+        PbgzParameter para;
+        DecompressEngine engine(para);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+        EXPECT_EQ(compressor.preAnalysis(), 0);
+        EXPECT_EQ(compressor.compress(), 0);
+        Json::Value compressedMeta;
+        coder_json metaJson;
+        metaJson.decoder(pOutBlock->getMetaBuffer(), (int32_t)pOutBlock->getMetaLen(),
+                         compressedMeta);
+        std::remove(name.c_str());
+        return compressedMeta["sam"]["streams"][10]["streams"].size();
+    };
+
+    EXPECT_EQ(qualStreamCount("q_plain.sam", "IIII"), 2u);   /* no marker needed */
+    EXPECT_EQ(qualStreamCount("q_stars.sam", "**"), 3u);     /* real all-'*' column */
+    EXPECT_EQ(qualStreamCount("q_missing.sam", "*"), 3u);    /* missing QUAL */
+}
+
+/*
+ * QNAMEs whose separator shape changes from line to line (real RNA-seq/ONT names do this)
+ * cannot use the split layout. The whole-column fallback has to be taken without indexing a
+ * short per-line position vector, which used to crash the compressor.
+ */
+TEST_F(SamDecompressTest, TestVariableShapeQnamesRoundtrip) {
+    const std::string file = "test_variable_qnames.sam";
+    {
+        std::ofstream out(file);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:coordinate\n";
+        out << "@SQ\tSN:chr1\tLN:2000000\n";
+        for (int i = 0; i < 200; ++i) {
+            std::string qname;
+            if (i % 2 == 0) {
+                qname = "Other_RNA_exon_exon_ENSRNOG00000032748|Abcc1|10|11261142|11261318///"
+                        "MN01080:7:000H37TCT:1:21103:19852:";
+            } else {
+                qname = "Genome///MN01080:7:000H37TCT:1:11102:17240:";
+            }
+            qname += std::to_string(i);
+            out << qname << "\t0\tchr1\t" << (1 + i * 10) << "\t60\t4M\t*\t0\t0\tACGT\tIIII\n";
+        }
+    }
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+    EXPECT_TRUE(compressor.idAnalysis.unavailable);
 
     const int64_t compressedLen = pOutBlock->getDataLen();
     const int64_t metaLen = pOutBlock->getMetaLen();

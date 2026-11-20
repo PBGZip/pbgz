@@ -52,6 +52,10 @@ public:
     /* Register an output file for cleanup on abnormal exit. */
     void addOutputFile(const std::string& fileName);
 
+    /* Input file of the current run, for diagnostics (set before the reader threads start). */
+    void setCurrentInputFile(const std::string& fileName) { currentInputFile = fileName; }
+    const std::string& getCurrentInputFile() const { return currentInputFile; }
+
     static PbgzManager& getInstance();
 
     std::string getVersion();
@@ -102,6 +106,7 @@ private:
     void updateDataInfo();
 
     std::vector<std::pair<std::string, bool>> outfiles;
+    std::string currentInputFile;
 
     /* Total decompressed input size; updated by multiple threads, so atomic. */
     std::atomic<uint64_t> totalReadLen;

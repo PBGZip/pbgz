@@ -693,16 +693,21 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
 
     /* fcv2 tiers are built only when fcv2 is in play.  Target files are
        predicted from their QUAL features; every other file keeps the shipped
-       presets so its archive stays byte-identical. */
+       presets.  The features are needed for every file anyway: the counter
+       mode is now chosen by rule rather than by an extra trial. */
+    QualFeatures fcv2Features;
+    bool haveFcv2Features = false;
     std::vector<Fcv2Cfg> cfgs;
     if (tryFcv2) {
+        fcv2Features = computeQualFeatures(records, freqByByte);
+        haveFcv2Features = true;
         if (targetScenario) {
             /* Feature candidates plus the shipped presets.  The presets are the
                anchor that makes the choice no worse than the previous behaviour
                even when the ~1 MB probe mis-ranks the bucket values; the trial
                picks the smallest of all six, and the extra tasks run in
                parallel with the existing round. */
-            cfgs = featureFcv2Cfgs(computeQualFeatures(records, freqByByte));
+            cfgs = featureFcv2Cfgs(fcv2Features);
             for (const Fcv2Cfg& preset : shippedFcv2Cfgs(compressLevel)) {
                 bool dup = false;
                 for (const Fcv2Cfg& c : cfgs) {
@@ -900,39 +905,19 @@ FieldCodecSelection QualSelector::select(const std::vector<QualSampleRecord>& re
         }
     }
 
-    /* One extra fcv2 trial with the faster counter-adaptation schedule, on the
-       tier that won the ladder.  The schedule's benefit is a cold-start effect:
-       it is strong on the ~1 MB probe but shrinks with the production block and
-       can invert (measured on 280 bp data: probe -0.6%, 28 MB block +0.05%).
-       Adopt it only when all of these hold:
-         - the file is the target scenario (all sampled reads unmapped, short
-           reads), so a non-target archive can never change,
-         - the production block is close to the probe size (<= 16 MB QUAL),
-         - the probe gain is at least 1%, so a cold-start-only win is rejected
-           (the benchmark's other unmapped files are 50-280 bp; without this
-           guard e115/e170 regress at their real block sizes).
-       Otherwise the tier is kept exactly as before, and the stream stays v3. */
-    if (tryFcv2 && finalSet && final.fcv2Ok && targetScenario) {
-        const uint64_t readsPerBlock = (compressLevel >= 8) ? 100000ull
-                                       : (compressLevel >= 6 ? 25000ull : 10000ull);
-        const uint64_t blockQualBytes = readsPerBlock * meanLen;
-        if (blockQualBytes <= (16ull << 20)) {
-            Fcv2Cfg fastCfg = final.fcv2Cfg;
-            fastCfg.counterMode = 1;
-            const size_t fastCount = recordsForBudget(records, settleProbe);
-            uint32_t fastLen = 0;
-            uint32_t fastUs = 0;
-            if (trialFcv2(records, fastCount, freqByByte, fastCfg, priorTree, fastLen, fastUs) &&
-                (uint64_t)fastLen * 100ull < (uint64_t)final.fcv2Len * 99ull) {
-                final.fcv2Len = fastLen;
-                final.fcv2Us = fastUs;
-                final.fcv2Cfg = fastCfg;
-                if (fastLen < final.bestLen) {
-                    final.bestLen = fastLen;
-                    final.bestCoder = CoderType::FCV2;
-                }
-            }
-        }
+    /* counterMode is a trained parameter, chosen here by rule instead of by an
+       extra trial (the trial budget stays at the shipped count, and is in fact
+       one fcv2 encode smaller than before).  The rule comes from the retrain on
+       all 21 short-read files: the faster steady-state schedule wins exactly on
+       the high-alphabet, low-cycle-variation group (sparse contexts that drift)
+       and loses on peaked/low-alphabet data:
+           alphabet >= 25 && cycStd < 2.0  -> mode 1
+       Full-file A/B: con_sorted -0.69%, OG32 chrY -0.54%, e19 -0.79% QUAL;
+       e115/e149/e170/e143/e103 stay at mode 0.  The mode is part of the stream
+       header (v4) and of the model snapshot (v10), so the decoder follows. */
+    if (tryFcv2 && finalSet && final.fcv2Ok && haveFcv2Features) {
+        final.fcv2Cfg.counterMode =
+            (fcv2Features.alphabet >= 25 && fcv2Features.cycStd < 2.0) ? 1 : 0;
     }
 
     sel.decidedLen = finalSet ? settleProbe : sampleLen;

@@ -39,7 +39,7 @@ inline constexpr uint32_t kMaxHexAlphabet = 32;
 inline constexpr uint32_t kMaxHexLen = 64;
 
 /* What the ID analysis found in a block's QNAME column: separators, per-line positions and
-   segment lengths. posLength == UINT32_MAX means the split is unavailable. */
+   segment lengths. unavailable means a later line broke the separator shape. */
 struct IdSplitAnalysis {
     /* The separators, in the order the first line carries them. */
     std::vector<uint8_t> symbols;
@@ -47,8 +47,11 @@ struct IdSplitAnalysis {
     std::vector<std::vector<int32_t>> positions;
     std::vector<uint32_t> minLen;   /* shortest segment seen, per separator */
     std::vector<uint32_t> maxLen;   /* longest segment seen, per separator */
-    /* Segments counted so far; UINT32_MAX once the split is unavailable. */
+    /* Segments counted so far (statistics). */
     uint32_t posLength = 0;
+    /* A later line did not carry every separator the first line did: the split layout cannot
+       address it, and callers must fall back to the whole-QNAME column. */
+    bool unavailable = false;
     /* Scratch: positions found in the line being analysed, cleared per call. */
     std::vector<int32_t> lineScratch;
 };

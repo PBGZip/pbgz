@@ -1397,7 +1397,8 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
         fieldTabs.push_back(tabs);
     }
 
-    if (!sawFirstRecord || analysis.symbols.empty() || analysis.posLength == UINT32_MAX) {
+    if (!sawFirstRecord || analysis.symbols.empty() || analysis.unavailable ||
+        analysis.posLength == UINT32_MAX) {
         /* Nothing to choose (no record, or the split is unavailable): the column is
            written whole. */
         return false;

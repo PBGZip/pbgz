@@ -220,6 +220,63 @@ Actuator* CompressEngine::actuatorPreProc(Actuator* actuator, RoughIOBlock* inBl
     return actuator;
 }
 
+int32_t CompressEngine::actuatorProc(Actuator* actuator, RoughIOBlock* inBlockPtr,
+                                     RoughIOBlock* outBlockPtr) {
+    int32_t ret = PbgzEngine::actuatorProc(actuator, inBlockPtr, outBlockPtr);
+    if (ret != 0 || actuator == nullptr || inBlockPtr == nullptr || outBlockPtr == nullptr) {
+        return ret;
+    }
+    SamCompressActuator* samActuator = dynamic_cast<SamCompressActuator*>(actuator);
+    if (samActuator == nullptr || samActuator->getCodecActuator() == nullptr ||
+        !samActuator->getCodecActuator()->usedMissingSeq()) {
+        return ret;
+    }
+
+    /* A block with SEQ '*' records may be coded with the SAM column layout or with the
+       generic binary coder; on long-read files (huge CIGAR strings) the latter often wins
+       by a wide margin. Encode both and keep the smaller, so accepting SEQ '*' can only
+       improve a block, never grow it. */
+    std::unique_ptr<RoughIOBlock> scratch = std::make_unique<RoughIOBlock>(getBlockSize());
+    if (scratch == nullptr) {
+        return ret;
+    }
+    /* The binary actuator tags its input block BINARY; put the original type back when the
+       column layout wins, since the worker copies the input type onto the output block. */
+    const BlockType originalType = inBlockPtr->getBlockType();
+    BinaryCompressActuator binary(inBlockPtr, scratch.get(), this);
+    if (binary.initial() != 0 || binary.process() != 0) {
+        inBlockPtr->setBlockType(originalType);
+        return ret;
+    }
+    const size_t samLen = (size_t)outBlockPtr->getDataLen() + outBlockPtr->getMetaLen();
+    const size_t binLen = (size_t)scratch->getDataLen() + scratch->getMetaLen();
+    if (binLen < samLen) {
+        outBlockPtr->reset();
+        if (outBlockPtr->ensureCapacity(binLen + 1) != 0) {
+            inBlockPtr->setBlockType(originalType);
+            return ret;
+        }
+        memcpy(outBlockPtr->getBuffer(), scratch->getBuffer(), binLen);
+        outBlockPtr->setDataLen(scratch->getDataLen());
+        outBlockPtr->setMetaLen(scratch->getMetaLen());
+        outBlockPtr->setBlockId(inBlockPtr->getBlockId());
+        /* The worker copies the input type onto the output block; BINARY tells the
+           decompressor to use the binary actuator rather than parse SAM meta. */
+        inBlockPtr->setBlockType(BINARY);
+        if (parameter.verbose) {
+            fprintf(stderr, "[block %ld] SEQ '*' block: SAM %zu bytes, binary %zu bytes -> binary\n",
+                    (long)inBlockPtr->getBlockId(), samLen, binLen);
+        }
+    } else {
+        inBlockPtr->setBlockType(originalType);
+        if (parameter.verbose) {
+            fprintf(stderr, "[block %ld] SEQ '*' block: SAM %zu bytes, binary %zu bytes -> SAM\n",
+                    (long)inBlockPtr->getBlockId(), samLen, binLen);
+        }
+    }
+    return ret;
+}
+
 /*
  * Codec trial / QUAL prior decision, run once per file by the reader thread before
  * block 0 is dispatched. Prior training is deferred to finalizePretrain.

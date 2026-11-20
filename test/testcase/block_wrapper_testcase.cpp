@@ -728,3 +728,90 @@ TEST(BamWriterTest, BgzfContainer) {
     EXPECT_EQ((uint8_t)out[13], 0x43);
     std::remove("ut_bw.bam");
 }
+
+/* ---- SamToBamConverter (the -b conversion stage) ---- */
+
+/*
+ * A block that fell back to the generic binary coder still carries SAM text. Once the header
+ * block has been converted, the converter must keep converting such blocks itself: BamWriter
+ * would otherwise parse them against an empty @SQ table and drop RNAME/POS (all records become
+ * unmapped). The record's refID/POS in the produced BAM bytes is the observable.
+ */
+TEST(SamToBamConverterTest, BinaryDataBlockAfterHeaderKeepsCoordinates) {
+    SamToBamConverter converter(1);
+
+    RoughIOBlock header(kBlockSize);
+    fillSamBlock(&header, kSamHeader);
+    ASSERT_EQ(converter.convert(&header), 0);
+    ASSERT_TRUE(header.isBamPrebuilt());
+    ASSERT_GE(header.getDataLen(), 4);
+    EXPECT_EQ(std::memcmp(header.getBuffer(), "BAM\1", 4), 0);
+
+    RoughIOBlock data(kBlockSize);
+    fillSamBlock(&data, makeSamRead(0, 1) + makeSamRead(1, 21));
+    /* The archive stored this block with the generic binary coder, so its type is BINARY. */
+    data.setBlockType(BINARY);
+    ASSERT_EQ(converter.convert(&data), 0);
+    ASSERT_TRUE(data.isBamPrebuilt());
+
+    const uint8_t* p = data.getBuffer();
+    ASSERT_GE(data.getDataLen(), 12);
+    int32_t refId = 0;
+    int32_t pos = -1;
+    std::memcpy(&refId, p + 4, sizeof(refId));
+    std::memcpy(&pos, p + 8, sizeof(pos));
+    EXPECT_EQ(refId, 0);    /* chr1 */
+    EXPECT_EQ(pos, 0);      /* SAM POS 1 -> 0-based 0 */
+}
+
+/* A non-SAM first block (-b on FASTQ/binary) must still pass through untouched. */
+TEST(SamToBamConverterTest, BinaryFirstBlockStillPassesThrough) {
+    SamToBamConverter converter(1);
+    RoughIOBlock data(kBlockSize);
+    const std::string binary(256, '\xAA');
+    ASSERT_GE(data.getBufferSize(), binary.size());
+    std::memcpy(data.getBuffer(), binary.data(), binary.size());
+    data.setDataLen((int64_t)binary.size());
+    data.setBlockType(BINARY);
+
+    ASSERT_EQ(converter.convert(&data), 0);
+    EXPECT_FALSE(data.isBamPrebuilt());
+    EXPECT_EQ(data.getDataLen(), (int64_t)binary.size());
+    EXPECT_EQ(0, std::memcmp(data.getBuffer(), binary.data(), binary.size()));
+}
+
+namespace {
+
+/* A reader that hands out some bytes and then reports an I/O/decompression error, the
+   shape FastGzFileReader returns for a corrupt .fastq.gz (size_t)-1). */
+class ErrorAfterBytesReader : public IOReader {
+public:
+    explicit ErrorAfterBytesReader(size_t bytes) : remaining(bytes) {}
+    int32_t openIO() override { return 0; }
+    void closeIO() override {}
+    size_t readIO(void* pBuffer, size_t readSize) override {
+        if (remaining == 0) {
+            return (size_t)-1;
+        }
+        const size_t n = (remaining < readSize) ? remaining : readSize;
+        memset(pBuffer, 'A', n);
+        remaining -= n;
+        return n;
+    }
+    size_t readLine(std::string&) override { return 0; }
+private:
+    size_t remaining;
+};
+
+}  // namespace
+
+/* A read error below the block layer must surface as -1 from readBlock; treating it as a
+   short read would let a corrupt gzip input be compressed as if it ended normally. */
+TEST(BlockReaderReadErrorTest, ReadErrorFromIoReaderFailsBlock) {
+    ErrorAfterBytesReader io(128);
+    BinaryBlockReader* reader = new BinaryBlockReader(&io);
+    RoughIOBlock block(1 << 20);
+
+    EXPECT_EQ(reader->readBlock(&block, TYPE_UNKNOW), -1);
+    delete reader;
+}

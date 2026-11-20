@@ -953,6 +953,11 @@ size_t FastGzFileReader::readLine(std::string& line, ChecksumStream* sink) {
         // If buffer data has been processed, read new data
         if (bufferPos >= bytesRead) {
             bytesRead = readIO(lineBuffer, bufferSize);
+            if (bytesRead == (size_t)-1) {
+                /* Corrupt gzip stream: surface a short read instead of walking a huge length. */
+                eofFlag = true;
+                return totalRead;
+            }
             if (sink != nullptr && bytesRead > 0) {
                 sink->update(reinterpret_cast<const uint8_t*>(lineBuffer), bytesRead);
             }
