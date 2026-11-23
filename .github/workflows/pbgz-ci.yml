@@ -35,6 +35,10 @@ on:
         description: "跑完保留编译机（排查用，会产生计费，记得手动删）"
         type: boolean
         default: false
+      verify:
+        description: "解压内容校验（samtools checksum / pigz 比对，失败样本标 FAIL）"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -70,7 +74,7 @@ jobs:
               *..*|/*|*/) echo "::error::ref 不能包含 .. 或首尾斜杠：$REF"; exit 1 ;;
             esac
           fi
-          echo "输入校验通过：level=${{ github.event.inputs.level }} ref=${REF:-(默认分支)} keep_compile_node=${{ github.event.inputs.keep_compile_node }}"
+          echo "输入校验通过：level=${{ github.event.inputs.level }} ref=${REF:-(默认分支)} keep_compile_node=${{ github.event.inputs.keep_compile_node }} verify=${{ github.event.inputs.verify }}"
 
       - name: 安装阿里云 CLI
         run: |
@@ -103,12 +107,14 @@ jobs:
           LEVEL: ${{ github.event.inputs.level }}
           REF: ${{ github.event.inputs.ref }}
           KCN: ${{ github.event.inputs.keep_compile_node }}
+          VERIFY: ${{ github.event.inputs.verify }}
           MID: ${{ secrets.ALIYUN_MANAGER_ECS_INSTANCE_ID }}
         run: |
           set -uo pipefail
           keep=0; [ "$KCN" = "true" ] && keep=1
-          echo "level=$LEVEL ref=$REF keep_compile_node=$keep"
-          cmd="KEEP_COMPILE_NODE=${keep} bash /root/pbgz-ci/call_start_pbgz_ci.sh ${LEVEL} '${REF}'"
+          verify=1; [ "$VERIFY" = "false" ] && verify=0
+          echo "level=$LEVEL ref=$REF keep_compile_node=$keep verify=$verify"
+          cmd="KEEP_COMPILE_NODE=${keep} bash /root/pbgz-ci/call_start_pbgz_ci.sh ${LEVEL} '${REF}' ${verify}"
           invoke_id=$(aliyun ecs RunCommand \
             --RegionId "$ALIYUN_REGION" \
             --Name "trigger-pbgz-ci" \
