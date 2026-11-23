@@ -183,6 +183,13 @@ public:
     IOWriter* ioWriter;
     std::list<RoughIOBlock*> outputSortedCache;
     const PbgzParameter& getParameter() const { return parameter; }
+
+    /* True once compression actually used the supplied reference: reference-coded SEQ,
+       reference-derived MD/NM, or the FASTQ read-mapping path. Decompression can then
+       skip the external-reference requirement when the archive does not pack one. */
+    void markReferenceUsed() { referenceUsed.store(true, std::memory_order_relaxed); }
+    bool isReferenceUsed() const { return referenceUsed.load(std::memory_order_relaxed); }
+
     virtual Reference* getReference() { return nullptr; }
 
     /* Block size upper bound from the file header; 0 if not yet read. */
@@ -218,6 +225,9 @@ public:
 
     /* Set on block-level failure; checked during engine cleanup. */
     std::atomic<bool> taskFailed{false};
+
+    /* Set by the encoders when the supplied reference is actually used. */
+    std::atomic<bool> referenceUsed{false};
 
     /* Whether the file-level decision has been executed. */
     bool fileDecisionInvoked = false;

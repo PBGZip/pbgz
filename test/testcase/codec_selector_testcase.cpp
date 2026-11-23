@@ -677,3 +677,52 @@ TEST_F(CodecSelectorTest, QnameLayoutHandlesVariableSeparatorShapes)
     ASSERT_EQ(CodecSelector::analyze(&block, 0, info), 0);
     info.markDone();
 }
+
+/*
+ * The first-block QNAME trial is only a seed. The reader-thread confirmation adds
+ * later blocks and flips the layout when the cumulative evidence is clear; this is
+ * what recovers the default-level QNAME regression on MHC-sized files.
+ */
+TEST_F(CodecSelectorTest, ConfirmQnameLayoutSwitchesAfterLaterBlocks)
+{
+    RoughIOBlock block(1 << 20);
+    buildQnameBlock(&block, 1000, [](uint32_t i) {
+        return "SRR001." + std::to_string(i);
+    });
+
+    block.setBlockId(1);
+    PreprocessInfo info;
+    info.qnameConfirmed = false;
+    info.qnameUseAffix.store(0);
+    info.qnameInitialBlockId = UINT32_MAX;
+
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_TRUE(CodecSelector::confirmQnameLayout(&block, info));
+    }
+    EXPECT_TRUE(info.qnameConfirmed);
+    EXPECT_GT(info.qnameConfirmBlocks, 0u);
+    EXPECT_EQ(info.qnameUseAffix.load(), 1);
+}
+
+/* Concatenated/random names prefer coder_qname; confirmation must not flip them
+   merely because it saw more blocks. */
+TEST_F(CodecSelectorTest, ConfirmQnameLayoutKeepsQnameForConcatenatedNames)
+{
+    RoughIOBlock block(1 << 20);
+    std::mt19937 rng(4321);
+    buildQnameBlock(&block, 1000, [&rng](uint32_t i) {
+        return std::string(i % 2 ? "B" : "A") + ".R" + std::to_string(rng() % 1000000000000ull);
+    });
+    block.setBlockId(1);
+
+    PreprocessInfo info;
+    info.qnameConfirmed = false;
+    info.qnameUseAffix.store(0);
+    info.qnameInitialBlockId = UINT32_MAX;
+
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_TRUE(CodecSelector::confirmQnameLayout(&block, info));
+    }
+    EXPECT_TRUE(info.qnameConfirmed);
+    EXPECT_EQ(info.qnameUseAffix.load(), 0);
+}

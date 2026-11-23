@@ -87,6 +87,12 @@ public:
                                                    const std::vector<LineSample>& chrLines,
                                                    std::vector<uint64_t>* varintCounts = nullptr);
 
+    /* Reader-thread second-stage QNAME layout confirmation: accumulates a few lines
+       from later blocks and flips info.qnameUseAffix only when the alternative is
+       clearly smaller. Safe to call on every SAM-text block; it stops after the first
+       decisive sample. */
+    static bool confirmQnameLayout(RoughIOBlock* block, PreprocessInfo& info);
+
     /* Cross-block QUAL accumulator for prior training, held by CompressEngine on the
        read thread; collection stops at QUAL_PRIOR_TRAIN_MAX. */
     struct QualPriorAccum {

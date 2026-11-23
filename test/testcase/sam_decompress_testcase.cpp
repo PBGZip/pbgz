@@ -27,6 +27,8 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include <random>
+#include <iterator>
 
 #define private public
 #include "coder/coder.h"
@@ -1142,4 +1144,228 @@ TEST_F(SamDecompressTest, TestVariableShapeQnamesRoundtrip) {
     EXPECT_EQ(got.size(), expected.size());
     EXPECT_EQ(got, expected);
     std::remove(file.c_str());
+}
+
+namespace {
+
+/* The main SEQ payload substream is named "m"; its coder is the one this test pins. */
+std::string seqPayloadCoderMagic(RoughIOBlock* block)
+{
+    Json::Value meta;
+    coder_json json;
+    json.decoder(block->getMetaBuffer(), (int32_t)block->getMetaLen(), meta);
+    const Json::Value& streams = meta["sam"]["streams"][9]["streams"];
+    std::string fallback;
+    uint64_t best = 0;
+    for (Json::ArrayIndex i = 0; i < streams.size(); ++i) {
+        const Json::Value& s = streams[i];
+        if (!s.isMember("coder") || !s["coder"].isMember("magic")) {
+            continue;
+        }
+        const std::string magic = s["coder"]["magic"].asString();
+        const std::string name = s.isMember("sname") ? s["sname"].asString() : std::string();
+        if (name == "m") {
+            return magic;
+        }
+        const uint64_t dst = s.isMember("dstlen") ? s["dstlen"].asUInt64() : 0;
+        if (dst >= best) {
+            best = dst;
+            fallback = magic;
+        }
+    }
+    return fallback;
+}
+
+void writeAcgtSam(const std::string& file, uint32_t reads, uint32_t len, bool same, uint32_t seed)
+{
+    std::ofstream out(file);
+    ASSERT_TRUE(out.is_open());
+    out << "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000000\n";
+    std::mt19937 rng(seed);
+    auto nextBase = [&rng]() { return "ACGT"[rng() & 3u]; };
+    std::string first;
+    first.reserve(len);
+    for (uint32_t i = 0; i < len; ++i) {
+        first.push_back(nextBase());
+    }
+    const std::string qual(len, 'I');
+    for (uint32_t i = 0; i < reads; ++i) {
+        std::string seq;
+        if (same) {
+            seq = first;
+        } else {
+            seq.reserve(len);
+            for (uint32_t j = 0; j < len; ++j) {
+                seq.push_back(nextBase());
+            }
+        }
+        out << 'r' << i << "\t4\t*\t0\t0\t*\t*\t0\t0\t" << seq << '\t' << qual << '\n';
+    }
+}
+
+std::string readTextFile(const std::string& file)
+{
+    std::ifstream in(file, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+}  // namespace
+
+/*
+ * Long all-ACGT reads at -l8 must not take the packed order-1 fast path. It replaced
+ * the selected coder with coder_arith_k, which cannot see the cross-read redundancy
+ * of long-read data (SRR12223958 was 1.45MB instead of 127KB). The unit path has no
+ * engine pre-selection, so either coder_fc or the coder_bwt_cm fallback is valid.
+ */
+TEST_F(SamDecompressTest, TestLongReadAllAcgtSeqAvoidsArithKAtLevel8)
+{
+    const std::string file = "test_long_read_fc.sam";
+    writeAcgtSam(file, 200, 1000, true, 11);
+    const std::string expected = readTextFile(file);
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    para.compressLevel = 8;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+    const std::string coder = seqPayloadCoderMagic(pOutBlock);
+    EXPECT_NE(coder, "coder_arith_k");
+    EXPECT_TRUE(coder == "coder_fc" || coder == "coder_bwt_cm") << "coder=" << coder;
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+    EXPECT_EQ(std::string((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen()),
+              expected);
+    std::remove(file.c_str());
+}
+
+/*
+ * Short all-ACGT reads keep the packed order-1 fast path at -l8: this is the scenario
+ * coder_arith_k was introduced for, and the long-read fix must not disturb it.
+ */
+TEST_F(SamDecompressTest, TestShortReadAllAcgtSeqKeepsArithKAtLevel8)
+{
+    const std::string file = "test_short_read_arithk.sam";
+    writeAcgtSam(file, 4000, 100, true, 22);
+    const std::string expected = readTextFile(file);
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    para.compressLevel = 8;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+    EXPECT_EQ(seqPayloadCoderMagic(pOutBlock), "coder_arith_k");
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+    EXPECT_EQ(std::string((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen()),
+              expected);
+    std::remove(file.c_str());
+}
+
+/*
+ * Long random all-ACGT reads have no cross-read redundancy; the 4 MiB probe says
+ * order-1 is within 3% of coder_fc, so arith_k stays for speed.
+ */
+TEST_F(SamDecompressTest, TestLongRandomAcgtSeqKeepsArithKAtLevel8)
+{
+    const std::string file = "test_long_random_arithk.sam";
+    writeAcgtSam(file, 3000, 1000, false, 33);
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    para.compressLevel = 8;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+    EXPECT_EQ(seqPayloadCoderMagic(pOutBlock), "coder_arith_k");
+    std::remove(file.c_str());
+}
+
+/*
+ * The archive records whether the supplied reference was actually used. A mapped read
+ * with a matching @SQ marks it; an unmapped read does not. Decompression uses the
+ * same flag to decide whether -r is mandatory for a non-packed reference.
+ */
+TEST_F(SamDecompressTest, TestReferenceUsedFlagTracksActualUse) {
+    /* A 1000 bp chr1 whose @SQ length matches the reference, so the actuator really
+       takes the reference path for the mapped record. */
+    const std::string refFile = "test_ref_used.fa";
+    {
+        std::ofstream out(refFile);
+        ASSERT_TRUE(out.is_open());
+        out << ">chr1\n";
+        for (int i = 0; i < 250; ++i) out << "ACGT";
+        out << "\n";
+    }
+    Reference ref(refFile, 1);
+    ref.makeIndex();
+
+    const std::string mapped = "test_ref_used_mapped.sam";
+    {
+        std::ofstream out(mapped);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n";
+        out << "r1\t0\tchr1\t1\t60\t100M\t*\t0\t0\t"
+            << std::string("ACGTACGTACACGTACGTACACGTACGTACACGTACGTACACGTACGTAC"
+                           "ACGTACGTACACGTACGTACACGTACGTACACGTACGTACACGTACGTAC")
+            << "\t" << std::string(100, 'I') << "\n";
+    }
+    {
+        loadSamData(mapped);
+        PbgzParameter para;
+        DecompressEngine engine(para);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+        ASSERT_EQ(compressor.preAnalysis(), 0);
+        ASSERT_EQ(compressor.compress(), 0);
+        EXPECT_TRUE(engine.isReferenceUsed());
+    }
+
+    const std::string unmapped = "test_ref_unused_unmapped.sam";
+    {
+        std::ofstream out(unmapped);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n";
+        out << "r1\t4\t*\t0\t0\t*\t*\t0\t0\t"
+            << std::string("ACGTACGTACACGTACGTACACGTACGTACACGTACGTACACGTACGTAC"
+                           "ACGTACGTACACGTACGTACACGTACGTACACGTACGTACACGTACGTAC")
+            << "\t" << std::string(100, 'I') << "\n";
+    }
+    {
+        loadSamData(unmapped);
+        PbgzParameter para;
+        DecompressEngine engine(para);
+        SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+        ASSERT_EQ(compressor.preAnalysis(), 0);
+        ASSERT_EQ(compressor.compress(), 0);
+        EXPECT_FALSE(engine.isReferenceUsed());
+    }
+
+    std::remove(mapped.c_str());
+    std::remove(unmapped.c_str());
+    std::remove(refFile.c_str());
+    std::remove((refFile + ".fai").c_str());
+    std::remove((refFile + ".ni").c_str());
 }

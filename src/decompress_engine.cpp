@@ -221,6 +221,16 @@ bool DecompressEngine::initRefGene(PbgzBlockReader* blockReader) {
 
     LOG_DEBUG("Reference blocks = %d", metaRefe["blocks"].asInt64());
 
+    /* New archives record whether the encoder actually used the reference. An external
+       reference (-n / --refunpack) is then optional when it was never needed. Older
+       archives have no flag and keep the historical mandatory-reference behaviour. */
+    const bool refeRequired = !metaRefe.isMember("required") ||
+                              metaRefe["required"].asBool();
+    if (metaRefe["blocks"].asInt64() == 0 && !refeRequired) {
+        LOG_INFO("Reference was not used by the encoder; no external reference needed");
+        return true;
+    }
+
     if (metaRefe["blocks"].asInt64() > 0) {
         /*  There is pack reference in compression package, directly unpack */
         if(unpackReference(blockReader, metaRefe)) {

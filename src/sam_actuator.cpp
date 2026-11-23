@@ -2041,6 +2041,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
     std::vector<std::vector<uint8_t>> derivedFlags(nTag);
     std::vector<std::string> derivedExcs(nTag);
     std::vector<bool> derivedReady(nTag, false);
+    bool usedDerivedEncoding = false;
     deriveOptionTags(inBlockPtr->getBuffer(), inBlockPtr->getNpos(), (uint32_t)headEndLine,
                      contentPos, pRefeGene, opt, mdId, nmId, derivedFlags, derivedExcs,
                      derivedReady);
@@ -2219,6 +2220,7 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
         s["coder"] = bestCoder;
         if (std::string(bestEnc) == "derived") {
             s["n"] = (Json::Value::UInt)vals.size();   /* number of flag bytes at the blob's head */
+            usedDerivedEncoding = true;
         }
         streams.append(s);
         totalDst += bestDst;
@@ -2236,6 +2238,10 @@ int32_t SamCodecActuator::compressOptionField(uint32_t& fieldSrcLen, Json::Value
 
     LOG_INFO("SAM OPTION tag-split compression completed: %u bytes -> %u bytes, %u tags, ratio = %.2f%%",
         fieldSrcLen, totalDst, nTag, (double)(totalDst * 100) / (double)(fieldSrcLen ? fieldSrcLen : 1));
+    if (usedDerivedEncoding && pbgzEngine != nullptr) {
+        /* The decoder regenerates MD/NM from the reference; keep the external reference required. */
+        pbgzEngine->markReferenceUsed();
+    }
     return (int32_t)totalDst;
 }
 
@@ -2918,42 +2924,46 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
         const bool shortReads = (maxBaseLength > 0 && maxBaseLength <= 512);
         const bool fastCandidate = shortReads && seqPayloadAllAcgt && !seqAnyMappedRecord &&
                                    !seqAnyUsedReference && seqSelfRef == nullptr;
-        if (!fastMode && !rle.useRle && engineCompressLevel() < 9) {
-            bool useFast = false;
-            if (fastCandidate) {
-                PreprocessInfo* preInfo = preprocessInfoMut();
-                int32_t verdict = (preInfo != nullptr)
-                                      ? preInfo->seqFastEligible.load(std::memory_order_relaxed)
-                                      : -1;
-                if (verdict < 0) {
-                    if (preInfo != nullptr) {
-                        /* One thread probes (-2 = in progress).  The others wait for it rather
-                           than coding their block the legacy way: the probe is a 4 MiB encode,
-                           and letting block placement depend on thread timing would make the
-                           archive bytes vary from run to run. */
-                        int32_t expected = -1;
-                        if (preInfo->seqFastEligible.compare_exchange_strong(
-                                expected, -2, std::memory_order_relaxed)) {
-                            verdict = trialSeqFastOrder1(payBuf, payLen);
-                            preInfo->seqFastEligible.store(verdict, std::memory_order_relaxed);
-                        } else {
-                            const auto deadline =
-                                std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                            while ((verdict = preInfo->seqFastEligible.load(
-                                        std::memory_order_relaxed)) == -2 &&
-                                   std::chrono::steady_clock::now() < deadline) {
-                                std::this_thread::yield();
-                            }
-                            if (verdict < 0) {
-                                verdict = 0;   /* probe never finished: keep the legacy path */
-                            }
-                        }
-                    } else {
-                        verdict = trialSeqFastOrder1(payBuf, payLen);
+        /* One 4 MiB probe per file decides whether order-1 is close enough to coder_fc.
+           The probe is shared by the short-read fast path and the packed all-ACGT path,
+           and is cached so every worker takes the same decision. */
+        auto seqOrder1Verdict = [&]() -> int32_t {
+            PreprocessInfo* preInfo = preprocessInfoMut();
+            int32_t verdict = (preInfo != nullptr)
+                                  ? preInfo->seqFastEligible.load(std::memory_order_relaxed)
+                                  : -1;
+            if (verdict >= 0) {
+                return verdict;
+            }
+            if (preInfo != nullptr) {
+                /* One thread probes (-2 = in progress).  The others wait for it rather
+                   than coding their block the legacy way: the probe is a 4 MiB encode,
+                   and letting block placement depend on thread timing would make the
+                   archive bytes vary from run to run. */
+                int32_t expected = -1;
+                if (preInfo->seqFastEligible.compare_exchange_strong(
+                        expected, -2, std::memory_order_relaxed)) {
+                    verdict = trialSeqFastOrder1(payBuf, payLen);
+                    preInfo->seqFastEligible.store(verdict, std::memory_order_relaxed);
+                } else {
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                    while ((verdict = preInfo->seqFastEligible.load(
+                                std::memory_order_relaxed)) == -2 &&
+                           std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::yield();
+                    }
+                    if (verdict < 0) {
+                        verdict = 0;   /* probe never finished: keep the legacy path */
                     }
                 }
-                useFast = (verdict == 1);
+            } else {
+                verdict = trialSeqFastOrder1(payBuf, payLen);
             }
+            return verdict;
+        };
+        if (!fastMode && !rle.useRle && engineCompressLevel() < 9) {
+            const bool useFast = fastCandidate && (seqOrder1Verdict() == 1);
             if (useFast) {
                 /* Sanitize the raw-base payload in place; the exception streams carry the
                    original characters.  (RLE is off on this path, so payBuf == matchBuffer.) */
@@ -2968,7 +2978,12 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
                 matchIo->meta["aknopack"] = 1;
                 seqUsedFastCoder = true;
             } else if (baseNCount == 0) {
-                payType = CoderType::ARITH_K;
+                /* Short reads keep the packed order-1 path. Long reads (PacBio/ONT) often
+                   carry heavy cross-read redundancy that order-1 cannot see, so only keep
+                   order-1 there when a size probe shows it is within 3% of coder_fc. */
+                if (shortReads || seqOrder1Verdict() == 1) {
+                    payType = CoderType::ARITH_K;
+                }
             }
         }
         /* A pinned or sampled verdict can still name a segment too short for coder_fc (FC_MIN_LEN bytes or less). */
@@ -3354,6 +3369,9 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         }
         /* A consensus is not a file reference and carries no match statistics to update. */
         if (payload.usedReference && seqSelfRef == nullptr && fileRef != nullptr) {
+            if (pbgzEngine != nullptr) {
+                pbgzEngine->markReferenceUsed();
+            }
             fileRef->updateMatchedGene((uint64_t)payload.refPos,
                 (crlIt != cigarReadLen.end()) ? crlIt->second : seqLength);
         }

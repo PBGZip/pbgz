@@ -153,11 +153,14 @@ BlockReader* CompressEngine::createBlockReader() {
     /* Archive mode: stream raw BAM records after the leading text blocks so BAM->SAM
        rendering and MD5 run on the render thread pool instead of the reader. */
     if (!bamStruct) {
+        /* Keep enough leading SAM-text blocks for the second-stage QNAME layout trial even
+           with one worker (-t1).  With fewer text blocks the reader could not gather any
+           later QNAME sample and the first-block verdict would stand forever. */
+        const int64_t textLimit = std::max<int64_t>(
+            (int64_t)((parameter.threadNum > 0) ? parameter.threadNum : 1), 5);
         if (BamGzBlockReader* bam = dynamic_cast<BamGzBlockReader*>(blockReader)) {
-            const int64_t textLimit = (parameter.threadNum > 0) ? (int64_t)parameter.threadNum : 1;
             bam->setRawStreamMode(true, textLimit);
         } else if (BamBlockReader* bam = dynamic_cast<BamBlockReader*>(blockReader)) {
-            const int64_t textLimit = (parameter.threadNum > 0) ? (int64_t)parameter.threadNum : 1;
             bam->setRawStreamMode(true, textLimit);
         }
     }
@@ -312,6 +315,14 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
                 }
             }
         }
+    }
+    if (BlockUtil::isSAMBlock(type) && !blockPtr->isRawBam() &&
+        blockPtr->getBamColumns() == nullptr) {
+        /* Reader-thread QNAME layout confirmation on later SAM-text blocks. The
+           initial verdict came from the first data block; this second stage can
+           flip it before the block is queued, deterministically in read order.
+           Raw/structured BAM blocks have no SAM QNAME text and are skipped. */
+        CodecSelector::confirmQnameLayout(blockPtr, preprocessInfo);
     }
     if (blockPtr->getBamColumns() != nullptr) {
         /* Structured BAM: hashing is deferred to the compressing worker. */
@@ -882,6 +893,18 @@ int32_t CompressEngine::startEnginePostProc() {
         }
     }
 
+    if (pRefGene != nullptr) {
+        /* Publish whether the encoder actually needed the reference. With --refunpack (-n)
+           no reference blocks are packed, so a false verdict lets decompression skip -r. */
+        std::lock_guard<std::mutex> lock(dynamicFileMetaMutex);
+        Json::Value refeMeta = dynamicFileMeta.getMetaData("refe");
+        if (!refeMeta.isObject()) {
+            refeMeta = baseFileMeta.getMetaData("refe");
+        }
+        refeMeta["required"] = isReferenceUsed();
+        dynamicFileMeta.setMetaData("refe", refeMeta);
+    }
+
     return CodecEngine::engineStartAfterProc();
 }
 
@@ -909,6 +932,12 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
             srcType == SAM || srcType == BAM) {
             baseFileMeta.setMetaData("srcFileType", (Json::Value::UInt)srcType);
         }
+        /* FASTQ uses the reference to build its read-mapping index; SAM/BAM mark the flag
+           from the encoder only when reference-coded SEQ or derived MD/NM is actually used. */
+        if (pRefGene != nullptr &&
+            (srcType == FASTQ_GEN2 || srcType == FASTQ_GEN3)) {
+            markReferenceUsed();
+        }
     }
 
     if (pRefGene == nullptr) {
@@ -933,6 +962,8 @@ void CompressEngine::setDataBlockPosition(uint32_t blockId) {
     }
     refeMeta["ni_name"] = "";
     refeMeta["max_block_len"] = 16 << 20;
+    /* Conservative default; startEnginePostProc publishes the actual verdict. */
+    refeMeta["required"] = true;
     if (isPackRefeInHeader()) {
         refeMeta["blocks"] = calcPackRefeBlockSize();
     } else {

@@ -454,6 +454,9 @@ int32_t BamCodecActuator::encodeSeqColumnRef(Json::Value& streamMeta)
         return encodeRawBwtColumn(SAM_SEQ, cols->seq.data(), cols->seq.size(),
                                   streamMeta, "SEQ");
     }
+    if (pbgzEngine != nullptr) {
+        pbgzEngine->markReferenceUsed();
+    }
 
     std::vector<uint8_t> diff;
     diff.reserve(cols->seq.size());

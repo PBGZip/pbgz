@@ -74,6 +74,12 @@ const uint32_t QUAL_TRIAL_MAX = 32u << 20;   /* 32 MB of QUAL */
 
 /* Lines of the QNAME column encoded with each candidate in the layout trial. */
 const uint32_t QNAME_TRIAL_LINES = 20000;
+/* Second-stage confirmation: a few lines from each of the next blocks, until the
+   cumulative trial reaches the same line target (or block cap). */
+const uint32_t QNAME_CONFIRM_LINES = 4000;
+const uint32_t QNAME_CONFIRM_BLOCKS = 4;
+/* Only switch when the alternative is at least this much smaller (percent). */
+const uint32_t QNAME_SWITCH_MARGIN = 2;
 
 /* coder_bwt_cm internal block sizes per level, mirroring coder_bwt_cm. */
 const uint32_t BWT_LEVEL_SIZE[10] = {
@@ -1345,7 +1351,10 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
     return true;
 }
 
-bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
+/* Collect the QNAME column and its tab positions from a SAM-text block. Returns false
+   when the block has no record QNAME or the split layout cannot address every line. */
+static bool collectQnameColumn(RoughIOBlock* block, IdSplitAnalysis& analysis,
+                               std::vector<LineTabs>& fieldTabs, size_t& headEndLine)
 {
     if (block == nullptr || block->getBuffer() == nullptr) {
         return false;
@@ -1356,17 +1365,13 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
         return false;
     }
 
-    /* Drive the ID analysis and tab collection the same way the block's own
-       pre-analysis does (SamCodecActuator::scanDataLine). */
-    IdSplitAnalysis analysis;
-    std::vector<LineTabs> fieldTabs;
-    size_t headEndLine = 0;
+    headEndLine = 0;
     while (headEndLine < npos.size()) {
         const size_t lineStart = (headEndLine == 0) ? 0 : npos[headEndLine - 1] + 1;
         if (lineStart >= npos[headEndLine] || buffer[lineStart] != '@') {
             break;
         }
-        ++headEndLine;   /* the header is the block's leading lines */
+        ++headEndLine;
     }
 
     bool sawFirstRecord = false;
@@ -1384,9 +1389,8 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
             }
         }
         if (tabs.empty()) {
-            return false;   /* not a record line: the block is not the SAM text this expects */
+            return false;
         }
-        /* The QNAME field runs up to and including its tab. */
         const uint32_t qnameLen = (uint32_t)tabs[0] + 1;
         if (!sawFirstRecord) {
             analyzeQnameFirstLine(buffer + lineStart, qnameLen, analysis);
@@ -1394,13 +1398,24 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
         } else {
             analyzeQnameLine(buffer + lineStart, qnameLen, analysis);
         }
-        fieldTabs.push_back(tabs);
+        fieldTabs.push_back(std::move(tabs));
     }
 
-    if (!sawFirstRecord || analysis.symbols.empty() || analysis.unavailable ||
-        analysis.posLength == UINT32_MAX) {
-        /* Nothing to choose (no record, or the split is unavailable): the column is
-           written whole. */
+    return sawFirstRecord && !analysis.symbols.empty() && !analysis.unavailable &&
+           analysis.posLength != UINT32_MAX;
+}
+
+bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
+{
+    if (block == nullptr || block->getBuffer() == nullptr) {
+        return false;
+    }
+    const uint8_t* buffer = block->getBuffer();
+    const std::vector<size_t>& npos = block->getNpos();
+    IdSplitAnalysis analysis;
+    std::vector<LineTabs> fieldTabs;
+    size_t headEndLine = 0;
+    if (!collectQnameColumn(block, analysis, fieldTabs, headEndLine)) {
         return false;
     }
 
@@ -1451,9 +1466,108 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
     info.fields[SAM_QNAME] = sel;
     info.setQnameUseAffix(useAffix ? 1 : 0);
 
+    /* Seed the reader-thread confirmation. A full 20k-line first sample needs no
+       second stage; the default 10k-read block does. */
+    const uint32_t trialLines =
+        (uint32_t)std::min<size_t>(fieldTabs.size(), QNAME_TRIAL_LINES);
+    info.qnameAffixSize = (lenAffix >= 0) ? lenAffix : 0;
+    info.qnameQnameSize = (lenQname >= 0) ? lenQname : 0;
+    info.qnameTrialBytes = srcAffix;
+    info.qnameTrialLines = trialLines;
+    info.qnameConfirmBlocks = 0;
+    info.qnameInitialBlockId = (uint32_t)block->getBlockId();
+    info.qnameConfirmed = (lenAffix < 0 || lenQname < 0 || trialLines >= QNAME_TRIAL_LINES);
+
     LOG_DEBUG("QNAME trial: affix=%d qname=%d (up to %u of the block's %u lines) -> %s", lenAffix,
               lenQname, QNAME_TRIAL_LINES, (unsigned)fieldTabs.size(),
               useAffix ? "affix" : "qname");
+    return true;
+}
+
+/* Reader-thread second stage: try both layouts on a few lines from later blocks and
+   switch only when the cumulative evidence is clear. Called before the block is
+   enqueued, so all workers see the same verdict for it. */
+bool CodecSelector::confirmQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
+{
+    if (block == nullptr || info.qnameConfirmed) {
+        return false;
+    }
+    if (info.qnameInitialBlockId == (uint32_t)block->getBlockId()) {
+        return false;   /* already measured as the first sample */
+    }
+    IdSplitAnalysis analysis;
+    std::vector<LineTabs> fieldTabs;
+    size_t headEndLine = 0;
+    if (!collectQnameColumn(block, analysis, fieldTabs, headEndLine)) {
+        return false;   /* header/raw/unsplittable block: a later one may still qualify */
+    }
+    const uint32_t limit =
+        (uint32_t)std::min<size_t>(fieldTabs.size(), QNAME_CONFIRM_LINES);
+    if (limit == 0) {
+        return false;
+    }
+
+    const uint32_t scratchSize =
+        (uint32_t)std::min<size_t>(block->getBufferSize(), 4u << 20);
+    RoughIOBlock scratch(scratchSize);
+    scratch.setBlockType(block->getBlockType());
+    coder_err_sink sink;
+    QnameColumnInput in;
+    in.buffer = block->getBuffer();
+    in.npos = &block->getNpos();
+    in.headEndLine = (int64_t)headEndLine;
+    in.fieldTabs = &fieldTabs;
+
+    Json::Value metaAffix;
+    Json::Value metaQname;
+    uint32_t srcAffix = 0;
+    uint32_t srcQname = 0;
+    const int32_t lenAffix =
+        encodeQnameSplit(in, analysis, &scratch, &sink, limit, metaAffix, srcAffix);
+    scratch.setDataLen(0);
+    const int32_t lenQname =
+        encodeQnameByQname(in, &scratch, &sink, limit, metaQname, srcQname);
+    scratch.setDataLen(0);
+    if (lenAffix < 0 || lenQname < 0) {
+        /* One layout cannot address this block; keep the current verdict. */
+        info.qnameConfirmed = true;
+        return false;
+    }
+
+    info.qnameAffixSize += lenAffix;
+    info.qnameQnameSize += lenQname;
+    info.qnameTrialBytes += srcAffix;
+    info.qnameTrialLines += limit;
+    ++info.qnameConfirmBlocks;
+    if (info.qnameTrialLines < QNAME_TRIAL_LINES &&
+        info.qnameConfirmBlocks < QNAME_CONFIRM_BLOCKS) {
+        return true;
+    }
+
+    const bool currentAffix = info.qnameUseAffix.load(std::memory_order_relaxed) != 0;
+    const bool affixBetter =
+        info.qnameAffixSize * 100 < info.qnameQnameSize * (100 - QNAME_SWITCH_MARGIN);
+    const bool qnameBetter =
+        info.qnameQnameSize * 100 < info.qnameAffixSize * (100 - QNAME_SWITCH_MARGIN);
+    bool newAffix = currentAffix;
+    if (currentAffix && qnameBetter) {
+        newAffix = false;
+    } else if (!currentAffix && affixBetter) {
+        newAffix = true;
+    }
+    if (newAffix != currentAffix) {
+        info.setQnameUseAffix(newAffix ? 1 : 0);
+        LOG_INFO("QNAME layout switched after %u lines/%u blocks: affix=%lld qname=%lld -> %s",
+                 info.qnameTrialLines, info.qnameConfirmBlocks,
+                 (long long)info.qnameAffixSize, (long long)info.qnameQnameSize,
+                 newAffix ? "affix" : "qname");
+    } else {
+        LOG_INFO("QNAME layout confirmed after %u lines/%u blocks: affix=%lld qname=%lld -> %s",
+                 info.qnameTrialLines, info.qnameConfirmBlocks,
+                 (long long)info.qnameAffixSize, (long long)info.qnameQnameSize,
+                 newAffix ? "affix" : "qname");
+    }
+    info.qnameConfirmed = true;
     return true;
 }
 

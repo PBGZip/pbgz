@@ -221,6 +221,19 @@ struct PreprocessInfo {
        (see CodecSelector::selectQnameLayout); -1 keeps the affix layout. */
     std::atomic<int32_t> qnameUseAffix;
 
+    /* Second-stage QNAME confirmation, run on the reader thread over later blocks.
+       Sizes are compressed QNAME bytes for exactly the same trial lines; the first
+       block's trial seeds them. When enough lines are seen, the alternative layout
+       wins by QNAME_SWITCH_MARGIN percent, qnameUseAffix is flipped for subsequent
+       blocks. Per-block QNAME meta records the layout, so earlier blocks stay valid. */
+    int64_t qnameAffixSize = 0;
+    int64_t qnameQnameSize = 0;
+    uint64_t qnameTrialBytes = 0;
+    uint32_t qnameTrialLines = 0;
+    uint32_t qnameConfirmBlocks = 0;
+    uint32_t qnameInitialBlockId = UINT32_MAX;
+    bool qnameConfirmed = true;
+
     /* Whether the short-read, reference-free SEQ fast path (unpacked order-1 rANS) is
        within 3% of coder_fc on this file: 1 = yes, 0 = no, -1 = not probed yet. */
     std::atomic<int32_t> seqFastEligible;
@@ -233,6 +246,8 @@ struct PreprocessInfo {
     /* Initializers follow the declaration order of the members. */
     PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
                        qualPriorTrainingBytes(0), seqMatchCoder(-1), nposForm(-1), qnameUseAffix(-1),
+                       qnameAffixSize(0), qnameQnameSize(0), qnameTrialBytes(0), qnameTrialLines(0),
+                       qnameConfirmBlocks(0), qnameInitialBlockId(UINT32_MAX), qnameConfirmed(true),
                        seqFastEligible(-1),
                        qualPriorRequested(false) {}
 
@@ -250,6 +265,13 @@ struct PreprocessInfo {
         seqMatchCoder.store(-1, std::memory_order_relaxed);
         nposForm.store(-1, std::memory_order_relaxed);
         qnameUseAffix.store(-1, std::memory_order_relaxed);
+        qnameAffixSize = 0;
+        qnameQnameSize = 0;
+        qnameTrialBytes = 0;
+        qnameTrialLines = 0;
+        qnameConfirmBlocks = 0;
+        qnameInitialBlockId = UINT32_MAX;
+        qnameConfirmed = true;
         seqFastEligible.store(-1, std::memory_order_relaxed);
     }
 
