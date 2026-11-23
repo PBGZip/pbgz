@@ -97,6 +97,7 @@ public:
         std::remove("test_mixed.sam");
         std::remove("test_large.sam");
         std::remove("test_reference_roundtrip.sam");
+        std::remove("test_unused_ref_no_sq.sam");
 
         SamInfo::getInstance().clearChromosomeInfo();
         SamInfo::getInstance().resetChrIdCounter();
@@ -793,6 +794,59 @@ TEST_F(SamDecompressTest, TestFieldMissing) {
  * column travels the reference-coded path (see sam_seq_payload), and what comes back has to be the
  * bytes that went in.
  */
+/*
+ * A file may carry no @SQ at all and yet be compressed with a reference supplied on the
+ * command line. No record then uses it, so the file-level verdict is "reference unused"
+ * and decompression skips loading it. Each block must still be self-contained: the SEQ
+ * layout has to say "noref" even though a reference object was supplied to the encoder.
+ */
+TEST_F(SamDecompressTest, TestUnusedReferenceBlockDecodesWithoutReference) {
+    const std::string file = "test_unused_ref_no_sq.sam";
+    {
+        std::ofstream out(file);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:unsorted\n";
+        out << "@RG\tID:A\tSM:test\n";
+        for (int r = 0; r < 12; ++r) {
+            std::string seq;
+            for (int i = 0; i < 50; ++i) {
+                seq += "ACGT"[(r + i) % 4];
+            }
+            out << "read" << (r + 1) << "\t4\t*\t0\t0\t*\t*\t0\t0\t"
+                << seq << "\t" << std::string(50, 'I') << "\tRG:Z:A\n";
+        }
+    }
+
+    loadSamData(file);
+    /* Supplied, but no record has a position that could address it. */
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    DecompressEngine engine(para);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+    ASSERT_FALSE(engine.isReferenceUsed());
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+
+    /* The no-reference decode path taken when the archive says refe.required=false. */
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &engine, nullptr);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::ifstream in(file, std::ios::binary);
+    std::string expected((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string got((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen());
+    EXPECT_EQ(got.size(), expected.size());
+    EXPECT_EQ(got, expected);
+    std::remove(file.c_str());
+}
+
 TEST_F(SamDecompressTest, TestReferenceRoundtripPreservesTheText) {
     const std::string file = "test_reference_roundtrip.sam";
     {

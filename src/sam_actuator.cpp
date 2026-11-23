@@ -3078,8 +3078,12 @@ static int atcgIndexOf(uint8_t ch)
 
 bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& out)
 {
-    /* Bounds on building a consensus: window size cap (counters/squash memory) and a coverage floor. */
-    static const int64_t kMaxWindowBases = 2 << 20;   /* 2 Mb: ~8 MB of counters, ~0.5 MB of squash */
+    /* Bounds on building a consensus: window size cap (counters/squash memory) and a coverage floor.
+       At level 8+ on long reads a block holds 10x the reads, so its local window is wider; raising
+       the cap only there keeps the block consensus available. Levels 1-7 and short-read blocks keep
+       the historical 2 Mb bound, so their output and memory are unchanged. */
+    const int64_t maxWindowBases =
+        (engineCompressLevel() >= 8 && maxBaseLength > 512) ? (32LL << 20) : (2LL << 20);
     static const int64_t kMinCoverageShift = 3;       /* at least 1/8 of the window covered */
 
     std::vector<size_t>& npos = inBlockPtr->getNpos();
@@ -3089,6 +3093,7 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
     /* Pass 1: the window, over every record that could be walked against a reference at all. */
     int64_t winStart = INT64_MAX;
     int64_t winEnd = 0;
+    int64_t alignedBases = 0;
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
         uint8_t* line = buffer + lineStart;
@@ -3117,6 +3122,7 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
         if (refStart < 0 || refConsumed == 0) {
             continue;
         }
+        alignedBases += refConsumed;
         if (refStart < winStart) {
             winStart = refStart;
         }
@@ -3128,8 +3134,20 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
         return false;
     }
     const int64_t windowBases = winEnd - winStart;
-    if (windowBases <= 0 || windowBases > kMaxWindowBases) {
+    if (windowBases <= 0 || windowBases > maxWindowBases) {
         return false;
+    }
+
+    /* A vote needs only a few reads per base; above that, sampling every k-th mapped read
+       keeps the same majority while bounding the counter pass. Only the level 8+ long-read
+       blocks whose window was raised (wider than 2 Mb) are sampled; every other block keeps
+       every read, so its consensus and output are unchanged. */
+    uint32_t voteStride = 1;
+    if (engineCompressLevel() >= 8 && maxBaseLength > 512 && windowBases > (2LL << 20)) {
+        const int64_t voteBudget = 8 * windowBases;
+        if (alignedBases > voteBudget) {
+            voteStride = (uint32_t)std::max<int64_t>(1, alignedBases / voteBudget);
+        }
     }
 
     /* Pass 2: one saturating counter per base. */
@@ -3137,6 +3155,7 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
     for (int k = 0; k < 4; ++k) {
         count[k].assign((size_t)windowBases, 0);
     }
+    uint32_t mappedIdx = 0;
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
         const uint32_t lineEnd = (uint32_t)npos[lineIdx] - lineStart;
@@ -3149,6 +3168,9 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
         const uint16_t flag = mappedFlag.find(lineIdx) == mappedFlag.end() ? 4 : mappedFlag[lineIdx];
         const auto posIt = mappedPos.find(lineIdx);
         if (chrId == 0xFFFF || chrId == 0xFFFE || (flag & 0x04) || posIt == mappedPos.end()) {
+            continue;
+        }
+        if ((mappedIdx++ % voteStride) != 0) {
             continue;
         }
         const int64_t chrStart = SamInfo::getInstance().getPositionByIndex(chrId);
@@ -3478,8 +3500,11 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     /* Count of the 'N' stream, for older archives. */
     fieldMeta["ncount"] = (Json::Value::UInt)excClasses[(uint8_t)'N'].count;
     fieldMeta["litbases"] = (Json::Value::UInt)1;
-    /* No reference (file's or consensus): the decoder must not try to rebuild any record against one. */
-    if (fileRef == nullptr && seqSelfRef == nullptr) {
+    /* A block with no record rebuilt against a reference is self-contained: the decoder must
+       not require one for it. This is not only the no-reference case: a reference may be
+       supplied yet unused by the whole block (e.g. an unmapped file with no @SQ), and then
+       the file-level `refe.required` verdict is false, so the decoder will not load it. */
+    if (seqSelfRef == nullptr && !seqAnyUsedReference) {
         fieldMeta["noref"] = (Json::Value::UInt)1;
     }
 
