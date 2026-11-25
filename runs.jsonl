@@ -1,0 +1,2 @@
+{"run_id": "20261117-174134-v2.2.0", "ts": "2026-11-20 14:06:07 +0800", "level": "full", "ref": "feature/codec-preselection", "verdict": "fail", "total": 430, "pass": 404, "fail": 26, "warn": 290, "version": "pbgz: 2.2.0", "commit": "63c35065a50a", "has_report": true}
+{"run_id": "20261125-102944-v2.2.0-5293415", "ts": "2026-11-25 10:43:50 +0800", "level": "smoke", "ref": "feature/codec-preselection", "verdict": "fail", "total": 4, "pass": 3, "fail": 1, "warn": 3, "version": "pbgz: 2.2.0", "commit": "52934154c39e", "has_report": true}
