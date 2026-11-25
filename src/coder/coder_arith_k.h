@@ -46,11 +46,11 @@ class coder_arith_k : public coder
 {
 public:
     coder_arith_k(coder_io *io, int order = 1, bool mapBases = true, bool useRans = false,
-                  bool ransPack = true)
+                  bool ransPack = true, const char* magic = "coder_arith_k")
     {
         this->io = io;
         this->io->m = coder_io::MUNSET;
-        this->io->appen_magic("coder_arith_k");
+        this->io->appen_magic(magic);
         this->order = order;
         this->mapBases = mapBases;
         this->useRans = useRans;

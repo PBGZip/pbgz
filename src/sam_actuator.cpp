@@ -188,12 +188,15 @@ SamCodecActuator::~SamCodecActuator() {
     MemoryUtil::safeFree(baseLengthBuffer);
     MemoryUtil::safeFree(baseSquashBuffer);
     MemoryUtil::safeFree(baseDiffSquashBuffer);
+    MemoryUtil::safeFree(baseInsSquashBuffer);
     MemoryUtil::safeFree(refeStrecchBuffer);
     MemoryUtil::safeFree(matchBlockBuffer);
+    MemoryUtil::safeFree(insBlockBuffer);
 
     // Release idDecoders
     idDecoders.clear();
     clearIdNumericState();
+    clearIdDedupState();
 
     // Release fieldDecoders
     fieldDecoders.clear();
@@ -232,6 +235,11 @@ int32_t SamCodecActuator::compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Valu
 int32_t SamCodecActuator::compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
     return encodeQnameByQname(qnameColumnInput(), outBlockPtr, &ioErrSink, 0, fieldMeta,
                               fieldSrcLen);
+}
+
+int32_t SamCodecActuator::compressIdFieldDedup(uint32_t& fieldSrcLen, Json::Value& fieldMeta) {
+    return encodeQnameDedup(qnameColumnInput(), idAnalysis, outBlockPtr, &ioErrSink, 0, fieldMeta,
+                            fieldSrcLen);
 }
 
 
@@ -729,14 +737,21 @@ int32_t SamCodecActuator::encodeQnameColumn(uint32_t& fieldSrcLen, Json::Value& 
         return compressIdFieldInAll(fieldSrcLen, fieldMeta);
     }
 
-    /* Which layout writes this column is the file-level verdict (PreprocessInfo::qnameUseAffix); affix is the fallback. */
+    /* Which layout writes this column is the file-level verdict (PreprocessInfo::qnameUseAffix):
+       0 = coder_qname, 1 = affix, 2 = affix on first occurrences + a repeat stream. Affix is
+       the fallback, including the unit paths that have no PreprocessInfo. */
     const PreprocessInfo* preInfo = preprocessInfoMut();
     const int32_t verdict =
         (preInfo != nullptr) ? preInfo->qnameUseAffix.load(std::memory_order_relaxed) : -1;
-    const bool useAffix = (verdict != 0);
-    LOG_DEBUG("QNAME: file verdict %d -> %s", verdict, useAffix ? "affix" : "qname");
-    return useAffix ? compressIdFieldSplit(fieldSrcLen, fieldMeta)
-                    : compressIdFieldQname(fieldSrcLen, fieldMeta);
+    LOG_DEBUG("QNAME: file verdict %d -> %s", verdict,
+              verdict == 0 ? "qname" : (verdict == 2 ? "dedup" : "affix"));
+    if (verdict == 2) {
+        return compressIdFieldDedup(fieldSrcLen, fieldMeta);
+    }
+    if (verdict == 0) {
+        return compressIdFieldQname(fieldSrcLen, fieldMeta);
+    }
+    return compressIdFieldSplit(fieldSrcLen, fieldMeta);
 }
 
 /* Close the block: write the SAM meta and per-field stream metas, hash the block, encode the meta. */
@@ -1302,6 +1317,22 @@ void SamCodecActuator::clearIdNumericState() {
     idIntActive.clear();
     idConstTexts.clear();
     idDictEntries.clear();
+}
+
+void SamCodecActuator::clearIdDedupState() {
+    if (idDedupBuf != nullptr) {
+        MemoryUtil::safeFree(idDedupBuf);
+        idDedupBuf = nullptr;
+    }
+    idDedupDecoder.reset();
+    idDedupFlags = nullptr;
+    idDedupDists = nullptr;
+    idDedupLines = 0;
+    idDedupReps = 0;
+    idDedupRepPos = 0;
+    idDedupLine = 0;
+    idDedupNames.clear();
+    idDedupActive = false;
 }
 
 
@@ -2866,41 +2897,152 @@ int32_t SamCodecActuator::writeSeqBaseLengthStream(Json::Value& metaSubs, Json::
    would cost seconds on files that end up keeping coder_fc. */
 static const uint32_t kSeqFastProbeBytes = 4u << 20;   /* 4 MiB */
 
-static int32_t trialSeqFastOrder1(const uint8_t* buf, uint32_t len)
+/* Trial one SEQ match-stream coder on a bounded prefix. The sample is the same for all
+   three candidates, so their sizes and times are directly comparable. */
+static bool trialSeqCoder(CoderType type, const uint8_t* buf, uint32_t len, uint8_t level,
+                          bool noPack, uint32_t& outSize, uint64_t& outUs)
 {
+    if (buf == nullptr || len == 0) {
+        return false;
+    }
     if (len > kSeqFastProbeBytes) {
         len = kSeqFastProbeBytes;
     }
     const int32_t cap = (int32_t)((uint64_t)len * 2 + 65536);
-    std::vector<uint8_t> outF((size_t)cap);
-    std::vector<uint8_t> outA((size_t)cap);
-    coder_err_sink sinkF;
-    coder_err_sink sinkA;
+    std::vector<uint8_t> out((size_t)cap);
+    coder_err_sink sink;
+    coder_io io(out.data(), cap, &sink, "SEQ coder trial");
+    CoderFactory::applyLevel(&io, type, level);
+    if (type == CoderType::ARITH_K && noPack) {
+        io.meta["aknopack"] = 1;
+    }
+    try {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::shared_ptr<coder> enc = CoderFactory::makeEncoder(type, &io);
+        enc->encode_line(buf, len);
+        enc->encode_flush();
+        outUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+    } catch (...) {
+        return false;
+    }
+    if (!sink.ok() || io.data_len <= 0) {
+        return false;
+    }
+    outSize = (uint32_t)io.data_len;
+    return true;
+}
 
-    coder_io ioF(outF.data(), cap, &sinkF, "SEQ fast trial");
-    std::shared_ptr<coder> cF = CoderFactory::makeEncoder(CoderType::FC, &ioF);
-    cF->encode_line(buf, len);
-    cF->encode_flush();
+/* Data-characteristic verdict: fc when it saves at least 3% and is not much slower (or
+   saves 10%+); arith_ctx only when it is smaller than order-1 *and* faster than it;
+   otherwise the speed tier order-1. */
+static CoderType decideSeqCoder(int64_t fcSize, int64_t ctxSize, int64_t akSize,
+                                uint64_t fileBytes)
+{
+    if (akSize <= 0) {
+        return CoderType::ARITH_K;
+    }
+    const double fcGain = 1.0 - (double)fcSize / (double)akSize;
+    const double ctxGain = 1.0 - (double)ctxSize / (double)akSize;
+    /* Very large high-entropy files are the speed-sensitive case: a file above 8 GiB
+       keeps its fast tier unless fc's SEQ gain is clear (>=10%), so ERR11436629/639
+       stay on order-1 while a large redundant file still picks fc. */
+    const bool large = (fileBytes >= (8ull << 30));
+    if (fcGain >= 0.03 && !(large && fcGain < 0.10)) {
+        return CoderType::FC;
+    }
+    if (ctxGain >= 0.05) {
+        return CoderType::ARITH_CTX;
+    }
+    return CoderType::ARITH_K;
+}
 
-    /* The fast coder sees the sanitized payload (non-ACGT -> 'A' + exception stream);
-       coder_fc sees the raw payload, exactly as it would be coded. */
-    std::vector<uint8_t> clean(buf, buf + len);
-    for (uint32_t i = 0; i < len; ++i) {
-        const uint8_t ch = clean[i];
-        if (!(ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T')) {
-            clean[i] = (uint8_t)'A';
+CoderType SamCodecActuator::chooseSeqMatchCoder(const uint8_t* buf, uint32_t len, uint8_t level,
+                                                bool fastCandidate, uint64_t blockId, bool& noPack)
+{
+    PreprocessInfo* pre = preprocessInfoMut();
+    if (pre == nullptr) {
+        /* Unit paths and any caller without a file-level PreprocessInfo: do the same triage
+           once on this block instead of silently inheriting the pre-selection. */
+        uint32_t fc = 0, ctx = 0, ak = 0;
+        uint64_t fcu = 0, ctxu = 0, aku = 0;
+        const bool okFc = trialSeqCoder(CoderType::FC, buf, len, level, false, fc, fcu);
+        const bool okCtx = trialSeqCoder(CoderType::ARITH_CTX, buf, len, level, false, ctx, ctxu);
+        const bool okAk = trialSeqCoder(CoderType::ARITH_K, buf, len, level, fastCandidate, ak, aku);
+        if (!okAk) {
+            noPack = fastCandidate;
+            return seqMatchCoderFor();
+        }
+        if (!okFc) { fc = ak; }
+        if (!okCtx) { ctx = ak; }
+        const CoderType c = decideSeqCoder(fc, ctx, ak, 0);
+        noPack = fastCandidate && c == CoderType::ARITH_K;
+        return c;
+    }
+    std::lock_guard<std::mutex> lock(pre->seqProbeMutex);
+    int32_t chosen = pre->seqChosenCoder.load(std::memory_order_relaxed);
+    const bool first = (pre->seqProbeSamples == 0);
+    const bool sample = first || (!pre->seqProbeDone &&
+                                  (uint32_t)blockId >= pre->seqProbeNextBlock);
+    if (!sample) {
+        if (chosen < 0) {
+            return seqMatchCoderFor();
+        }
+        noPack = fastCandidate && chosen == (int32_t)CoderType::ARITH_K;
+        return (CoderType)chosen;
+    }
+
+    uint32_t fc = 0, ctx = 0, ak = 0;
+    uint64_t fcu = 0, ctxu = 0, aku = 0;
+    const bool okFc = trialSeqCoder(CoderType::FC, buf, len, level, false, fc, fcu);
+    const bool okCtx = trialSeqCoder(CoderType::ARITH_CTX, buf, len, level, false, ctx, ctxu);
+    const bool okAk = trialSeqCoder(CoderType::ARITH_K, buf, len, level, fastCandidate, ak, aku);
+    if (!okAk) {
+        /* Without the speed tier there is no useful comparison; keep the pre-selection. */
+        chosen = (int32_t)seqMatchCoderFor();
+        pre->seqChosenCoder.store(chosen, std::memory_order_relaxed);
+        pre->seqProbeDone = true;
+        pre->seqProbeSamples = 1;
+        noPack = fastCandidate && chosen == (int32_t)CoderType::ARITH_K;
+        return (CoderType)chosen;
+    }
+    /* A candidate that cannot carry this sample simply does not win it. */
+    if (!okFc) { fc = ak; fcu = aku; }
+    if (!okCtx) { ctx = ak; ctxu = aku; }
+
+    pre->seqProbeFcSize += fc;
+    pre->seqProbeCtxSize += ctx;
+    pre->seqProbeAkSize += ak;
+    pre->seqProbeFcUs += fcu;
+    pre->seqProbeCtxUs += ctxu;
+    pre->seqProbeAkUs += aku;
+    ++pre->seqProbeSamples;
+
+    if (first) {
+        chosen = (int32_t)decideSeqCoder(pre->seqProbeFcSize, pre->seqProbeCtxSize,
+                                        pre->seqProbeAkSize, pre->inputTotalBytes);
+        pre->seqChosenCoder.store(chosen, std::memory_order_relaxed);
+        pre->seqProbeFirstBlock = (uint32_t)blockId;
+        pre->seqProbeNextBlock = (uint32_t)blockId + 8;   /* 0 -> 8 */
+    } else {
+        chosen = (int32_t)decideSeqCoder(pre->seqProbeFcSize, pre->seqProbeCtxSize,
+                                        pre->seqProbeAkSize, pre->inputTotalBytes);
+        pre->seqChosenCoder.store(chosen, std::memory_order_relaxed);
+        if (pre->seqProbeSamples >= 4) {
+            pre->seqProbeDone = true;
+        } else if (pre->seqProbeSamples == 2) {
+            pre->seqProbeNextBlock = pre->seqProbeFirstBlock + 32;  /* 8 -> 32 */
+        } else if (pre->seqProbeSamples == 3) {
+            pre->seqProbeNextBlock = pre->seqProbeFirstBlock + 128; /* 32 -> 128 */
         }
     }
-    coder_io ioA(outA.data(), cap, &sinkA, "SEQ fast trial");
-    ioA.meta["aknopack"] = 1;
-    std::shared_ptr<coder> cA = CoderFactory::makeEncoder(CoderType::ARITH_K, &ioA);
-    cA->encode_line(clean.data(), len);
-    cA->encode_flush();
-
-    if (!sinkF.ok() || !sinkA.ok() || ioF.data_len <= 0 || ioA.data_len <= 0) {
-        return 0;
-    }
-    return ((uint64_t)ioA.data_len * 100ull <= (uint64_t)ioF.data_len * 103ull) ? 1 : 0;
+    noPack = fastCandidate && chosen == (int32_t)CoderType::ARITH_K;
+    LOG_INFO("SEQ coder probe: block=%llu samples=%u fc=%lld/%lluus ctx=%lld/%lluus ak=%lld/%lluus -> %s",
+             (unsigned long long)blockId, pre->seqProbeSamples, (long long)pre->seqProbeFcSize,
+             (unsigned long long)pre->seqProbeFcUs, (long long)pre->seqProbeCtxSize,
+             (unsigned long long)pre->seqProbeCtxUs, (long long)pre->seqProbeAkSize,
+             (unsigned long long)pre->seqProbeAkUs, coderTypeToMagic((CoderType)chosen));
+    return (CoderType)chosen;
 }
 
 int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uint8_t* matchBuffer,
@@ -2917,73 +3059,19 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
            At the extreme-ratio level (-l9) coder_arith_k is never taken: the pre-selection's verdict (coder_fc/coder_bwt_cm) is used as it stands. */
         const bool fastMode = (compressMode() == PBGZ_MODE_FAST);
         CoderType payType = seqMatchCoderFor();
-        /* The unpacked order-1 fast path is for the scenario it was measured on: short,
-           reference-free blocks (all-unmapped reads), including sporadic Ns.  Everything
-           else keeps the previous behaviour (packed order-1 when baseNCount == 0, else
-           the pre-selection verdict). */
         const bool shortReads = (maxBaseLength > 0 && maxBaseLength <= 512);
         const bool fastCandidate = shortReads && seqPayloadAllAcgt && !seqAnyMappedRecord &&
                                    !seqAnyUsedReference && seqSelfRef == nullptr;
-        /* One 4 MiB probe per file decides whether order-1 is close enough to coder_fc.
-           The probe is shared by the short-read fast path and the packed all-ACGT path,
-           and is cached so every worker takes the same decision. */
-        auto seqOrder1Verdict = [&]() -> int32_t {
-            PreprocessInfo* preInfo = preprocessInfoMut();
-            int32_t verdict = (preInfo != nullptr)
-                                  ? preInfo->seqFastEligible.load(std::memory_order_relaxed)
-                                  : -1;
-            if (verdict >= 0) {
-                return verdict;
-            }
-            if (preInfo != nullptr) {
-                /* One thread probes (-2 = in progress).  The others wait for it rather
-                   than coding their block the legacy way: the probe is a 4 MiB encode,
-                   and letting block placement depend on thread timing would make the
-                   archive bytes vary from run to run. */
-                int32_t expected = -1;
-                if (preInfo->seqFastEligible.compare_exchange_strong(
-                        expected, -2, std::memory_order_relaxed)) {
-                    verdict = trialSeqFastOrder1(payBuf, payLen);
-                    preInfo->seqFastEligible.store(verdict, std::memory_order_relaxed);
-                } else {
-                    const auto deadline =
-                        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                    while ((verdict = preInfo->seqFastEligible.load(
-                                std::memory_order_relaxed)) == -2 &&
-                           std::chrono::steady_clock::now() < deadline) {
-                        std::this_thread::yield();
-                    }
-                    if (verdict < 0) {
-                        verdict = 0;   /* probe never finished: keep the legacy path */
-                    }
-                }
-            } else {
-                verdict = trialSeqFastOrder1(payBuf, payLen);
-            }
-            return verdict;
-        };
-        if (!fastMode && !rle.useRle && engineCompressLevel() < 9) {
-            const bool useFast = fastCandidate && (seqOrder1Verdict() == 1);
-            if (useFast) {
-                /* Sanitize the raw-base payload in place; the exception streams carry the
-                   original characters.  (RLE is off on this path, so payBuf == matchBuffer.) */
-                uint8_t* mb = const_cast<uint8_t*>(payBuf);
-                for (uint32_t i = 0; i < payLen; ++i) {
-                    const uint8_t ch = mb[i];
-                    if (!(ch == 'A' || ch == 'C' || ch == 'G' || ch == 'T')) {
-                        mb[i] = (uint8_t)'A';
-                    }
-                }
-                payType = CoderType::ARITH_K;
+        /* The two-stage probe picks among coder_fc, coder_arith_ctx and order-1 from the
+           actual match payload. It samples the first block and three later blocks, not
+           every block. */
+        if (!fastMode && !rle.useRle && baseNCount == 0 && engineCompressLevel() < 9) {
+            bool noPack = false;
+            payType = chooseSeqMatchCoder(payBuf, payLen, engineCompressLevel(), fastCandidate,
+                                          inBlockPtr->getBlockId(), noPack);
+            if (payType == CoderType::ARITH_K && noPack) {
                 matchIo->meta["aknopack"] = 1;
                 seqUsedFastCoder = true;
-            } else if (baseNCount == 0) {
-                /* Short reads keep the packed order-1 path. Long reads (PacBio/ONT) often
-                   carry heavy cross-read redundancy that order-1 cannot see, so only keep
-                   order-1 there when a size probe shows it is within 3% of coder_fc. */
-                if (shortReads || seqOrder1Verdict() == 1) {
-                    payType = CoderType::ARITH_K;
-                }
             }
         }
         /* A pinned or sampled verdict can still name a segment too short for coder_fc (FC_MIN_LEN bytes or less). */
@@ -3046,6 +3134,45 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
         outBlockPtr->setDataLen(outBlockPtr->getDataLen() + valIo->data_len);
         totalDstLen += valIo->data_len;
     }
+    return 0;
+}
+
+int32_t SamCodecActuator::writeSeqSplitStreams(const uint8_t* mat, uint32_t matLen,
+                                               const uint8_t* ins, uint32_t insLen,
+                                               uint32_t srcLen, coder_io* matchIo,
+                                               Json::Value& metaSubs, Json::Value& metaStreams,
+                                               uint32_t& totalDstLen)
+{
+    /* The aligned half is written exactly like the legacy "m" stream (same RLE test, same coder
+       probe and field meta); the inserted/soft-clipped half is one whole coder_bwt_cm stream. */
+    const SeqRleSplit rle = splitSeqMatchStream(mat, matLen);
+    if (writeSeqMatchStreams(rle, mat, matLen, matLen, matchIo, metaSubs, metaStreams,
+                             totalDstLen) != 0) {
+        return -1;
+    }
+
+    std::shared_ptr<coder_io> insIo =
+        makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ ins");
+    {
+        std::shared_ptr<coder> insCoder =
+            CoderFactory::makeProfileEncoder(SAM_SEQ, compressMode(), insIo.get(),
+                                             CoderType::RANS, false, engineCompressLevel());
+        insCoder->encode_line(ins, insLen);
+        insCoder->encode_flush();
+    }
+    if (insIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode SEQ ins stream overflow: output buffer too small");
+        return -1;
+    }
+    metaSubs.clear();
+    metaSubs["srclen"] = (Json::Value::UInt)insLen;
+    metaSubs["dstlen"] = insIo->data_len;
+    metaSubs["coder"] = insIo->meta;
+    metaSubs["sname"] = "ins";
+    metaStreams.append(metaSubs);
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + insIo->data_len);
+    totalDstLen += insIo->data_len;
+    LOG_DEBUG("SEQ split streams: mat=%u ins=%u bases=%u", matLen, insLen, srcLen);
     return 0;
 }
 
@@ -3317,6 +3444,18 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     /* The SEQ match stream (per-base 2-bit: M/=/X XOR the reference, I/S raw). Accumulated whole-block, then encoded once. */
     std::unique_ptr<uint8_t[]> matchBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen() + 1);
     uint32_t matchLen = 0;
+    /* The split layout: aligned M/=/X bytes in matBuf, inserted/soft-clipped (and raw) in insBuf.
+       The verdict is file-level (PreprocessInfo::seqSplitMode), so a block only pays for the
+       layout the file selected. */
+    PreprocessInfo* splitInfo = preprocessInfoMut();
+    const bool splitLayout = (splitInfo != nullptr) &&
+                             (splitInfo->seqSplitMode.load(std::memory_order_relaxed) == 1);
+    std::vector<uint8_t> matBuf;
+    std::vector<uint8_t> insBuf;
+    if (splitLayout) {
+        matBuf.reserve((size_t)inBlockPtr->getDataLen() / 2 + 1024);
+        insBuf.reserve((size_t)inBlockPtr->getDataLen() / 2 + 1024);
+    }
     int64_t srcLen = 0;
     uint32_t totalBaseLength = 0;
 
@@ -3413,32 +3552,47 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         if (outLen > 0) {
             /* Accumulate instead of encoding line-by-line: the coder is picked by
                the total length after the loop (coder_fc is block-only). */
+            /* The legacy buffer is always built: a split-enabled file still has blocks with no
+               I/S bytes (or no aligned bytes), and those fall back to the legacy layout. */
             if (!appendSeqMatch(matchBuffer.get(), matchLen, inBlockPtr->getDataLen(),
                                 payload.bytes, payload.length)) {
                 LOG_ERROR("SEQ match buffer overflow in block %llu: %u + %u > %u",
                           inBlockPtr->getBlockId(), matchLen, seqLength, inBlockPtr->getDataLen());
                 return -1;
             }
+            if (splitLayout) {
+                partitionSeqPayload(ops, payload.bytes, payload.length, payload.usedReference,
+                                    matBuf, insBuf);
+            }
             srcLen += seqLength;
         }
     }
-    /* RLE preprocessing: split the match stream into "m" (varint zero-run lengths) and "mval" (non-zero values), applied only when at least 98% zeros. */
-    const auto seqSplitT0 = pbgzprof::nowOrZero();
-    SeqRleSplit rle = splitSeqMatchStream(matchBuffer.get(), matchLen);
     pbgzprof::addSince(pbgzprof::SEQ_MATCH_BUILD, seqBuildT0);
-    pbgzprof::addSince(pbgzprof::SEQ_MATCH_SPLIT, seqSplitT0);
 
-    /* Sub-stream "m": run lengths under RLE, otherwise the whole match stream; the coder is the per-file verdict (seqMatchCoderFor). */
-    /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
-    {
     const auto seqEncT0 = pbgzprof::nowOrZero();
-    if (writeSeqMatchStreams(rle, matchBuffer.get(), matchLen, srcLen, matchIo.get(), metaSubs,
-                             metaStreams, totalDstLen) != 0) {
-        return -1;
+    if (splitLayout && !matBuf.empty() && !insBuf.empty()) {
+        /* Both halves present: write the aligned M/=/X stream as "m" (with the usual RLE) and the
+           inserted/soft-clipped stream as "ins". */
+        if (writeSeqSplitStreams(matBuf.data(), (uint32_t)matBuf.size(), insBuf.data(),
+                                 (uint32_t)insBuf.size(), srcLen, matchIo.get(), metaSubs,
+                                 metaStreams, totalDstLen) != 0) {
+            return -1;
+        }
+        fieldMeta["seqlayout"] = (Json::Value::UInt)1;
+        totalSrcLen += srcLen;
+    } else {
+        /* RLE preprocessing: split the match stream into "m" (varint zero-run lengths) and "mval" (non-zero values), applied only when at least 98% zeros. */
+        const auto seqSplitT0 = pbgzprof::nowOrZero();
+        SeqRleSplit rle = splitSeqMatchStream(matchBuffer.get(), matchLen);
+        pbgzprof::addSince(pbgzprof::SEQ_MATCH_SPLIT, seqSplitT0);
+        /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
+        if (writeSeqMatchStreams(rle, matchBuffer.get(), matchLen, srcLen, matchIo.get(), metaSubs,
+                                 metaStreams, totalDstLen) != 0) {
+            return -1;
+        }
+        totalSrcLen += srcLen;
     }
     pbgzprof::addSince(pbgzprof::SEQ_MATCH_ENCODE, seqEncT0);
-    totalSrcLen += srcLen;
-    }
 
 
     /* 'N' from a raw payload is carried by the payload itself (as before); only when the fast
@@ -4051,6 +4205,7 @@ int32_t SamCodecActuator::decompressSamByFields(RoughIOBlock* outputBlock) {
 
     baseSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     baseDiffSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
+    baseInsSquashBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength);
     /* +8 slack: getStretch2Bits1Char may write outLen+3 bytes. */
     refeStrecchBuffer = MemoryUtil::safeAlloc<uint8_t>(maxBaseLength + 8);
     uint32_t totalBaseLen = 0;
@@ -4295,11 +4450,15 @@ static int32_t expandCounterSubStream(const uint8_t* payload, uint32_t payloadLe
 /* Build the ID/QNAME column: one decoder per split sub-stream, plus the payload state each layout needs. */
 int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
 {
-    std::string idSplit = idMeta["splitsym"].asString();
+    /* Only layout 2 is the current dedup format; absent means the plain split/qname layouts. */
+    clearIdDedupState();
+    idDedupActive = idMeta.isMember("qnameDedup") && idMeta["qnameDedup"].asUInt() >= 2;
+    Json::Value& splitMeta = idDedupActive ? idMeta["newnames"] : idMeta;
+    std::string idSplit = splitMeta["splitsym"].asString();
     for (uint32_t i = 0; i < idSplit.length(); ++i) {
         idAnalysis.symbols.push_back(idSplit.c_str()[i]);
     }
-    Json::Value& idStreamMeta = idMeta["streams"];
+    Json::Value& idStreamMeta = splitMeta["streams"];
     if (idStreamMeta.size() != idAnalysis.symbols.size()) {
         LOG_ERROR("id streams not match id split, expect:%u, actual:%u", idAnalysis.symbols.size(), idStreamMeta.size());
         return -1;
@@ -4521,16 +4680,75 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
 
         readOffset += dstLength;
     }
+
+    if (idDedupActive) {
+        /* The repeat stream follows the newnames streams: one whole-buffer decoder. */
+        Json::Value& dupMeta = idMeta["dup"];
+        const uint32_t dupSrc = dupMeta["srclen"].asUInt();
+        const uint32_t dupDst = dupMeta["dstlen"].asUInt();
+        const uint32_t lines = idMeta["lines"].asUInt();
+        const uint32_t reps = dupMeta["reps"].asUInt();
+        if (lines == 0 || (uint64_t)lines + (uint64_t)reps * 3 != (uint64_t)dupSrc ||
+            (samLine != 0 && lines != samLine)) {
+            LOG_ERROR("QNAME dedup meta is inconsistent (lines=%u reps=%u src=%u samlines=%u)",
+                      lines, reps, dupSrc, samLine);
+            return -1;
+        }
+        std::shared_ptr<coder_io> io =
+            makeCoderIo(inBlockPtr->getBuffer() + readOffset, dupDst, "QNAME dedup");
+        io->meta = dupMeta;
+        ioVector.push_back(io);
+        FieldDecoderArgs args;
+        idDedupDecoder = CoderFactory::makeFieldDecoder(dupMeta["coder"]["magic"].asString(),
+                                                        io.get(), args);
+        if (idDedupDecoder == nullptr) {
+            LOG_ERROR("Unsupported QNAME dedup stream coder:%s",
+                      dupMeta["coder"]["magic"].asString().c_str());
+            return -1;
+        }
+        idDedupBuf = MemoryUtil::safeAlloc<uint8_t>(dupSrc + 1);
+        if (idDedupBuf == nullptr) {
+            return -1;
+        }
+        const int32_t got = idDedupDecoder->decode_line(idDedupBuf, dupSrc, UINT8_MAX, false);
+        if (got != (int32_t)dupSrc) {
+            LOG_ERROR("Decode QNAME dedup stream failed: %d/%u", got, dupSrc);
+            return -1;
+        }
+        idDedupLines = lines;
+        idDedupReps = reps;
+        idDedupFlags = idDedupBuf;
+        idDedupDists = idDedupBuf + lines;
+        idDedupNames.reserve(lines);
+        readOffset += dupDst;
+    }
     return 0;
 }
 
 /* Build the SEQ column: reference layout (match, exception, base-length streams) or the single whole-column stream. */
+/* The SEQ layout version a block records:
+     0 / absent = one match stream (legacy)
+     1          = aligned "m" stream + inserted/soft-clipped "ins" stream
+   A future layout adds a value; an unknown one is rejected rather than silently decoded with
+   the version-1 rules. Only the "seqlayout" key is recognized. */
+static int seqLayoutOf(const Json::Value& meta)
+{
+    return meta.isMember("seqlayout") ? meta["seqlayout"].asInt() : 0;
+}
+
 int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t idx,
                                               RoughIOBlock* outputBlock)
 {
     maxBaseLength = baseMeta["maxlen"].asUInt();
     minBaseLength = baseMeta["minlen"].asUInt();
-    LOG_DEBUG("maxBaseLen = %d, minBaseLen = %d", maxBaseLength, minBaseLength);
+    const int seqLayout = seqLayoutOf(baseMeta);
+    if (seqLayout > 1) {
+        LOG_ERROR("SEQ block %lld uses unsupported layout version %d",
+                  (long long)inBlockPtr->getBlockId(), seqLayout);
+        return -1;
+    }
+    LOG_DEBUG("maxBaseLen = %d, minBaseLen = %d, seqLayout = %d", maxBaseLength, minBaseLength,
+              seqLayout);
     /* A block-consensus column uses the same layout as the reference one but needs no external reference. */
     baseSelfRefActive = false;
     /* The multi-stream layout is identified by the meta itself (a "selfref" consensus, or a reference
@@ -4578,6 +4796,20 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
 
         readOffset += dstLength + matchExtraOffset;   /* +mval sub-stream under RLE */
         matchExtraOffset = 0;
+        /* Split layout: the inserted/soft-clipped half follows the aligned "m"/"mval" pair. */
+        if (seqLayout == 1) {
+            if (id + 1 >= (uint32_t)baseMetaStreams.size() ||
+                baseMetaStreams[id + 1]["sname"].asString() != "ins") {
+                LOG_ERROR("SEQ split layout is missing its ins stream");
+                return -1;
+            }
+            id++;
+            const uint32_t insDstLength = baseMetaStreams[id]["dstlen"].asUInt();
+            if (predecodeSeqInsStream(baseMetaStreams, id) != 0) {
+                return -1;
+            }
+            readOffset += insDstLength;
+        }
         /* SEQ exception streams (see SeqExceptionClass): one per character present, a strictly increasing offset list. */
         if (predecodeSeqExceptionStreams(baseMeta, baseMetaStreams, id) != 0) {
             return -1;
@@ -5442,6 +5674,41 @@ int32_t SamCodecActuator::predecodeSeqWholeMatchStream(const Json::Value& stream
             return -1;
         }
     }
+    return 0;
+}
+
+/* The split layout's inserted/soft-clipped stream: one whole buffer, sliced per record. */
+int32_t SamCodecActuator::predecodeSeqInsStream(const Json::Value& streams, uint32_t streamId)
+{
+    const uint32_t srcLen = streams[streamId]["srclen"].asUInt();
+    const uint32_t dstLen = streams[streamId]["dstlen"].asUInt();
+    std::shared_ptr<coder_io> io =
+        makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SEQ ins");
+    io->meta = streams[streamId];
+    ioVector.push_back(io);
+    const std::string coderName = streams[streamId]["coder"]["magic"].asString();
+    FieldDecoderArgs args;
+    if (streams[streamId]["coder"].isMember("level")) {
+        args.level = streams[streamId]["coder"]["level"].asInt();
+    }
+    std::shared_ptr<coder> decoder = CoderFactory::makeFieldDecoder(coderName, io.get(), args);
+    if (decoder == nullptr) {
+        LOG_ERROR("Unsupported coder name for SEQ ins stream: %s", coderName.c_str());
+        return -1;
+    }
+    MemoryUtil::safeFree(insBlockBuffer);
+    insBlockBuffer = MemoryUtil::safeAlloc<uint8_t>(srcLen + 1);
+    if (insBlockBuffer == nullptr) {
+        LOG_ERROR("Alloc SEQ ins block buffer failed");
+        return -1;
+    }
+    if (decoder->decode_line(insBlockBuffer, srcLen, UINT8_MAX, false) < 0) {
+        LOG_ERROR("Decode SEQ ins stream failed");
+        return -1;
+    }
+    insBlockLength = srcLen;
+    insBlockOffset = 0;
+    insBlockDecode = true;
     return 0;
 }
 
@@ -6469,16 +6736,68 @@ int32_t SamCodecActuator::decompressIdField(uint32_t fieldIdx, Json::Value& fiel
     if (fieldIdx != 0) {
         return -1;
     }
-    // Handle ID field with split compression
-    Json::Value& idStreams = fieldMeta["streams"];
     uint32_t idLength = 0;
 
+    if (idDedupActive) {
+        /* One flag per line: a repeat copies the name `dist` lines back, a first occurrence
+           pulls the next name from the newnames sub-streams (the plain affix layout). */
+        if (idDedupLine >= idDedupLines) {
+            LOG_ERROR("QNAME dedup line %u exceeds the block's %u", idDedupLine, idDedupLines);
+            return -1;
+        }
+        uint8_t* lineStart = outputBlock->getCurrent();
+        const uint32_t before = outputBlock->getDataLen();
+        if (idDedupFlags[idDedupLine]) {
+            if (idDedupRepPos >= idDedupReps) {
+                LOG_ERROR("QNAME dedup repeat stream exhausted at line %u", idDedupLine);
+                return -1;
+            }
+            const uint32_t k = idDedupRepPos++;
+            const uint32_t dist = (uint32_t)idDedupDists[k] |
+                                  ((uint32_t)idDedupDists[idDedupReps + k] << 8) |
+                                  ((uint32_t)idDedupDists[2 * idDedupReps + k] << 16);
+            if (dist == 0 || dist > idDedupLine || idDedupNames.size() != idDedupLine) {
+                LOG_ERROR("QNAME dedup distance %u invalid at line %u", dist, idDedupLine);
+                return -1;
+            }
+            const std::string& name = idDedupNames[idDedupLine - dist];
+            if (outputBlock->getRemain() < name.size() + 1) {
+                LOG_ERROR("QNAME dedup expand overflow");
+                return -1;
+            }
+            memcpy(lineStart, name.data(), name.size());
+            lineStart[name.size()] = '\t';
+            outputBlock->setDataLen(before + (uint32_t)name.size() + 1);
+            idDedupNames.push_back(name);
+            ++idDedupLine;
+            return (int32_t)name.size() + 1;
+        }
+
+        Json::Value& nameStreams = fieldMeta["newnames"]["streams"];
+        for (uint32_t splitIdx = 0; splitIdx < nameStreams.size(); ++splitIdx) {
+            if (reconstructIdSegment(splitIdx, nameStreams[splitIdx], outputBlock, idLength) != 0) {
+                return -1;
+            }
+        }
+        const uint32_t written = outputBlock->getDataLen() - before;
+        uint32_t n = written;
+        if (n > 0 && lineStart[n - 1] == '\t') {
+            --n;
+        }
+        idDedupNames.emplace_back((const char*)lineStart, n);
+        ++idDedupLine;
+        return (int32_t)written;
+    }
+
+    // Handle ID field with split compression
+    Json::Value& idStreams = fieldMeta["streams"];
+
     if (idUsesQnameCoder && !idDecoders.empty()) {
-        /* Single-stream coder_qname: decode one whole QNAME per line (including the trailing '\t'). */
+        /* Single-stream coder_qname: decode one whole QNAME per line (including the trailing tab). */
         int32_t segLen = idDecoders[0]->decode_line(outputBlock->getCurrent(), outputBlock->getRemain(),
             UINT8_MAX, false);
         if (segLen < 0) {
-            LOG_ERROR("Decode QNAME (coder_qname) failed: %d", segLen);
+            LOG_ERROR("Decode QNAME (qname coder) failed: %d", segLen);
             return -1;
         }
         readOffset += idStreams[0]["dstlen"].asUInt();
@@ -6574,6 +6893,23 @@ int32_t SamCodecActuator::readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_
     return fieldDecoders[fieldIdx]->decode_line(dst, len, UINT8_MAX, false);
 }
 
+int32_t SamCodecActuator::readInsLine(uint8_t* dst, uint32_t len, uint32_t lineNo)
+{
+    if (!insBlockDecode) {
+        LOG_ERROR("SEQ ins stream was not decoded for block %llu, line %u",
+                  inBlockPtr->getBlockId(), lineNo);
+        return -1;
+    }
+    if (insBlockOffset + len > insBlockLength) {
+        LOG_ERROR("SEQ ins stream exhausted in block %llu, line %u (need %u, left %u)",
+                  inBlockPtr->getBlockId(), lineNo, len, insBlockLength - insBlockOffset);
+        return -1;
+    }
+    std::memcpy(dst, insBlockBuffer + insBlockOffset, len);
+    insBlockOffset += len;
+    return (int32_t)len;
+}
+
 int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMeta, uint8_t*& pBaseOut, uint32_t lineNo,
                                     uint32_t& totalBaseLen, RoughIOBlock* outputBlock) {
     /* ensureCapacity must not be called here: the caller captured basePtr for QUAL, and a realloc would dangle it. */
@@ -6583,6 +6919,8 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
     const bool isStreamsLayout = fieldMeta.isMember("streams");
     const bool isNoRefBlock = isStreamsLayout && !isSelfReference &&
                               fieldMeta.isMember("noref") && fieldMeta["noref"].asUInt() != 0;
+    /* Split layout: "m" holds only M/=/X bytes and "ins" holds I/S (and all raw) bytes. */
+    const bool isSplit = isStreamsLayout && seqLayoutOf(fieldMeta) == 1;
     const bool isUserReference = isSelfReference || isStreamsLayout;
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
@@ -6667,7 +7005,8 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             uint16_t mapFlag = mappedFlag.find(lineNo) == mappedFlag.end() ? 4 : mappedFlag[lineNo];
             // Not matched, or the block was coded with no reference at all: the payload is the bases themselves
             if (isNoRefBlock || (mapFlag & 0x04)) {
-                decoderLen = readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
+                decoderLen = isSplit ? readInsLine(baseSquashBuffer, actualBaseLen, lineNo)
+                                     : readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
                 if ((uint32_t)decoderLen != actualBaseLen) {
                     LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                     return -1;
@@ -6710,12 +7049,99 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 }
 
                 if (!findMappedPos) {
-                    decoderLen = readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
+                    decoderLen = isSplit ? readInsLine(baseSquashBuffer, actualBaseLen, lineNo)
+                                         : readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
                     if ((uint32_t)decoderLen != actualBaseLen) {
                         LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                         return -1;
                     }
                     writeDirectBases(baseSquashBuffer, decoderLen);
+                } else if (isSplit) {
+                    /* Two streams: M/=/X bytes from "m", I/S (and a raw/fallback record) from "ins". */
+                    const bool hasOps = (lineNo < cigarOpList.size()) && !cigarOpList[lineNo].empty();
+                    uint32_t mTotal = 0, insTotal = 0;
+                    if (hasOps) {
+                        for (const CigarOp& op : cigarOpList[lineNo]) {
+                            if (op.op == 'M' || op.op == '=' || op.op == 'X') {
+                                mTotal += op.len;
+                            } else if (op.op == 'I' || op.op == 'S') {
+                                insTotal += op.len;
+                            }
+                        }
+                    }
+                    const bool walkOk = hasOps && (mTotal + insTotal == actualBaseLen);
+                    if (!hasOps) {
+                        /* No ops: the writer stored raw ASCII bases in the ins stream. */
+                        decoderLen = readInsLine(baseSquashBuffer, actualBaseLen, lineNo);
+                        if ((uint32_t)decoderLen != actualBaseLen) {
+                            LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actual len %d",
+                                      inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
+                            return -1;
+                        }
+                        writeDirectBases(baseSquashBuffer, decoderLen);
+                    } else if (!walkOk) {
+                        /* The writer's actgEncode fallback: 2-bit codes in the ins stream. */
+                        decoderLen = readInsLine(baseInsSquashBuffer, actualBaseLen, lineNo);
+                        if ((uint32_t)decoderLen != actualBaseLen) {
+                            LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actual len %d",
+                                      inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
+                            return -1;
+                        }
+                        uint8_t* out = outputBlock->getCurrent();
+                        for (uint32_t i = 0; i < actualBaseLen; ++i) {
+                            out[i] = atcg4[baseInsSquashBuffer[i] & 0x3];
+                        }
+                    } else {
+                        if (mTotal > 0) {
+                            decoderLen = readMatchLine(fieldIdx, baseDiffSquashBuffer, mTotal, lineNo);
+                            if ((uint32_t)decoderLen != mTotal) {
+                                LOG_ERROR("base decode failed in block %llu, line %d, expect M %d, actual %d",
+                                          inBlockPtr->getBlockId(), lineNo, mTotal, decoderLen);
+                                return -1;
+                            }
+                        }
+                        if (insTotal > 0) {
+                            decoderLen = readInsLine(baseInsSquashBuffer, insTotal, lineNo);
+                            if ((uint32_t)decoderLen != insTotal) {
+                                LOG_ERROR("base decode failed in block %llu, line %d, expect I/S %d, actual %d",
+                                          inBlockPtr->getBlockId(), lineNo, insTotal, decoderLen);
+                                return -1;
+                            }
+                        }
+                        uint8_t* out = outputBlock->getCurrent();
+                        uint32_t mCur = 0;
+                        uint32_t insCur = 0;
+                        const SeqWalkEnd end = seqWalkCigar(cigarOpList[lineNo], actualBaseLen, refeMappedPos,
+                            [&](uint32_t readPos, int64_t pos, uint32_t len) {
+                                if (isSelfReference) {
+                                    seqSquashStretch(baseSelfRefSquash.data(), refeStrecchBuffer, len,
+                                                     (uint64_t)pos);
+                                    for (uint32_t i = 0; i < len; ++i) {
+                                        out[readPos + i] =
+                                            atcg4[(refeStrecchBuffer[i] ^ baseDiffSquashBuffer[mCur++]) & 0x3];
+                                    }
+                                } else {
+                                    pRefeGene->getStretch2Bits1Char(refeStrecchBuffer, len, pos);
+                                    for (uint32_t i = 0; i < len; ++i) {
+                                        baseSquashBuffer[i] = refeStrecchBuffer[i] ^ baseDiffSquashBuffer[mCur++];
+                                    }
+                                    pRefeGene->getActgFrom2Bits(baseSquashBuffer, len, out + readPos);
+                                }
+                                return SeqWalkAction::Continue;
+                            },
+                            [&](uint32_t readPos, uint32_t len) {
+                                for (uint32_t i = 0; i < len; ++i) {
+                                    out[readPos + i] = atcg4[baseInsSquashBuffer[insCur++] & 0x3];
+                                }
+                                return SeqWalkAction::Continue;
+                            },
+                            [](uint32_t) { return SeqWalkAction::Continue; });
+                        if (!end.complete || mCur != mTotal || insCur != insTotal) {
+                            LOG_ERROR("SEQ split payload mismatch in block %llu, line %u (M %u/%u, I/S %u/%u)",
+                                      inBlockPtr->getBlockId(), lineNo, mCur, mTotal, insCur, insTotal);
+                            return -1;
+                        }
+                    }
                 } else {
                     decoderLen = readMatchLine(fieldIdx, baseDiffSquashBuffer, actualBaseLen, lineNo);
                     if ((uint32_t)decoderLen != actualBaseLen) {

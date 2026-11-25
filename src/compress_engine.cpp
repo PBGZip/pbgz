@@ -432,6 +432,8 @@ void CompressEngine::fileDecisionProc(RoughIOBlock* inBlockPtr) {
         }
     }
 
+    preprocessInfo.inputTotalBytes = inputTotalBytes;
+
     /* -m selects the per-field candidate lists; CoderFactory additionally gates them
        by profile/level (see CodecSelector::analyze). */
     const int32_t analyzeRet = CodecSelector::analyze(inBlockPtr, inputTotalBytes, preprocessInfo,

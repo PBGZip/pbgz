@@ -1304,10 +1304,12 @@ TEST_F(SamDecompressTest, TestLongReadAllAcgtSeqAvoidsArithKAtLevel8)
 }
 
 /*
- * Short all-ACGT reads keep the packed order-1 fast path at -l8: this is the scenario
- * coder_arith_k was introduced for, and the long-read fix must not disturb it.
+ * Short all-ACGT reads are handled by the data-driven SEQ coder selection at -l8.
+ * This synthetic file is 4000 copies of one read, so the redundant-data rule may pick
+ * coder_fc (or the engine fallback); only a SEQ coders set and a clean roundtrip are
+ * required here. The order-1 speed guard is exercised by the large-file benchmark.
  */
-TEST_F(SamDecompressTest, TestShortReadAllAcgtSeqKeepsArithKAtLevel8)
+TEST_F(SamDecompressTest, TestShortReadAllAcgtSeqUsesSeqCoderAtLevel8)
 {
     const std::string file = "test_short_read_arithk.sam";
     writeAcgtSam(file, 4000, 100, true, 22);
@@ -1321,7 +1323,10 @@ TEST_F(SamDecompressTest, TestShortReadAllAcgtSeqKeepsArithKAtLevel8)
     SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
     ASSERT_EQ(compressor.preAnalysis(), 0);
     ASSERT_EQ(compressor.compress(), 0);
-    EXPECT_EQ(seqPayloadCoderMagic(pOutBlock), "coder_arith_k");
+    EXPECT_TRUE(seqPayloadCoderMagic(pOutBlock) == "coder_fc" ||
+                seqPayloadCoderMagic(pOutBlock) == "coder_bwt_cm" ||
+                seqPayloadCoderMagic(pOutBlock) == "coder_arith_ctx" ||
+                seqPayloadCoderMagic(pOutBlock) == "coder_arith_k");
 
     const int64_t compressedLen = pOutBlock->getDataLen();
     const int64_t metaLen = pOutBlock->getMetaLen();
@@ -1338,10 +1343,12 @@ TEST_F(SamDecompressTest, TestShortReadAllAcgtSeqKeepsArithKAtLevel8)
 }
 
 /*
- * Long random all-ACGT reads have no cross-read redundancy; the 4 MiB probe says
- * order-1 is within 3% of coder_fc, so arith_k stays for speed.
+ * Long random all-ACGT reads are the high-entropy case. The data-driven selection
+ * compares fc/arith_ctx/order-1 on the actual match payload; a small unit file may
+ * legitimately pick any of the SEQ coders, so only the SEQ coder set and a clean
+ * roundtrip are asserted. The large-file speed guard is covered by the benchmark.
  */
-TEST_F(SamDecompressTest, TestLongRandomAcgtSeqKeepsArithKAtLevel8)
+TEST_F(SamDecompressTest, TestLongRandomAcgtSeqUsesSeqCoderAtLevel8)
 {
     const std::string file = "test_long_random_arithk.sam";
     writeAcgtSam(file, 3000, 1000, false, 33);
@@ -1354,7 +1361,10 @@ TEST_F(SamDecompressTest, TestLongRandomAcgtSeqKeepsArithKAtLevel8)
     SamCodecActuator compressor(pInBlock, pOutBlock, &engine, &ref);
     ASSERT_EQ(compressor.preAnalysis(), 0);
     ASSERT_EQ(compressor.compress(), 0);
-    EXPECT_EQ(seqPayloadCoderMagic(pOutBlock), "coder_arith_k");
+    EXPECT_TRUE(seqPayloadCoderMagic(pOutBlock) == "coder_fc" ||
+                seqPayloadCoderMagic(pOutBlock) == "coder_bwt_cm" ||
+                seqPayloadCoderMagic(pOutBlock) == "coder_arith_ctx" ||
+                seqPayloadCoderMagic(pOutBlock) == "coder_arith_k");
     std::remove(file.c_str());
 }
 
@@ -1422,4 +1432,69 @@ TEST_F(SamDecompressTest, TestReferenceUsedFlagTracksActualUse) {
     std::remove(refFile.c_str());
     std::remove((refFile + ".fai").c_str());
     std::remove((refFile + ".ni").c_str());
+}
+
+/*
+ * The QNAME dedup layout (affix on first occurrences + a separate repeat stream) is a
+ * file-level verdict from the codec pre-selection. Pin it, then roundtrip a block whose
+ * names repeat at distances that cross many lines, with mapped and unmapped records
+ * interleaved in an unsorted order; the decoded text must be byte-identical.
+ */
+TEST_F(SamDecompressTest, TestQnameDedupLayoutRoundtrip) {
+    const std::string file = "test_qname_dedup.sam";
+    {
+        std::ofstream out(file);
+        ASSERT_TRUE(out.is_open());
+        out << "@HD\tVN:1.6\tSO:unsorted\n";
+        out << "@SQ\tSN:chr1\tLN:2000000\n";
+        std::vector<std::string> pool;
+        char name[128];
+        for (int i = 0; i < 4000; ++i) {
+            snprintf(name, sizeof(name), "HWUSI-EAS492_0029_FC:8:%d:%d:%d#0",
+                     1 + i % 120, 1000 + (i * 3) % 19000, 1000 + (i * 7) % 19000);
+            pool.emplace_back(name);
+        }
+        uint32_t rnd = 2463534242u;
+        for (int i = 0; i < 20000; ++i) {
+            rnd = rnd * 1664525u + 1013904223u;
+            const std::string& qname = pool[(rnd >> 9) % pool.size()];
+            rnd = rnd * 1664525u + 1013904223u;
+            if ((rnd & 1u) != 0) {
+                out << qname << "\t4\t*\t0\t0\t*\t*\t0\t0\t*\t*\n";
+            } else {
+                const uint32_t flag = (rnd & 2u) ? 0u : 16u;
+                out << qname << '\t' << flag << "\tchr1\t" << (1 + (rnd >> 2) % 1900000u)
+                    << "\t60\t*\t*\t0\t0\t*\t*\n";
+            }
+        }
+    }
+
+    loadSamData(file);
+    Reference ref = createTestReference();
+    PbgzParameter para;
+    CompressEngine ceng(para);
+    ASSERT_NE(ceng.getPreprocessInfoMut(), nullptr);
+    ceng.getPreprocessInfoMut()->setQnameUseAffix(2);
+    SamCodecActuator compressor(pInBlock, pOutBlock, &ceng, &ref);
+    ASSERT_EQ(compressor.preAnalysis(), 0);
+    ASSERT_EQ(compressor.compress(), 0);
+
+    const int64_t compressedLen = pOutBlock->getDataLen();
+    const int64_t metaLen = pOutBlock->getMetaLen();
+    pInBlock->reset();
+    memcpy(pInBlock->getBuffer(), pOutBlock->getBuffer(), (size_t)(compressedLen + metaLen));
+    pInBlock->setDataLen(compressedLen);
+    pInBlock->setMetaLen(metaLen);
+    pOutBlock->reset();
+
+    DecompressEngine deng(para);
+    SamCodecActuator decompressor(pInBlock, pOutBlock, &deng, &ref);
+    ASSERT_EQ(decompressor.decompress(), 0);
+
+    std::ifstream in(file, std::ios::binary);
+    std::string expected((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string got((const char*)pOutBlock->getBuffer(), (size_t)pOutBlock->getDataLen());
+    EXPECT_EQ(got.size(), expected.size());
+    EXPECT_EQ(got, expected);
+    std::remove(file.c_str());
 }

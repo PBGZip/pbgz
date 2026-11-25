@@ -139,6 +139,38 @@ bool seqRecordUsesReference(uint16_t chrId, uint16_t flag, uint64_t startPos, ui
     return true;
 }
 
+/* A contig name reduced to the form @SQ lists and FASTA headers share: lower case, no
+   "chr" prefix, no accession version suffix. "chr1", "1" and "CHR1" collapse to "1";
+   "NC_037328.1" to "nc_037328"; "M" to "mt". */
+static std::string canonicalContigName(const std::string& name)
+{
+    std::string s;
+    s.reserve(name.size());
+    for (char ch : name) {
+        s.push_back((char)std::tolower((unsigned char)ch));
+    }
+    if (s.size() > 3 && s.compare(0, 3, "chr") == 0) {
+        s.erase(0, 3);
+    }
+    const size_t dot = s.rfind('.');
+    if (dot != std::string::npos && dot + 1 < s.size()) {
+        bool version = true;
+        for (size_t i = dot + 1; i < s.size(); ++i) {
+            if (!std::isdigit((unsigned char)s[i])) {
+                version = false;
+                break;
+            }
+        }
+        if (version) {
+            s.erase(dot);
+        }
+    }
+    if (s == "m") {
+        s = "mt";
+    }
+    return s;
+}
+
 bool referenceLinesUpWithHeader(const Reference* reference)
 {
     if (reference == nullptr) {
@@ -157,32 +189,85 @@ bool referenceLinesUpWithHeader(const Reference* reference)
        reference whose unplaced contigs are ordered differently fall back to no reference at all,
        which costs far more than it protects. */
     std::unordered_map<std::string, Reference::SequenceSpan> refByName;
+    std::unordered_map<std::string, Reference::SequenceSpan> refByCanonical;
     refByName.reserve(seqs.size() * 2);
+    refByCanonical.reserve(seqs.size() * 2);
     for (const Reference::SequenceSpan& s : seqs) {
         refByName.emplace(s.name, s);
+        refByCanonical.emplace(canonicalContigName(s.name), s);
     }
 
     const std::vector<ChromosomeInfo>& chrs = SamInfo::getInstance().getAllChromosomeInfo();
     size_t reordered = 0;
+    bool nameMatch = true;
     for (const ChromosomeInfo& c : chrs) {
-        const auto it = refByName.find(c.name);
+        auto it = refByName.find(c.name);
         if (it == refByName.end()) {
-            return false;   /* the reference is not the assembly the header names */
+            /* Ensembl-style @SQ names ("1") and RefSeq-style FASTA names ("NC_037328.1")
+               often describe the same sequence; compare the canonical forms. */
+            it = refByCanonical.find(canonicalContigName(c.name));
+            if (it == refByCanonical.end()) {
+                nameMatch = false;
+                break;
+            }
         }
         if (it->second.length != 0 && it->second.length != c.length) {
-            return false;   /* same name, different sequence length: not this assembly */
+            nameMatch = false;   /* same sequence, different length: not this assembly */
+            break;
         }
         if (it->second.offset != c.position) {
             ++reordered;
         }
     }
-    if (reordered > 0) {
-        LOG_WARNING("Reference and @SQ list hold the same sequences in a different order "
-                    "(%zu of %zu contigs); the reference is used with the @SQ layout, so those "
-                    "contigs compress less well (decompression is unaffected).",
-                    reordered, chrs.size());
+    if (nameMatch) {
+        if (reordered > 0) {
+            LOG_WARNING("Reference and @SQ list hold the same sequences in a different order "
+                        "(%zu of %zu contigs); the reference is used with the @SQ layout, so those "
+                        "contigs compress less well (decompression is unaffected).",
+                        reordered, chrs.size());
+        }
+        return true;
     }
-    return true;
+
+    /* Different contig names but the same assembly: accept when a reference sequence starts at
+       the offset each @SQ contig addresses and covers it, for essentially all @SQ bases. This is
+       the alias/order case (e.g. @SQ "1".."29" over a RefSeq FASTA "NC_037328.1"...). The SEQ
+       column addresses bases by the @SQ offset, so such a reference compresses as well as one
+       whose names match. A contig whose span is missing or shorter (an assembly version with a
+       different chromosome) falls outside the match; reads there still round-trip, they just use
+       the bases at that offset. */
+    std::unordered_map<uint64_t, uint64_t> lengthAtOffset;
+    lengthAtOffset.reserve(seqs.size() * 2);
+    for (const Reference::SequenceSpan& s : seqs) {
+        lengthAtOffset.emplace(s.offset, s.length);
+    }
+    uint64_t totalBases = 0;
+    uint64_t alignedBases = 0;
+    size_t alignedContigs = 0;
+    for (const ChromosomeInfo& c : chrs) {
+        totalBases += c.length;
+        const auto it = lengthAtOffset.find(c.position);
+        if (it != lengthAtOffset.end() && (it->second == 0 || it->second >= c.length)) {
+            alignedBases += c.length;
+            ++alignedContigs;
+        }
+    }
+    /* At least two contigs must line up: a lone offset-0 hit proves nothing. 99% of the bases
+       leaves room for a version skew in a small contig (e.g. a 16 kb mitochondrion) without
+       accepting a reference of another assembly, whose whole layout differs. */
+    if (chrs.size() >= 2 && alignedContigs >= 2 && totalBases > 0 &&
+        alignedBases * 100 >= totalBases * 99) {
+        /* Every block's actuator asks again; report the decision once per run. */
+        static std::atomic<bool> warnedAliasMatch{false};
+        if (!warnedAliasMatch.exchange(true, std::memory_order_relaxed)) {
+            LOG_WARNING("Reference contig names differ from the @SQ list, but its layout matches "
+                        "(%zu of %zu @SQ contigs, %.4f%% of bases); using it by position.",
+                        alignedContigs, chrs.size(),
+                        100.0 * (double)alignedBases / (double)totalBases);
+        }
+        return true;
+    }
+    return false;
 }
 
 void warnReferenceNotUsableForSeq()
@@ -194,9 +279,10 @@ void warnReferenceNotUsableForSeq()
     /* Nothing else reports this: the reference loads and verifies, the SEQ column just stops
        improving. */
     LOG_WARNING("The reference does not line up with the file's @SQ list: its sequences are not "
-                "the ones the header names (a name is missing or its length differs), so a read's "
-                "position would address the wrong bases. SEQ is compressed without it; supply a "
-                "reference of the same assembly as the alignment.");
+                "the ones the header names (a name is missing or its length differs, and the "
+                "layout does not match either), so a read's position would address the wrong "
+                "bases. SEQ is compressed without it; supply a reference of the same assembly as "
+                "the alignment.");
     fprintf(stderr, "warning: reference does not line up with the @SQ list; "
                     "SEQ falls back to compression without a reference\n");
 }
@@ -320,6 +406,43 @@ bool seqRecordUsesSquashWindow(uint16_t chrId, uint16_t flag, uint64_t startPos,
         return false;
     }
     return true;
+}
+
+bool partitionSeqPayload(const std::vector<CigarOp>& ops, const uint8_t* coded, uint32_t seqLength,
+                         bool usedReference, std::vector<uint8_t>& mat, std::vector<uint8_t>& ins)
+{
+    if (coded == nullptr || seqLength == 0) {
+        return true;
+    }
+    if (!usedReference || ops.empty()) {
+        ins.insert(ins.end(), coded, coded + seqLength);
+        return true;
+    }
+    uint32_t readPos = 0;
+    for (const CigarOp& op : ops) {
+        const uint32_t n = op.len;
+        switch (op.op) {
+            case 'M': case '=': case 'X':
+                if (readPos + n > seqLength) {
+                    ins.insert(ins.end(), coded, coded + seqLength);
+                    return false;
+                }
+                mat.insert(mat.end(), coded + readPos, coded + readPos + n);
+                readPos += n;
+                break;
+            case 'I': case 'S':
+                if (readPos + n > seqLength) {
+                    ins.insert(ins.end(), coded, coded + seqLength);
+                    return false;
+                }
+                ins.insert(ins.end(), coded + readPos, coded + readPos + n);
+                readPos += n;
+                break;
+            default:
+                break;
+        }
+    }
+    return readPos == seqLength;
 }
 
 SeqRecordPayload buildSeqSquashRecordPayload(uint16_t chrId, uint16_t flag, uint64_t startPos,

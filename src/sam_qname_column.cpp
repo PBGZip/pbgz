@@ -25,11 +25,14 @@
 
 #include <cstring>
 #include <memory>
+#include <unordered_map>
 
 #include "coder/coder_affix_match.h"
 #include "coder/coder_bwt_cm.h"
 #include "coder/coder_io.h"
 #include "coder/coder_qname.h"
+#include "coder/coder_qname_dedup.h"
+#include "coder_factory.h"
 #include "coder/id_int_model.h"
 #include "io_block.h"
 #include "seq_stream_util.h"
@@ -767,7 +770,8 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
                                               const uint8_t* buffer,
                                               const std::vector<std::vector<int32_t>>& splitPos,
                                               const std::vector<uint8_t>& splitSymbols,
-                                              int64_t headEndLine, bool digitSplit = false)
+                                              int64_t headEndLine, bool digitSplit = false,
+                                              const std::vector<uint8_t>* lineKeep = nullptr)
 {
     IdSplitSegments seg;
     const uint32_t lineNum = (uint32_t)npos.size();
@@ -784,6 +788,9 @@ static IdSplitSegments collectIdSplitSegments(uint32_t splitIdx, uint32_t trialL
         const uint32_t contentId = lineIdx - (uint32_t)headEndLine;
         if (contentId >= splitPos.size()) {
             break;   /* the analysis and the block disagree; no split segment for this line */
+        }
+        if (lineKeep != nullptr && contentId < lineKeep->size() && !(*lineKeep)[contentId]) {
+            continue;   /* the dedup layout encodes first occurrences only */
         }
         const std::vector<int32_t>& posLine = splitPos[contentId];
         /* In digit-split mode stream 0 is the synthetic cut before the trailing digits; the
@@ -1012,7 +1019,8 @@ static Json::Value buildIdSplitMeta(const IdSplitWinner& winner, uint32_t splitI
    numeric layout instead of the affix coder's text.  This is a plain scan of the sampled
    lines: it costs no extra trial encode and adds no trial round. */
 static bool qnameDigitSplitFits(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
-                                uint32_t trialLines)
+                                uint32_t trialLines,
+                                const std::vector<uint8_t>* lineKeep = nullptr)
 {
     if (analysis.symbols.size() != 1 || analysis.symbols[0] != (uint8_t)'\t') {
         return false;   /* delimiter-ful names already tokenise */
@@ -1022,7 +1030,8 @@ static bool qnameDigitSplitFits(const QnameColumnInput& in, const IdSplitAnalysi
     const uint8_t* buffer = in.buffer;
     std::string prefix;
     uint32_t digits = 0;
-    uint32_t seen = 0;
+    uint32_t seen = 0;      /* record lines scanned (the trial bound) */
+    uint32_t used = 0;      /* kept lines actually inspected */
     for (uint32_t lineIdx = (uint32_t)in.headEndLine; lineIdx < lineNum; ++lineIdx) {
         if (trialLines != 0 && seen >= trialLines) {
             break;
@@ -1030,6 +1039,11 @@ static bool qnameDigitSplitFits(const QnameColumnInput& in, const IdSplitAnalysi
         const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
         const uint32_t lineEnd = (uint32_t)npos[lineIdx];
         if (lineStart >= lineEnd || buffer[lineStart] == (uint8_t)'@') {
+            continue;
+        }
+        ++seen;
+        const uint32_t contentId = lineIdx - (uint32_t)in.headEndLine;
+        if (lineKeep != nullptr && contentId < lineKeep->size() && !(*lineKeep)[contentId]) {
             continue;
         }
         const uint8_t* tab = (const uint8_t*)memchr(buffer + lineStart, '\t', lineEnd - lineStart);
@@ -1045,7 +1059,7 @@ static bool qnameDigitSplitFits(const QnameColumnInput& in, const IdSplitAnalysi
         if (run < 4 || b == lineStart) {
             return false;   /* too short to be a counter, or no prefix at all */
         }
-        if (seen == 0) {
+        if (used == 0) {
             prefix.assign((const char*)buffer + lineStart, (size_t)(b - lineStart));
             digits = run;
         } else if (digits != run ||
@@ -1053,14 +1067,15 @@ static bool qnameDigitSplitFits(const QnameColumnInput& in, const IdSplitAnalysi
                                   (size_t)(b - lineStart)) != 0) {
             return false;   /* mixed shapes: keep the whole-name layout */
         }
-        ++seen;
+        ++used;
     }
-    return seen > 0 && !prefix.empty();
+    return used > 0 && !prefix.empty();
 }
 
 int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
                          RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
-                         Json::Value& fieldMeta, uint32_t& fieldSrcLen)
+                         Json::Value& fieldMeta, uint32_t& fieldSrcLen,
+                         const std::vector<uint8_t>* lineKeep)
 {
     // One sub-stream per split symbol
     Json::Value streamMeta;
@@ -1069,7 +1084,7 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
 
     /* Delimiter-less names with a counter tail get one extra cut before the digits; the
        stream list then carries kQnameDigitSplit ahead of the real split symbols. */
-    const bool digitSplit = qnameDigitSplitFits(in, analysis, trialLines);
+    const bool digitSplit = qnameDigitSplitFits(in, analysis, trialLines, lineKeep);
     std::vector<uint8_t> streamSymbols;
     if (digitSplit) {
         streamSymbols.push_back(kQnameDigitSplit);
@@ -1083,7 +1098,8 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
 
         const IdSplitSegments seg = collectIdSplitSegments(i, trialLines, *in.npos,
                                                            in.buffer, analysis.positions,
-                                                           streamSymbols, in.headEndLine, digitSplit);
+                                                           streamSymbols, in.headEndLine, digitSplit,
+                                                           lineKeep);
         std::string constText;
         const bool constMode = isConstantIdSplit(seg, constText);
 
@@ -1125,6 +1141,117 @@ int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& anal
             totalSrcLength, totalDstLength, (double)(totalDstLength * 100)/(double)totalSrcLength);
 
     return totalDstLength;
+}
+
+/* QNAME dedup layout, version 2 (meta "qnameDedup": 2). Two parts:
+     - "newnames": the block's first-occurrence names, coded by the affix split layout
+       (identical to plain affix, just skipping lines that repeat);
+     - "dup": one whole-buffer stream, [one flag byte per line][three distance planes],
+       order-1 entropy coded. Flag 1 marks an exact repeat of the name `dist` lines back.
+   Keeping the repeat information in its own stream is what makes a repeat cost ~10 bits;
+   an inline textual marker costs more than the affix coder's whole name. */
+int32_t encodeQnameDedup(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
+                         RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
+                         Json::Value& fieldMeta, uint32_t& fieldSrcLen)
+{
+    const std::vector<size_t>& npos = *in.npos;
+    const uint32_t lineNum = (uint32_t)npos.size();
+    const uint8_t* buffer = in.buffer;
+    const uint32_t headEndLine = (uint32_t)in.headEndLine;
+
+    /* classify each record line: first occurrence, or an exact repeat of an earlier one */
+    std::unordered_map<std::string, uint32_t> last;
+    std::vector<uint8_t> keep(in.fieldTabs->size(), 0);
+    std::vector<uint8_t> flags;
+    std::vector<uint32_t> dists;
+    fieldSrcLen = 0;
+    uint32_t rec = 0;
+    for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
+        if (trialLines != 0 && lineIdx - headEndLine >= trialLines) {
+            break;
+        }
+        const uint32_t lineStart = (lineIdx == 0) ? 0 : (uint32_t)npos[lineIdx - 1] + 1;
+        if (buffer[lineStart] == '@') {
+            continue;
+        }
+        const uint32_t contentId = lineIdx - headEndLine;
+        if (contentId >= in.fieldTabs->size()) {
+            break;
+        }
+        const uint32_t nameLen = (uint32_t)(*in.fieldTabs)[contentId][0];
+        const std::string key((const char*)buffer + lineStart, nameLen);
+        const auto it = last.find(key);
+        if (it == last.end()) {
+            keep[contentId] = 1;
+            flags.push_back(0);
+            last.emplace(key, rec);
+        } else {
+            flags.push_back(1);
+            dists.push_back(rec - it->second);
+            it->second = rec;   /* always measure from the most recent occurrence */
+        }
+        fieldSrcLen += nameLen + 1;
+        ++rec;
+    }
+    if (rec == 0) {
+        return -1;
+    }
+
+    /* the first-occurrence names, through the ordinary affix split layout */
+    Json::Value splitMeta;
+    uint32_t splitSrc = 0;
+    const int32_t splitLen = encodeQnameSplit(in, analysis, outBlock, sink, trialLines, splitMeta,
+                                              splitSrc, &keep);
+    if (splitLen < 0) {
+        return -1;
+    }
+
+    /* flags, then the distance byte planes (24 bits covers any block; planes keep each
+       entropy model one-dimensional) */
+    const uint32_t reps = (uint32_t)dists.size();
+    std::vector<uint8_t> payload;
+    payload.reserve((size_t)rec + (size_t)reps * 3);
+    payload.insert(payload.end(), flags.begin(), flags.end());
+    for (uint32_t plane = 0; plane < 3; ++plane) {
+        for (uint32_t d : dists) {
+            payload.push_back((uint8_t)(d >> (8 * plane)));
+        }
+    }
+
+    std::shared_ptr<coder_io> dupIo = makeColumnIo(outBlock, "QNAME dedup", sink);
+    dupIo->meta["lines"] = (Json::Value::UInt)rec;
+    dupIo->meta["reps"] = (Json::Value::UInt)reps;
+    std::shared_ptr<coder_qname_dedup> dupCoder =
+        std::make_shared<coder_qname_dedup>(dupIo.get());
+    dupCoder->encode_line(payload.data(), (uint32_t)payload.size());
+    dupCoder->encode_flush();
+    if (dupIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode QNAME dedup: output buffer too small");
+        return -1;
+    }
+    outBlock->setDataLen(outBlock->getDataLen() + dupIo->data_len);
+
+    Json::Value dupMeta;
+    dupMeta["srclen"] = (Json::Value::UInt)payload.size();
+    dupMeta["dstlen"] = (Json::Value::UInt)dupIo->data_len;
+    dupMeta["lines"] = (Json::Value::UInt)rec;
+    dupMeta["reps"] = (Json::Value::UInt)reps;
+    dupMeta["coder"] = dupIo->meta;
+
+    fieldMeta["qnameDedup"] = (Json::Value::UInt)2;
+    fieldMeta["lines"] = (Json::Value::UInt)rec;
+    fieldMeta["newnames"] = splitMeta;
+    fieldMeta["dup"] = dupMeta;
+    fieldMeta["totalsrclen"] = (Json::Value::UInt)fieldSrcLen;
+    fieldMeta["totaldstlen"] = (Json::Value::UInt)((uint32_t)splitLen + (uint32_t)dupIo->data_len);
+    fieldMeta["field"] = 0;
+
+    LOG_INFO("SAM QNAME (dedup) compression completed: %u bytes -> %u bytes "
+             "(newnames %u, dup %u), compress ratio = %.2f%%",
+             fieldSrcLen, (uint32_t)splitLen + (uint32_t)dupIo->data_len, (uint32_t)splitLen,
+             (uint32_t)dupIo->data_len,
+             (double)(((uint32_t)splitLen + (uint32_t)dupIo->data_len) * 100) / (double)fieldSrcLen);
+    return (int32_t)((uint32_t)splitLen + (uint32_t)dupIo->data_len);
 }
 
 int32_t encodeQnameByQname(const QnameColumnInput& in, RoughIOBlock* outBlock, coder_err_sink* sink,

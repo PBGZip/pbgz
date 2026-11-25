@@ -94,6 +94,14 @@ constexpr uint8_t kQnameDigitSplit = 0x01;
 
 int32_t encodeQnameSplit(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
                          RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
+                         Json::Value& fieldMeta, uint32_t& fieldSrcLen,
+                         const std::vector<uint8_t>* lineKeep = nullptr);
+
+/* QNAME dedup layout: the block's first occurrences go through encodeQnameSplit, while
+   an exact repeat is a flag plus its line distance in a separate entropy-coded stream.
+   `trialLines` limits the sample (0 = whole block). */
+int32_t encodeQnameDedup(const QnameColumnInput& in, const IdSplitAnalysis& analysis,
+                         RoughIOBlock* outBlock, coder_err_sink* sink, uint32_t trialLines,
                          Json::Value& fieldMeta, uint32_t& fieldSrcLen);
 
 /* Same, with coder_qname: the column as one stream, deduplicated across lines. */

@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 #include <atomic>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -43,9 +44,11 @@ enum class CoderType : uint8_t {
     AFFIX_MATCH,  /* coder_affix_match: prefix/suffix matching column coder */
     ARITH,        /* coder_arith:  order-0 adaptive arithmetic byte-stream coder */
     ARITH_K,      /* coder_arith_k: htscodecs order-1 rANS byte coder (see coder_arith_k.h) */
+    ARITH_CTX,      /* coder_arith_ctx: order-2 arithmetic context coder, SAM SEQ only */
     RANS,         /* coder_rans:   static order-0 entropy coder, fast preset only (never a trial candidate) */
     QCM,          /* coder_qcm:    order-2 context model for the quality column (see coder_qcm.h) */
     QNAME,        /* coder_qname:  the QNAME column's own coder; never a trial candidate */
+    QNAME_DEDUP,  /* coder_qname_dedup: the QNAME dedup layout's flag/distance stream */
     COUNT
 };
 
@@ -61,9 +64,11 @@ static inline const char* coderTypeToMagic(CoderType type)
     case CoderType::AFFIX_MATCH: return "coder_affix_match";
     case CoderType::ARITH:     return "coder_arith";
     case CoderType::ARITH_K:   return "coder_arith_k";
+    case CoderType::ARITH_CTX:   return "coder_arith_ctx";
     case CoderType::RANS:      return "coder_rans";
     case CoderType::QCM:       return "coder_qcm";
     case CoderType::QNAME:     return "coder_qname";
+    case CoderType::QNAME_DEDUP: return "coder_qname_dedup";
     default:                   return "unknown";
     }
 }
@@ -211,14 +216,22 @@ struct PreprocessInfo {
        -1 means no verdict, and the coder side uses coder_bwt_cm. */
     std::atomic<int32_t> seqMatchCoder;
 
+    /* Whether SEQ is written as the split layout (aligned M/=/X stream + inserted/soft-clipped
+       stream) instead of one match stream: 1 = split, 0 = legacy, -1 = not decided. Decided once
+       per file from a size trial on the pre-selection sample (see selectSeqReferenceCoder). */
+    std::atomic<int32_t> seqSplitMode;
+
+
     /* Which form the block's N positions travel in: 0 = absolute 4-byte offsets ("npos"),
        1 = varint deltas ("nposd"), 2 = runs ("nposr"), -1 while undecided. All three are
        measured and the smallest wins; measured once on the first block that has positions. */
     std::atomic<int32_t> nposForm;
 
     /* Which layout writes the QNAME column: 1 = affix segmentation, 0 = coder_qname's
-       cross-line deduplication, -1 while undecided. Decided from a sample of the first block
-       (see CodecSelector::selectQnameLayout); -1 keeps the affix layout. */
+       cross-line deduplication, 2 = affix segmentation of the block's first occurrences
+       plus a separate repeat stream (see encodeQnameDedup), -1 while undecided. Decided
+       from a sample of the first block (see CodecSelector::selectQnameLayout); -1 keeps
+       the affix layout. */
     std::atomic<int32_t> qnameUseAffix;
 
     /* Second-stage QNAME confirmation, run on the reader thread over later blocks.
@@ -228,6 +241,7 @@ struct PreprocessInfo {
        blocks. Per-block QNAME meta records the layout, so earlier blocks stay valid. */
     int64_t qnameAffixSize = 0;
     int64_t qnameQnameSize = 0;
+    int64_t qnameDedupSize = 0;
     uint64_t qnameTrialBytes = 0;
     uint32_t qnameTrialLines = 0;
     uint32_t qnameConfirmBlocks = 0;
@@ -238,6 +252,27 @@ struct PreprocessInfo {
        within 3% of coder_fc on this file: 1 = yes, 0 = no, -1 = not probed yet. */
     std::atomic<int32_t> seqFastEligible;
 
+    /* File-level SEQ match coder chosen by the two-stage probe (a CoderType value), or -1
+       until the first sample. The probe samples a few blocks, accumulates fc/arith_ctx/
+       order-1 sizes and times, and re-decides when the evidence is clear. Earlier blocks
+       keep the coder recorded in their own meta, so a mid-file switch stays decodable. */
+    std::atomic<int32_t> seqChosenCoder;
+    std::mutex seqProbeMutex;
+    int64_t seqProbeFcSize = 0;
+    int64_t seqProbeCtxSize = 0;
+    int64_t seqProbeAkSize = 0;
+    uint64_t seqProbeFcUs = 0;
+    uint64_t seqProbeCtxUs = 0;
+    uint64_t seqProbeAkUs = 0;
+    uint32_t seqProbeSamples = 0;
+    uint32_t seqProbeFirstBlock = UINT32_MAX;
+    uint32_t seqProbeNextBlock = UINT32_MAX;
+    bool seqProbeDone = false;
+
+    /* Input file size in bytes (0 when unknown, e.g. a pipe). Used by the SEQ coder
+       decision as the speed-sensitivity guard for very large files. */
+    uint64_t inputTotalBytes = 0;
+
     /* Whether this file is worth training and publishing a QUAL prior for; training is
        deferred until the pre-training blocks are consumed (see
        CompressEngine::finalizePretrain). */
@@ -245,11 +280,11 @@ struct PreprocessInfo {
 
     /* Initializers follow the declaration order of the members. */
     PreprocessInfo() : fileType(TYPE_UNKNOW), state(PreprocessState::IDLE), sampleBytes(0), scannedBytes(0),
-                       qualPriorTrainingBytes(0), seqMatchCoder(-1), nposForm(-1), qnameUseAffix(-1),
-                       qnameAffixSize(0), qnameQnameSize(0), qnameTrialBytes(0), qnameTrialLines(0),
+                       qualPriorTrainingBytes(0), seqMatchCoder(-1), seqSplitMode(-1), nposForm(-1), qnameUseAffix(-1),
+                       qnameAffixSize(0), qnameQnameSize(0), qnameDedupSize(0), qnameTrialBytes(0), qnameTrialLines(0),
                        qnameConfirmBlocks(0), qnameInitialBlockId(UINT32_MAX), qnameConfirmed(true),
-                       seqFastEligible(-1),
-                       qualPriorRequested(false) {}
+                       seqFastEligible(-1), seqChosenCoder(-1),
+                       inputTotalBytes(0), qualPriorRequested(false) {}
 
     void reset(BlockType type)
     {
@@ -263,16 +298,25 @@ struct PreprocessInfo {
         qualPriorRequested = false;
         posPriorSnapshot.clear();
         seqMatchCoder.store(-1, std::memory_order_relaxed);
+        seqSplitMode.store(-1, std::memory_order_relaxed);
         nposForm.store(-1, std::memory_order_relaxed);
         qnameUseAffix.store(-1, std::memory_order_relaxed);
         qnameAffixSize = 0;
         qnameQnameSize = 0;
+        qnameDedupSize = 0;
         qnameTrialBytes = 0;
         qnameTrialLines = 0;
         qnameConfirmBlocks = 0;
         qnameInitialBlockId = UINT32_MAX;
         qnameConfirmed = true;
         seqFastEligible.store(-1, std::memory_order_relaxed);
+        seqChosenCoder.store(-1, std::memory_order_relaxed);
+        seqProbeFcSize = seqProbeCtxSize = seqProbeAkSize = 0;
+        seqProbeFcUs = seqProbeCtxUs = seqProbeAkUs = 0;
+        seqProbeSamples = 0;
+        seqProbeFirstBlock = UINT32_MAX;
+        seqProbeNextBlock = UINT32_MAX;
+        seqProbeDone = false;
     }
 
     bool isDone() const

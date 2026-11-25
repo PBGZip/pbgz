@@ -241,6 +241,18 @@ public:
        matchBlockDecode, else decoded per line. Returns bytes, or -1. */
     int32_t readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_t len, uint32_t lineNo);
 
+    /* Read one record's bytes from the split layout's inserted/soft-clipped stream. */
+    int32_t readInsLine(uint8_t* dst, uint32_t len, uint32_t lineNo);
+
+    /* Encode the split layout's two halves (aligned M/=/X and inserted/soft-clipped). */
+    int32_t writeSeqSplitStreams(const uint8_t* mat, uint32_t matLen, const uint8_t* ins,
+                                 uint32_t insLen, uint32_t srcLen, coder_io* matchIo,
+                                 Json::Value& metaSubs, Json::Value& metaStreams,
+                                 uint32_t& totalDstLen);
+
+    /* Decode the split layout's inserted/soft-clipped stream for a block. */
+    int32_t predecodeSeqInsStream(const Json::Value& streams, uint32_t streamId);
+
     int32_t decompressQuality(uint32_t lineNo, uint8_t* basePtr, uint32_t actualBaseLen,
                               RoughIOBlock* outputBlock);
 
@@ -321,6 +333,7 @@ private:
     int32_t compressIdFieldSplit(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
     /* QNAME-specific: cross-line deduplication + position-based modeling (see coder_qname.h). */
     int32_t compressIdFieldQname(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
+    int32_t compressIdFieldDedup(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
 
     // ID field whole compression
     int32_t compressIdFieldInAll(uint32_t& fieldSrcLen, Json::Value& fieldMeta);
@@ -342,6 +355,11 @@ private:
 
     /* The SEQ match stream coder chosen once per file by the codec pre-selection (see seqMatchCoderFor). */
     CoderType seqMatchCoderFor();
+
+    /* Two-stage SEQ match coder probe: samples a few blocks, compares coder_fc,
+       coder_arith_ctx and order-1, and keeps the file-level verdict in PreprocessInfo. */
+    CoderType chooseSeqMatchCoder(const uint8_t* buf, uint32_t len, uint8_t level,
+                                  bool fastCandidate, uint64_t blockId, bool& noPack);
 
     /* The file-level preprocessing result, or nullptr when there is no engine to hold one. */
     PreprocessInfo* preprocessInfoMut() const;
@@ -662,15 +680,35 @@ private:
     std::map<uint32_t, std::shared_ptr<coder>> fieldDecoders;
     /* Decoder for the QUAL column (see CoderFactory::makeQualDecoder). */
     std::shared_ptr<qual_record_decoder> qualDecoder;
+    /* QNAME dedup layout (meta "qnameDedup": 2): the block's names decoded so far, plus the
+       pre-decoded repeat stream (one flag per line, then three distance planes). */
+    std::vector<std::string> idDedupNames;
+    std::shared_ptr<coder> idDedupDecoder;
+    uint8_t* idDedupBuf = nullptr;
+    const uint8_t* idDedupFlags = nullptr;
+    const uint8_t* idDedupDists = nullptr;
+    uint32_t idDedupLines = 0;
+    uint32_t idDedupReps = 0;
+    uint32_t idDedupRepPos = 0;
+    uint32_t idDedupLine = 0;
+    bool idDedupActive = false;
+    void clearIdDedupState();
 
     uint8_t* baseSquashBuffer;
     uint8_t* baseDiffSquashBuffer;
+    /* The split layout's inserted/soft-clipped bytes for the current record. */
+    uint8_t* baseInsSquashBuffer = nullptr;
     uint8_t* refeStrecchBuffer;
     /* SEQ match stream decoded as a whole block (coder_fc); records are sliced from matchBlockBuffer. */
     bool matchBlockDecode = false;
     uint8_t* matchBlockBuffer = nullptr;
     uint32_t matchBlockLength = 0;
     uint32_t matchBlockOffset = 0;
+    /* The split layout's inserted/soft-clipped stream, decoded as a whole block. */
+    bool insBlockDecode = false;
+    uint8_t* insBlockBuffer = nullptr;
+    uint32_t insBlockLength = 0;
+    uint32_t insBlockOffset = 0;
     /* Byte length of the "mval" sub-stream under RLE, to advance readOffset past both. */
     uint32_t matchExtraOffset = 0;
     /* Reads with missing QUAL (*), expanded to seqLen '*' on compression. */

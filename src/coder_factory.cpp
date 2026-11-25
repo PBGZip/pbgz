@@ -39,6 +39,7 @@
 #include "coder/coder_rans.h"
 #include "coder/coder_qcm.h"
 #include "coder/coder_qname.h"
+#include "coder/coder_qname_dedup.h"
 #include "field_coder_config.h"
 
 namespace {
@@ -59,9 +60,18 @@ std::shared_ptr<coder> createArithK(coder_io* io)    {
     return std::make_shared<coder_arith_k>(io, /*order=*/1, /*mapBases=*/true,
                                            /*useRans=*/true, /*ransPack=*/!noPack);
 }
+std::shared_ptr<coder> createArithCtx(coder_io* io)   {
+    /* Order-2 arithmetic context coder for the SAM SEQ match stream only. */
+    return std::make_shared<coder_arith_k>(io, /*order=*/2, /*mapBases=*/true,
+                                           /*useRans=*/false, /*ransPack=*/true,
+                                           "coder_arith_ctx");
+}
 std::shared_ptr<coder> createRans(coder_io* io)      { return std::make_shared<coder_rans>(io); }
 std::shared_ptr<coder> createQcm(coder_io* io)       { return std::make_shared<coder_qcm>(io); }
 std::shared_ptr<coder> createQname(coder_io* io)     { return std::make_shared<coder_qname>(io); }
+std::shared_ptr<coder> createQnameDedup(coder_io* io) {
+    return std::make_shared<coder_qname_dedup>(io);
+}
 
 /*---------------------------------------------------------------------------
  * Applicability checks
@@ -110,6 +120,9 @@ const CoderDescriptor kCoderDescriptors[] = {
     {CoderType::AFFIX_MATCH,  CODER_PROFILE_ARCHIVE,  true,           true,           false,          1,        20,       CoderLevelPolicy::NONE,      createAffix,  supportsAffix, true, false},
     {CoderType::ARITH,        CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        40,       CoderLevelPolicy::SET_LEVEL, createArith,  supportsAny,  false, false},
     {CoderType::ARITH_K,      CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        41,       CoderLevelPolicy::NONE,      createArithK, supportsAny,  false, true},
+    /* SEQ-only fast context coder: order-2 arithmetic context model. It is only listed
+       in the SAM SEQ candidate row, so no other field can select it. */
+    {CoderType::ARITH_CTX,      CODER_PROFILE_ARCHIVE,  false,          true,           false,          1,        45,       CoderLevelPolicy::NONE,      createArithCtx, supportsAny,  false, true},
     {CoderType::RANS,         CODER_PROFILE_FAST,     false,          true,           false,          1,        50,       CoderLevelPolicy::NONE,      createRans,   supportsAny,  false, false},
 
     /* coder_lzma was removed as too slow (see the header comment). */
@@ -123,6 +136,8 @@ const CoderDescriptor kCoderDescriptors[] = {
        compressIdFieldQname). Never a trial candidate; its row lets a stream be rebuilt by
        magic alone (see makeFieldDecoder). */
     {CoderType::QNAME,        CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      createQname,  supportsAny,  false, false},
+    /* The dedup layout's flag/distance stream; selected by the QNAME encoder, never a trial. */
+    {CoderType::QNAME_DEDUP,  CODER_PROFILE_ARCHIVE,  false,          false,          false,          1,        0,        CoderLevelPolicy::NONE,      createQnameDedup, supportsAny, false, false},
 
     /* QUAL (coder_qual) and FCV2 (coder_fcv2) do not inherit coder and need record-level
        input, so they have no create function here; their rows only record that they are

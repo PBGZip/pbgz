@@ -148,6 +148,10 @@ bool trialEncode(const uint8_t* data, uint32_t len, int bwtLevel, uint32_t& outL
 bool trialStream(CoderType type, const uint8_t* data, uint32_t len, int level,
                  uint32_t& outLen, uint32_t& usec)
 {
+    /* coder_fc only accepts (FC_MIN_LEN, FC_MAX_LEN); a trial must not reach its check_exit. */
+    if (type == CoderType::FC && (len <= FC_MIN_LEN || len >= (uint32_t)FC_MAX_LEN)) {
+        return false;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     uint32_t cap = (len << 1) + 65536;
     std::vector<uint8_t> outBuf(cap, 0);
@@ -1279,6 +1283,12 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
 
     std::vector<uint8_t> match;
     match.reserve(seq.size());
+    /* The split layout's two halves, built alongside so the layout can be trialled. */
+    std::vector<uint8_t> mat;
+    std::vector<uint8_t> ins;
+    mat.reserve(seq.size() / 2 + 1024);
+    ins.reserve(seq.size() / 2 + 1024);
+    uint32_t maxSeqLen = 0;
     std::vector<uint8_t> ref2bit;
     std::vector<uint8_t> coded;
     std::vector<CigarOp> ops;
@@ -1306,6 +1316,10 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
         if (payload.usedReference) {
             ++refCoded;
         }
+        if (seqLength > maxSeqLen) {
+            maxSeqLen = seqLength;
+        }
+        partitionSeqPayload(ops, payload.bytes, seqLength, payload.usedReference, mat, ins);
         match.insert(match.end(), payload.bytes, payload.bytes + payload.length);
     }
     if (match.empty()) {
@@ -1329,6 +1343,65 @@ bool CodecSelector::selectSeqReferenceCoder(RoughIOBlock* block, Reference* refe
     /* A caller-published verdict (>= 0) wins over this trial; -1 is undecided. */
     if (info.seqMatchCoder.load(std::memory_order_relaxed) < 0) {
         info.setSeqMatchCoder((int32_t)verdict.selectedCoder);
+    }
+
+    /* Split layout trial: code the aligned M/=/X bytes and the inserted/soft-clipped bytes as
+       two streams and keep it only when it is clearly smaller than the single match stream.
+       Long reads with a meaningful I/S share are the case it targets; everything else keeps
+       the legacy layout, so a block with a small I/S share cannot regress. */
+    if (info.seqSplitMode.load(std::memory_order_relaxed) < 0) {
+        bool useSplit = false;
+        uint32_t singleSize = 0;
+        uint32_t splitSize = 0;
+        const bool longReads = (maxSeqLen > 1024);
+        const uint64_t totalBases = (uint64_t)mat.size() + (uint64_t)ins.size();
+        const bool enoughIns = (!ins.empty()) && (totalBases > 0) &&
+                               ((uint64_t)ins.size() * 10 >= totalBases * 1);
+        if (longReads && !mat.empty() && enoughIns && level < 9) {
+            const CoderType trialCoder = CoderType::FC;
+            const SeqRleSplit srle = splitSeqMatchStream(match.data(), (uint32_t)match.size());
+            const uint8_t* sp = srle.useRle ? srle.run.get() : match.data();
+            const uint32_t sl = srle.useRle ? srle.runLength : (uint32_t)match.size();
+            uint32_t part = 0, usec = 0;
+            const CoderType singleCoder = (trialCoder == CoderType::FC &&
+                                           (sl <= FC_MIN_LEN || sl >= (uint32_t)FC_MAX_LEN))
+                                              ? CoderType::BWT_CM : trialCoder;
+            bool ok = trialStream(singleCoder, sp, sl, level, part, usec);
+            singleSize = part;
+            if (ok && srle.useRle && srle.valLength > 0) {
+                if (trialStream(CoderType::BWT_CM, srle.val.get(), srle.valLength, level, part, usec)) {
+                    singleSize += part;
+                } else {
+                    ok = false;
+                }
+            }
+            const SeqRleSplit mrle = splitSeqMatchStream(mat.data(), (uint32_t)mat.size());
+            const uint8_t* mp = mrle.useRle ? mrle.run.get() : mat.data();
+            const uint32_t ml = mrle.useRle ? mrle.runLength : (uint32_t)mat.size();
+            const CoderType matCoder = (trialCoder == CoderType::FC &&
+                                        (ml <= FC_MIN_LEN || ml >= (uint32_t)FC_MAX_LEN))
+                                           ? CoderType::BWT_CM : trialCoder;
+            bool ok2 = trialStream(matCoder, mp, ml, level, part, usec);
+            splitSize = part;
+            if (ok2 && mrle.useRle && mrle.valLength > 0) {
+                if (trialStream(CoderType::BWT_CM, mrle.val.get(), mrle.valLength, level, part, usec)) {
+                    splitSize += part;
+                } else {
+                    ok2 = false;
+                }
+            }
+            if (ok2 && trialStream(CoderType::RANS, ins.data(), (uint32_t)ins.size(), level, part, usec)) {
+                splitSize += part;
+            } else {
+                ok2 = false;
+            }
+            /* 1% margin plus a little per-stream overhead: only an unambiguous win switches. */
+            useSplit = ok && ok2 && (splitSize + 64 + splitSize / 100 < singleSize);
+        }
+        info.seqSplitMode.store(useSplit ? 1 : 0, std::memory_order_relaxed);
+        LOG_INFO("SEQ layout trial: single=%u split=%u (m=%u ins=%u, maxRead=%u) -> %s",
+                 singleSize, splitSize, (uint32_t)mat.size(), (uint32_t)ins.size(), maxSeqLen,
+                 useSplit ? "split" : "single");
     }
 
     /* The smallest N-position form is a file property, so measure it once here. */
@@ -1419,7 +1492,7 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
         return false;
     }
 
-    /* Run both encoders as the block pass does, into a throwaway scratch block. */
+    /* Run the candidate encoders as the block pass does, into a throwaway scratch block. */
     RoughIOBlock scratch(block->getBufferSize());
     scratch.setBlockType(block->getBlockType());
     coder_err_sink sink;
@@ -1432,8 +1505,10 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
 
     Json::Value metaAffix;
     Json::Value metaQname;
+    Json::Value metaDedup;
     uint32_t srcAffix = 0;
     uint32_t srcQname = 0;
+    uint32_t srcDedup = 0;
     const auto t0 = std::chrono::steady_clock::now();
     const int32_t lenAffix = encodeQnameSplit(in, analysis, &scratch, &sink, QNAME_TRIAL_LINES,
                                               metaAffix, srcAffix);
@@ -1446,15 +1521,38 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
     const uint32_t qnameUs = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
                                  std::chrono::steady_clock::now() - t1).count();
     scratch.setDataLen(0);
+    const auto t2 = std::chrono::steady_clock::now();
+    const int32_t lenDedup = encodeQnameDedup(in, analysis, &scratch, &sink, QNAME_TRIAL_LINES,
+                                              metaDedup, srcDedup);
+    const uint32_t dedupUs = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - t2).count();
+    scratch.setDataLen(0);
 
-    /* Affix layout unless qname is smaller; a failure of one side leaves the other. */
-    const bool useAffix = (lenQname < 0) || (lenAffix >= 0 && lenAffix <= lenQname);
+    /* The smallest of affix / qname / dedup; a failure of one leaves the others. */
+    int32_t bestLen = -1;
+    int32_t layout = 1;   /* affix is the fallback */
+    if (lenAffix >= 0) {
+        bestLen = lenAffix;
+        layout = 1;
+    }
+    if (lenQname >= 0 && (bestLen < 0 || lenQname < bestLen)) {
+        bestLen = lenQname;
+        layout = 0;
+    }
+    if (lenDedup >= 0 && (bestLen < 0 || lenDedup < bestLen)) {
+        bestLen = lenDedup;
+        layout = 2;
+    }
+    if (bestLen < 0) {
+        layout = 1;
+    }
+    const CoderType bestCoder = (layout == 0) ? CoderType::QNAME : CoderType::AFFIX_MATCH;
 
     FieldCodecSelection sel;
     sel.status = FieldStatus::SELECTED;
-    sel.selectedCoder = useAffix ? CoderType::AFFIX_MATCH : CoderType::QNAME;
-    sel.sampleLen = srcAffix;      /* both layouts are handed the same lines */
-    sel.decidedLen = srcAffix;
+    sel.selectedCoder = bestCoder;
+    sel.sampleLen = (srcAffix != 0) ? srcAffix : (srcQname != 0 ? srcQname : srcDedup);
+    sel.decidedLen = sel.sampleLen;
     sel.rounds = 1;
     if (lenAffix >= 0) {
         sel.addTrial(CoderType::AFFIX_MATCH, (uint32_t)lenAffix, affixUs);
@@ -1462,9 +1560,13 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
     if (lenQname >= 0) {
         sel.addTrial(CoderType::QNAME, (uint32_t)lenQname, qnameUs);
     }
-    sel.bestCompLen = (uint32_t)(useAffix ? lenAffix : lenQname);
+    if (lenDedup >= 0) {
+        /* The dedup layout has no coder table row of its own; report it as an affix variant. */
+        sel.addTrial(CoderType::AFFIX_MATCH, (uint32_t)lenDedup, dedupUs);
+    }
+    sel.bestCompLen = (bestLen > 0) ? (uint32_t)bestLen : 0;
     info.fields[SAM_QNAME] = sel;
-    info.setQnameUseAffix(useAffix ? 1 : 0);
+    info.setQnameUseAffix(layout);
 
     /* Seed the reader-thread confirmation. A full 20k-line first sample needs no
        second stage; the default 10k-read block does. */
@@ -1472,15 +1574,17 @@ bool CodecSelector::selectQnameLayout(RoughIOBlock* block, PreprocessInfo& info)
         (uint32_t)std::min<size_t>(fieldTabs.size(), QNAME_TRIAL_LINES);
     info.qnameAffixSize = (lenAffix >= 0) ? lenAffix : 0;
     info.qnameQnameSize = (lenQname >= 0) ? lenQname : 0;
+    info.qnameDedupSize = (lenDedup >= 0) ? lenDedup : 0;
     info.qnameTrialBytes = srcAffix;
     info.qnameTrialLines = trialLines;
     info.qnameConfirmBlocks = 0;
     info.qnameInitialBlockId = (uint32_t)block->getBlockId();
-    info.qnameConfirmed = (lenAffix < 0 || lenQname < 0 || trialLines >= QNAME_TRIAL_LINES);
+    info.qnameConfirmed = (lenAffix < 0 || lenQname < 0 || lenDedup < 0 ||
+                           trialLines >= QNAME_TRIAL_LINES);
 
-    LOG_DEBUG("QNAME trial: affix=%d qname=%d (up to %u of the block's %u lines) -> %s", lenAffix,
-              lenQname, QNAME_TRIAL_LINES, (unsigned)fieldTabs.size(),
-              useAffix ? "affix" : "qname");
+    LOG_DEBUG("QNAME trial: affix=%d qname=%d dedup=%d (up to %u of the block's %u lines) -> %s",
+              lenAffix, lenQname, lenDedup, QNAME_TRIAL_LINES, (unsigned)fieldTabs.size(),
+              layout == 1 ? "affix" : (layout == 2 ? "dedup" : "qname"));
     return true;
 }
 
@@ -1520,15 +1624,20 @@ bool CodecSelector::confirmQnameLayout(RoughIOBlock* block, PreprocessInfo& info
 
     Json::Value metaAffix;
     Json::Value metaQname;
+    Json::Value metaDedup;
     uint32_t srcAffix = 0;
     uint32_t srcQname = 0;
+    uint32_t srcDedup = 0;
     const int32_t lenAffix =
         encodeQnameSplit(in, analysis, &scratch, &sink, limit, metaAffix, srcAffix);
     scratch.setDataLen(0);
     const int32_t lenQname =
         encodeQnameByQname(in, &scratch, &sink, limit, metaQname, srcQname);
     scratch.setDataLen(0);
-    if (lenAffix < 0 || lenQname < 0) {
+    const int32_t lenDedup =
+        encodeQnameDedup(in, analysis, &scratch, &sink, limit, metaDedup, srcDedup);
+    scratch.setDataLen(0);
+    if (lenAffix < 0 || lenQname < 0 || lenDedup < 0) {
         /* One layout cannot address this block; keep the current verdict. */
         info.qnameConfirmed = true;
         return false;
@@ -1536,6 +1645,7 @@ bool CodecSelector::confirmQnameLayout(RoughIOBlock* block, PreprocessInfo& info
 
     info.qnameAffixSize += lenAffix;
     info.qnameQnameSize += lenQname;
+    info.qnameDedupSize += lenDedup;
     info.qnameTrialBytes += srcAffix;
     info.qnameTrialLines += limit;
     ++info.qnameConfirmBlocks;
@@ -1544,29 +1654,31 @@ bool CodecSelector::confirmQnameLayout(RoughIOBlock* block, PreprocessInfo& info
         return true;
     }
 
-    const bool currentAffix = info.qnameUseAffix.load(std::memory_order_relaxed) != 0;
-    const bool affixBetter =
-        info.qnameAffixSize * 100 < info.qnameQnameSize * (100 - QNAME_SWITCH_MARGIN);
-    const bool qnameBetter =
-        info.qnameQnameSize * 100 < info.qnameAffixSize * (100 - QNAME_SWITCH_MARGIN);
-    bool newAffix = currentAffix;
-    if (currentAffix && qnameBetter) {
-        newAffix = false;
-    } else if (!currentAffix && affixBetter) {
-        newAffix = true;
+    /* Layout indices: 0 = qname, 1 = affix, 2 = dedup. Switch only when the best
+       alternative wins by QNAME_SWITCH_MARGIN percent. */
+    const int32_t cur = info.qnameUseAffix.load(std::memory_order_relaxed);
+    const int64_t sizes[3] = {info.qnameQnameSize, info.qnameAffixSize, info.qnameDedupSize};
+    int best = -1;
+    int64_t bestSize = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (sizes[i] > 0 && (best < 0 || sizes[i] < bestSize)) {
+            best = i;
+            bestSize = sizes[i];
+        }
     }
-    if (newAffix != currentAffix) {
-        info.setQnameUseAffix(newAffix ? 1 : 0);
-        LOG_INFO("QNAME layout switched after %u lines/%u blocks: affix=%lld qname=%lld -> %s",
-                 info.qnameTrialLines, info.qnameConfirmBlocks,
-                 (long long)info.qnameAffixSize, (long long)info.qnameQnameSize,
-                 newAffix ? "affix" : "qname");
-    } else {
-        LOG_INFO("QNAME layout confirmed after %u lines/%u blocks: affix=%lld qname=%lld -> %s",
-                 info.qnameTrialLines, info.qnameConfirmBlocks,
-                 (long long)info.qnameAffixSize, (long long)info.qnameQnameSize,
-                 newAffix ? "affix" : "qname");
+    bool changed = false;
+    if (best >= 0 && best != cur &&
+        (cur < 0 || cur > 2 || sizes[cur] <= 0 ||
+         bestSize * 100 < sizes[cur] * (100 - QNAME_SWITCH_MARGIN))) {
+        info.setQnameUseAffix(best);
+        changed = true;
     }
+    static const char* const kLayoutNames[3] = {"qname", "affix", "dedup"};
+    const int shown = (best >= 0) ? best : ((cur >= 0 && cur < 3) ? cur : 1);
+    LOG_INFO("QNAME layout %s after %u lines/%u blocks: affix=%lld qname=%lld dedup=%lld -> %s",
+             changed ? "switched" : "confirmed", info.qnameTrialLines, info.qnameConfirmBlocks,
+             (long long)info.qnameAffixSize, (long long)info.qnameQnameSize,
+             (long long)info.qnameDedupSize, kLayoutNames[shown]);
     info.qnameConfirmed = true;
     return true;
 }

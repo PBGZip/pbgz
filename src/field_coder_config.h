@@ -70,7 +70,7 @@ inline const FieldCoderConfig kSamFieldCoderConfig[SAM_FIELD_COUNT_SELECT] = {
     /* RNEXT */ {{CoderType::BWT_CM, CoderType::FC}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
     /* PNEXT */ {{}, CoderType::BWT_CM, PBGZ_FQ_NONE, CoderType::RANS},
     /* TLEN  */ {{}, CoderType::BWT_CM, PBGZ_FQ_NONE, CoderType::RANS},
-    /* SEQ   */ {{CoderType::FC}, CoderType::FC, PBGZ_FQ_RANS, CoderType::RANS},
+    /* SEQ   */ {{CoderType::FC, CoderType::ARITH_CTX}, CoderType::FC, PBGZ_FQ_RANS, CoderType::RANS},
     /* QUAL  */ {{CoderType::QUAL, CoderType::FCV2, CoderType::QCM}, CoderType::QUAL, PBGZ_FQ_NONE, CoderType::RANS},
     /* OPTION */ {{CoderType::BWT_CM, CoderType::FC, CoderType::AFFIX_MATCH}, CoderType::BWT_CM, PBGZ_FQ_RANS, CoderType::RANS},
 };

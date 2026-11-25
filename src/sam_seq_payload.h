@@ -65,8 +65,11 @@ bool deriveMdNm(Reference* reference, int64_t chrStart, uint64_t pos, uint16_t f
                 const std::vector<CigarOp>& ops, const uint8_t* seq, uint32_t seqLen,
                 std::vector<uint8_t>& refScratch, std::string& md, int64_t& nm);
 
-/* Whether the loaded reference is the assembly the @SQ list names: every @SQ sequence must exist
-   in the reference with the same length. The order need not match (a reordered FASTA still
+/* Whether the loaded reference is the assembly the @SQ list describes: every @SQ sequence must
+   exist in the reference with the same length, matched first by exact name and then by canonical
+   name ("chr1"/"1", accession versions ignored). When the names differ entirely (Ensembl vs
+   RefSeq style), a reference whose sequences start at the @SQ offsets and cover them is accepted
+   by position, which is how SEQ addresses it. The order need not match (a reordered FASTA still
    decompresses correctly; see the definition). Returns true when this holds, and also when it
    cannot be checked (an NI-loaded reference carries no names). */
 bool referenceLinesUpWithHeader(const Reference* reference);
@@ -253,3 +256,11 @@ struct SeqExceptionClass {
 
 /* The run form's payload: every gap, then every length, each as a varint (see above). */
 void buildRunForm(const SeqExceptionClass& exc, std::vector<uint8_t>& out);
+
+/* Partition one record's coded payload (buildSeqRecordPayload's bytes) into the aligned
+   M/=/X stream and the inserted/soft-clipped stream, in read order. A record that was not
+   reference-coded contributes all its bytes to `ins`. `mat`/`ins` are appended to. Returns
+   false only when the ops do not describe the payload (the caller must then not use the
+   partial result); a payload with usedReference == true always partitions exactly. */
+bool partitionSeqPayload(const std::vector<CigarOp>& ops, const uint8_t* coded, uint32_t seqLength,
+                         bool usedReference, std::vector<uint8_t>& mat, std::vector<uint8_t>& ins);

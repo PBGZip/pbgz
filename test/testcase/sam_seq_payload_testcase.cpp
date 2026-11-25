@@ -47,10 +47,13 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
+#include "sam_info.h"
 #include "sam_seq_payload.h"
 
 /*
@@ -138,4 +141,123 @@ TEST(SamSeqPayloadTest, CigarParseKeepsEachSpansLetterSet) {
     ASSERT_EQ(ops.size(), 7u);
     EXPECT_EQ(ops[0].op, 'H');
     EXPECT_EQ(ops[6].op, 'X');
+}
+
+/*
+ * referenceLinesUpWithHeader is the gate for the reference-coded SEQ layout. It has to accept a
+ * FASTA of the same assembly even when its contig names follow the other convention (Ensembl
+ * "1".."29" over a RefSeq "NC_037328.1"... FASTA), and it has to reject a reference of a different
+ * assembly. The alias case is decided by position because that is how SEQ addresses the reference:
+ * every @SQ contig must start at the offset the reference gives it.
+ */
+TEST(SamSeqPayloadTest, ReferenceLinesUpWithHeaderAcceptsAliasNamesByPosition)
+{
+    const std::string fasta = "test_alias_ref.fa";
+    {
+        std::ofstream out(fasta);
+        ASSERT_TRUE(out.is_open());
+        out << ">NC_000001.1\n" << std::string(40, 'A') << '\n';
+        out << ">NC_000002.1\n" << std::string(24, 'C') << '\n';
+    }
+    Reference reference(fasta, 1);
+    ASSERT_TRUE(reference.makeIndex());
+
+    SamInfo& info = SamInfo::getInstance();
+    info.clearChromosomeInfo();
+    info.resetChrIdCounter();
+    info.addChromosomeInfo("1", 40);
+    info.addChromosomeInfo("2", 24);
+    EXPECT_TRUE(referenceLinesUpWithHeader(&reference));
+
+    info.clearChromosomeInfo();
+    info.resetChrIdCounter();
+    std::remove(fasta.c_str());
+}
+
+TEST(SamSeqPayloadTest, ReferenceLinesUpWithHeaderAcceptsCanonicalNamesInAnyOrder)
+{
+    const std::string fasta = "test_canonical_ref.fa";
+    {
+        std::ofstream out(fasta);
+        ASSERT_TRUE(out.is_open());
+        /* "chr1"/"chr2" against "1"/"2", in the opposite order: only the canonical name matches. */
+        out << ">2\n" << std::string(24, 'C') << '\n';
+        out << ">1\n" << std::string(40, 'A') << '\n';
+    }
+    Reference reference(fasta, 1);
+    ASSERT_TRUE(reference.makeIndex());
+
+    SamInfo& info = SamInfo::getInstance();
+    info.clearChromosomeInfo();
+    info.resetChrIdCounter();
+    info.addChromosomeInfo("chr1", 40);
+    info.addChromosomeInfo("chr2", 24);
+    EXPECT_TRUE(referenceLinesUpWithHeader(&reference));
+
+    info.clearChromosomeInfo();
+    info.resetChrIdCounter();
+    std::remove(fasta.c_str());
+}
+
+TEST(SamSeqPayloadTest, ReferenceLinesUpWithHeaderRejectsAnotherAssembly)
+{
+    const std::string fasta = "test_other_assembly_ref.fa";
+    {
+        std::ofstream out(fasta);
+        ASSERT_TRUE(out.is_open());
+        /* Same names, different lengths and layout: another assembly. */
+        out << ">NC_000001.1\n" << std::string(48, 'A') << '\n';
+        out << ">NC_000002.1\n" << std::string(24, 'C') << '\n';
+    }
+    Reference reference(fasta, 1);
+    ASSERT_TRUE(reference.makeIndex());
+
+    SamInfo& info = SamInfo::getInstance();
+    info.clearChromosomeInfo();
+    info.resetChrIdCounter();
+    info.addChromosomeInfo("1", 40);
+    info.addChromosomeInfo("2", 24);
+    EXPECT_FALSE(referenceLinesUpWithHeader(&reference));
+
+    info.clearChromosomeInfo();
+    info.resetChrIdCounter();
+    std::remove(fasta.c_str());
+}
+
+/*
+ * The split SEQ layout separates aligned bytes (M/=/X) from inserted/soft-clipped ones, so the
+ * decoder can use a different model for each. Partitioning must follow the CIGAR and keep read
+ * order; a record that was not reference-coded belongs entirely to the inserted/raw stream.
+ */
+TEST(SamSeqPayloadTest, PartitionSeqPayloadSplitsAlignedAndInsertedBytes)
+{
+    const std::vector<CigarOp> ops = {{'M', 4}, {'I', 2}, {'M', 3}, {'S', 2}, {'D', 1}, {'M', 1}};
+    const uint8_t coded[12] = {0, 1, 2, 3, 10, 11, 4, 5, 6, 12, 13, 7};
+    std::vector<uint8_t> mat;
+    std::vector<uint8_t> ins;
+    ASSERT_TRUE(partitionSeqPayload(ops, coded, 12, true, mat, ins));
+    EXPECT_EQ(mat, (std::vector<uint8_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+    EXPECT_EQ(ins, (std::vector<uint8_t>{10, 11, 12, 13}));
+}
+
+TEST(SamSeqPayloadTest, PartitionSeqPayloadSendsRawRecordsToInsertedStream)
+{
+    const uint8_t raw[3] = {'A', 'C', 'G'};
+    std::vector<uint8_t> mat;
+    std::vector<uint8_t> ins;
+    ASSERT_TRUE(partitionSeqPayload({}, raw, 3, false, mat, ins));
+    EXPECT_TRUE(mat.empty());
+    EXPECT_EQ(ins, (std::vector<uint8_t>{'A', 'C', 'G'}));
+}
+
+TEST(SamSeqPayloadTest, PartitionSeqPayloadFollowsTheReferenceWalk)
+{
+    /* D/N consume nothing, I/S go to the inserted stream, and H/P are ignored. */
+    const std::vector<CigarOp> ops = {{'H', 2}, {'S', 1}, {'M', 2}, {'N', 3}, {'=', 1}, {'I', 1}};
+    const uint8_t coded[5] = {9, 0, 1, 2, 3};
+    std::vector<uint8_t> mat;
+    std::vector<uint8_t> ins;
+    ASSERT_TRUE(partitionSeqPayload(ops, coded, 5, true, mat, ins));
+    EXPECT_EQ(mat, (std::vector<uint8_t>{0, 1, 2}));
+    EXPECT_EQ(ins, (std::vector<uint8_t>{9, 3}));
 }
