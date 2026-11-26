@@ -202,3 +202,6 @@ test/con_sorted*
 test/bt_*
 test/a1.*
 test/.*
+
+# Local memorybank (kept out of version control)
+docs/MEMORYBANK.md

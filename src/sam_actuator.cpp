@@ -192,6 +192,7 @@ SamCodecActuator::~SamCodecActuator() {
     MemoryUtil::safeFree(refeStrecchBuffer);
     MemoryUtil::safeFree(matchBlockBuffer);
     MemoryUtil::safeFree(insBlockBuffer);
+    MemoryUtil::safeFree(rawBlockBuffer);
 
     // Release idDecoders
     idDecoders.clear();
@@ -2306,8 +2307,36 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
     std::vector<std::vector<SeqEntry>> sequences;
     std::vector<uint8_t> indexText;
     std::vector<uint8_t> valueText;
+    /* The same values in a typed, delimiter-free form: varint for i/I, one byte for A,
+       length+bytes for strings. Trialled against valueText per block. */
+    std::vector<uint8_t> valueTyped;
+    bool typedOk = true;
     std::vector<SegView> segs;
     uint32_t srcLen = 0;
+
+    auto parseSignedValue = [](const uint8_t* p, uint32_t n, int64_t& out) -> bool {
+        if (n == 0 || n > 20) return false;
+        uint64_t v = 0;
+        uint32_t i = 0;
+        bool neg = false;
+        if (p[0] == '-') { neg = true; i = 1; if (n == 1) return false; }
+        for (; i < n; ++i) {
+            if (p[i] < '0' || p[i] > '9') return false;
+            v = v * 10 + (uint64_t)(p[i] - '0');
+        }
+        out = neg ? -(int64_t)v : (int64_t)v;
+        return true;
+    };
+    auto parseUnsignedValue = [](const uint8_t* p, uint32_t n, uint64_t& out) -> bool {
+        if (n == 0 || n > 20) return false;
+        uint64_t v = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (p[i] < '0' || p[i] > '9') return false;
+            v = v * 10 + (uint64_t)(p[i] - '0');
+        }
+        out = v;
+        return true;
+    };
 
     for (uint32_t lineIdx = headEndLine; lineIdx < lineNum; ++lineIdx) {
         const uint32_t lineStart = (lineIdx == 0) ? 0 : npos[lineIdx - 1] + 1;
@@ -2442,8 +2471,42 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
         for (const SegView& v : segs) {
             if (v.verbatim) {
                 valueText.insert(valueText.end(), text + v.segOff, text + v.segOff + v.segLen);
+                if (typedOk) {
+                    appendVarint64(valueTyped, v.segLen);
+                    valueTyped.insert(valueTyped.end(), text + v.segOff, text + v.segOff + v.segLen);
+                }
             } else {
                 valueText.insert(valueText.end(), text + v.valueOff, text + v.valueOff + v.valueLen);
+                if (typedOk) {
+                    const uint8_t* val = text + v.valueOff;
+                    const uint32_t vl = v.valueLen;
+                    const char ty = (v.typeLen == 1) ? (char)text[v.typeOff] : 0;
+                    switch (ty) {
+                    case 'i': {
+                        int64_t sv = 0;
+                        if (!parseSignedValue(val, vl, sv)) { typedOk = false; break; }
+                        appendVarint64(valueTyped, zigzag64(sv));
+                        break;
+                    }
+                    case 'I': {
+                        uint64_t uv = 0;
+                        if (!parseUnsignedValue(val, vl, uv)) { typedOk = false; break; }
+                        appendVarint64(valueTyped, uv);
+                        break;
+                    }
+                    case 'A':
+                        if (vl != 1) { typedOk = false; break; }
+                        valueTyped.push_back(val[0]);
+                        break;
+                    case 'Z': case 'H': case 'f': case 'B':
+                        appendVarint64(valueTyped, vl);
+                        valueTyped.insert(valueTyped.end(), val, val + vl);
+                        break;
+                    default:
+                        typedOk = false;
+                        break;
+                    }
+                }
             }
             valueText.push_back('\t');
         }
@@ -2454,44 +2517,120 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
         }
     }
 
-    /* Commit: both sub-streams written before the meta; a failure rolls the block back. */
+    /* Commit: sidx, then whichever value stream is smaller (text or typed). */
     const uint32_t savedDst = outBlockPtr->getDataLen();
     Json::Value streams(Json::arrayValue);
     uint32_t totalDst = 0;
-    bool ok = true;
-    {
-        const char* const streamNames[2] = { "sidx", "vals" };
-        const std::vector<uint8_t>* const texts[2] = { &indexText, &valueText };
-        for (int i = 0; i < 2 && ok; ++i) {
-            std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(),
-                                                       outBlockPtr->getRemain(), streamNames[i]);
-            std::shared_ptr<coder> c = makeFieldEncoder(fieldIdx,
-                                                        samFieldDefaultCoder(fieldIdx, CoderType::BWT_CM),
-                                                        io.get(), true);
-            if (c == nullptr) {
-                ok = false;
-                break;
-            }
-            c->encode_line(texts[i]->data(), (uint32_t)texts[i]->size());
-            c->encode_flush();
-            if (io->err != coder_io::IO_OK) {
-                ok = false;
-                break;
-            }
-            Json::Value s;
-            s["sname"] = streamNames[i];
-            s["srclen"] = (Json::Value::UInt)texts[i]->size();
-            s["dstlen"] = (Json::Value::UInt)io->data_len;
-            s["coder"] = io->meta;
-            streams.append(s);
-            outBlockPtr->setDataLen(outBlockPtr->getDataLen() + io->data_len);
-            totalDst += io->data_len;
+
+    auto encodeBlob = [&](const std::vector<uint8_t>& blob, const char* name,
+                          std::vector<uint8_t>& outBytes, Json::Value& outCoder) -> uint32_t {
+        if (blob.empty()) {
+            return 0;
+        }
+        const int64_t saved = outBlockPtr->getDataLen();
+        std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(),
+                                                   outBlockPtr->getRemain(), name);
+        std::shared_ptr<coder> c = makeFieldEncoder(fieldIdx,
+                                                    samFieldDefaultCoder(fieldIdx, CoderType::BWT_CM),
+                                                    io.get(), true);
+        if (c == nullptr) {
+            return 0;
+        }
+        c->encode_line(blob.data(), (uint32_t)blob.size());
+        c->encode_flush();
+        if (io->err != coder_io::IO_OK) {
+            outBlockPtr->setDataLen(saved);
+            return 0;
+        }
+        outBytes.assign(outBlockPtr->getBuffer() + saved,
+                        outBlockPtr->getBuffer() + saved + io->data_len);
+        outCoder = io->meta;
+        outBlockPtr->setDataLen(saved);
+        return (uint32_t)io->data_len;
+    };
+
+    /* A whole-blob encoder of an explicit type: the line-mode default cannot be coder_fc, but a
+       typed value blob is decoded whole, so the type the pre-selection picked stays usable. */
+    auto encodeBlobAs = [&](const std::vector<uint8_t>& blob, const char* name, CoderType type,
+                            std::vector<uint8_t>& outBytes, Json::Value& outCoder) -> uint32_t {
+        if (blob.empty()) {
+            return 0;
+        }
+        if (type == CoderType::FC &&
+            (blob.size() <= (size_t)FC_MIN_LEN || blob.size() >= (size_t)FC_MAX_LEN)) {
+            return 0;
+        }
+        const int64_t saved = outBlockPtr->getDataLen();
+        std::shared_ptr<coder_io> io = makeCoderIo(outBlockPtr->getCurrent(),
+                                                   outBlockPtr->getRemain(), name);
+        std::shared_ptr<coder> c = makeEncoderOfType(type, io.get(), false, type);
+        if (c == nullptr) {
+            return 0;
+        }
+        c->encode_line(blob.data(), (uint32_t)blob.size());
+        c->encode_flush();
+        if (io->err != coder_io::IO_OK) {
+            outBlockPtr->setDataLen(saved);
+            return 0;
+        }
+        outBytes.assign(outBlockPtr->getBuffer() + saved,
+                        outBlockPtr->getBuffer() + saved + io->data_len);
+        outCoder = io->meta;
+        outBlockPtr->setDataLen(saved);
+        return (uint32_t)io->data_len;
+    };
+
+    std::vector<uint8_t> sidxBytes, textBytes, typedBytes;
+    Json::Value sidxCoder, textCoder, typedCoder;
+    const uint32_t sidxDst = encodeBlob(indexText, "sidx", sidxBytes, sidxCoder);
+    const uint32_t textDst = encodeBlob(valueText, "vals", textBytes, textCoder);
+    uint32_t typedDst = typedOk ? encodeBlob(valueTyped, "vals", typedBytes, typedCoder) : 0;
+    if (typedOk && typedDst > 0) {
+        std::vector<uint8_t> fcBytes;
+        Json::Value fcCoder;
+        const uint32_t fcDst = encodeBlobAs(valueTyped, "vals", CoderType::FC, fcBytes, fcCoder);
+        if (fcDst > 0 && fcDst < typedDst) {
+            typedBytes.swap(fcBytes);
+            typedCoder = fcCoder;
+            typedDst = fcDst;
         }
     }
-    if (!ok) {
+    /* The typed mode name is two bytes longer per block and the extra meta has to be paid for;
+       require a real margin so a block with no meaningful win stays on the text layout. */
+    const bool useTyped = typedOk && typedDst > 0 && (textDst == 0 || typedDst + 8 < textDst);
+    if ((!indexText.empty() && sidxDst == 0) || (!valueText.empty() && textDst == 0)) {
         outBlockPtr->setDataLen(savedDst);
         return false;
     }
+
+    if (!sidxBytes.empty()) {
+        memcpy(outBlockPtr->getBuffer() + outBlockPtr->getDataLen(), sidxBytes.data(),
+               sidxBytes.size());
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + sidxBytes.size());
+    }
+    Json::Value sidxMeta;
+    sidxMeta["sname"] = "sidx";
+    sidxMeta["srclen"] = (Json::Value::UInt)indexText.size();
+    sidxMeta["dstlen"] = (Json::Value::UInt)sidxDst;
+    sidxMeta["coder"] = sidxCoder;
+    streams.append(sidxMeta);
+    totalDst += sidxDst;
+
+    const std::vector<uint8_t>& bestBytes = useTyped ? typedBytes : textBytes;
+    const uint32_t bestDst = useTyped ? typedDst : textDst;
+    const uint32_t bestSrc = useTyped ? (uint32_t)valueTyped.size() : (uint32_t)valueText.size();
+    if (!bestBytes.empty()) {
+        memcpy(outBlockPtr->getBuffer() + outBlockPtr->getDataLen(), bestBytes.data(),
+               bestBytes.size());
+        outBlockPtr->setDataLen(outBlockPtr->getDataLen() + bestBytes.size());
+    }
+    Json::Value valsMeta;
+    valsMeta["sname"] = "vals";
+    valsMeta["srclen"] = (Json::Value::UInt)bestSrc;
+    valsMeta["dstlen"] = (Json::Value::UInt)bestDst;
+    valsMeta["coder"] = useTyped ? typedCoder : textCoder;
+    streams.append(valsMeta);
+    totalDst += bestDst;
 
     Json::Value seqJson(Json::arrayValue);
     for (const std::vector<SeqEntry>& seq : sequences) {
@@ -2506,7 +2645,7 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
         seqJson.append(segJson);
     }
 
-    fieldMeta["mode"] = "opt_strip";
+    fieldMeta["mode"] = useTyped ? "opt_strip_t" : "opt_strip";
     fieldMeta["seqs"] = seqJson;
     fieldMeta["streams"] = streams;
     fieldMeta["srclen"] = srcLen;
@@ -2515,8 +2654,9 @@ bool SamCodecActuator::compressOptionStrip(uint32_t fieldIdx, uint32_t& fieldSrc
     fieldSrcLen = srcLen;
     dstLen = totalDst;
 
-    LOG_INFO("SAM OPTION tag-strip compression: %u bytes -> %u bytes (%zu sequences, %zu records), ratio = %.2f%%",
+    LOG_INFO("SAM OPTION tag-strip compression: %u bytes -> %u bytes (%zu sequences, %zu records, %s values), ratio = %.2f%%",
              srcLen, totalDst, sequences.size(), (size_t)(lineNum - headEndLine),
+             useTyped ? "typed" : "text",
              (double)(totalDst * 100) / (double)(srcLen ? srcLen : 1));
     return true;
 }
@@ -3048,7 +3188,7 @@ CoderType SamCodecActuator::chooseSeqMatchCoder(const uint8_t* buf, uint32_t len
 int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uint8_t* matchBuffer,
                                                uint32_t matchLen, uint32_t srcLen, coder_io* matchIo,
                                                Json::Value& metaSubs, Json::Value& metaStreams,
-                                               uint32_t& totalDstLen)
+                                               uint32_t& totalDstLen, CoderType forcedCoder)
 {
     {
         const uint32_t payLen = rle.useRle ? rle.runLength : matchLen;
@@ -3058,14 +3198,15 @@ int32_t SamCodecActuator::writeSeqMatchStreams(const SeqRleSplit& rle, const uin
            (N/n) in this block: when it is non-zero the stream is not all-ACGT, so coder_arith_k cannot pack it and would only rANS its raw bytes, and coder_fc is kept.
            At the extreme-ratio level (-l9) coder_arith_k is never taken: the pre-selection's verdict (coder_fc/coder_bwt_cm) is used as it stands. */
         const bool fastMode = (compressMode() == PBGZ_MODE_FAST);
-        CoderType payType = seqMatchCoderFor();
+        CoderType payType = (forcedCoder != CoderType::COUNT) ? forcedCoder : seqMatchCoderFor();
         const bool shortReads = (maxBaseLength > 0 && maxBaseLength <= 512);
         const bool fastCandidate = shortReads && seqPayloadAllAcgt && !seqAnyMappedRecord &&
                                    !seqAnyUsedReference && seqSelfRef == nullptr;
         /* The two-stage probe picks among coder_fc, coder_arith_ctx and order-1 from the
            actual match payload. It samples the first block and three later blocks, not
-           every block. */
-        if (!fastMode && !rle.useRle && baseNCount == 0 && engineCompressLevel() < 9) {
+           every block. A forced coder (the raw-split layout) skips the probe. */
+        if (forcedCoder == CoderType::COUNT && !fastMode && !rle.useRle && baseNCount == 0 &&
+            engineCompressLevel() < 9) {
             bool noPack = false;
             payType = chooseSeqMatchCoder(payBuf, payLen, engineCompressLevel(), fastCandidate,
                                           inBlockPtr->getBlockId(), noPack);
@@ -3176,6 +3317,46 @@ int32_t SamCodecActuator::writeSeqSplitStreams(const uint8_t* mat, uint32_t matL
     return 0;
 }
 
+int32_t SamCodecActuator::writeSeqRawSplitStreams(const uint8_t* mat, uint32_t matLen,
+                                                  const uint8_t* raw, uint32_t rawLen,
+                                                  CoderType rawCoder, coder_io* matIo,
+                                                  Json::Value& metaSubs, Json::Value& metaStreams,
+                                                  uint32_t& totalDstLen)
+{
+    /* The reference-coded half is written exactly like the legacy stream but pinned to
+       coder_bwt_cm: on the sparse mismatch stream it beats the legacy coder_fc selection. */
+    const SeqRleSplit rle = splitSeqMatchStream(mat, matLen);
+    if (writeSeqMatchStreams(rle, mat, matLen, matLen, matIo, metaSubs, metaStreams, totalDstLen,
+                             CoderType::BWT_CM) != 0) {
+        return -1;
+    }
+
+    /* The records' own characters: DNA text, which coder_fc's LZP handles better than BWT. */
+    std::shared_ptr<coder_io> rawIo =
+        makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ raw");
+    {
+        std::shared_ptr<coder> rawEncoder =
+            CoderFactory::makeProfileEncoder(SAM_SEQ, compressMode(), rawIo.get(), rawCoder,
+                                             false, engineCompressLevel());
+        rawEncoder->encode_line(const_cast<uint8_t*>(raw), rawLen);
+        rawEncoder->encode_flush();
+    }
+    if (rawIo->err != coder_io::IO_OK) {
+        LOG_ERROR("Encode SEQ raw stream overflow: output buffer too small");
+        return -1;
+    }
+    metaSubs.clear();
+    metaSubs["srclen"] = (Json::Value::UInt)rawLen;
+    metaSubs["dstlen"] = rawIo->data_len;
+    metaSubs["coder"] = rawIo->meta;
+    metaSubs["sname"] = "raw";
+    metaStreams.append(metaSubs);
+    outBlockPtr->setDataLen(outBlockPtr->getDataLen() + rawIo->data_len);
+    totalDstLen += rawIo->data_len;
+    LOG_DEBUG("SEQ raw split streams: mat=%u raw=%u", matLen, rawLen);
+    return 0;
+}
+
 bool SamCodecActuator::referenceUsableForSeq()
 {
     if (pRefeGene == nullptr) {
@@ -3206,11 +3387,12 @@ static int atcgIndexOf(uint8_t ch)
 bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& out)
 {
     /* Bounds on building a consensus: window size cap (counters/squash memory) and a coverage floor.
-       At level 8+ on long reads a block holds 10x the reads, so its local window is wider; raising
-       the cap only there keeps the block consensus available. Levels 1-7 and short-read blocks keep
-       the historical 2 Mb bound, so their output and memory are unchanged. */
+       At level 8+ a block holds ~10x the reads at every read length, so its local window is wider
+       than the 2 Mb that levels 1-7 see. Keep the raised cap for all l8 blocks: gating it on long
+       reads made short-read l8 blocks silently fall back to raw bases (e.g. ctvt: 62% consensus
+       blocks at l8 vs 93% at l5, and a SEQ stream *larger* than l5's). */
     const int64_t maxWindowBases =
-        (engineCompressLevel() >= 8 && maxBaseLength > 512) ? (32LL << 20) : (2LL << 20);
+        (engineCompressLevel() >= 8) ? (32LL << 20) : (2LL << 20);
     static const int64_t kMinCoverageShift = 3;       /* at least 1/8 of the window covered */
 
     std::vector<size_t>& npos = inBlockPtr->getNpos();
@@ -3266,11 +3448,10 @@ bool SamCodecActuator::buildBlockConsensus(uint32_t fieldIdx, BlockConsensus& ou
     }
 
     /* A vote needs only a few reads per base; above that, sampling every k-th mapped read
-       keeps the same majority while bounding the counter pass. Only the level 8+ long-read
-       blocks whose window was raised (wider than 2 Mb) are sampled; every other block keeps
-       every read, so its consensus and output are unchanged. */
+       keeps the same majority while bounding the counter pass. The raised l8 windows are
+       sampled; every other block keeps every read. */
     uint32_t voteStride = 1;
-    if (engineCompressLevel() >= 8 && maxBaseLength > 512 && windowBases > (2LL << 20)) {
+    if (engineCompressLevel() >= 8 && windowBases > (2LL << 20)) {
         const int64_t voteBudget = 8 * windowBases;
         if (alignedBases > voteBudget) {
             voteStride = (uint32_t)std::max<int64_t>(1, alignedBases / voteBudget);
@@ -3444,6 +3625,10 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
     /* The SEQ match stream (per-base 2-bit: M/=/X XOR the reference, I/S raw). Accumulated whole-block, then encoded once. */
     std::unique_ptr<uint8_t[]> matchBuffer = std::make_unique<uint8_t[]>(inBlockPtr->getDataLen() + 1);
     uint32_t matchLen = 0;
+    /* The layout-2 halves: reference-coded payloads, and the records' own characters. They are
+       only written when the block used the reference for something and both halves are present. */
+    std::vector<uint8_t> splitMatchBuf;
+    std::vector<uint8_t> splitRawBuf;
     /* The split layout: aligned M/=/X bytes in matBuf, inserted/soft-clipped (and raw) in insBuf.
        The verdict is file-level (PreprocessInfo::seqSplitMode), so a block only pays for the
        layout the file selected. */
@@ -3560,6 +3745,14 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
                           inBlockPtr->getBlockId(), matchLen, seqLength, inBlockPtr->getDataLen());
                 return -1;
             }
+            if (!splitLayout && !payload.rawBases) {
+                splitMatchBuf.insert(splitMatchBuf.end(), payload.bytes,
+                                     payload.bytes + payload.length);
+            }
+            if (!splitLayout && payload.rawBases) {
+                splitRawBuf.insert(splitRawBuf.end(), payload.bytes,
+                                   payload.bytes + payload.length);
+            }
             if (splitLayout) {
                 partitionSeqPayload(ops, payload.bytes, payload.length, payload.usedReference,
                                     matBuf, insBuf);
@@ -3585,10 +3778,82 @@ int32_t SamCodecActuator::compressBaseWithRef(uint32_t fieldIdx, uint32_t& field
         const auto seqSplitT0 = pbgzprof::nowOrZero();
         SeqRleSplit rle = splitSeqMatchStream(matchBuffer.get(), matchLen);
         pbgzprof::addSince(pbgzprof::SEQ_MATCH_SPLIT, seqSplitT0);
-        /* Sub-stream "m": run-length segment under RLE, otherwise the whole match stream. */
+
+        /* The legacy stream mixes 2-bit mismatch codes with the ASCII bases of records that could
+           not use the reference. When both are present, the separate layout is trialled against
+           the legacy stream and kept only when it is smaller (layout 2: "m" = reference-coded
+           payload, "raw" = the records' own characters). A block that never used the reference
+           stays on the legacy path: its whole payload is raw, and the decoder's block-level
+           no-reference branch reads every record from the same stream. */
+        const bool rawSplitCandidate =
+            !splitRawBuf.empty() && !splitMatchBuf.empty() && !rle.useRle &&
+            seqAnyUsedReference && compressMode() == PBGZ_MODE_ARCHIVE &&
+            (baseNCount != 0 || engineCompressLevel() >= 9);
+        const uint32_t splitDstBefore = outBlockPtr->getDataLen();
+        const Json::Value::ArrayIndex splitStreamsBefore = metaStreams.size();
         if (writeSeqMatchStreams(rle, matchBuffer.get(), matchLen, srcLen, matchIo.get(), metaSubs,
                                  metaStreams, totalDstLen) != 0) {
             return -1;
+        }
+        if (rawSplitCandidate) {
+            auto trialDst = [&](const uint8_t* data, uint32_t len, CoderType type) -> uint32_t {
+                if (len == 0) {
+                    return 0;
+                }
+                std::vector<uint8_t> out((size_t)len * 2 + (1u << 20));
+                coder_io io(out.data(), (int32_t)out.size());
+                std::shared_ptr<coder> c =
+                    CoderFactory::makeProfileEncoder(SAM_SEQ, compressMode(), &io, type, false,
+                                                     engineCompressLevel());
+                if (c == nullptr) {
+                    return UINT32_MAX;
+                }
+                c->encode_line(const_cast<uint8_t*>(data), len);
+                c->encode_flush();
+                return (io.err == coder_io::IO_OK) ? (uint32_t)io.data_len : UINT32_MAX;
+            };
+            const SeqRleSplit matRle = splitSeqMatchStream(splitMatchBuf.data(),
+                                                           (uint32_t)splitMatchBuf.size());
+            const uint32_t matPayLen = matRle.useRle ? matRle.runLength
+                                                     : (uint32_t)splitMatchBuf.size();
+            const uint8_t* matPay = matRle.useRle ? matRle.run.get() : splitMatchBuf.data();
+            uint32_t splitDst = trialDst(matPay, matPayLen, CoderType::BWT_CM);
+            if (matRle.useRle && matRle.valLength > 0) {
+                const uint32_t valDst = trialDst(matRle.val.get(), matRle.valLength,
+                                                 CoderType::BWT_CM);
+                splitDst = (splitDst == UINT32_MAX || valDst == UINT32_MAX)
+                               ? UINT32_MAX : splitDst + valDst;
+            }
+            /* coder_fc needs a payload inside its own size range; smaller raw halves take BWT. */
+            const CoderType rawCoder =
+                (splitRawBuf.size() > (size_t)FC_MIN_LEN && splitRawBuf.size() < (size_t)FC_MAX_LEN)
+                    ? CoderType::FC : CoderType::BWT_CM;
+            const uint32_t rawDst = trialDst(splitRawBuf.data(), (uint32_t)splitRawBuf.size(),
+                                             rawCoder);
+            if (splitDst == UINT32_MAX || rawDst == UINT32_MAX) {
+                splitDst = UINT32_MAX;
+            } else {
+                splitDst += rawDst;
+            }
+            const uint32_t singleDst = outBlockPtr->getDataLen() - splitDstBefore;
+            /* The extra sub-stream's meta is a little over a hundred bytes; demand a real win. */
+            if (splitDst != UINT32_MAX && splitDst + 256 < singleDst) {
+                outBlockPtr->setDataLen(splitDstBefore);
+                metaStreams.resize(splitStreamsBefore);
+                totalDstLen -= singleDst;
+                std::shared_ptr<coder_io> splitMatIo =
+                    makeCoderIo(outBlockPtr->getCurrent(), outBlockPtr->getRemain(), "SEQ match");
+                if (writeSeqRawSplitStreams(splitMatchBuf.data(), (uint32_t)splitMatchBuf.size(),
+                                            splitRawBuf.data(), (uint32_t)splitRawBuf.size(),
+                                            rawCoder, splitMatIo.get(), metaSubs, metaStreams,
+                                            totalDstLen) != 0) {
+                    return -1;
+                }
+                fieldMeta["seqlayout"] = (Json::Value::UInt)2;
+                LOG_DEBUG("SEQ raw split: block %lld match=%u raw=%u single=%u split=%u",
+                          (long long)inBlockPtr->getBlockId(), (uint32_t)splitMatchBuf.size(),
+                          (uint32_t)splitRawBuf.size(), singleDst, splitDst);
+            }
         }
         totalSrcLen += srcLen;
     }
@@ -4729,6 +4994,7 @@ int32_t SamCodecActuator::initIdFieldDecoders(Json::Value& idMeta)
 /* The SEQ layout version a block records:
      0 / absent = one match stream (legacy)
      1          = aligned "m" stream + inserted/soft-clipped "ins" stream
+     2          = reference-coded "m" stream + the records' own characters in "raw"
    A future layout adds a value; an unknown one is rejected rather than silently decoded with
    the version-1 rules. Only the "seqlayout" key is recognized. */
 static int seqLayoutOf(const Json::Value& meta)
@@ -4742,7 +5008,7 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
     maxBaseLength = baseMeta["maxlen"].asUInt();
     minBaseLength = baseMeta["minlen"].asUInt();
     const int seqLayout = seqLayoutOf(baseMeta);
-    if (seqLayout > 1) {
+    if (seqLayout > 2) {
         LOG_ERROR("SEQ block %lld uses unsupported layout version %d",
                   (long long)inBlockPtr->getBlockId(), seqLayout);
         return -1;
@@ -4810,6 +5076,20 @@ int32_t SamCodecActuator::initSeqFieldDecoders(Json::Value& baseMeta, uint32_t i
             }
             readOffset += insDstLength;
         }
+        /* Layout 2: the records' own characters follow the "m"/"mval" pair as "raw". */
+        if (seqLayout == 2) {
+            if (id + 1 >= (uint32_t)baseMetaStreams.size() ||
+                baseMetaStreams[id + 1]["sname"].asString() != "raw") {
+                LOG_ERROR("SEQ raw-split layout is missing its raw stream");
+                return -1;
+            }
+            id++;
+            const uint32_t rawDstLength = baseMetaStreams[id]["dstlen"].asUInt();
+            if (predecodeSeqRawStream(baseMetaStreams, id) != 0) {
+                return -1;
+            }
+            readOffset += rawDstLength;
+        }
         /* SEQ exception streams (see SeqExceptionClass): one per character present, a strictly increasing offset list. */
         if (predecodeSeqExceptionStreams(baseMeta, baseMetaStreams, id) != 0) {
             return -1;
@@ -4847,7 +5127,8 @@ bool SamCodecActuator::recordDeferredFieldOffset(uint32_t idx, Json::Value& fiel
 {
     if (idx == 11 && fieldMeta.isMember("mode") &&
         (fieldMeta["mode"].asString() == "tag_split" ||
-         fieldMeta["mode"].asString() == "opt_strip")) {
+         fieldMeta["mode"].asString() == "opt_strip" ||
+         fieldMeta["mode"].asString() == "opt_strip_t")) {
         /* OPTION is the last field, so its streams need no advancing. */
         fieldIoStart[idx] = readOffset;
         return true;
@@ -4938,8 +5219,10 @@ int32_t SamCodecActuator::decompressRegularField(uint32_t fieldIdx, uint32_t lin
 int32_t SamCodecActuator::decompressOptionField(uint32_t lineNo, uint8_t splitFlag,
                                                 RoughIOBlock* outputBlock,
                                                 const Json::Value& fieldMeta) {
-    /* The stripped layout: rebuild each record from its sequence index and values (see compressOptionStrip). */
-    if (fieldMeta.isMember("mode") && fieldMeta["mode"].asString() == "opt_strip") {
+    /* The stripped layout (text or typed values): rebuild each record from its sequence
+       index and values (see compressOptionStrip). */
+    const std::string optMode = fieldMeta.isMember("mode") ? fieldMeta["mode"].asString() : "";
+    if (optMode == "opt_strip" || optMode == "opt_strip_t") {
         if (optionCacheEmpty) {
             if (decodeOptionStripColumn(fieldMeta) != 0) {
                 return -1;
@@ -5295,6 +5578,8 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
     auto openSub = [&](const Json::Value& meta, uint32_t at, uint32_t len) -> std::shared_ptr<coder> {
         const std::string coderName = meta["coder"]["magic"].asString();
         std::shared_ptr<coder_io> io = makeCoderIo(inBlockPtr->getBuffer() + at, len, "OPTION stream");
+        /* A whole-block decoder (coder_fc) reads its parameters back from this meta. */
+        io->meta = meta;
         ioVector.push_back(io);
         FieldDecoderArgs args;
         if (coderName == "coder_affix_match" ||
@@ -5309,6 +5594,24 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
     if (sidxCoder == nullptr || valsCoder == nullptr) {
         LOG_ERROR("Unsupported OPTION sub-stream coder");
         return -1;
+    }
+
+    /* opt_strip_t: the value stream is typed and delimiter-free, decoded whole here. */
+    const bool typedVals =
+        fieldMeta.isMember("mode") && fieldMeta["mode"].asString() == "opt_strip_t";
+    std::vector<uint8_t> typedValsBuf;
+    uint32_t typedPos = 0;
+    if (typedVals) {
+        const uint32_t tlen = valsMeta->isMember("srclen") ? (*valsMeta)["srclen"].asUInt() : 0;
+        if (tlen == 0) {
+            LOG_ERROR("OPTION typed values stream has no length");
+            return -1;
+        }
+        typedValsBuf.resize((size_t)tlen + 1);
+        if (valsCoder->decode_line(typedValsBuf.data(), tlen, UINT8_MAX, false) != (int32_t)tlen) {
+            LOG_ERROR("OPTION typed values stream is corrupt");
+            return -1;
+        }
     }
 
     /* The sequence table's texts, read out of the meta once per sequence (seqText[i][k] is segment k of sequence i). */
@@ -5345,16 +5648,6 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
             return -1;
         }
 
-        const int32_t valsGot = valsCoder->decode_line(tmp, sizeof(tmp), '\n', false);
-        if (valsGot <= 0) {
-            LOG_ERROR("OPTION values line is missing");
-            return -1;
-        }
-        uint32_t valsEnd = (uint32_t)valsGot;
-        if (valsEnd > 0 && tmp[valsEnd - 1] == '\n') {
-            --valsEnd;
-        }
-
         /* The value count is fixed by the sequence, not the line's length. */
         const Json::Value& seq = seqs[seqIdx];
         if (!seqReady[seqIdx]) {
@@ -5369,6 +5662,75 @@ int32_t SamCodecActuator::decodeOptionStripColumn(const Json::Value& fieldMeta)
             }
             seqReady[seqIdx] = 1;
         }
+
+        if (typedVals) {
+            const uint32_t tlen = (uint32_t)typedValsBuf.size();
+            for (uint32_t k = 0; k < (uint32_t)seq.size(); ++k) {
+                if (k) {
+                    optionRecText.push_back('\t');
+                }
+                const SeqSegment& e = seqText[seqIdx][k];
+                if (e.verbatim) {
+                    uint64_t n = 0;
+                    if (!readVarint64(typedValsBuf.data(), tlen, typedPos, n) ||
+                        n > (uint64_t)(tlen - typedPos)) {
+                        LOG_ERROR("OPTION typed verbatim length is corrupt");
+                        return -1;
+                    }
+                    optionRecText.insert(optionRecText.end(), typedValsBuf.data() + typedPos,
+                                         typedValsBuf.data() + typedPos + (uint32_t)n);
+                    typedPos += (uint32_t)n;
+                    continue;
+                }
+                optionRecText.insert(optionRecText.end(), e.prefix.begin(), e.prefix.end());
+                const std::string ty = seq[k][2].asString();
+                const char t = ty.empty() ? 0 : ty[0];
+                if (t == 'i' || t == 'I') {
+                    uint64_t uv = 0;
+                    if (!readVarint64(typedValsBuf.data(), tlen, typedPos, uv)) {
+                        LOG_ERROR("OPTION typed integer is corrupt");
+                        return -1;
+                    }
+                    std::string text;
+                    if (t == 'i') {
+                        text = std::to_string(unzigzag64(uv));
+                    } else {
+                        text = std::to_string(uv);
+                    }
+                    optionRecText.insert(optionRecText.end(), text.begin(), text.end());
+                } else if (t == 'A') {
+                    if (typedPos >= tlen) {
+                        LOG_ERROR("OPTION typed char is corrupt");
+                        return -1;
+                    }
+                    optionRecText.push_back(typedValsBuf[typedPos++]);
+                } else {
+                    uint64_t n = 0;
+                    if (!readVarint64(typedValsBuf.data(), tlen, typedPos, n) ||
+                        n > (uint64_t)(tlen - typedPos)) {
+                        LOG_ERROR("OPTION typed string length is corrupt");
+                        return -1;
+                    }
+                    optionRecText.insert(optionRecText.end(), typedValsBuf.data() + typedPos,
+                                         typedValsBuf.data() + typedPos + (uint32_t)n);
+                    typedPos += (uint32_t)n;
+                }
+            }
+            optionRecOff.push_back((uint32_t)optionRecText.size());
+            optionRecPresent.push_back(seq.size() > 0 ? 1 : 0);
+            continue;
+        }
+
+        const int32_t valsGot = valsCoder->decode_line(tmp, sizeof(tmp), '\n', false);
+        if (valsGot <= 0) {
+            LOG_ERROR("OPTION values line is missing");
+            return -1;
+        }
+        uint32_t valsEnd = (uint32_t)valsGot;
+        if (valsEnd > 0 && tmp[valsEnd - 1] == '\n') {
+            --valsEnd;
+        }
+
         valueStarts.clear();
         if (seq.size() > 0) {
             uint32_t start = 0;
@@ -5709,6 +6071,41 @@ int32_t SamCodecActuator::predecodeSeqInsStream(const Json::Value& streams, uint
     insBlockLength = srcLen;
     insBlockOffset = 0;
     insBlockDecode = true;
+    return 0;
+}
+
+/* Layout 2's "raw" stream: the records' own characters, decoded as one whole block. */
+int32_t SamCodecActuator::predecodeSeqRawStream(const Json::Value& streams, uint32_t streamId)
+{
+    const uint32_t srcLen = streams[streamId]["srclen"].asUInt();
+    const uint32_t dstLen = streams[streamId]["dstlen"].asUInt();
+    std::shared_ptr<coder_io> io =
+        makeCoderIo(inBlockPtr->getBuffer() + readOffset, dstLen, "SEQ raw");
+    io->meta = streams[streamId];
+    ioVector.push_back(io);
+    const std::string coderName = streams[streamId]["coder"]["magic"].asString();
+    FieldDecoderArgs args;
+    if (streams[streamId]["coder"].isMember("level")) {
+        args.level = streams[streamId]["coder"]["level"].asInt();
+    }
+    std::shared_ptr<coder> decoder = CoderFactory::makeFieldDecoder(coderName, io.get(), args);
+    if (decoder == nullptr) {
+        LOG_ERROR("Unsupported coder name for SEQ raw stream: %s", coderName.c_str());
+        return -1;
+    }
+    MemoryUtil::safeFree(rawBlockBuffer);
+    rawBlockBuffer = MemoryUtil::safeAlloc<uint8_t>(srcLen + 1);
+    if (rawBlockBuffer == nullptr) {
+        LOG_ERROR("Alloc SEQ raw block buffer failed");
+        return -1;
+    }
+    if (decoder->decode_line(rawBlockBuffer, srcLen, UINT8_MAX, false) < 0) {
+        LOG_ERROR("Decode SEQ raw stream failed");
+        return -1;
+    }
+    rawBlockLength = srcLen;
+    rawBlockOffset = 0;
+    rawBlockDecode = true;
     return 0;
 }
 
@@ -6893,6 +7290,23 @@ int32_t SamCodecActuator::readMatchLine(uint32_t fieldIdx, uint8_t* dst, uint32_
     return fieldDecoders[fieldIdx]->decode_line(dst, len, UINT8_MAX, false);
 }
 
+int32_t SamCodecActuator::readRawLine(uint8_t* dst, uint32_t len, uint32_t lineNo)
+{
+    if (!rawBlockDecode) {
+        LOG_ERROR("SEQ raw stream was not decoded for block %llu, line %u",
+                  inBlockPtr->getBlockId(), lineNo);
+        return -1;
+    }
+    if (rawBlockOffset + len > rawBlockLength) {
+        LOG_ERROR("SEQ raw stream exhausted in block %llu, line %u (need %u, left %u)",
+                  inBlockPtr->getBlockId(), lineNo, len, rawBlockLength - rawBlockOffset);
+        return -1;
+    }
+    std::memcpy(dst, rawBlockBuffer + rawBlockOffset, len);
+    rawBlockOffset += len;
+    return (int32_t)len;
+}
+
 int32_t SamCodecActuator::readInsLine(uint8_t* dst, uint32_t len, uint32_t lineNo)
 {
     if (!insBlockDecode) {
@@ -6921,6 +7335,8 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                               fieldMeta.isMember("noref") && fieldMeta["noref"].asUInt() != 0;
     /* Split layout: "m" holds only M/=/X bytes and "ins" holds I/S (and all raw) bytes. */
     const bool isSplit = isStreamsLayout && seqLayoutOf(fieldMeta) == 1;
+    /* Layout 2: "m" holds the reference-coded payload and "raw" the records' own characters. */
+    const bool isRawSplit = isStreamsLayout && seqLayoutOf(fieldMeta) == 2;
     const bool isUserReference = isSelfReference || isStreamsLayout;
     uint32_t actualBaseLen = 0;
     if (!isUserReference) {
@@ -7005,8 +7421,9 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
             uint16_t mapFlag = mappedFlag.find(lineNo) == mappedFlag.end() ? 4 : mappedFlag[lineNo];
             // Not matched, or the block was coded with no reference at all: the payload is the bases themselves
             if (isNoRefBlock || (mapFlag & 0x04)) {
-                decoderLen = isSplit ? readInsLine(baseSquashBuffer, actualBaseLen, lineNo)
-                                     : readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
+                decoderLen = isRawSplit ? readRawLine(baseSquashBuffer, actualBaseLen, lineNo)
+                             : isSplit ? readInsLine(baseSquashBuffer, actualBaseLen, lineNo)
+                                       : readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
                 if ((uint32_t)decoderLen != actualBaseLen) {
                     LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                     return -1;
@@ -7049,8 +7466,9 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                 }
 
                 if (!findMappedPos) {
-                    decoderLen = isSplit ? readInsLine(baseSquashBuffer, actualBaseLen, lineNo)
-                                         : readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
+                    decoderLen = isRawSplit ? readRawLine(baseSquashBuffer, actualBaseLen, lineNo)
+                                 : isSplit ? readInsLine(baseSquashBuffer, actualBaseLen, lineNo)
+                                           : readMatchLine(fieldIdx, baseSquashBuffer, actualBaseLen, lineNo);
                     if ((uint32_t)decoderLen != actualBaseLen) {
                         LOG_ERROR("base decode failed in block %llu, line %d, expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                         return -1;
@@ -7143,14 +7561,16 @@ int32_t SamCodecActuator::decompressBase(uint32_t fieldIdx, Json::Value& fieldMe
                         }
                     }
                 } else {
-                    decoderLen = readMatchLine(fieldIdx, baseDiffSquashBuffer, actualBaseLen, lineNo);
+                    uint8_t* out = outputBlock->getCurrent();
+                    /* No op list (or empty): the record took the encoder's fallback and its bases are not reference-coded. */
+                    const bool hasOps = (lineNo < cigarOpList.size()) && !cigarOpList[lineNo].empty();
+                    decoderLen = (isRawSplit && !hasOps)
+                                     ? readRawLine(baseDiffSquashBuffer, actualBaseLen, lineNo)
+                                     : readMatchLine(fieldIdx, baseDiffSquashBuffer, actualBaseLen, lineNo);
                     if ((uint32_t)decoderLen != actualBaseLen) {
                         LOG_ERROR("base decode failed in block %llu, line %d,expect len %d, actural len %d", inBlockPtr->getBlockId(), lineNo, actualBaseLen, decoderLen);
                         return -1;
                     }
-                    uint8_t* out = outputBlock->getCurrent();
-                    /* No op list (or empty): the record took the encoder's fallback and its bases are not reference-coded. */
-                    const bool hasOps = (lineNo < cigarOpList.size()) && !cigarOpList[lineNo].empty();
                     if (!hasOps) {
                         writeDirectBases(baseDiffSquashBuffer, (int32_t)actualBaseLen);
                     } else {

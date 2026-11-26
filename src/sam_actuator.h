@@ -244,11 +244,21 @@ public:
     /* Read one record's bytes from the split layout's inserted/soft-clipped stream. */
     int32_t readInsLine(uint8_t* dst, uint32_t len, uint32_t lineNo);
 
+    /* Read one record's own characters from the layout-2 "raw" stream. */
+    int32_t readRawLine(uint8_t* dst, uint32_t len, uint32_t lineNo);
+
     /* Encode the split layout's two halves (aligned M/=/X and inserted/soft-clipped). */
     int32_t writeSeqSplitStreams(const uint8_t* mat, uint32_t matLen, const uint8_t* ins,
                                  uint32_t insLen, uint32_t srcLen, coder_io* matchIo,
                                  Json::Value& metaSubs, Json::Value& metaStreams,
                                  uint32_t& totalDstLen);
+    /* Layout 2: reference-coded bytes as "m", the records' own characters as "raw". */
+    int32_t writeSeqRawSplitStreams(const uint8_t* mat, uint32_t matLen, const uint8_t* raw,
+                                    uint32_t rawLen, CoderType rawCoder, coder_io* matIo,
+                                    Json::Value& metaSubs, Json::Value& metaStreams,
+                                    uint32_t& totalDstLen);
+    /* Decode the layout-2 "raw" stream as one whole block. */
+    int32_t predecodeSeqRawStream(const Json::Value& streams, uint32_t streamId);
 
     /* Decode the split layout's inserted/soft-clipped stream for a block. */
     int32_t predecodeSeqInsStream(const Json::Value& streams, uint32_t streamId);
@@ -475,7 +485,8 @@ private:
     /* The SEQ match stream: sub-stream "m" and, under RLE, sub-stream "mval". */
     int32_t writeSeqMatchStreams(const SeqRleSplit& rle, const uint8_t* matchBuffer, uint32_t matchLen,
                                  uint32_t srcLen, coder_io* matchIo, Json::Value& metaSubs,
-                                 Json::Value& metaStreams, uint32_t& totalDstLen);
+                                 Json::Value& metaStreams, uint32_t& totalDstLen,
+                                 CoderType forcedCoder = CoderType::COUNT);
 
     int32_t compressBaseWithRef(uint32_t fieldIdx, uint32_t& fieldSrcLen, Json::Value& fieldMeta);
     /* One SEQ exception sub-stream: encode its positions and describe it in `streamMeta`. */
@@ -709,6 +720,11 @@ private:
     uint8_t* insBlockBuffer = nullptr;
     uint32_t insBlockLength = 0;
     uint32_t insBlockOffset = 0;
+    /* Layout 2's "raw" stream, decoded as a whole block. */
+    bool rawBlockDecode = false;
+    uint8_t* rawBlockBuffer = nullptr;
+    uint32_t rawBlockLength = 0;
+    uint32_t rawBlockOffset = 0;
     /* Byte length of the "mval" sub-stream under RLE, to advance readOffset past both. */
     uint32_t matchExtraOffset = 0;
     /* Reads with missing QUAL (*), expanded to seqLen '*' on compression. */
