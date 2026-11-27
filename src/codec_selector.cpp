@@ -1683,6 +1683,118 @@ bool CodecSelector::confirmQnameLayout(RoughIOBlock* block, PreprocessInfo& info
     return true;
 }
 
+/* Reader-thread QUAL confirmation. The first-block trial can settle on a coder that is
+   best on its (prefix) sample but not on the rest of the file; this later check samples a
+   segment from the middle of each block and only switches after two blocks of evidence. */
+bool CodecSelector::confirmQualCoder(RoughIOBlock* block, PreprocessInfo& info,
+                                     uint8_t compressLevel)
+{
+    if (block == nullptr || info.qualConfirmDone) {
+        return false;
+    }
+    const FieldCodecSelection* sel = info.getField(SAM_QUAL);
+    if (sel == nullptr || sel->status != FieldStatus::SELECTED) {
+        info.qualConfirmDone = true;
+        return false;
+    }
+    /* Switching policy by speed:
+         - slow -> fast (QCM -> QUAL): switch as soon as the fast coder wins at all,
+           since it improves size and speed together;
+         - fast -> slow (QUAL -> QCM): only with a clear size margin (2%), so a noisy
+           sample cannot trade a large speed loss for a negligible size gain. */
+    const CoderType incumbent = sel->selectedCoder;
+    if (incumbent != CoderType::QCM && incumbent != CoderType::QUAL) {
+        info.qualConfirmDone = true;
+        return false;
+    }
+    const bool slowToFast = (incumbent == CoderType::QCM);
+    const CoderType challenger = slowToFast ? CoderType::QUAL : CoderType::QCM;
+
+    /* Collect the block's QUAL records, then keep a 2 MB window from the middle: the
+       first-block sample already covered the prefix, so the confirmation must not reuse it. */
+    std::vector<QualSampleRecord> records;
+    std::vector<uint32_t> freqByByte(256, 0);
+    uint64_t collected = 0;
+    uint64_t budget = (uint64_t)block->getDataLen();
+    if (budget < (2u << 20)) {
+        budget = (2u << 20);
+    }
+    if (budget > (64u << 20)) {
+        budget = (64u << 20);
+    }
+    collectQualSamplesInto(block, records, freqByByte, (uint32_t)budget, budget, collected);
+    const size_t n = records.size();
+    if (n < 2) {
+        info.qualConfirmDone = true;
+        return false;
+    }
+
+    std::vector<QualSampleRecord> sample;
+    std::vector<uint32_t> sampleFreq(256, 0);
+    uint64_t sampleBytes = 0;
+    for (size_t i = n / 2; i < n && sampleBytes < (16u << 20); ++i) {
+        sampleBytes += records[i].qual.size();
+        for (uint8_t ch : records[i].qual) {
+            ++sampleFreq[ch];
+        }
+        sample.push_back(std::move(records[i]));
+    }
+    if (sample.empty()) {
+        info.qualConfirmDone = true;
+        return false;
+    }
+
+    const std::vector<CoderType> candidates = {CoderType::QCM, CoderType::QUAL};
+    const FieldCodecSelection verdict =
+        QualSelector::select(sample, sampleFreq, compressLevel, candidates, false, false);
+    uint32_t incumbentLen = 0;
+    uint32_t challengerLen = 0;
+    for (uint32_t t = 0; t < verdict.trialCount; ++t) {
+        if (verdict.trialCoder[t] == incumbent) {
+            incumbentLen = verdict.trialLen[t];
+        } else if (verdict.trialCoder[t] == challenger) {
+            challengerLen = verdict.trialLen[t];
+        }
+    }
+    if (incumbentLen == 0 || challengerLen == 0) {
+        info.qualConfirmDone = true;
+        return false;
+    }
+
+    ++info.qualConfirmBlocks;
+    info.qualConfirmIncumbent += incumbentLen;
+    info.qualConfirmChallenger += challengerLen;
+    LOG_INFO("QUAL coder confirm block %lld: %s=%u %s=%u (total %llu vs %llu, %u blocks)",
+             (long long)block->getBlockId(),
+             coderTypeToMagic(incumbent), incumbentLen,
+             coderTypeToMagic(challenger), challengerLen,
+             (unsigned long long)info.qualConfirmIncumbent,
+             (unsigned long long)info.qualConfirmChallenger,
+             info.qualConfirmBlocks);
+
+    /* Slow -> fast: one block with any win. Fast -> slow: two blocks and a 2% win. */
+    const bool enough = slowToFast ? (info.qualConfirmBlocks >= 1)
+                                   : (info.qualConfirmBlocks >= 2);
+    const uint32_t slowMarginPct = 2;
+    const bool challengerWins =
+        slowToFast
+            ? ((uint64_t)info.qualConfirmChallenger < (uint64_t)info.qualConfirmIncumbent)
+            : ((uint64_t)info.qualConfirmChallenger * 100ull <
+               (uint64_t)info.qualConfirmIncumbent * (100ull - slowMarginPct));
+    if (enough && challengerWins) {
+        info.setQualCoder((int32_t)challenger);
+        info.qualConfirmDone = true;
+        LOG_INFO("QUAL coder switched after %u blocks: %s -> %s",
+                 info.qualConfirmBlocks, coderTypeToMagic(incumbent),
+                 coderTypeToMagic(challenger));
+        return true;
+    }
+    if (info.qualConfirmBlocks >= 4) {
+        info.qualConfirmDone = true;
+    }
+    return false;
+}
+
 int32_t CodecSelector::analyzeSam(RoughIOBlock* block, uint64_t inputTotalBytes, PreprocessInfo& info,
                                   uint8_t compressLevel, uint8_t mode, Reference* reference)
 {

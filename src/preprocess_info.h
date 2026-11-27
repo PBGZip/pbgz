@@ -234,6 +234,16 @@ struct PreprocessInfo {
        the affix layout. */
     std::atomic<int32_t> qnameUseAffix;
 
+    /* QUAL coder override from the reader-side multi-block confirmation; -1 means use the
+       file-level fields[SAM_QUAL] verdict. Written only by CodecSelector::confirmQualCoder
+       and read by compressQuality, so a late switch is safe: every block records its own
+       coder in the stream meta. */
+    std::atomic<int32_t> qualCoderOverride{-1};
+    uint64_t qualConfirmIncumbent = 0;
+    uint64_t qualConfirmChallenger = 0;
+    uint32_t qualConfirmBlocks = 0;
+    bool qualConfirmDone = false;
+
     /* Second-stage QNAME confirmation, run on the reader thread over later blocks.
        Sizes are compressed QNAME bytes for exactly the same trial lines; the first
        block's trial seeds them. When enough lines are seen, the alternative layout
@@ -301,6 +311,11 @@ struct PreprocessInfo {
         seqSplitMode.store(-1, std::memory_order_relaxed);
         nposForm.store(-1, std::memory_order_relaxed);
         qnameUseAffix.store(-1, std::memory_order_relaxed);
+        qualCoderOverride.store(-1, std::memory_order_relaxed);
+        qualConfirmIncumbent = 0;
+        qualConfirmChallenger = 0;
+        qualConfirmBlocks = 0;
+        qualConfirmDone = false;
         qnameAffixSize = 0;
         qnameQnameSize = 0;
         qnameDedupSize = 0;
@@ -405,5 +420,16 @@ struct PreprocessInfo {
     void setQnameUseAffix(int32_t useAffix)
     {
         qnameUseAffix.store(useAffix, std::memory_order_release);
+    }
+
+    /* QUAL coder chosen by the multi-block confirmation, or -1 for the initial verdict. */
+    int32_t qualCoder() const
+    {
+        return qualCoderOverride.load(std::memory_order_acquire);
+    }
+
+    void setQualCoder(int32_t coder)
+    {
+        qualCoderOverride.store(coder, std::memory_order_release);
     }
 };

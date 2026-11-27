@@ -4164,8 +4164,12 @@ int32_t SamCodecActuator::compressQuality(uint32_t fieldIdx, uint32_t& fieldSrcL
     const PreprocessInfo* qualPreInfo =
         (pbgzEngine != nullptr) ? pbgzEngine->getPreprocessInfo() : nullptr;
     if (qualPreInfo != nullptr) {
+        /* The multi-block confirmation may have replaced the first-block verdict; it has
+           already checked QCM/QUAL, and the per-block meta records the coder used. */
+        const int32_t overrideCoder = qualPreInfo->qualCoder();
         const CoderType picked =
-            qualPreInfo->coderFor(SAM_QUAL, pickedQualCoder);
+            (overrideCoder >= 0) ? (CoderType)overrideCoder
+                                 : qualPreInfo->coderFor(SAM_QUAL, pickedQualCoder);
         if (CoderFactory::eligibleProfile(picked, compressMode())) {
             pickedQualCoder = picked;
         }

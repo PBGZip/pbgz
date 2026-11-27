@@ -93,6 +93,13 @@ public:
        decisive sample. */
     static bool confirmQnameLayout(RoughIOBlock* block, PreprocessInfo& info);
 
+    /* Reader-thread QUAL coder confirmation: samples the middle of later blocks,
+       trials the incumbent QCM/QUAL coder against the other, and publishes an
+       override only after enough evidence. No-op when the incumbent is FCV2 or
+       another coder. Safe from any SAM-text block; stops after the decision. */
+    static bool confirmQualCoder(RoughIOBlock* block, PreprocessInfo& info,
+                                 uint8_t compressLevel);
+
     /* Cross-block QUAL accumulator for prior training, held by CompressEngine on the
        read thread; collection stops at QUAL_PRIOR_TRAIN_MAX. */
     struct QualPriorAccum {

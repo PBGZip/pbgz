@@ -323,6 +323,11 @@ void CompressEngine::preDispatchBlock(RoughIOBlock* blockPtr) {
            flip it before the block is queued, deterministically in read order.
            Raw/structured BAM blocks have no SAM QNAME text and are skipped. */
         CodecSelector::confirmQnameLayout(blockPtr, preprocessInfo);
+        /* QUAL coder confirmation on the same reader thread; no worker sees a half
+           decision, and the first blocks already carry their own coder in the meta. */
+        if (preprocessInfo.isDone()) {
+            CodecSelector::confirmQualCoder(blockPtr, preprocessInfo, parameter.compressLevel);
+        }
     }
     if (blockPtr->getBamColumns() != nullptr) {
         /* Structured BAM: hashing is deferred to the compressing worker. */
